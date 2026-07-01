@@ -1,0 +1,14 @@
+{
+  "name": "visualwavedrom-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:connection": "node test-connection.mjs",
+    "test:preset-after-pick": "node test-preset-after-pick.mjs",
+    "test:blank-name": "node test-blank-name-fix.mjs",
+    "test:freeze": "node test-freeze-diag.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.52.0"
+  }
+}
