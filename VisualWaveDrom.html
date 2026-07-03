@@ -194,7 +194,6 @@ try { module.exports = WaveSkin; } catch(err) {}
 
     /* Legend */
     .legend-add-btn {
-      margin: 0 12px 8px;
       border-radius: 8px;
       background: var(--surface-2);
       border: 1px dashed var(--border);
@@ -205,39 +204,104 @@ try { module.exports = WaveSkin; } catch(err) {}
       background: var(--border);
     }
 
-    .wave-edit-mode-toggle {
-      display: flex;
+    .menu-section > .menu-btn.legend-add-btn {
       margin: 0 12px 8px;
+    }
+
+    .wave-add-delete-row,
+    .wave-move-row,
+    .wave-mode-delete-row {
+      display: flex;
+      gap: 6px;
+      margin: 0 12px 8px;
+    }
+
+    .wave-add-delete-row .legend-add-btn,
+    .wave-add-delete-row .wave-delete-signal-btn,
+    .wave-move-row .wave-move-signal-btn,
+    .wave-mode-delete-row .wave-edit-mode-btn,
+    .wave-mode-delete-row .wave-delete-col-btn {
+      flex: 1 1 0;
+      min-width: 0;
+      width: auto;
+      margin: 0;
+      padding: 8px 6px;
+      justify-content: center;
+      font-size: 0.8125rem;
+    }
+
+    .wave-add-delete-row .legend-add-btn svg,
+    .wave-add-delete-row .wave-delete-signal-btn svg,
+    .wave-move-row .wave-move-signal-btn svg {
+      width: 16px;
+      height: 16px;
+    }
+
+    .wave-move-row .wave-move-signal-btn {
       border-radius: 8px;
-      overflow: hidden;
-      border: 1px solid var(--border);
       background: var(--surface-2);
-    }
-
-    .mode-toggle-btn {
-      flex: 1;
-      padding: 7px 8px;
-      border: none;
-      background: transparent;
+      border: 1px solid var(--border);
       color: var(--text-muted);
-      font-size: 0.75rem;
-      cursor: pointer;
-      transition: background 0.15s, color 0.15s;
     }
 
-    .mode-toggle-btn:not(:last-child) {
-      border-right: 1px solid var(--border);
-    }
-
-    .mode-toggle-btn:hover:not(.active) {
+    .wave-move-row .wave-move-signal-btn:not(:disabled):hover {
+      border-color: var(--accent);
       background: var(--border);
       color: var(--text);
     }
 
-    .mode-toggle-btn.active {
-      background: var(--accent);
-      color: #fff;
+    .wave-mode-delete-row .wave-edit-mode-btn {
+      flex: 1.35 1 0;
+    }
+
+    .wave-edit-mode-btn {
+      border-radius: 8px;
+      justify-content: center;
       font-weight: 600;
+      border: 1px solid var(--border);
+      transition: background 0.15s, border-color 0.15s, color 0.15s, filter 0.15s;
+    }
+
+    .wave-edit-mode-btn svg {
+      width: 16px;
+      height: 16px;
+      flex-shrink: 0;
+    }
+
+    .wave-edit-mode-btn.mode-modify {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+    }
+
+    .wave-edit-mode-btn.mode-insert {
+      background: #0d9488;
+      border-color: #0d9488;
+      color: #fff;
+    }
+
+    .wave-edit-mode-btn:hover {
+      filter: brightness(1.1);
+    }
+
+    .wave-delete-col-btn,
+    .wave-delete-signal-btn {
+      border-radius: 8px;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+    }
+
+    .wave-delete-signal-btn:not(:disabled) {
+      border-color: rgba(229, 83, 75, 0.45);
+      color: #f0b0ab;
+    }
+
+    .wave-delete-col-btn:not(:disabled):hover,
+    .wave-delete-signal-btn:not(:disabled):hover {
+      border-color: #e5534b;
+      background: rgba(229, 83, 75, 0.12);
+      color: #f0b0ab;
     }
 
     .legend-list {
@@ -317,12 +381,42 @@ try { module.exports = WaveSkin; } catch(err) {}
       vertical-align: middle;
     }
 
-    /* Connection relations */
+    /* Connection relations — max 5 visible rows, scroll beyond */
+    .connection-list,
+    .connection-edge-list {
+      overflow-y: auto;
+      overflow-x: hidden;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(148, 163, 184, 0.35) transparent;
+    }
+
+    .connection-list::-webkit-scrollbar,
+    .connection-edge-list::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    .connection-list::-webkit-scrollbar-track,
+    .connection-edge-list::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    .connection-list::-webkit-scrollbar-thumb,
+    .connection-edge-list::-webkit-scrollbar-thumb {
+      background: rgba(148, 163, 184, 0.35);
+      border-radius: 3px;
+    }
+
+    .connection-list::-webkit-scrollbar-thumb:hover,
+    .connection-edge-list::-webkit-scrollbar-thumb:hover {
+      background: rgba(148, 163, 184, 0.55);
+    }
+
     .connection-list {
       padding: 0 12px 8px;
       display: flex;
       flex-direction: column;
       gap: 6px;
+      max-height: 224px; /* 5 × 40px rows + 4 × 6px gaps */
     }
 
     .connection-item {
@@ -344,6 +438,30 @@ try { module.exports = WaveSkin; } catch(err) {}
     }
 
     .connection-item:active { transform: scale(0.99); }
+
+    .connection-item.disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+      pointer-events: none;
+    }
+
+    .connection-item.disabled:hover {
+      background: var(--surface-2);
+      border-color: var(--border);
+    }
+
+    .connection-item.disabled:active { transform: none; }
+
+    .connection-item.preset-matches-selected {
+      border-color: var(--accent);
+      background: rgba(59, 130, 246, 0.12);
+      box-shadow: 0 0 0 1px var(--accent);
+    }
+
+    .connection-item.preset-matches-selected:hover {
+      background: rgba(59, 130, 246, 0.18);
+      border-color: var(--accent);
+    }
 
     .connection-label {
       flex-shrink: 0;
@@ -398,6 +516,7 @@ try { module.exports = WaveSkin; } catch(err) {}
       display: flex;
       flex-direction: column;
       gap: 4px;
+      max-height: 176px; /* 5 × 32px rows + 4 × 4px gaps */
     }
 
     .connection-edge-row {
@@ -537,6 +656,28 @@ try { module.exports = WaveSkin; } catch(err) {}
       stroke-width: 2.5 !important;
     }
 
+    @keyframes waveEdgeLabelBlink {
+      0%, 45% { visibility: visible; opacity: 1; }
+      50%, 95% { visibility: hidden; opacity: 0; }
+      100% { visibility: visible; opacity: 1; }
+    }
+
+    @keyframes waveEdgePathBlink {
+      0%, 45% { opacity: 1; }
+      50%, 95% { opacity: 0.12; }
+      100% { opacity: 1; }
+    }
+
+    .wave-edge-label-blink {
+      animation: waveEdgeLabelBlink 1.2s step-end infinite;
+    }
+
+    .wave-edge-blink path,
+    .wave-edge-blink line,
+    .wave-edge-blink polyline {
+      animation: waveEdgePathBlink 1.2s step-end infinite;
+    }
+
     /* Main content */
     .main {
       flex: 1;
@@ -561,6 +702,28 @@ try { module.exports = WaveSkin; } catch(err) {}
     .wave-panel .wave-container {
       width: 100%;
       max-width: 100%;
+      position: relative;
+    }
+
+    .wave-container.rendering {
+      opacity: 0.55;
+      pointer-events: none;
+      transition: opacity 0.15s ease;
+    }
+
+    .wave-container.rendering::after {
+      content: '波形更新中…';
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      font-size: 0.75rem;
+      color: var(--text-muted, #64748b);
+      background: rgba(255, 255, 255, 0.92);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 4px 10px;
+      pointer-events: none;
+      z-index: 2;
     }
 
     .wave-error {
@@ -1047,6 +1210,26 @@ try { module.exports = WaveSkin; } catch(err) {}
     @media (max-width: 768px) {
       :root { --sidebar-width: 180px; }
       .menu-btn .shortcut { display: none; }
+      .wave-add-delete-row,
+      .wave-move-row,
+      .wave-mode-delete-row { gap: 4px; }
+      .wave-add-delete-row .legend-add-btn,
+      .wave-add-delete-row .wave-delete-signal-btn,
+      .wave-move-row .wave-move-signal-btn,
+      .wave-mode-delete-row .wave-edit-mode-btn,
+      .wave-mode-delete-row .wave-delete-col-btn {
+        padding: 7px 4px;
+        font-size: 0.6875rem;
+        gap: 4px;
+      }
+      .wave-add-delete-row .legend-add-btn svg,
+      .wave-add-delete-row .wave-delete-signal-btn svg,
+      .wave-move-row .wave-move-signal-btn svg,
+      .wave-mode-delete-row .wave-edit-mode-btn svg,
+      .wave-mode-delete-row .wave-delete-col-btn svg {
+        width: 14px;
+        height: 14px;
+      }
     }
   </style>
 </head>
@@ -1096,16 +1279,55 @@ try { module.exports = WaveSkin; } catch(err) {}
       <!-- Waveform Menu -->
       <div class="menu-section">
         <div class="menu-section-title">波形菜单</div>
-        <button class="menu-btn legend-add-btn" id="btn-add-signal" type="button" title="在 signal 数组末尾插入新信号行">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <line x1="12" y1="5" x2="12" y2="19"/>
-            <line x1="5" y1="12" x2="19" y2="12"/>
-          </svg>
-          新增信号行
-        </button>
-        <div class="wave-edit-mode-toggle" role="radiogroup" aria-label="波形编辑模式">
-          <button type="button" class="mode-toggle-btn active" id="btn-mode-modify" data-mode="modify" title="点击图例替换选中列字符">修改</button>
-          <button type="button" class="mode-toggle-btn" id="btn-mode-insert" data-mode="insert" title="点击图例在选中列位置插入字符">插入</button>
+        <div class="wave-add-delete-row">
+          <button class="menu-btn legend-add-btn" id="btn-add-signal" type="button" title="在 signal 数组末尾插入新信号行">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="12" y1="5" x2="12" y2="19"/>
+              <line x1="5" y1="12" x2="19" y2="12"/>
+            </svg>
+            新增行
+          </button>
+          <button class="menu-btn wave-delete-signal-btn" id="btn-delete-signal" type="button" disabled title="请先在波形区点击选中一行">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <polyline points="3 6 5 6 21 6"/>
+              <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+              <path d="M10 11v6M14 11v6"/>
+              <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+            </svg>
+            删除行
+          </button>
+        </div>
+        <div class="wave-move-row">
+          <button class="menu-btn wave-move-signal-btn" id="btn-move-signal-up" type="button" disabled title="请先在波形区点击选中一行">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <polyline points="18 15 12 9 6 15"/>
+            </svg>
+            行上移
+          </button>
+          <button class="menu-btn wave-move-signal-btn" id="btn-move-signal-down" type="button" disabled title="请先在波形区点击选中一行">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <polyline points="6 9 12 15 18 9"/>
+            </svg>
+            行下移
+          </button>
+        </div>
+        <div class="wave-mode-delete-row">
+          <button type="button" class="menu-btn wave-edit-mode-btn mode-modify" id="btn-wave-edit-mode" aria-pressed="false" aria-label="修改模式" title="当前为修改模式：点击图例替换选中列字符；点击切换为插入模式">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+              <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+            </svg>
+            <span class="wave-edit-mode-label">修改模式</span>
+          </button>
+          <button class="menu-btn wave-delete-col-btn" id="btn-delete-wave-col" type="button" disabled title="请先在波形区点击选中一行">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <polyline points="3 6 5 6 21 6"/>
+              <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+              <path d="M10 11v6M14 11v6"/>
+              <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+            </svg>
+            删除
+          </button>
         </div>
         <div class="legend-list" id="legend-list"></div>
       </div>
@@ -1350,6 +1572,18 @@ try { module.exports = WaveSkin; } catch(err) {}
           ],
           edge: ['a->b : My Label']
         }
+      },
+      {
+        label: '双向箭头',
+        syntax: '<-> : label',
+        template: '{from}<->{to} : {label}',
+        preview: {
+          signal: [
+            { name: 'A', wave: '01', node: '.a' },
+            { name: 'B', wave: '01', node: '..b' }
+          ],
+          edge: ['a<->b : label']
+        }
       }
     ];
 
@@ -1359,6 +1593,12 @@ try { module.exports = WaveSkin; } catch(err) {}
     };
 
     const LEGEND_ITEMS = [
+      {
+        char: 'p',
+        label: '时钟',
+        desc: 'Clock positive (p)',
+        wave: { signal: [{ name: '_', wave: 'xp.' }] }
+      },
       {
         char: '1',
         label: '高电平',
@@ -1372,10 +1612,58 @@ try { module.exports = WaveSkin; } catch(err) {}
         wave: { signal: [{ name: '_', wave: 'x0x' }] }
       },
       {
-        char: 'p',
-        label: '时钟',
-        desc: 'Clock positive (p)',
-        wave: { signal: [{ name: '_', wave: 'xp.' }] }
+        char: '.',
+        label: '延续',
+        desc: 'Continue previous (.)',
+        wave: { signal: [{ name: '_', wave: '0.1' }] }
+      },
+      {
+        char: '|',
+        label: '分割',
+        desc: 'Edge marker (|)',
+        wave: { signal: [{ name: '_', wave: '0.|1' }] }
+      },
+      {
+        char: '=',
+        label: '位置',
+        desc: 'Transition (=)',
+        wave: { signal: [{ name: '_', wave: 'x=x' }] }
+      },
+      {
+        char: '3',
+        label: '数据3',
+        desc: 'Data bus (3)',
+        wave: { signal: [{ name: '_', wave: 'x3x' }] }
+      },
+      {
+        char: '4',
+        label: '数据4',
+        desc: 'Data bus (4)',
+        wave: { signal: [{ name: '_', wave: 'x4x' }] }
+      },
+      {
+        char: '5',
+        label: '数据5',
+        desc: 'Data bus (5)',
+        wave: { signal: [{ name: '_', wave: 'x5x' }] }
+      },
+      {
+        char: '6',
+        label: '数据6',
+        desc: 'Data bus (6)',
+        wave: { signal: [{ name: '_', wave: 'x6x' }] }
+      },
+      {
+        char: '7',
+        label: '数据7',
+        desc: 'Data bus (7)',
+        wave: { signal: [{ name: '_', wave: 'x7x' }] }
+      },
+      {
+        char: '8',
+        label: '数据8',
+        desc: 'Data bus (8)',
+        wave: { signal: [{ name: '_', wave: 'x8x' }] }
       },
       {
         char: 'n',
@@ -1394,36 +1682,6 @@ try { module.exports = WaveSkin; } catch(err) {}
         label: '高阻',
         desc: 'High-Z (z)',
         wave: { signal: [{ name: '_', wave: '0z0' }] }
-      },
-      {
-        char: '=',
-        label: '过渡',
-        desc: 'Transition (=)',
-        wave: { signal: [{ name: '_', wave: 'x=x' }] }
-      },
-      {
-        char: '.',
-        label: '延续',
-        desc: 'Continue previous (.)',
-        wave: { signal: [{ name: '_', wave: '0.1' }] }
-      },
-      {
-        char: '|',
-        label: '分隔',
-        desc: 'Edge marker (|)',
-        wave: { signal: [{ name: '_', wave: '0.|1' }] }
-      },
-      {
-        char: '4',
-        label: '数据',
-        desc: 'Data bus (4)',
-        wave: { signal: [{ name: '_', wave: 'x345x', data: ['D', 'A', 'T'] }] }
-      },
-      {
-        char: '3',
-        label: '无效',
-        desc: 'Invalid data (3)',
-        wave: { signal: [{ name: '_', wave: 'x3x' }] }
       }
     ];
 
@@ -1450,6 +1708,7 @@ try { module.exports = WaveSkin; } catch(err) {}
     let selectedSignalIndex = -1;
     let selectedWaveColumnIndex = -1;
     let connectionPickActive = false;
+    let connectionAddSessionActive = false;
     let connectionFromPoint = null;
     let connectionToPoint = null;
     let pendingEdgeTemplate = null;
@@ -1457,6 +1716,26 @@ try { module.exports = WaveSkin; } catch(err) {}
     let isRenderingWaveform = false;
     let pendingRenderText = null;
     let isInsertingEdge = false;
+    let connectionHighlightRaf = null;
+    let pendingHighlightLanes = null;
+    let pendingHighlightSourceMap = null;
+    let renderWaveformRaf = null;
+    let scheduledRenderText = null;
+    let scheduledRenderCallbacks = null;
+    let waveformRenderingBusy = false;
+    const vwdPerfMarks = [];
+
+    function vwdMark(label) {
+      vwdPerfMarks.push({ label, t: performance.now() });
+      if (vwdPerfMarks.length > 120) vwdPerfMarks.shift();
+    }
+
+    function setWaveformRenderingBusy(busy) {
+      waveformRenderingBusy = !!busy;
+      if (waveContainer) {
+        waveContainer.classList.toggle('rendering', waveformRenderingBusy);
+      }
+    }
 
     const BACK_BTN_POS_KEY = 'vwd-back-btn-pos';
     const WAVE_EDIT_MODE_KEY = 'vwd-wave-edit-mode';
@@ -1550,9 +1829,18 @@ try { module.exports = WaveSkin; } catch(err) {}
 
       flat.forEach((signal) => {
         const nameJson = JSON.stringify(signal.name);
-        const re = new RegExp('"name"\\s*:\\s*' + escapeRegex(nameJson));
+        const waveJson = JSON.stringify(signal.wave);
         const slice = jsonText.slice(searchStart);
-        const m = re.exec(slice);
+        // Match name + wave together so empty names ("" / "") never alias another row.
+        const compositeRe = new RegExp(
+          '"name"\\s*:\\s*' + escapeRegex(nameJson)
+          + '\\s*,\\s*"wave"\\s*:\\s*' + escapeRegex(waveJson)
+        );
+        let m = compositeRe.exec(slice);
+        if (!m) {
+          const nameRe = new RegExp('"name"\\s*:\\s*' + escapeRegex(nameJson));
+          m = nameRe.exec(slice);
+        }
         if (!m) return;
         const nameAbs = searchStart + m.index;
         const objStart = findObjectStart(jsonText, nameAbs);
@@ -1772,16 +2060,28 @@ try { module.exports = WaveSkin; } catch(err) {}
       } catch (e) { /* ignore */ }
     }
 
-    function applyEditorChange(newText, selStart, selEnd) {
+    function applyEditorChange(newText, selStart, selEnd, options) {
+      const opts = options || {};
       editor.value = newText;
       lastSavedContent = newText;
       editor.selectionStart = selStart;
       editor.selectionEnd = selEnd ?? selStart;
-      editor.focus();
+      if (!opts.skipFocus) {
+        editor.focus();
+      }
       updateLineNumbers();
       syncLineNumberScroll();
-      renderWaveform(newText);
-      saveEditorJsonToStorage(newText);
+      if (opts.deferRender) {
+        renderConnectionEdgeList();
+        scheduleRenderWaveform(newText, opts.onRenderComplete);
+      } else {
+        renderWaveform(newText);
+      }
+      if (opts.skipSyncPersist) {
+        debouncedPersistEditorJson();
+      } else {
+        saveEditorJsonToStorage(newText);
+      }
     }
 
     function normalizeHscale(n) {
@@ -2037,11 +2337,49 @@ try { module.exports = WaveSkin; } catch(err) {}
       return alloc;
     }
 
+    function getDrawGroupContentWidth(drawGroup, unitWidth) {
+      const step = unitWidth || WAVE_UNIT_WIDTH;
+      try {
+        const bbox = drawGroup.getBBox();
+        if (bbox.width > step * 0.25) return bbox.width;
+      } catch (e) { /* ignore */ }
+      try {
+        const lane = drawGroup.closest('[id^="wavelane_"]');
+        if (lane) {
+          const laneBbox = lane.getBBox();
+          const drawBbox = drawGroup.getBBox();
+          const nameWidth = drawBbox.x - laneBbox.x;
+          const contentWidth = laneBbox.width - nameWidth;
+          if (contentWidth > step * 0.25) return contentWidth;
+        }
+      } catch (e) { /* ignore */ }
+      return step * 8;
+    }
+
+    function buildVirtualColumnMap(numCols, unitWidth) {
+      const step = unitWidth || WAVE_UNIT_WIDTH;
+      const cols = [];
+      for (let i = 0; i < numCols; i++) {
+        cols.push({ charIndex: i, char: '', x0: i * step, x1: (i + 1) * step });
+      }
+      return cols;
+    }
+
+    function columnIndexFromLocalX(localX, unitWidth) {
+      const step = unitWidth || WAVE_UNIT_WIDTH;
+      if (localX < 0) return 0;
+      return Math.floor(localX / step);
+    }
+
     function buildWaveColumnMap(drawGroup, wave, unitWidth) {
       const step = unitWidth || WAVE_UNIT_WIDTH;
       const uses = drawGroup ? getDrawUses(drawGroup) : [];
       const n = wave.length;
-      if (n === 0) return [];
+      if (n === 0) {
+        const width = drawGroup ? getDrawGroupContentWidth(drawGroup, unitWidth) : step * 8;
+        const numCols = Math.max(1, Math.ceil(width / step));
+        return buildVirtualColumnMap(numCols, unitWidth);
+      }
 
       if (uses.length === 0) {
         return [...wave].map((char, i) => ({
@@ -2074,7 +2412,21 @@ try { module.exports = WaveSkin; } catch(err) {}
       return cols;
     }
 
+    function clampPickColumnIndex(colIndex, wave, cols) {
+      const minCol = 0;
+      let maxCol = Math.max((wave || '').length, cols.length);
+      if (!wave.length && cols.length > 0) {
+        maxCol = cols.length;
+      } else if (maxCol > 0) {
+        maxCol += 1;
+      } else {
+        maxCol = 8;
+      }
+      return Math.min(Math.max(minCol, colIndex), maxCol);
+    }
+
     function columnIndexFromClick(drawGroup, wave, svgRoot, clientX, unitWidth) {
+      const step = unitWidth || WAVE_UNIT_WIDTH;
       const pt = svgRoot.createSVGPoint();
       pt.x = clientX;
       pt.y = 0;
@@ -2082,11 +2434,19 @@ try { module.exports = WaveSkin; } catch(err) {}
       if (!ctm) return 0;
       const local = pt.matrixTransform(ctm.inverse());
       const cols = buildWaveColumnMap(drawGroup, wave, unitWidth);
-      if (!cols.length) return 0;
+      if (!cols.length) {
+        return clampPickColumnIndex(columnIndexFromLocalX(local.x, unitWidth), wave, cols);
+      }
 
       for (const col of cols) {
         if (col.x1 <= col.x0) continue;
-        if (local.x >= col.x0 && local.x < col.x1) return col.charIndex;
+        if (local.x >= col.x0 && local.x < col.x1) {
+          return clampPickColumnIndex(col.charIndex, wave, cols);
+        }
+      }
+
+      if (local.x >= cols[cols.length - 1].x1) {
+        return clampPickColumnIndex(columnIndexFromLocalX(local.x, unitWidth), wave, cols);
       }
 
       let best = cols[0].charIndex;
@@ -2099,7 +2459,7 @@ try { module.exports = WaveSkin; } catch(err) {}
           best = col.charIndex;
         }
       });
-      return best;
+      return clampPickColumnIndex(best, wave, cols);
     }
 
     function replaceWaveCharAt(wave, colIndex, char) {
@@ -2111,6 +2471,11 @@ try { module.exports = WaveSkin; } catch(err) {}
     function insertWaveCharAt(wave, colIndex, char) {
       const pos = colIndex < 0 ? 0 : Math.min(colIndex, wave.length);
       return wave.slice(0, pos) + char + wave.slice(pos);
+    }
+
+    function deleteWaveCharAt(wave, colIndex) {
+      if (colIndex < 0 || colIndex >= wave.length) return wave;
+      return wave.slice(0, colIndex) + wave.slice(colIndex + 1);
     }
 
     function resolveLegendColumnIndex(wave, forInsert) {
@@ -2143,7 +2508,10 @@ try { module.exports = WaveSkin; } catch(err) {}
 
       const wave = entry.signal.wave || '';
       const safeCol = colIndex < 0 ? 0 : Math.min(colIndex, Math.max(0, wave.length - 1));
-      const newWave = replaceWaveCharAt(wave, safeCol, char);
+      const atLastColumn = wave.length === 0 || safeCol === wave.length - 1;
+      const newWave = atLastColumn
+        ? insertWaveCharAt(wave, wave.length, char)
+        : replaceWaveCharAt(wave, safeCol, char);
       if (newWave === wave) return false;
 
       pushUndoBeforeChange();
@@ -2151,15 +2519,25 @@ try { module.exports = WaveSkin; } catch(err) {}
       const indent = getIndentAt(text, entry.start);
       const newObjStr = formatSignalObject(updatedSignal, indent);
       const newText = text.slice(0, entry.start) + newObjStr + text.slice(entry.end);
-      const nextCol = newWave.length > 0 ? Math.min(safeCol + 1, newWave.length - 1) : -1;
+      const nextCol = atLastColumn
+        ? newWave.length - 1
+        : (newWave.length > 0 ? Math.min(safeCol + 1, newWave.length - 1) : -1);
       setSelectedSignal(rowIndex, nextCol);
       applyEditorChange(newText, entry.start, entry.start + newObjStr.length);
-      setStatus(
-        true,
-        waveEditModeLabel()
-          + ' · 已修改 ' + updatedSignal.name + ' [' + safeCol + ']=' + JSON.stringify(char)
-          + ' · 当前列 [' + nextCol + ']=' + JSON.stringify(newWave[nextCol] || '')
-      );
+      if (atLastColumn) {
+        setStatus(
+          true,
+          waveEditModeLabel()
+            + ' · 已在末尾新增 ' + updatedSignal.name + ' [' + nextCol + ']=' + JSON.stringify(char)
+        );
+      } else {
+        setStatus(
+          true,
+          waveEditModeLabel()
+            + ' · 已修改 ' + updatedSignal.name + ' [' + safeCol + ']=' + JSON.stringify(char)
+            + ' · 当前列 [' + nextCol + ']=' + JSON.stringify(newWave[nextCol] || '')
+        );
+      }
       return true;
     }
 
@@ -2202,8 +2580,61 @@ try { module.exports = WaveSkin; } catch(err) {}
       return true;
     }
 
+    function deleteWaveCharAtColumn(rowIndex, colIndex) {
+      if (rowIndex < 0) {
+        setStatus(false, '请先在波形区点击选中一行');
+        return false;
+      }
+      if (colIndex < 0) {
+        setStatus(false, '请先选中列');
+        return false;
+      }
+
+      let parsed;
+      try {
+        parsed = JSON.parse(editor.value);
+      } catch (e) {
+        setStatus(false, 'JSON 错误，无法删除');
+        return false;
+      }
+
+      const text = editor.value;
+      const sourceMap = buildSignalSourceMap(text);
+      const entry = sourceMap[rowIndex];
+      if (!entry) {
+        setStatus(false, '未找到选中的信号');
+        setSelectedSignal(rowIndex, -1);
+        return false;
+      }
+
+      const wave = entry.signal.wave || '';
+      if (wave.length === 0) {
+        setStatus(false, '波形为空，无法删除');
+        return false;
+      }
+
+      const safeCol = Math.min(colIndex, wave.length - 1);
+      const newWave = deleteWaveCharAt(wave, safeCol);
+      if (newWave === wave) return false;
+
+      pushUndoBeforeChange();
+      const updatedSignal = Object.assign({}, entry.signal, { wave: newWave });
+      const indent = getIndentAt(text, entry.start);
+      const newObjStr = formatSignalObject(updatedSignal, indent);
+      const newText = text.slice(0, entry.start) + newObjStr + text.slice(entry.end);
+      const nextCol = newWave.length > 0 ? Math.min(safeCol, newWave.length - 1) : -1;
+      setSelectedSignal(rowIndex, nextCol);
+      applyEditorChange(newText, entry.start, entry.start + newObjStr.length);
+      setStatus(true, '已删除 ' + updatedSignal.name + ' [' + safeCol + ']');
+      return true;
+    }
+
     function waveEditModeLabel() {
       return waveEditMode === 'insert' ? '模式: 插入' : '模式: 修改';
+    }
+
+    function toggleWaveEditMode() {
+      setWaveEditMode(waveEditMode === 'insert' ? 'modify' : 'insert');
     }
 
     function setWaveEditMode(mode) {
@@ -2226,19 +2657,69 @@ try { module.exports = WaveSkin; } catch(err) {}
     }
 
     function updateWaveEditModeUI() {
-      document.getElementById('btn-mode-modify').classList.toggle('active', waveEditMode === 'modify');
-      document.getElementById('btn-mode-insert').classList.toggle('active', waveEditMode === 'insert');
+      const btn = document.getElementById('btn-wave-edit-mode');
+      if (!btn) return;
+      const labelEl = btn.querySelector('.wave-edit-mode-label');
+      const isInsert = waveEditMode === 'insert';
+      btn.classList.toggle('mode-modify', !isInsert);
+      btn.classList.toggle('mode-insert', isInsert);
+      if (labelEl) labelEl.textContent = isInsert ? '插入模式' : '修改模式';
+      btn.title = isInsert
+        ? '当前为插入模式：点击图例在选中列位置插入字符；点击切换为修改模式'
+        : '当前为修改模式：点击图例替换选中列字符；点击切换为插入模式';
+      btn.setAttribute('aria-label', isInsert ? '插入模式' : '修改模式');
+      btn.setAttribute('aria-pressed', isInsert ? 'true' : 'false');
       updateLegendAvailability();
     }
 
     function updateLegendAvailability() {
-      const hasSelection = selectedSignalIndex >= 0;
+      const hasRow = selectedSignalIndex >= 0;
+      const hasCol = selectedWaveColumnIndex >= 0;
+      let waveLen = 0;
+      let signalCount = 0;
+      if (hasRow) {
+        try {
+          const sourceMap = buildSignalSourceMap(editor.value);
+          signalCount = sourceMap.length;
+          const entry = sourceMap[selectedSignalIndex];
+          if (entry) waveLen = (entry.signal.wave || '').length;
+        } catch (e) { /* ignore */ }
+      }
+      const canDeleteCol = hasRow && hasCol && waveLen > 0;
+      const deleteColBtn = document.getElementById('btn-delete-wave-col');
+      if (deleteColBtn) {
+        deleteColBtn.disabled = !canDeleteCol;
+        deleteColBtn.title = canDeleteCol
+          ? '删除选中位置的 wave 字符'
+          : (!hasRow ? '请先在波形区点击选中一行' : (!hasCol ? '请先选中列' : '波形为空，无法删除'));
+      }
+      const deleteSignalBtn = document.getElementById('btn-delete-signal');
+      if (deleteSignalBtn) {
+        deleteSignalBtn.disabled = !hasRow;
+        deleteSignalBtn.title = hasRow ? '删除当前选中的信号行' : '请先在波形区点击选中一行';
+      }
+      const canMoveUp = hasRow && selectedSignalIndex > 0;
+      const canMoveDown = hasRow && selectedSignalIndex >= 0 && selectedSignalIndex < signalCount - 1;
+      const moveUpBtn = document.getElementById('btn-move-signal-up');
+      if (moveUpBtn) {
+        moveUpBtn.disabled = !canMoveUp;
+        moveUpBtn.title = canMoveUp
+          ? '将当前选中的信号行上移'
+          : (!hasRow ? '请先在波形区点击选中一行' : '已在首行，无法上移');
+      }
+      const moveDownBtn = document.getElementById('btn-move-signal-down');
+      if (moveDownBtn) {
+        moveDownBtn.disabled = !canMoveDown;
+        moveDownBtn.title = canMoveDown
+          ? '将当前选中的信号行下移'
+          : (!hasRow ? '请先在波形区点击选中一行' : '已在末行，无法下移');
+      }
       const actionHint = waveEditMode === 'insert'
         ? '点击在选中列位置插入波形字符'
         : '点击替换选中列的波形字符';
       document.querySelectorAll('.legend-item').forEach(item => {
-        item.classList.toggle('legend-disabled', !hasSelection);
-        item.title = hasSelection ? actionHint : '请先在波形区点击选中一行';
+        item.classList.toggle('legend-disabled', !hasRow);
+        item.title = hasRow ? actionHint : '请先在波形区点击选中一行';
       });
     }
 
@@ -2256,16 +2737,22 @@ try { module.exports = WaveSkin; } catch(err) {}
       setSelectedSignal(index, index >= 0 ? (selectedWaveColumnIndex >= 0 ? selectedWaveColumnIndex : 0) : -1);
     }
 
-    function updateColumnHighlight(lane, drawGroup, wave, colIndex, unitWidth, highlightClass) {
-      if (!drawGroup) return;
+    function appendColumnHighlight(drawGroup, wave, colIndex, unitWidth, highlightClass) {
+      if (!drawGroup || colIndex < 0) return;
+      const step = unitWidth || WAVE_UNIT_WIDTH;
       const cls = highlightClass || 'wave-col-highlight';
-      drawGroup.querySelectorAll('.wave-col-highlight, .wave-col-highlight-from, .wave-col-highlight-to')
-        .forEach(el => el.remove());
-      if (colIndex < 0 || !wave) return;
 
-      const cols = buildWaveColumnMap(drawGroup, wave, unitWidth);
+      const cols = buildWaveColumnMap(drawGroup, wave || '', unitWidth);
       const col = cols[colIndex];
-      if (!col || col.x1 <= col.x0) return;
+      let x0;
+      let x1;
+      if (col && col.x1 > col.x0) {
+        x0 = col.x0;
+        x1 = col.x1;
+      } else {
+        x0 = colIndex * step;
+        x1 = (colIndex + 1) * step;
+      }
 
       let height = 24;
       try {
@@ -2274,11 +2761,125 @@ try { module.exports = WaveSkin; } catch(err) {}
 
       const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
       rect.setAttribute('class', cls);
-      rect.setAttribute('x', col.x0);
+      rect.setAttribute('x', x0);
       rect.setAttribute('y', -2);
-      rect.setAttribute('width', col.x1 - col.x0);
+      rect.setAttribute('width', x1 - x0);
       rect.setAttribute('height', height);
+      rect.setAttribute('pointer-events', 'none');
       drawGroup.appendChild(rect);
+    }
+
+    function updateColumnHighlight(lane, drawGroup, wave, colIndex, unitWidth, highlightClass) {
+      if (!drawGroup) return;
+      drawGroup.querySelectorAll('.wave-col-highlight, .wave-col-highlight-from, .wave-col-highlight-to')
+        .forEach(el => el.remove());
+      appendColumnHighlight(drawGroup, wave, colIndex, unitWidth, highlightClass);
+    }
+
+    function isConnectionPickFlow() {
+      return connectionAddSessionActive && connectionPickActive;
+    }
+
+    function areConnectionPresetsEnabledForInsert() {
+      return connectionAddSessionActive && connectionFromPoint && connectionToPoint;
+    }
+
+    function getEdgeStyleSignature(edgeStr) {
+      const { prefix, arrow } = parseEdgeString(edgeStr);
+      return prefix + '\0' + arrow;
+    }
+
+    function getPresetStyleSignature(template) {
+      const sample = buildEdgeFromTemplate(template, 'x', 'y', '');
+      const { prefix, arrow } = parseEdgeString(sample);
+      return prefix + '\0' + arrow;
+    }
+
+    function findPresetIndexForEdge(edgeStr) {
+      const sig = getEdgeStyleSignature(edgeStr);
+      for (let i = 0; i < EDGE_STYLE_PRESETS.length; i++) {
+        if (getPresetStyleSignature(EDGE_STYLE_PRESETS[i].template) === sig) {
+          return i;
+        }
+      }
+      return -1;
+    }
+
+    function findPresetIndexForTemplate(template) {
+      for (let i = 0; i < EDGE_STYLE_PRESETS.length; i++) {
+        if (EDGE_STYLE_PRESETS[i].template === template) {
+          return i;
+        }
+      }
+      return -1;
+    }
+
+    function updateConnectionPresetSelection() {
+      const list = document.getElementById('connection-list');
+      if (!list) return;
+
+      let activeIndex = -1;
+      if (selectedEdgeIndex >= 0) {
+        try {
+          const edges = JSON.parse(editor.value).edge || [];
+          if (selectedEdgeIndex < edges.length) {
+            activeIndex = findPresetIndexForEdge(edges[selectedEdgeIndex]);
+          }
+        } catch (e) { /* ignore */ }
+      } else if (pendingEdgeTemplate && areConnectionPresetsEnabledForInsert()) {
+        activeIndex = findPresetIndexForTemplate(pendingEdgeTemplate);
+      }
+
+      list.querySelectorAll('.connection-item').forEach((item, index) => {
+        item.classList.toggle('preset-matches-selected', index === activeIndex && activeIndex >= 0);
+      });
+    }
+
+    function updateConnectionPresetDisabledState() {
+      const list = document.getElementById('connection-list');
+      if (!list) return;
+      const insertPhase = areConnectionPresetsEnabledForInsert();
+      list.querySelectorAll('.connection-item').forEach((item) => {
+        const enabled = connectionAddSessionActive
+          ? insertPhase
+          : selectedEdgeIndex >= 0;
+        item.classList.toggle('disabled', !enabled);
+      });
+      updateConnectionPresetSelection();
+    }
+
+    function endConnectionAddSession() {
+      connectionAddSessionActive = false;
+      pendingEdgeTemplate = null;
+      clearConnectionPoints();
+      updateConnectionPresetDisabledState();
+    }
+
+    function scheduleConnectionHighlightUpdate(lanes, sourceMap) {
+      pendingHighlightLanes = lanes;
+      pendingHighlightSourceMap = sourceMap;
+      if (connectionHighlightRaf !== null) return;
+      connectionHighlightRaf = requestAnimationFrame(() => {
+        connectionHighlightRaf = null;
+        const lanesRef = pendingHighlightLanes;
+        const mapRef = pendingHighlightSourceMap;
+        pendingHighlightLanes = null;
+        pendingHighlightSourceMap = null;
+        if (lanesRef && mapRef) {
+          updateConnectionPointHighlights(lanesRef, mapRef);
+        }
+      });
+    }
+
+    function refreshConnectionHighlightsFromDom() {
+      const svg = waveContainer.querySelector('svg');
+      if (!svg) return;
+      const lanes = getWaveLaneGroups(svg);
+      let sourceMap = [];
+      try {
+        sourceMap = buildSignalSourceMap(editor.value);
+      } catch (e) { /* ignore */ }
+      scheduleConnectionHighlightUpdate(lanes, sourceMap);
     }
 
     function updateConnectionPointHighlights(lanes, sourceMap) {
@@ -2292,15 +2893,17 @@ try { module.exports = WaveSkin; } catch(err) {}
         const isTo = connectionToPoint && connectionToPoint.rowIndex === idx;
         const isSelected = selectedSignalIndex === idx;
 
+        drawGroup.querySelectorAll('.wave-col-highlight, .wave-col-highlight-from, .wave-col-highlight-to')
+          .forEach(el => el.remove());
+
         if (isFrom) {
-          updateColumnHighlight(lane, drawGroup, wave, connectionFromPoint.colIndex, unitWidth, 'wave-col-highlight-from');
-        } else if (isTo) {
-          updateColumnHighlight(lane, drawGroup, wave, connectionToPoint.colIndex, unitWidth, 'wave-col-highlight-to');
-        } else if (isSelected) {
-          updateColumnHighlight(lane, drawGroup, wave, selectedWaveColumnIndex, unitWidth, 'wave-col-highlight');
-        } else {
-          drawGroup.querySelectorAll('.wave-col-highlight, .wave-col-highlight-from, .wave-col-highlight-to')
-            .forEach(el => el.remove());
+          appendColumnHighlight(drawGroup, wave, connectionFromPoint.colIndex, unitWidth, 'wave-col-highlight-from');
+        }
+        if (isTo) {
+          appendColumnHighlight(drawGroup, wave, connectionToPoint.colIndex, unitWidth, 'wave-col-highlight-to');
+        }
+        if (isSelected && !isFrom && !isTo) {
+          appendColumnHighlight(drawGroup, wave, selectedWaveColumnIndex, unitWidth, 'wave-col-highlight');
         }
       });
     }
@@ -2316,6 +2919,7 @@ try { module.exports = WaveSkin; } catch(err) {}
       });
 
       updateConnectionPointHighlights(lanes, sourceMap);
+      updateLegendAvailability();
     }
 
     function applyLegendCharToSelection(char) {
@@ -2341,7 +2945,7 @@ try { module.exports = WaveSkin; } catch(err) {}
     }
 
     function insertNewSignalRow(template) {
-      const tpl = template || DEFAULT_NEW_SIGNAL_TEMPLATE;
+      const tpl = Object.assign({}, template || DEFAULT_NEW_SIGNAL_TEMPLATE);
 
       let parsed;
       try {
@@ -2376,6 +2980,198 @@ try { module.exports = WaveSkin; } catch(err) {}
       setSelectedSignal(newIndex, 0);
       applyEditorChange(newText, selStart, selStart + newObjStr.length);
       setStatus(true, tpl.name ? ('已插入信号: ' + tpl.name) : '已插入空白信号行');
+    }
+
+    function removeSignalFromText(text, index) {
+      const sourceMap = buildSignalSourceMap(text);
+      if (index < 0 || index >= sourceMap.length) return text;
+
+      const entry = sourceMap[index];
+      const absStart = entry.start;
+      const absEnd = entry.end;
+      const bounds = findSignalArrayBounds(text);
+      if (!bounds) return text;
+
+      const before = text.slice(bounds.arrStart, absStart);
+      const after = text.slice(absEnd, bounds.arrEnd);
+
+      let start = absStart;
+      let end = absEnd;
+      const trailingComma = after.match(/^\s*,\s*/);
+      const leadingComma = before.match(/,\s*$/);
+      if (trailingComma) {
+        end = absEnd + trailingComma[0].length;
+      } else if (leadingComma) {
+        start = absStart - leadingComma[0].length;
+      }
+      return text.slice(0, start) + text.slice(end);
+    }
+
+    function swapAdjacentSignalsInText(text, indexA, indexB) {
+      const sourceMap = buildSignalSourceMap(text);
+      const low = Math.min(indexA, indexB);
+      const high = Math.max(indexA, indexB);
+      if (low < 0 || high >= sourceMap.length || high - low !== 1) return text;
+
+      const entryLow = sourceMap[low];
+      const entryHigh = sourceMap[high];
+      const sliceLow = text.slice(entryLow.start, entryLow.end);
+      const sliceHigh = text.slice(entryHigh.start, entryHigh.end);
+      const middle = text.slice(entryLow.end, entryHigh.start);
+      const newBlock = sliceHigh + middle + sliceLow;
+      return text.slice(0, entryLow.start) + newBlock + text.slice(entryHigh.end);
+    }
+
+    function adjustConnectionPointAfterRowDelete(deletedIndex) {
+      function adjust(pt) {
+        if (!pt) return null;
+        if (pt.rowIndex === deletedIndex) return null;
+        if (pt.rowIndex > deletedIndex) return { rowIndex: pt.rowIndex - 1, colIndex: pt.colIndex };
+        return pt;
+      }
+      connectionFromPoint = adjust(connectionFromPoint);
+      connectionToPoint = adjust(connectionToPoint);
+      updateConnectionPointStatusUI();
+    }
+
+    function adjustConnectionPointAfterRowSwap(fromIndex, toIndex) {
+      function adjust(pt) {
+        if (!pt) return null;
+        if (pt.rowIndex === fromIndex) return { rowIndex: toIndex, colIndex: pt.colIndex };
+        if (pt.rowIndex === toIndex) return { rowIndex: fromIndex, colIndex: pt.colIndex };
+        return pt;
+      }
+      connectionFromPoint = adjust(connectionFromPoint);
+      connectionToPoint = adjust(connectionToPoint);
+      updateConnectionPointStatusUI();
+    }
+
+    function adjustPendingNameEditAfterRowDelete(deletedIndex) {
+      if (pendingNameEditSignalIndex < 0) return;
+      if (pendingNameEditSignalIndex === deletedIndex) {
+        pendingNameEditSignalIndex = -1;
+      } else if (pendingNameEditSignalIndex > deletedIndex) {
+        pendingNameEditSignalIndex--;
+      }
+    }
+
+    function adjustPendingNameEditAfterRowSwap(fromIndex, toIndex) {
+      if (pendingNameEditSignalIndex < 0) return;
+      if (pendingNameEditSignalIndex === fromIndex) {
+        pendingNameEditSignalIndex = toIndex;
+      } else if (pendingNameEditSignalIndex === toIndex) {
+        pendingNameEditSignalIndex = fromIndex;
+      }
+    }
+
+    function moveSelectedSignalRow(delta) {
+      if (selectedSignalIndex < 0) {
+        setStatus(false, '请先在波形区点击选中一行');
+        return;
+      }
+      if (delta !== -1 && delta !== 1) return;
+
+      try {
+        JSON.parse(editor.value);
+      } catch (e) {
+        setStatus(false, 'JSON 错误，无法移动');
+        return;
+      }
+
+      const sourceMap = buildSignalSourceMap(editor.value);
+      const fromIndex = selectedSignalIndex;
+      const toIndex = fromIndex + delta;
+      if (toIndex < 0 || toIndex >= sourceMap.length) return;
+
+      const entry = sourceMap[fromIndex];
+      const signalName = entry ? (entry.signal.name || ('row' + fromIndex)) : ('row' + fromIndex);
+
+      pushUndoBeforeChange();
+      const text = editor.value;
+      const newText = swapAdjacentSignalsInText(text, fromIndex, toIndex);
+      if (newText === text) {
+        setStatus(false, '无法移动信号行');
+        return;
+      }
+
+      adjustConnectionPointAfterRowSwap(fromIndex, toIndex);
+      adjustPendingNameEditAfterRowSwap(fromIndex, toIndex);
+      setSelectedSignal(toIndex, selectedWaveColumnIndex >= 0 ? selectedWaveColumnIndex : 0);
+      applyEditorChange(newText, editor.selectionStart, editor.selectionEnd);
+      setStatus(true, (delta < 0 ? '已上移信号行: ' : '已下移信号行: ') + signalName);
+    }
+
+    function deleteSelectedSignalRow() {
+      if (selectedSignalIndex < 0) {
+        setStatus(false, '请先在波形区点击选中一行');
+        return;
+      }
+
+      try {
+        JSON.parse(editor.value);
+      } catch (e) {
+        setStatus(false, 'JSON 错误，无法删除');
+        return;
+      }
+
+      const text = editor.value;
+      const sourceMap = buildSignalSourceMap(text);
+      const deletedIndex = selectedSignalIndex;
+      const entry = sourceMap[deletedIndex];
+      if (!entry) {
+        setStatus(false, '未找到要删除的信号行');
+        setSelectedSignal(-1, -1);
+        return;
+      }
+
+      const signalName = entry.signal.name || ('row' + deletedIndex);
+      const deletedNodeChars = new Set();
+      const nodeStr = entry.signal.node || '';
+      for (let i = 0; i < nodeStr.length; i++) {
+        if (nodeStr[i] !== '.') deletedNodeChars.add(nodeStr[i]);
+      }
+
+      pushUndoBeforeChange();
+      let newText = removeSignalFromText(text, deletedIndex);
+      if (newText === text) {
+        setStatus(false, '未找到要删除的信号行');
+        return;
+      }
+
+      let parsed;
+      try {
+        parsed = JSON.parse(newText);
+      } catch (e) {
+        setStatus(false, 'JSON 错误，删除失败');
+        return;
+      }
+
+      const nodeUpdates = cleanupOrphanedNodeUpdates(parsed);
+      if (nodeUpdates.length) {
+        newText = applySignalUpdatesInText(newText, nodeUpdates);
+        parsed = JSON.parse(newText);
+      }
+
+      const newCount = flattenSignals(parsed.signal || []).length;
+      adjustConnectionPointAfterRowDelete(deletedIndex);
+      adjustPendingNameEditAfterRowDelete(deletedIndex);
+
+      let newSelectedIndex = -1;
+      if (newCount > 0) {
+        newSelectedIndex = deletedIndex >= newCount ? newCount - 1 : deletedIndex;
+      }
+      setSelectedSignal(newSelectedIndex, newSelectedIndex >= 0 ? 0 : -1);
+      applyEditorChange(newText, editor.selectionStart, editor.selectionEnd);
+
+      let statusMsg = '已删除信号行: ' + signalName;
+      const affectedEdges = (parsed.edge || []).filter((edgeStr) => {
+        const { from, to } = parseEdgeString(edgeStr);
+        return deletedNodeChars.has(from) || deletedNodeChars.has(to);
+      });
+      if (affectedEdges.length) {
+        statusMsg += '（' + affectedEdges.length + ' 条连接可能失效）';
+      }
+      setStatus(true, statusMsg);
     }
 
     function findEdgeArrayBounds(text) {
@@ -2437,6 +3233,8 @@ try { module.exports = WaveSkin; } catch(err) {}
       connectionPickActive = !!active;
       document.getElementById('btn-connection-pick').classList.toggle('active', connectionPickActive);
       updateConnectionPointStatusUI();
+      updateConnectionPresetDisabledState();
+      refreshConnectionHighlightsFromDom();
     }
 
     function updateConnectionPointStatusUI() {
@@ -2455,12 +3253,12 @@ try { module.exports = WaveSkin; } catch(err) {}
         : '—';
 
       let hint = '';
-      if (connectionPickActive) {
+      if (connectionAddSessionActive && connectionPickActive) {
         if (!connectionFromPoint) hint = ' · 请在波形上点击连接起点';
         else if (!connectionToPoint) hint = ' · 请点击连接终点';
-        else hint = ' · 已选两点，可点击样式插入';
-      } else if (pendingEdgeTemplate && !connectionToPoint) {
-        hint = ' · 请开启选点模式并选择终点';
+        else hint = ' · 请选择连接样式';
+      } else if (connectionPickActive && !connectionAddSessionActive) {
+        hint = ' · 请先点击「新增连接」';
       }
 
       el.innerHTML =
@@ -2469,28 +3267,22 @@ try { module.exports = WaveSkin; } catch(err) {}
     }
 
     function handleConnectionPointClick(rowIndex, colIndex) {
-      if (!connectionPickActive && !pendingEdgeTemplate) return false;
+      if (!connectionAddSessionActive || !connectionPickActive) return false;
 
       if (!connectionFromPoint) {
         connectionFromPoint = { rowIndex, colIndex };
         setStatus(true, '已选连接起点 [' + rowIndex + ',' + colIndex + ']，请选择终点');
       } else if (!connectionToPoint) {
         connectionToPoint = { rowIndex, colIndex };
-        setStatus(true, '已选连接终点 [' + rowIndex + ',' + colIndex + ']');
-        if (pendingEdgeTemplate) {
-          const tpl = pendingEdgeTemplate;
-          pendingEdgeTemplate = null;
-          queueMicrotask(() => insertEdgeFromTemplate(tpl));
-          updateConnectionPointStatusUI();
-          return true;
-        }
+        setStatus(true, '起点与终点已选定，请选择连接样式');
       } else {
         connectionFromPoint = { rowIndex, colIndex };
         connectionToPoint = null;
         setStatus(true, '已重选连接起点，请选择终点');
       }
 
-      updateConnectionPointStatusUI();
+      queueMicrotask(updateConnectionPointStatusUI);
+      updateConnectionPresetDisabledState();
       return true;
     }
 
@@ -2511,11 +3303,14 @@ try { module.exports = WaveSkin; } catch(err) {}
     }
 
     function ensureNodeCharAtColumn(signal, colIndex, nodeChar) {
-      const wave = signal.wave || '';
-      const safeCol = colIndex < 0 ? 0 : Math.min(colIndex, Math.max(0, wave.length - 1));
+      const safeCol = colIndex < 0 ? 0 : colIndex;
+      let wave = signal.wave || '';
+      if (wave.length <= safeCol) {
+        wave = wave.padEnd(safeCol + 1, '.');
+      }
       let node = padNodeToWaveLength(signal.node || '', wave.length);
       node = node.slice(0, safeCol) + nodeChar + node.slice(safeCol + 1);
-      return Object.assign({}, signal, { node });
+      return Object.assign({}, signal, { wave, node });
     }
 
     function collectUsedNodeIds(parsed) {
@@ -2546,15 +3341,19 @@ try { module.exports = WaveSkin; } catch(err) {}
     }
 
     function applySignalUpdatesInText(text, updates) {
+      if (!updates.length) return text;
       let newText = text;
       const sorted = [...updates].sort((a, b) => b.rowIndex - a.rowIndex);
-      sorted.forEach(({ rowIndex, signal }) => {
-        const map = buildSignalSourceMap(newText);
+      let map = buildSignalSourceMap(newText);
+      sorted.forEach(({ rowIndex, signal }, idx) => {
         const entry = map[rowIndex];
         if (!entry) return;
         const indent = getIndentAt(newText, entry.start);
         const newObjStr = formatSignalObject(signal, indent);
         newText = newText.slice(0, entry.start) + newObjStr + newText.slice(entry.end);
+        if (idx < sorted.length - 1) {
+          map = buildSignalSourceMap(newText);
+        }
       });
       return newText;
     }
@@ -2745,6 +3544,7 @@ try { module.exports = WaveSkin; } catch(err) {}
       selectedEdgeIndex = index;
       renderConnectionEdgeList();
       updateEdgeLabelEditUI();
+      updateConnectionPresetDisabledState();
       highlightSelectedEdgeInSvg();
       if (index >= 0) {
         try {
@@ -2760,7 +3560,66 @@ try { module.exports = WaveSkin; } catch(err) {}
       selectedEdgeIndex = -1;
       renderConnectionEdgeList();
       updateEdgeLabelEditUI();
+      updateConnectionPresetDisabledState();
       highlightSelectedEdgeInSvg();
+    }
+
+    function clearEdgeSelectionBlink(svg) {
+      if (!svg) return;
+      svg.querySelectorAll('.wave-edge-label-blink').forEach((el) => {
+        el.classList.remove('wave-edge-label-blink');
+      });
+      svg.querySelectorAll('.wave-edge-blink').forEach((el) => {
+        el.classList.remove('wave-edge-blink');
+      });
+    }
+
+    function textDistanceToGmark(textEl, gmark) {
+      try {
+        const tb = textEl.getBBox();
+        const gb = gmark.getBBox();
+        const tx = tb.x + tb.width / 2;
+        const ty = tb.y + tb.height / 2;
+        const gx = gb.x + gb.width / 2;
+        const gy = gb.y + gb.height / 2;
+        const dx = tx - gx;
+        const dy = ty - gy;
+        return Math.sqrt(dx * dx + dy * dy);
+      } catch (e) {
+        return Infinity;
+      }
+    }
+
+    function findEdgeLabelTextElements(svg, gmark, label) {
+      const trimmed = String(label || '').trim();
+      if (!trimmed) return [];
+
+      const candidates = [...svg.querySelectorAll('text')].filter((el) => {
+        if (el.classList.contains('wave-headfoot-text')) return false;
+        if (el.classList.contains('info')) return false;
+        return el.textContent.trim() === trimmed;
+      });
+
+      if (candidates.length === 0) return [];
+
+      if (gmark && candidates.length > 1) {
+        candidates.sort((a, b) => textDistanceToGmark(a, gmark) - textDistanceToGmark(b, gmark));
+      }
+
+      return [candidates[0]];
+    }
+
+    function applyEdgeSelectionBlink(svg, gmark, label) {
+      clearEdgeSelectionBlink(svg);
+      if (!gmark) return;
+
+      const labelEls = findEdgeLabelTextElements(svg, gmark, label);
+      if (labelEls.length > 0) {
+        labelEls.forEach((el) => el.classList.add('wave-edge-label-blink'));
+        return;
+      }
+
+      gmark.classList.add('wave-edge-blink');
     }
 
     function highlightSelectedEdgeInSvg() {
@@ -2770,6 +3629,7 @@ try { module.exports = WaveSkin; } catch(err) {}
       svg.querySelectorAll('.wave-edge-selected').forEach((el) => {
         el.classList.remove('wave-edge-selected');
       });
+      clearEdgeSelectionBlink(svg);
 
       if (selectedEdgeIndex < 0) return;
 
@@ -2783,11 +3643,15 @@ try { module.exports = WaveSkin; } catch(err) {}
       const edges = parsed.edge || [];
       if (selectedEdgeIndex >= edges.length) return;
 
-      const { from, to } = parseEdgeString(edges[selectedEdgeIndex]);
+      const edgeParsed = parseEdgeString(edges[selectedEdgeIndex]);
+      const { from, to, label } = edgeParsed;
       if (!from || !to) return;
 
       const gmark = svg.querySelector('#gmark_' + from + '_' + to);
-      if (gmark) gmark.classList.add('wave-edge-selected');
+      if (gmark) {
+        gmark.classList.add('wave-edge-selected');
+        applyEdgeSelectionBlink(svg, gmark, label);
+      }
     }
 
     function modifyEdgeAtIndex(index, newEdgeStr) {
@@ -2845,6 +3709,7 @@ try { module.exports = WaveSkin; } catch(err) {}
 
       if (modifyEdgeAtIndex(selectedEdgeIndex, newEdgeStr)) {
         setStatus(true, '已修改连接样式: ' + newEdgeStr);
+        updateConnectionPresetSelection();
         return true;
       }
       return false;
@@ -2885,37 +3750,36 @@ try { module.exports = WaveSkin; } catch(err) {}
     }
 
     function handleEdgeStylePresetClick(template) {
+      if (areConnectionPresetsEnabledForInsert()) {
+        if (isInsertingEdge) return;
+        pendingEdgeTemplate = template;
+        updateConnectionPresetSelection();
+        insertEdgeFromTemplate(template);
+        return;
+      }
       if (selectedEdgeIndex >= 0) {
         modifySelectedEdgeStyle(template);
         return;
       }
       if (isInsertingEdge) return;
-      queueMicrotask(() => insertEdgeFromTemplate(template));
+      if (!connectionAddSessionActive) {
+        setStatus(false, '请先点击「新增连接」，再选起点与终点');
+      } else if (!connectionFromPoint) {
+        setStatus(false, '请先在波形上选择连接起点');
+      } else if (!connectionToPoint) {
+        setStatus(false, '请先在波形上选择连接终点');
+      }
     }
 
-    function beginEdgeInsertion(template) {
-      const endpoints = resolveConnectionEndpoints();
-      if (endpoints) return true;
-
-      if (selectedSignalIndex >= 0 && selectedWaveColumnIndex >= 0 && !connectionFromPoint) {
-        connectionFromPoint = {
-          rowIndex: selectedSignalIndex,
-          colIndex: selectedWaveColumnIndex
-        };
-      }
-
-      pendingEdgeTemplate = template;
+    function beginEdgeAddSession() {
+      if (isInsertingEdge) return;
+      endConnectionAddSession();
+      clearEdgeSelection();
+      connectionAddSessionActive = true;
       setConnectionPickActive(true);
       updateConnectionPointStatusUI();
-
-      if (connectionFromPoint && !connectionToPoint) {
-        setStatus(false, '已设起点，请在波形上点击连接终点');
-      } else if (!connectionFromPoint) {
-        setStatus(false, '请开启选点模式，在波形上依次点击起点与终点');
-      } else {
-        setStatus(false, '请重新选择连接终点');
-      }
-      return false;
+      updateConnectionPresetDisabledState();
+      setStatus(false, '选点模式：请依次点击波形上的起点与终点');
     }
 
     function scrollEditorToEdge(text, edgeStr) {
@@ -2933,12 +3797,104 @@ try { module.exports = WaveSkin; } catch(err) {}
       syncLineNumberScroll();
     }
 
+    function commitEdgeInsert(template) {
+      if (isInsertingEdge) return;
+
+      const endpoints = resolveConnectionEndpoints();
+      if (!endpoints) return;
+
+      isInsertingEdge = true;
+      setWaveformRenderingBusy(true);
+      setStatus(true, '正在插入连接…');
+      vwdMark('commitEdgeInsert:start');
+
+      requestAnimationFrame(() => {
+        vwdMark('commitEdgeInsert:raf');
+        const fromPickFlow = connectionAddSessionActive && connectionPickActive;
+        let statusMsg = '';
+        let deferCompletion = false;
+
+        try {
+          let parsed;
+          try {
+            parsed = JSON.parse(editor.value);
+          } catch (e) {
+            setStatus(false, 'JSON 错误，无法插入连接');
+            return;
+          }
+
+          const prepared = prepareEdgeEndpoints(parsed, endpoints.from, endpoints.to);
+          if (prepared.error) {
+            setStatus(false, prepared.error);
+            return;
+          }
+
+          const insertLabel = selectedEdgeIndex < 0 ? getConnectionLabelInputValue() : '';
+          const edgeStr = buildEdgeFromTemplate(template, prepared.fromNode, prepared.toNode, insertLabel);
+          let text = editor.value;
+          text = applySignalUpdatesInText(text, prepared.updates);
+
+          const ensured = ensureEdgeArrayInText(text);
+          if (!ensured) {
+            setStatus(false, '未找到 signal 数组，无法插入 edge');
+            return;
+          }
+          text = ensured.text;
+          const bounds = ensured.bounds;
+
+          pushUndoBeforeChange();
+          const indent = getIndentAt(text, bounds.arrStart) || '  ';
+          const itemIndent = indent + '  ';
+          const edgeJson = JSON.stringify(edgeStr);
+          const beforeClose = text.slice(0, bounds.insertBefore).replace(/\s*$/, '');
+          const afterClose = text.slice(bounds.insertBefore);
+          const inner = text.slice(bounds.arrStart, bounds.insertBefore);
+          const needsComma = /\S/.test(inner);
+          const insertion = (needsComma ? ',\n' : '\n') + itemIndent + edgeJson;
+          const insertPos = bounds.insertBefore;
+          const newText = beforeClose + insertion + afterClose;
+          const selStart = insertPos + insertion.indexOf(edgeJson);
+          const selEnd = selStart + edgeJson.length;
+          statusMsg = '已插入连接: ' + edgeStr + '（node ' + prepared.fromNode + ' → ' + prepared.toNode + '）';
+
+          vwdMark('commitEdgeInsert:beforeApply');
+          deferCompletion = true;
+
+          applyEditorChange(newText, selStart, selEnd, {
+            skipFocus: fromPickFlow,
+            deferRender: true,
+            skipSyncPersist: true,
+            onRenderComplete: () => {
+              vwdMark('commitEdgeInsert:afterRender');
+              if (!fromPickFlow) {
+                requestAnimationFrame(() => scrollEditorToEdge(newText, edgeStr));
+              }
+              setStatus(true, statusMsg);
+              setWaveformRenderingBusy(false);
+              isInsertingEdge = false;
+            }
+          });
+
+          if (fromPickFlow) {
+            endConnectionAddSession();
+            setConnectionPickActive(false);
+          }
+        } catch (e) {
+          setStatus(false, '插入连接失败');
+        } finally {
+          if (!deferCompletion) {
+            setWaveformRenderingBusy(false);
+            isInsertingEdge = false;
+          }
+        }
+      });
+    }
+
     function insertEdgeFromTemplate(template) {
       if (isInsertingEdge) return;
 
-      let parsed;
       try {
-        parsed = JSON.parse(editor.value);
+        JSON.parse(editor.value);
       } catch (e) {
         setStatus(false, 'JSON 错误，无法插入连接');
         return;
@@ -2946,52 +3902,13 @@ try { module.exports = WaveSkin; } catch(err) {}
 
       const endpoints = resolveConnectionEndpoints();
       if (!endpoints) {
-        beginEdgeInsertion(template);
+        if (connectionAddSessionActive) {
+          setStatus(false, '请先在波形上选择起点与终点');
+        }
         return;
       }
 
-      isInsertingEdge = true;
-      try {
-        const prepared = prepareEdgeEndpoints(parsed, endpoints.from, endpoints.to);
-        if (prepared.error) {
-          setStatus(false, prepared.error);
-          return;
-        }
-
-        const insertLabel = selectedEdgeIndex < 0 ? getConnectionLabelInputValue() : '';
-        const edgeStr = buildEdgeFromTemplate(template, prepared.fromNode, prepared.toNode, insertLabel);
-        let text = editor.value;
-        text = applySignalUpdatesInText(text, prepared.updates);
-
-        const ensured = ensureEdgeArrayInText(text);
-        if (!ensured) {
-          setStatus(false, '未找到 signal 数组，无法插入 edge');
-          return;
-        }
-        text = ensured.text;
-        const bounds = ensured.bounds;
-
-        pushUndoBeforeChange();
-        const indent = getIndentAt(text, bounds.arrStart) || '  ';
-        const itemIndent = indent + '  ';
-        const edgeJson = JSON.stringify(edgeStr);
-        const beforeClose = text.slice(0, bounds.insertBefore).replace(/\s*$/, '');
-        const afterClose = text.slice(bounds.insertBefore);
-        const inner = text.slice(bounds.arrStart, bounds.insertBefore);
-        const needsComma = /\S/.test(inner);
-        const insertion = (needsComma ? ',\n' : '\n') + itemIndent + edgeJson;
-        const insertPos = bounds.insertBefore;
-        const newText = beforeClose + insertion + afterClose;
-        const selStart = insertPos + insertion.indexOf(edgeJson);
-
-        pendingEdgeTemplate = null;
-        clearConnectionPoints();
-        applyEditorChange(newText, selStart, selStart + edgeJson.length);
-        scrollEditorToEdge(newText, edgeStr);
-        setStatus(true, '已插入连接: ' + edgeStr + '（node ' + prepared.fromNode + ' → ' + prepared.toNode + '）');
-      } finally {
-        isInsertingEdge = false;
-      }
+      commitEdgeInsert(template);
     }
 
     function parseEdgeArraySlice(text) {
@@ -3132,6 +4049,7 @@ try { module.exports = WaveSkin; } catch(err) {}
         empty.className = 'connection-edge-empty';
         empty.textContent = 'JSON 无效';
         list.appendChild(empty);
+        updateConnectionPresetSelection();
         return;
       }
 
@@ -3149,6 +4067,7 @@ try { module.exports = WaveSkin; } catch(err) {}
           updateEdgeLabelEditUI();
           highlightSelectedEdgeInSvg();
         }
+        updateConnectionPresetSelection();
         return;
       }
 
@@ -3193,6 +4112,7 @@ try { module.exports = WaveSkin; } catch(err) {}
         list.appendChild(row);
       });
       highlightSelectedEdgeInSvg();
+      updateConnectionPresetSelection();
     }
 
     function attachEdgeInteractivity(jsonText) {
@@ -3218,6 +4138,8 @@ try { module.exports = WaveSkin; } catch(err) {}
         if (idx < 0) return;
 
         el.classList.add('wave-edge-interactive');
+        if (el.dataset.vwdEdgeBound === '1') return;
+        el.dataset.vwdEdgeBound = '1';
         el.addEventListener('click', (e) => {
           e.stopPropagation();
           if (inlineEditActive) return;
@@ -3330,6 +4252,11 @@ try { module.exports = WaveSkin; } catch(err) {}
     function attachSignalNameEdit(lane, entry, handleLanePointSelect) {
       const nameText = lane.querySelector('text.info');
       if (!nameText) return;
+      if (nameText.dataset.vwdNameBound === '1') return;
+
+      if (entry.signal.name === '') {
+        nameText.textContent = '';
+      }
 
       const openNameEdit = (anchorEl) => {
         startInlineEdit(nameText, entry, 'name', undefined, anchorEl || nameText);
@@ -3337,7 +4264,8 @@ try { module.exports = WaveSkin; } catch(err) {}
 
       const onNameClick = (e, anchorEl) => {
         e.stopPropagation();
-        if (connectionPickActive || pendingEdgeTemplate) {
+        if (e.vwdLanePickHandled) return;
+        if (isConnectionPickFlow()) {
           handleLanePointSelect(e);
           return;
         }
@@ -3345,11 +4273,14 @@ try { module.exports = WaveSkin; } catch(err) {}
       };
 
       if (hasVisibleSvgText(nameText)) {
+        nameText.dataset.vwdNameBound = '1';
         nameText.addEventListener('click', (e) => onNameClick(e, nameText));
         return;
       }
 
       const zone = ensureSignalNameClickZone(lane, nameText);
+      nameText.dataset.vwdNameBound = '1';
+      zone.dataset.vwdNameBound = '1';
       zone.addEventListener('click', (e) => onNameClick(e, zone));
       nameText.addEventListener('click', (e) => onNameClick(e, nameText));
     }
@@ -3371,6 +4302,9 @@ try { module.exports = WaveSkin; } catch(err) {}
       overlay.className = 'wave-text-edit-overlay';
       overlay.type = 'text';
       overlay.value = oldValue;
+      overlay.autocomplete = 'off';
+      overlay.setAttribute('autocomplete', 'off');
+      overlay.spellcheck = false;
       overlay.style.left = (rect.left - panelRect.left + wavePanel.scrollLeft) + 'px';
       overlay.style.top = (rect.top - panelRect.top + wavePanel.scrollTop) + 'px';
       overlay.style.width = Math.max(rect.width + 16, 48) + 'px';
@@ -3378,7 +4312,11 @@ try { module.exports = WaveSkin; } catch(err) {}
 
       wavePanel.appendChild(overlay);
       overlay.focus();
-      overlay.select();
+      if (field === 'name' && oldValue === '') {
+        overlay.setSelectionRange(0, 0);
+      } else {
+        overlay.select();
+      }
 
       let committed = false;
       const commit = () => {
@@ -3519,33 +4457,42 @@ try { module.exports = WaveSkin; } catch(err) {}
 
         function handleLanePointSelect(e) {
           if (inlineEditActive) return;
+          if (e.vwdLanePickHandled) return;
+          e.vwdLanePickHandled = true;
           if (app.classList.contains('reading-mode')) return;
 
           const drawGroup = lane.querySelector('[id^="wavelane_draw_"]');
           const wave = entry.signal.wave || '';
           let colIndex = 0;
-          if (drawGroup && wave) {
+          if (drawGroup) {
             colIndex = columnIndexFromClick(drawGroup, wave, svg, e.clientX, unitWidth);
           }
 
+          const inPickFlow = isConnectionPickFlow();
           setSelectedSignal(idx, colIndex);
           lanes.forEach((l, i) => l.classList.toggle('wave-lane-selected', i === idx));
 
-          if (connectionPickActive || pendingEdgeTemplate) {
-            handleConnectionPointClick(idx, colIndex);
+          if (inPickFlow) {
+            const pickResult = handleConnectionPointClick(idx, colIndex);
+            scheduleConnectionHighlightUpdate(lanes, sourceMap);
+            if (pickResult === 'insert-queued') return;
+            return;
           }
 
-          updateConnectionPointHighlights(lanes, sourceMap);
-          scrollEditorToSignal(entry);
+          scheduleConnectionHighlightUpdate(lanes, sourceMap);
+          requestAnimationFrame(() => scrollEditorToSignal(entry));
           setStatus(true, '已选中: ' + entry.signal.name + ' [' + colIndex + ']=' + JSON.stringify(wave[colIndex] || ''));
         }
 
-        lane.addEventListener('click', (e) => {
-          const isText = e.target.closest('text') || e.target.classList.contains('wave-text-edit-overlay');
-          const isNameZone = e.target.classList.contains('wave-name-click-zone');
-          if ((isText || isNameZone) && !(connectionPickActive || pendingEdgeTemplate)) return;
-          handleLanePointSelect(e);
-        });
+        if (lane.dataset.vwdLaneBound !== '1') {
+          lane.dataset.vwdLaneBound = '1';
+          lane.addEventListener('click', (e) => {
+            const isText = e.target.closest('text') || e.target.classList.contains('wave-text-edit-overlay');
+            const isNameZone = e.target.classList.contains('wave-name-click-zone');
+            if ((isText || isNameZone) && !isConnectionPickFlow()) return;
+            handleLanePointSelect(e);
+          });
+        }
 
         attachSignalNameEdit(lane, entry, handleLanePointSelect);
 
@@ -3553,10 +4500,12 @@ try { module.exports = WaveSkin; } catch(err) {}
         if (drawGroup) {
           const dataTexts = drawGroup.querySelectorAll('text');
           dataTexts.forEach((textEl, dataIdx) => {
+            if (textEl.dataset.vwdDataBound === '1') return;
+            textEl.dataset.vwdDataBound = '1';
             textEl.classList.add('wave-data-text');
             textEl.addEventListener('click', (e) => {
               e.stopPropagation();
-              if (connectionPickActive || pendingEdgeTemplate) {
+              if (isConnectionPickFlow()) {
                 handleLanePointSelect(e);
                 return;
               }
@@ -4084,12 +5033,37 @@ try { module.exports = WaveSkin; } catch(err) {}
       container.appendChild(errDiv);
     }
 
+    function scheduleRenderWaveform(jsonText, onComplete) {
+      scheduledRenderText = jsonText;
+      if (onComplete) {
+        scheduledRenderCallbacks = scheduledRenderCallbacks || [];
+        scheduledRenderCallbacks.push(onComplete);
+      }
+      if (renderWaveformRaf !== null) return;
+      renderWaveformRaf = requestAnimationFrame(() => {
+        renderWaveformRaf = null;
+        const text = scheduledRenderText;
+        const callbacks = scheduledRenderCallbacks;
+        scheduledRenderText = null;
+        scheduledRenderCallbacks = null;
+        if (text == null) return;
+        vwdMark('scheduleRenderWaveform:run');
+        const ok = renderWaveform(text);
+        if (callbacks) {
+          callbacks.forEach((cb) => {
+            try { cb(ok); } catch (e) { /* ignore */ }
+          });
+        }
+      });
+    }
+
     function renderWaveform(jsonText) {
       if (isRenderingWaveform) {
         pendingRenderText = jsonText;
         return false;
       }
       isRenderingWaveform = true;
+      vwdMark('renderWaveform:start');
 
       try {
         waveContainer.innerHTML = '';
@@ -4129,7 +5103,8 @@ try { module.exports = WaveSkin; } catch(err) {}
           syncHscaleInputFromJson(jsonText);
           attachWaveInteractivity(jsonText);
           renderConnectionEdgeList();
-          if (!isInsertingEdge) {
+          vwdMark('renderWaveform:done');
+          if (!isInsertingEdge && !waveformRenderingBusy) {
             setStatus(true, '波形已更新');
           }
           return true;
@@ -4302,7 +5277,8 @@ try { module.exports = WaveSkin; } catch(err) {}
       const div = document.createElement('div');
       const example = buildEdgeFromTemplate(item.template, 'a', 'b', 'label');
       div.className = 'connection-item';
-      div.title = item.label + ' — 选连接后修改样式，或选两点后插入 ' + example;
+      div.dataset.presetIndex = String(index);
+      div.title = item.label + ' — 选中连接后修改样式，或在新增连接选完起点后选择样式 ' + example;
       div.addEventListener('click', () => handleEdgeStylePresetClick(item.template));
 
       const label = document.createElement('div');
@@ -4405,9 +5381,11 @@ try { module.exports = WaveSkin; } catch(err) {}
       }
     });
     document.getElementById('btn-add-signal').addEventListener('click', () => insertNewSignalRow());
+    document.getElementById('btn-delete-signal').addEventListener('click', () => deleteSelectedSignalRow());
+    document.getElementById('btn-move-signal-up').addEventListener('click', () => moveSelectedSignalRow(-1));
+    document.getElementById('btn-move-signal-down').addEventListener('click', () => moveSelectedSignalRow(1));
     document.getElementById('btn-add-connection').addEventListener('click', () => {
-      if (isInsertingEdge) return;
-      queueMicrotask(() => insertEdgeFromTemplate(DEFAULT_EDGE_TEMPLATE));
+      beginEdgeAddSession();
     });
     document.getElementById('btn-apply-edge-label').addEventListener('click', applyEdgeLabelFromInput);
     document.getElementById('connection-label-input').addEventListener('keydown', (e) => {
@@ -4419,9 +5397,13 @@ try { module.exports = WaveSkin; } catch(err) {}
     document.getElementById('btn-connection-pick').addEventListener('click', () => {
       setConnectionPickActive(!connectionPickActive);
       if (connectionPickActive) {
-        setStatus(true, '选点模式：依次点击波形上的起点与终点');
+        if (connectionAddSessionActive) {
+          setStatus(true, '选点模式：依次点击波形上的起点与终点');
+        } else {
+          setStatus(true, '选点模式已开启，请先点击「新增连接」开始添加');
+        }
       } else {
-        pendingEdgeTemplate = null;
+        endConnectionAddSession();
         setStatus(true, '已关闭选点模式');
       }
       updateConnectionPointStatusUI();
@@ -4430,15 +5412,27 @@ try { module.exports = WaveSkin; } catch(err) {}
     if (typeof window !== 'undefined') {
       window.__vwdGetConnectionState = () => ({
         connectionPickActive,
+        connectionAddSessionActive,
         connectionFromPoint,
         connectionToPoint,
         pendingEdgeTemplate,
         isInsertingEdge,
-        isRenderingWaveform
+        isRenderingWaveform,
+        waveformRenderingBusy,
+        selectedEdgeIndex
       });
+      window.__vwdGetPresetHighlightIndex = () => {
+        const el = document.querySelector('#connection-list .connection-item.preset-matches-selected');
+        return el ? parseInt(el.dataset.presetIndex, 10) : -1;
+      };
+      window.__vwdFindPresetIndexForEdge = findPresetIndexForEdge;
+      window.__vwdGetPerf = () => vwdPerfMarks.slice();
+      window.__vwdClearPerf = () => { vwdPerfMarks.length = 0; };
     }
-    document.getElementById('btn-mode-modify').addEventListener('click', () => setWaveEditMode('modify'));
-    document.getElementById('btn-mode-insert').addEventListener('click', () => setWaveEditMode('insert'));
+    document.getElementById('btn-wave-edit-mode').addEventListener('click', toggleWaveEditMode);
+    document.getElementById('btn-delete-wave-col').addEventListener('click', () => {
+      deleteWaveCharAtColumn(selectedSignalIndex, selectedWaveColumnIndex);
+    });
     document.getElementById('btn-copy-json').addEventListener('click', copyEditorJsonToClipboard);
     document.getElementById('btn-save-tag').addEventListener('click', openSaveTagDialog);
     document.getElementById('tag-save-cancel').addEventListener('click', closeSaveTagDialog);
@@ -4489,6 +5483,7 @@ try { module.exports = WaveSkin; } catch(err) {}
       initEditor();
       renderLegends();
       renderConnectionPresets();
+      updateConnectionPresetDisabledState();
       renderConnectionEdgeList();
       updateEdgeLabelEditUI();
       restoreBackBtnPosition();

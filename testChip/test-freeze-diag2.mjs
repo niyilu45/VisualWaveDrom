@@ -5,6 +5,8 @@ import path from 'path';
 const htmlPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'VisualWaveDrom.html');
 const fileUrl = 'file:///' + htmlPath.replace(/\\/g, '/');
 
+let failed = 0;
+
 async function runScenario(name, fn) {
   const browser = await chromium.launch();
   const page = await browser.newPage();
@@ -19,6 +21,7 @@ async function runScenario(name, fn) {
     ]);
     console.log(`OK ${name} (${Date.now() - t0}ms):`, JSON.stringify(result));
   } catch (e) {
+    failed += 1;
     console.log(`FAIL ${name}:`, e.message);
   } finally {
     await browser.close();
@@ -36,12 +39,12 @@ await runScenario('mouse-pick-add', async (page) => {
   const before = await page.evaluate(() => JSON.parse(document.getElementById('code-editor').value).edge.length);
   await page.click('#btn-add-connection');
   await page.waitForTimeout(300);
-  return await page.evaluate(() => ({
-    before,
+  return await page.evaluate((beforeCount) => ({
+    before: beforeCount,
     after: JSON.parse(document.getElementById('code-editor').value).edge.length,
     edges: JSON.parse(document.getElementById('code-editor').value).edge,
     status: document.getElementById('status-text').textContent
-  }));
+  }), before);
 });
 
 // Scenario 2: Auto-insert via preset with pending template
@@ -55,12 +58,12 @@ await runScenario('auto-insert-preset', async (page) => {
   const before = await page.evaluate(() => JSON.parse(document.getElementById('code-editor').value).edge.length);
   await page.locator('#connection-list .connection-item').first().click();
   await page.waitForTimeout(500);
-  return await page.evaluate(() => ({
-    before,
+  return await page.evaluate((beforeCount) => ({
+    before: beforeCount,
     after: JSON.parse(document.getElementById('code-editor').value).edge.length,
     edges: JSON.parse(document.getElementById('code-editor').value).edge,
     status: document.getElementById('status-text').textContent
-  }));
+  }), before);
 });
 
 // Scenario 3: Direct evaluate insertEdge path
@@ -80,3 +83,7 @@ await runScenario('direct-insert', async (page) => {
     return { note: 'need internal fn access' };
   });
 });
+
+if (failed > 0) {
+  process.exit(1);
+}

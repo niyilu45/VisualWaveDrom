@@ -47,6 +47,29 @@ assert('name click zone has hit area', afterInsert.zoneSize && afterInsert.zoneS
 assert('auto-opens name edit after insert', afterInsert.autoOverlay);
 assert('blank row is selected', !!afterInsert.selected);
 
+const noClk = await page.evaluate(() => {
+  const parsed = JSON.parse(document.getElementById('code-editor').value);
+  const last = parsed.signal[parsed.signal.length - 1];
+  const lanes = [...document.querySelectorAll('#wave-container g[id^="wavelane_"]')]
+    .filter(g => /^wavelane_\d+_\d+$/.test(g.id));
+  const lastLane = lanes[lanes.length - 1];
+  const overlay = document.querySelector('.wave-text-edit-overlay');
+  const uses = [...(lastLane?.querySelectorAll('[id^="wavelane_draw_"] use') || [])]
+    .map(u => u.getAttribute('href') || u.getAttributeNS('http://www.w3.org/1999/xlink', 'href'));
+  return {
+    lastName: last.name,
+    lastWave: last.wave,
+    labelText: lastLane?.querySelector('text.info')?.textContent ?? null,
+    overlayValue: overlay?.value ?? null,
+    hasClockUse: uses.some(h => h && /clk/i.test(h))
+  };
+});
+assert('JSON last row name is empty', noClk.lastName === '');
+assert('JSON last row wave is empty', noClk.lastWave === '');
+assert('SVG label is not clk', noClk.labelText !== 'clk');
+assert('auto-edit overlay value is empty', noClk.overlayValue === '');
+assert('blank row wave is not clock pattern', !noClk.hasClockUse);
+
 // Close auto overlay without changing
 await page.keyboard.press('Escape');
 await page.waitForTimeout(200);

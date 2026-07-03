@@ -44,7 +44,7 @@ const edgeCountBefore = await page.evaluate(() => {
 
 assert('edge list shows default connection', (await page.locator('#connection-edge-list .connection-edge-row').count()) >= 1);
 
-await page.click('#btn-connection-pick');
+await page.click('#btn-add-connection');
 const lanePick = await page.evaluate(() => {
   const svg = document.querySelector('#wave-container svg');
   const lanes = [...svg.querySelectorAll('g[id^="wavelane_"]')]
@@ -59,22 +59,19 @@ const lanePick = await page.evaluate(() => {
   }
 
   clickLane(0, 0.65);
+  const fromAfterFirst = window.__vwdGetConnectionState().connectionFromPoint;
   clickLane(1, 0.65);
   return {
     laneCount: lanes.length,
-    fromRow: window.__vwdGetConnectionState().connectionFromPoint?.rowIndex,
-    toRow: window.__vwdGetConnectionState().connectionToPoint?.rowIndex
+    fromAfterFirst: fromAfterFirst?.rowIndex,
+    colAfterFirst: fromAfterFirst?.colIndex
   };
 });
 assert('wave lanes rendered', lanePick.laneCount >= 2);
-assert('picked two different signal rows', lanePick.fromRow !== lanePick.toRow);
+assert('first point recorded before second pick', lanePick.fromAfterFirst != null);
 
-const statusAfterPick = await page.locator('#connection-point-status').textContent();
-const colMarkers = (statusAfterPick.match(/\[\d+\]/g) || []).length;
-assert('both points shown in status', colMarkers >= 2);
-
-await page.click('#btn-add-connection');
-await page.waitForTimeout(500);
+await page.evaluate(() => document.querySelector('#connection-list .connection-item').click());
+await page.waitForTimeout(600);
 
 const afterInsert = await page.evaluate(() => {
   const text = document.getElementById('code-editor').value;
@@ -117,6 +114,9 @@ const afterSelect = await page.evaluate(() => ({
 assert('click edge row selects connection', afterSelect.selectedIndex !== false || afterSelect.status.includes('已选中连接'));
 assert('status shows selected edge', afterSelect.status.includes('已选中连接'));
 
+const presetHighlightSolid = await page.evaluate(() => window.__vwdGetPresetHighlightIndex());
+assert('selected edge highlights solid-arrow preset', presetHighlightSolid === 0);
+
 // --- Style modification preserves label ---
 await page.evaluate(() => {
   const editor = document.getElementById('code-editor');
@@ -140,6 +140,9 @@ const afterStyleChange = await page.evaluate(() => {
 assert('style change to dashed arrow', afterStyleChange.isDashed);
 assert('style change preserves label', afterStyleChange.hasLabel);
 
+const presetHighlightDashed = await page.evaluate(() => window.__vwdGetPresetHighlightIndex());
+assert('style change updates preset highlight to dashed', presetHighlightDashed === 1);
+
 // --- Label edit ---
 await page.locator('#connection-label-input').fill('world');
 await page.click('#btn-apply-edge-label');
@@ -161,6 +164,70 @@ const afterUndo = await page.evaluate(() => {
   return (p.edge || [])[0] || '';
 });
 assert('undo restores prior edge state', afterUndo.includes('hello') || afterUndo === 'a->b');
+
+// --- Bidirectional arrow (<->) ---
+await page.evaluate(() => {
+  const editor = document.getElementById('code-editor');
+  const p = JSON.parse(editor.value);
+  const signals = p.signal || [];
+  if (signals[0]) {
+    signals[0].wave = signals[0].wave || '01';
+    let node = (signals[0].node || '').padEnd(signals[0].wave.length, '.');
+    node = node.split('');
+    node[1] = 'a';
+    signals[0].node = node.join('');
+  }
+  if (signals[1]) {
+    signals[1].wave = signals[1].wave || '01';
+    let node = (signals[1].node || '').padEnd(signals[1].wave.length, '.');
+    node = node.split('');
+    node[2] = 'b';
+    signals[1].node = node.join('');
+  }
+  p.edge = ['a<->b : sync'];
+  editor.value = JSON.stringify(p, null, 2);
+  editor.dispatchEvent(new Event('input', { bubbles: true }));
+});
+await page.waitForFunction(() => {
+  const gmark = document.querySelector('#wave-container svg #gmark_a_b');
+  const style = gmark?.getAttribute('style') || '';
+  return style.includes('marker-start') && style.includes('marker-end');
+}, { timeout: 5000 });
+
+const bidirectionalRender = await page.evaluate(() => {
+  const svg = document.querySelector('#wave-container svg');
+  const gmark = svg ? svg.querySelector('#gmark_a_b') : null;
+  const style = gmark ? gmark.getAttribute('style') || '' : '';
+  return {
+    hasGmark: !!gmark,
+    hasBothMarkers: style.includes('marker-start') && style.includes('marker-end')
+  };
+});
+assert('bidirectional edge renders gmark_a_b', bidirectionalRender.hasGmark);
+assert('bidirectional edge has marker-start and marker-end', bidirectionalRender.hasBothMarkers);
+
+const bidirectionalPresetIndex = await page.evaluate(() => {
+  const items = [...document.querySelectorAll('#connection-list .connection-item')];
+  return items.findIndex((el) => el.querySelector('.connection-label')?.textContent === '双向箭头');
+});
+assert('bidirectional preset exists in connection list', bidirectionalPresetIndex >= 0);
+
+await page.locator('#connection-edge-list .connection-edge-row').first().click();
+await page.waitForTimeout(200);
+await page.locator('#connection-list .connection-item').nth(bidirectionalPresetIndex).click();
+await page.waitForTimeout(500);
+
+const afterBidirectionalStyle = await page.evaluate(() => {
+  const p = JSON.parse(document.getElementById('code-editor').value);
+  const edge = (p.edge || [])[0] || '';
+  const firstWord = edge.split(/\s+/)[0];
+  return { edge, isBidirectional: firstWord.includes('<->'), hasLabel: edge.includes('sync') };
+});
+assert('style change to bidirectional arrow', afterBidirectionalStyle.isBidirectional);
+assert('bidirectional style change preserves label', afterBidirectionalStyle.hasLabel);
+
+const presetHighlightBidirectional = await page.evaluate(() => window.__vwdGetPresetHighlightIndex());
+assert('bidirectional style updates preset highlight', presetHighlightBidirectional === bidirectionalPresetIndex);
 
 await browser.close();
 console.log('\nResults:', passed, 'passed,', failed, 'failed');

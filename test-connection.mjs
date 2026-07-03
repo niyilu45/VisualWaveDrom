@@ -29,8 +29,8 @@ await page.waitForSelector('#wave-container svg', { timeout: 30000 });
 
 const edgeCountBefore = await page.evaluate(() => JSON.parse(document.getElementById('code-editor').value).edge.length);
 
+await page.click('#btn-add-connection');
 await page.evaluate(() => {
-  document.getElementById('btn-connection-pick').click();
   const lanes = [...document.querySelectorAll('#wave-container g[id^="wavelane_"]')]
     .filter((g) => /^wavelane_\d+_\d+$/.test(g.id))
     .sort((a, b) => parseInt(a.id.match(/^wavelane_(\d+)_/)[1], 10) - parseInt(b.id.match(/^wavelane_(\d+)_/)[1], 10));
@@ -47,24 +47,22 @@ await page.evaluate(() => {
   clickLane(lanes[1], 0.55);
 });
 
-const pickState = await page.evaluate(() => window.__vwdGetConnectionState());
-assert('both connection points selected', pickState.connectionFromPoint && pickState.connectionToPoint);
-
 const insertStart = Date.now();
-await page.click('#btn-add-connection');
 await page.waitForFunction(
-  () => JSON.parse(document.getElementById('code-editor').value).edge.length > 1,
+  () => JSON.parse(document.getElementById('code-editor').value).edge.length > edgeCountBefore,
   { timeout: 5000 }
 );
 assert('insert completes within 5s (no hang)', Date.now() - insertStart < 5000);
 
 const afterInsert = await page.evaluate(() => ({
   edgeCount: JSON.parse(document.getElementById('code-editor').value).edge.length,
-  status: document.getElementById('status-text').textContent
+  status: document.getElementById('status-text').textContent,
+  state: window.__vwdGetConnectionState()
 }));
 
 assert('new edge added', afterInsert.edgeCount > edgeCountBefore);
 assert('insert status shows success', afterInsert.status.includes('已插入连接'));
+assert('add session cleared', !afterInsert.state.connectionAddSessionActive);
 
 await browser.close();
 console.log('\nResults:', passed, 'passed,', failed, 'failed');
