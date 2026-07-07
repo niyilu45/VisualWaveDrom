@@ -12,6 +12,7 @@
       --error: #ef4444;
       --line-num-bg: #151c28;
       --editor-font: "Cascadia Code", "Fira Code", Consolas, "Courier New", monospace;
+      --editor-line-height: 20px;
     }
 
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -266,6 +267,11 @@
       background: var(--surface-2);
       border: 1px solid var(--border);
       color: var(--text-muted);
+    }
+
+    .wave-delete-col-btn:not(:disabled) {
+      border-color: rgba(229, 83, 75, 0.45);
+      color: #f0b0ab;
     }
 
     .wave-delete-signal-btn:not(:disabled) {
@@ -1009,7 +1015,7 @@
       text-align: right;
       font-family: var(--editor-font);
       font-size: 13px;
-      line-height: 1.6;
+      line-height: var(--editor-line-height);
       color: var(--text-muted);
       overflow: hidden;
       user-select: none;
@@ -1019,6 +1025,19 @@
 
     .line-numbers span {
       display: block;
+      position: relative;
+      padding-left: 12px;
+    }
+
+    .line-numbers span.line-error {
+      color: var(--error);
+      font-weight: 700;
+    }
+
+    .line-numbers span.line-error b {
+      position: absolute;
+      left: 0;
+      font-weight: 700;
     }
 
     .code-editor {
@@ -1032,8 +1051,12 @@
       color: #c9d1d9;
       font-family: var(--editor-font);
       font-size: 13px;
-      line-height: 1.6;
+      line-height: var(--editor-line-height);
+      font-variant-ligatures: none;
+      font-feature-settings: "liga" 0, "calt" 0;
+      letter-spacing: 0;
       tab-size: 2;
+      scrollbar-gutter: stable;
       overflow: auto;
       white-space: pre;
     }

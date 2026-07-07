@@ -274,8 +274,9 @@ function getDefaultJson() {
     let scheduledRenderText = null;
     let scheduledRenderCallbacks = null;
     let deferredEdgeRenderTimer = null;
-let deferredEditorUiTimer = null;
-let deferredKnownValidPersistTimer = null;
+    let deferredEditorUiTimer = null;
+    let deferredKnownValidPersistTimer = null;
+    let jsonErrorLine = -1;
     let waveformRenderingBusy = false;
     const vwdPerfMarks = [];
 
@@ -368,6 +369,24 @@ let deferredKnownValidPersistTimer = null;
       return text.length;
     }
 
+    function formatJsonForDisplay(text) {
+      try {
+        return JSON.stringify(JSON.parse(text), null, 2);
+      } catch (e) {
+        return text;
+      }
+    }
+
+    function formatEditorJson() {
+      const formatted = formatJsonForDisplay(editor.value);
+      if (formatted === editor.value) {
+        setStatus(true, 'JSON 已对齐');
+        return;
+      }
+      pushUndoBeforeChange();
+      applyEditorChange(formatted, 0, 0, { skipFocus: false });
+      setStatus(true, 'JSON 已格式化对齐');
+    }
     function buildSignalSourceMap(jsonText) {
       let parsed;
       try {
@@ -1057,10 +1076,24 @@ let deferredKnownValidPersistTimer = null;
       return clampPickColumnIndex(best, wave, cols);
     }
 
-    function getWaveBoundaryPositions(drawGroup, wave, unitWidth) {
+    function getMaxWaveBoundaryIndex(sourceMap) {
+      return (sourceMap || []).reduce((max, entry) => {
+        const wave = entry && entry.signal ? (entry.signal.wave || '') : '';
+        return Math.max(max, wave.length);
+      }, 0);
+    }
+
+    function getWaveBoundaryPositions(drawGroup, wave, unitWidth, maxBoundaryIndex) {
       const step = unitWidth || WAVE_UNIT_WIDTH;
       const cols = buildWaveColumnMap(drawGroup, wave || '', unitWidth);
-      if (!cols.length) return [{ index: 0, x: 0 }, { index: 1, x: step }];
+      const targetIndex = Math.max(0, maxBoundaryIndex || 0, (wave || '').length, cols.length);
+      if (!cols.length) {
+        const boundaries = [];
+        for (let i = 0; i <= Math.max(1, targetIndex); i++) {
+          boundaries.push({ index: i, x: i * step });
+        }
+        return boundaries;
+      }
       const boundaries = [];
       cols.forEach((col) => {
         if (col.x1 <= col.x0) return;
@@ -1068,18 +1101,22 @@ let deferredKnownValidPersistTimer = null;
       });
       const last = cols[cols.length - 1];
       const lastIndex = Math.max((wave || '').length, cols.length);
-      boundaries.push({ index: lastIndex, x: last && last.x1 > last.x0 ? last.x1 : lastIndex * step });
+      const lastX = last && last.x1 > last.x0 ? last.x1 : lastIndex * step;
+      boundaries.push({ index: lastIndex, x: lastX });
+      for (let i = lastIndex + 1; i <= targetIndex; i++) {
+        boundaries.push({ index: i, x: lastX + (i - lastIndex) * step });
+      }
       return boundaries;
     }
 
-    function boundaryIndexFromClick(drawGroup, wave, svgRoot, clientX, unitWidth) {
+    function boundaryIndexFromClick(drawGroup, wave, svgRoot, clientX, unitWidth, maxBoundaryIndex) {
       const pt = svgRoot.createSVGPoint();
       pt.x = clientX;
       pt.y = 0;
       const ctm = drawGroup.getScreenCTM();
       if (!ctm) return 0;
       const local = pt.matrixTransform(ctm.inverse());
-      const boundaries = getWaveBoundaryPositions(drawGroup, wave, unitWidth);
+      const boundaries = getWaveBoundaryPositions(drawGroup, wave, unitWidth, maxBoundaryIndex);
       let best = boundaries[0] || { index: 0, x: 0 };
       let bestDist = Infinity;
       boundaries.forEach((boundary) => {
@@ -1092,8 +1129,8 @@ let deferredKnownValidPersistTimer = null;
       return Math.max(0, best.index);
     }
 
-    function getBoundaryXForColumn(drawGroup, wave, colIndex, unitWidth) {
-      const boundaries = getWaveBoundaryPositions(drawGroup, wave, unitWidth);
+    function getBoundaryXForColumn(drawGroup, wave, colIndex, unitWidth, maxBoundaryIndex) {
+      const boundaries = getWaveBoundaryPositions(drawGroup, wave, unitWidth, maxBoundaryIndex);
       const exact = boundaries.find((boundary) => boundary.index === colIndex);
       if (exact) return exact.x;
       const step = unitWidth || WAVE_UNIT_WIDTH;
@@ -1311,18 +1348,17 @@ let deferredKnownValidPersistTimer = null;
     }
 
     function updateLegendAvailability() {
-      const hasRow = selectedSignalIndex >= 0;
+      let hasRow = false;
       const hasCol = selectedWaveColumnIndex >= 0;
       let waveLen = 0;
       let signalCount = 0;
-      if (hasRow) {
-        try {
-          const sourceMap = buildSignalSourceMap(editor.value);
-          signalCount = sourceMap.length;
-          const entry = sourceMap[selectedSignalIndex];
-          if (entry) waveLen = (entry.signal.wave || '').length;
-        } catch (e) { /* ignore */ }
-      }
+      try {
+        const sourceMap = buildSignalSourceMap(editor.value);
+        signalCount = sourceMap.length;
+        const entry = selectedSignalIndex >= 0 ? sourceMap[selectedSignalIndex] : null;
+        hasRow = !!entry;
+        if (entry) waveLen = (entry.signal.wave || '').length;
+      } catch (e) { /* ignore */ }
       const canDeleteCol = hasRow && hasCol && waveLen > 0;
       const deleteColBtn = document.getElementById('btn-delete-wave-col');
       if (deleteColBtn) {
@@ -1375,7 +1411,7 @@ let deferredKnownValidPersistTimer = null;
       setSelectedSignal(index, index >= 0 ? (selectedWaveColumnIndex >= 0 ? selectedWaveColumnIndex : 0) : -1);
     }
 
-    function appendColumnHighlight(drawGroup, wave, colIndex, unitWidth, highlightClass) {
+    function appendColumnHighlight(drawGroup, wave, colIndex, unitWidth, highlightClass, maxBoundaryIndex) {
       if (!drawGroup || colIndex < 0) return;
       const step = unitWidth || WAVE_UNIT_WIDTH;
       const cls = highlightClass || 'wave-col-highlight';
@@ -1384,7 +1420,7 @@ let deferredKnownValidPersistTimer = null;
       let x0;
       let x1;
       if (isConnectionPoint) {
-        const x = getBoundaryXForColumn(drawGroup, wave || '', colIndex, unitWidth);
+        const x = getBoundaryXForColumn(drawGroup, wave || '', colIndex, unitWidth, maxBoundaryIndex);
         x0 = x - 1.5;
         x1 = x + 1.5;
       } else {
@@ -1540,6 +1576,7 @@ let deferredKnownValidPersistTimer = null;
 
     function updateConnectionPointHighlights(lanes, sourceMap) {
       const unitWidth = getWaveUnitWidth(editor.value);
+      const maxBoundaryIndex = getMaxWaveBoundaryIndex(sourceMap);
       lanes.forEach((lane, idx) => {
         const drawGroup = lane.querySelector('[id^="wavelane_draw_"]');
         if (!drawGroup || !sourceMap[idx]) return;
@@ -1553,10 +1590,10 @@ let deferredKnownValidPersistTimer = null;
           .forEach(el => el.remove());
 
         if (isFrom) {
-          appendColumnHighlight(drawGroup, wave, connectionFromPoint.colIndex, unitWidth, 'wave-col-highlight-from');
+          appendColumnHighlight(drawGroup, wave, connectionFromPoint.colIndex, unitWidth, 'wave-col-highlight-from', maxBoundaryIndex);
         }
         if (isTo) {
-          appendColumnHighlight(drawGroup, wave, connectionToPoint.colIndex, unitWidth, 'wave-col-highlight-to');
+          appendColumnHighlight(drawGroup, wave, connectionToPoint.colIndex, unitWidth, 'wave-col-highlight-to', maxBoundaryIndex);
         }
         if (isSelected && !isFrom && !isTo) {
           appendColumnHighlight(drawGroup, wave, selectedWaveColumnIndex, unitWidth, 'wave-col-highlight');
@@ -1566,7 +1603,7 @@ let deferredKnownValidPersistTimer = null;
 
     function restoreWaveSelection(lanes, sourceMap) {
       if (selectedSignalIndex < 0 && !connectionFromPoint && !connectionToPoint) return;
-      if (selectedSignalIndex >= lanes.length) {
+      if (selectedSignalIndex >= lanes.length || (selectedSignalIndex >= 0 && !sourceMap[selectedSignalIndex])) {
         setSelectedSignal(-1, -1);
       }
 
@@ -1736,6 +1773,11 @@ let deferredKnownValidPersistTimer = null;
 
       const sourceMap = buildSignalSourceMap(editor.value);
       const fromIndex = selectedSignalIndex;
+      if (!sourceMap[fromIndex]) {
+        setSelectedSignal(-1, -1);
+        setStatus(false, '请先在波形区点击选中一行');
+        return;
+      }
       const toIndex = fromIndex + delta;
       if (toIndex < 0 || toIndex >= sourceMap.length) return;
 
@@ -1775,8 +1817,8 @@ let deferredKnownValidPersistTimer = null;
       const deletedIndex = selectedSignalIndex;
       const entry = sourceMap[deletedIndex];
       if (!entry) {
-        setStatus(false, '未找到要删除的信号行');
         setSelectedSignal(-1, -1);
+        setStatus(false, '请先在波形区点击选中一行');
         return;
       }
 
@@ -2575,7 +2617,7 @@ let deferredKnownValidPersistTimer = null;
       const signal = sourceMap && sourceMap[point.rowIndex] && sourceMap[point.rowIndex].signal;
       const wave = signal ? (signal.wave || '') : '';
       const unitWidth = getWaveUnitWidth(editor.value);
-      const x = getBoundaryXForColumn(drawGroup, wave, point.colIndex, unitWidth);
+      const x = getBoundaryXForColumn(drawGroup, wave, point.colIndex, unitWidth, getMaxWaveBoundaryIndex(sourceMap));
 
       let y = 10;
       try {
@@ -3018,7 +3060,7 @@ let deferredKnownValidPersistTimer = null;
         });
     }
 
-    function addLaneHoverRect(lane) {
+    function addLaneHoverRect(lane, maxBoundaryIndex, unitWidth) {
       if (lane.querySelector('rect.lane-hover-bg')) return;
       try {
         const bbox = lane.getBBox();
@@ -3026,7 +3068,13 @@ let deferredKnownValidPersistTimer = null;
         rect.setAttribute('class', 'lane-hover-bg');
         rect.setAttribute('x', bbox.x - 4);
         rect.setAttribute('y', bbox.y - 2);
-        rect.setAttribute('width', bbox.width + 8);
+        let width = bbox.width + 8;
+        const drawGroup = lane.querySelector('[id^="wavelane_draw_"]');
+        if (drawGroup && maxBoundaryIndex) {
+          const drawBox = drawGroup.getBBox();
+          width = Math.max(width, (drawBox.x - bbox.x) + maxBoundaryIndex * (unitWidth || WAVE_UNIT_WIDTH) + 8);
+        }
+        rect.setAttribute('width', width);
         rect.setAttribute('height', bbox.height + 4);
         rect.setAttribute('fill', 'transparent');
         rect.setAttribute('pointer-events', 'all');
@@ -3289,13 +3337,14 @@ let deferredKnownValidPersistTimer = null;
       const sourceMap = buildSignalSourceMap(jsonText);
       const lanes = getWaveLaneGroups(svg);
       const unitWidth = getWaveUnitWidth(jsonText);
+      const maxBoundaryIndex = getMaxWaveBoundaryIndex(sourceMap);
 
       lanes.forEach((lane, idx) => {
         const entry = sourceMap[idx];
         if (!entry) return;
 
         lane.classList.add('wave-lane-interactive');
-        addLaneHoverRect(lane);
+        addLaneHoverRect(lane, maxBoundaryIndex, unitWidth);
 
         function handleLanePointSelect(e) {
           if (inlineEditActive) return;
@@ -3306,10 +3355,11 @@ let deferredKnownValidPersistTimer = null;
           const drawGroup = lane.querySelector('[id^="wavelane_draw_"]');
           const wave = entry.signal.wave || '';
           const inPickFlow = isConnectionPickFlow();
+          const pickMaxBoundaryIndex = inPickFlow ? maxBoundaryIndex : 0;
           let colIndex = 0;
           if (drawGroup) {
             colIndex = inPickFlow
-              ? boundaryIndexFromClick(drawGroup, wave, svg, e.clientX, unitWidth)
+              ? boundaryIndexFromClick(drawGroup, wave, svg, e.clientX, unitWidth, pickMaxBoundaryIndex)
               : columnIndexFromClick(drawGroup, wave, svg, e.clientX, unitWidth);
           }
           setSelectedSignal(idx, colIndex);
@@ -3319,7 +3369,7 @@ let deferredKnownValidPersistTimer = null;
             let svgPoint = null;
             if (drawGroup && svg && drawGroup.getScreenCTM && svg.getScreenCTM) {
               try {
-                const boundaryX = getBoundaryXForColumn(drawGroup, wave, colIndex, unitWidth);
+                const boundaryX = getBoundaryXForColumn(drawGroup, wave, colIndex, unitWidth, pickMaxBoundaryIndex);
                 const localPoint = svg.createSVGPoint();
                 localPoint.x = boundaryX;
                 localPoint.y = 0;
@@ -3476,8 +3526,27 @@ let deferredKnownValidPersistTimer = null;
       const lines = editor.value.split('\n');
       const count = Math.max(lines.length, 1);
       lineNumbersEl.innerHTML = Array.from({ length: count }, (_, i) =>
-        `<span>${i + 1}</span>`
+        `<span class="${jsonErrorLine === i + 1 ? 'line-error' : ''}">${jsonErrorLine === i + 1 ? '<b aria-hidden="true">×</b>' : ''}${i + 1}</span>`
       ).join('');
+    }
+
+    function getJsonErrorLine(text, error) {
+      const message = error && error.message ? String(error.message) : '';
+      const match = message.match(/position\s+(\d+)/i);
+      if (!match) return -1;
+      const pos = Math.max(0, Math.min(Number(match[1]) || 0, text.length));
+      let line = 1;
+      for (let i = 0; i < pos; i++) {
+        if (text.charCodeAt(i) === 10) line++;
+      }
+      return line;
+    }
+
+    function setJsonErrorLine(line) {
+      const nextLine = Number.isFinite(line) ? line : -1;
+      if (jsonErrorLine === nextLine) return;
+      jsonErrorLine = nextLine;
+      updateLineNumbers();
     }
 
     function syncLineNumberScroll() {
@@ -3877,6 +3946,72 @@ let deferredKnownValidPersistTimer = null;
         });
     }
 
+    function makeExportFileName() {
+      const now = new Date();
+      const pad = (n) => String(n).padStart(2, '0');
+      return 'VisualWaveDrom-'
+        + now.getFullYear()
+        + pad(now.getMonth() + 1)
+        + pad(now.getDate())
+        + '-'
+        + pad(now.getHours())
+        + pad(now.getMinutes())
+        + pad(now.getSeconds())
+        + '.json';
+    }
+
+    function exportWaveJson() {
+      const text = formatJsonForDisplay(editor.value);
+      try {
+        JSON.parse(text);
+      } catch (e) {
+        setStatus(false, 'JSON 错误，无法导出');
+        return;
+      }
+      const blob = new Blob([text + '\n'], { type: 'application/json;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = makeExportFileName();
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+      setStatus(true, '已导出 JSON 文件');
+    }
+
+    function requestImportWaveJson() {
+      const input = document.getElementById('json-import-input');
+      if (!input) return;
+      input.value = '';
+      input.click();
+    }
+
+    function importWaveJsonFile(file) {
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        const raw = String(reader.result || '');
+        let formatted;
+        try {
+          formatted = JSON.stringify(JSON.parse(raw), null, 2);
+        } catch (e) {
+          setJsonErrorLine(getJsonErrorLine(raw, e));
+          setStatus(false, '导入失败：JSON 解析错误');
+          return;
+        }
+        pushUndoBeforeChange();
+        selectedSignalIndex = -1;
+        selectedWaveColumnIndex = -1;
+        clearConnectionPoints();
+        clearEdgeSelection();
+        applyEditorChange(formatted, 0, 0, { skipFocus: true });
+        setStatus(true, '已导入 JSON: ' + file.name);
+      };
+      reader.onerror = () => setStatus(false, '导入失败：无法读取文件');
+      reader.readAsText(file, 'utf-8');
+    }
+
     function isWaveDromReady() {
       return typeof WaveDrom !== 'undefined'
         && typeof WaveDrom.RenderWaveForm === 'function'
@@ -3933,6 +4068,7 @@ let deferredKnownValidPersistTimer = null;
         }
 
         if (!jsonText || !jsonText.trim()) {
+          setJsonErrorLine(-1);
           showWaveError(waveContainer, 'JSON 解析错误: 内容为空');
           setStatus(false, 'JSON 错误');
           return false;
@@ -3941,7 +4077,9 @@ let deferredKnownValidPersistTimer = null;
         let source;
         try {
           source = JSON.parse(jsonText);
+          setJsonErrorLine(-1);
         } catch (e) {
+          setJsonErrorLine(getJsonErrorLine(jsonText, e));
           showWaveError(waveContainer, 'JSON 解析错误: ' + e.message);
           setStatus(false, 'JSON 错误');
           return false;
@@ -4060,7 +4198,7 @@ let deferredKnownValidPersistTimer = null;
     }
 
     function initEditor() {
-      const initialJson = loadEditorJsonFromStorage();
+      const initialJson = formatJsonForDisplay(loadEditorJsonFromStorage());
       editor.value = initialJson;
       undoStack = [];
       redoStack = [];
@@ -4290,6 +4428,12 @@ let deferredKnownValidPersistTimer = null;
     document.getElementById('btn-wave-edit-mode').addEventListener('click', toggleWaveEditMode);
     document.getElementById('btn-delete-wave-col').addEventListener('click', () => {
       deleteWaveCharAtColumn(selectedSignalIndex, selectedWaveColumnIndex);
+    });
+    document.getElementById('btn-format-json').addEventListener('click', formatEditorJson);
+    document.getElementById('btn-export-json').addEventListener('click', exportWaveJson);
+    document.getElementById('btn-import-json').addEventListener('click', requestImportWaveJson);
+    document.getElementById('json-import-input').addEventListener('change', (e) => {
+      importWaveJsonFile(e.target.files && e.target.files[0]);
     });
     document.getElementById('btn-copy-json').addEventListener('click', copyEditorJsonToClipboard);
     document.getElementById('btn-save-tag').addEventListener('click', openSaveTagDialog);
