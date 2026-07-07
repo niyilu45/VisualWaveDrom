@@ -1,4 +1,4 @@
-    const DEFAULT_WAVE_JSON_PATH = 'Wave/default.json';
+﻿    const DEFAULT_WAVE_JSON_PATH = 'Wave/default.json';
 const FALLBACK_DEFAULT_JSON = `{
   "signal": [
     { "name": "clk", "wave": "p.....|", "node": ".a....|" },
@@ -138,10 +138,7 @@ function getDefaultJson() {
       }
     ];
 
-    const DEFAULT_NEW_SIGNAL_TEMPLATE = {
-      name: '',
-      wave: ''
-    };
+    const DEFAULT_NEW_SIGNAL_TEMPLATE = {};
 
     const LEGEND_ITEMS = [
       {
@@ -152,85 +149,85 @@ function getDefaultJson() {
       },
       {
         char: '1',
-        label: '高电平',
+        label: '时钟',
         desc: 'High level (1)',
         wave: { signal: [{ name: '_', wave: 'x1x' }] }
       },
       {
         char: '0',
-        label: '低电平',
+        label: '高电平',
         desc: 'Low level (0)',
         wave: { signal: [{ name: '_', wave: 'x0x' }] }
       },
       {
         char: '.',
-        label: '延续',
+        label: '低电平',
         desc: 'Continue previous (.)',
         wave: { signal: [{ name: '_', wave: '0.1' }] }
       },
       {
         char: '|',
-        label: '分割',
+        label: '延续',
         desc: 'Edge marker (|)',
         wave: { signal: [{ name: '_', wave: '0.|1' }] }
       },
       {
         char: '=',
-        label: '位置',
+        label: '分割',
         desc: 'Transition (=)',
         wave: { signal: [{ name: '_', wave: 'x=x' }] }
       },
       {
         char: '3',
-        label: '数据3',
+        label: '位置',
         desc: 'Data bus (3)',
         wave: { signal: [{ name: '_', wave: 'x3x' }] }
       },
       {
         char: '4',
-        label: '数据4',
+        label: '数据3',
         desc: 'Data bus (4)',
         wave: { signal: [{ name: '_', wave: 'x4x' }] }
       },
       {
         char: '5',
-        label: '数据5',
+        label: '数据4',
         desc: 'Data bus (5)',
         wave: { signal: [{ name: '_', wave: 'x5x' }] }
       },
       {
         char: '6',
-        label: '数据6',
+        label: '数据5',
         desc: 'Data bus (6)',
         wave: { signal: [{ name: '_', wave: 'x6x' }] }
       },
       {
         char: '7',
-        label: '数据7',
+        label: '数据6',
         desc: 'Data bus (7)',
         wave: { signal: [{ name: '_', wave: 'x7x' }] }
       },
       {
         char: '8',
-        label: '数据8',
+        label: '数据7',
         desc: 'Data bus (8)',
         wave: { signal: [{ name: '_', wave: 'x8x' }] }
       },
       {
         char: 'n',
-        label: '反相时钟',
+        label: '数据8',
         desc: 'Clock negative (n)',
         wave: { signal: [{ name: '_', wave: 'xn.' }] }
       },
       {
         char: 'x',
-        label: '未知',
+        label: '反相时钟',
         desc: 'Unknown (x)',
         wave: { signal: [{ name: '_', wave: '0x0' }] }
       },
       {
         char: 'z',
-        label: '高阻',
+        label: '未知',
         desc: 'High-Z (z)',
         wave: { signal: [{ name: '_', wave: '0z0' }] }
       }
@@ -258,6 +255,9 @@ function getDefaultJson() {
     let pendingNameEditSignalIndex = -1;
     let selectedSignalIndex = -1;
     let selectedWaveColumnIndex = -1;
+    let selectedGroupIndex = -1;
+    let groupPickActive = false;
+    let groupPickStartIndex = -1;
     let connectionPickActive = false;
     let connectionAddSessionActive = false;
     let connectionFromPoint = null;
@@ -327,9 +327,13 @@ function getDefaultJson() {
     }
 
     function flattenSignals(signals, result) {
-      if (!Array.isArray(signals)) return result || [];
       const out = result || [];
+      if (!Array.isArray(signals)) return out;
       signals.forEach((sig) => {
+        if (Array.isArray(sig)) {
+          flattenSignals(sig.slice(1), out);
+          return;
+        }
         if (!sig || typeof sig !== 'object') return;
         if (sig.wave !== undefined && sig.name !== undefined) {
           out.push(sig);
@@ -424,6 +428,324 @@ function getDefaultJson() {
       return map;
     }
 
+    function findArrayEnd(text, startIndex) {
+      if (!text || startIndex < 0 || text[startIndex] !== '[') return startIndex;
+      let depth = 0;
+      let inString = false;
+      let escape = false;
+      for (let i = startIndex; i < text.length; i++) {
+        const c = text[i];
+        if (inString) {
+          if (escape) {
+            escape = false;
+          } else if (c === '\\') {
+            escape = true;
+          } else if (c === '"') {
+            inString = false;
+          }
+          continue;
+        }
+        if (c === '"') {
+          inString = true;
+          continue;
+        }
+        if (c === '[') {
+          depth++;
+          continue;
+        }
+        if (c === ']') {
+          depth--;
+          if (depth === 0) return i + 1;
+        }
+      }
+      return text.length;
+    }
+
+    function buildGroupSourceMap(jsonText) {
+      const bounds = findSignalArrayBounds(jsonText);
+      if (!bounds) return [];
+
+      const groups = [];
+      let rowCursor = 0;
+
+      function buildGroupPath(parentPath, childIndex) {
+        if (!Number.isInteger(childIndex) || childIndex < 0) return parentPath;
+        return parentPath.concat([childIndex]);
+      }
+
+      function skipSpaceComma(pos, endPos) {
+        let p = pos;
+        while (p < endPos) {
+          const ch = jsonText[p];
+          if (/\s|,/.test(ch)) {
+            p += 1;
+            continue;
+          }
+          break;
+        }
+        return p;
+      }
+
+      function parseValue(pos, endPos, arrayPath, childIndex) {
+        let p = skipSpaceComma(pos, endPos);
+        if (p >= endPos) return p;
+        if (jsonText[p] === '{') {
+          rowCursor += 1;
+          return findObjectEnd(jsonText, p);
+        }
+        if (jsonText[p] === '[') {
+          return parseGroup(p, endPos, arrayPath, childIndex);
+        }
+        return findJsonValueEnd(jsonText, p);
+      }
+
+      function parseGroup(startPos, endPos, arrayPath, childIndex) {
+        const groupStart = startPos;
+        const groupEnd = findArrayEnd(jsonText, startPos);
+        if (groupEnd <= groupStart) return groupEnd;
+
+        const groupPath = buildGroupPath(arrayPath, childIndex);
+        let p = skipSpaceComma(startPos + 1, groupEnd);
+        if (p >= groupEnd || jsonText[p] !== '"') return groupEnd;
+
+        const labelStart = p;
+        const labelEnd = findJsonValueEnd(jsonText, labelStart);
+        let label = '分组';
+        try {
+          label = JSON.parse(jsonText.slice(labelStart, labelEnd));
+        } catch (_e) {
+          label = '分组';
+        }
+
+        const rowStart = rowCursor;
+        p = labelEnd;
+        let index = 0;
+        while (p < groupEnd) {
+          p = skipSpaceComma(p, groupEnd);
+          if (p >= groupEnd || jsonText[p] === ']') break;
+          p = parseValue(p, groupEnd, groupPath, index);
+          if (p <= labelEnd) p = groupEnd;
+          index += 1;
+        }
+        const rowEnd = rowCursor - 1;
+        if (rowEnd >= rowStart) {
+          groups.push({
+            start: groupStart,
+            end: groupEnd,
+            path: groupPath,
+            labelStart,
+            labelEnd,
+            label,
+            rowStart,
+            rowEnd,
+          });
+        }
+        return groupEnd;
+      }
+
+      let cursor = bounds.arrStart;
+      let index = 0;
+      while (cursor < bounds.arrEnd) {
+        const next = parseValue(cursor, bounds.arrEnd, [], index);
+        if (next <= cursor) {
+          cursor += 1;
+        } else {
+          cursor = next;
+        }
+        index += 1;
+      }
+
+      return groups;
+    }
+
+    function getInnermostGroupByRowIndex(groupMap, rowIndex) {
+      let hit = null;
+      for (let i = 0; i < groupMap.length; i++) {
+        const g = groupMap[i];
+        if (g.rowStart <= rowIndex && rowIndex <= g.rowEnd) {
+          if (!hit || (g.rowEnd - g.rowStart < hit.rowEnd - hit.rowStart)) {
+            hit = g;
+          }
+        }
+      }
+      return hit;
+    }
+
+    function isRowIndexInGroup(rowIndex, group) {
+      return !!group && group.rowStart <= rowIndex && rowIndex <= group.rowEnd;
+    }
+
+    function replaceGroupLabelInSource(text, entry, newLabel) {
+      if (!entry || typeof entry.labelStart !== 'number' || typeof entry.labelEnd !== 'number') {
+        return text;
+      }
+      const labelText = JSON.stringify(newLabel || '分组');
+      return text.slice(0, entry.labelStart) + labelText + text.slice(entry.labelEnd);
+    }
+
+    function getGroupLabelText(text, group) {
+      if (!group || typeof group.start !== 'number' || typeof group.end !== 'number') {
+        return null;
+      }
+      const open = group.start;
+      const close = Math.min(group.end, text.length);
+      if (open < 0 || close <= open + 1) return null;
+      let p = open + 1;
+      while (p < close) {
+        const ch = text[p];
+        if (/\\s|,/.test(ch)) {
+          p += 1;
+          continue;
+        }
+        break;
+      }
+      if (p >= close || text[p] !== '"') return null;
+      const labelEnd = findJsonValueEnd(text, p);
+      if (labelEnd <= p || labelEnd > close) return null;
+      try {
+        return JSON.parse(text.slice(p, labelEnd));
+      } catch (_e) {
+        return null;
+      }
+    }
+
+    function replaceGroupLabelInSourceByRange(text, group, newLabel) {
+      if (!group || typeof group.start !== 'number' || typeof group.end !== 'number') {
+        return null;
+      }
+
+      const open = group.start;
+      const close = Math.min(group.end, text.length);
+      if (open < 0 || close <= open + 1) return null;
+
+      let p = open + 1;
+      while (p < close) {
+        const ch = text[p];
+        if (/\\s|,/.test(ch)) {
+          p += 1;
+          continue;
+        }
+        break;
+      }
+      if (p >= close || text[p] !== '"') return null;
+
+      const labelStart = p;
+      const labelEnd = findJsonValueEnd(text, labelStart);
+      if (labelEnd <= labelStart || labelEnd > close) return null;
+
+      const labelText = JSON.stringify(newLabel || '分组');
+      return {
+        text: text.slice(0, labelStart) + labelText + text.slice(labelEnd),
+        start: labelStart,
+        end: labelStart + labelText.length
+      };
+    }
+
+    function replaceGroupLabelInSourceByAbsoluteRange(text, labelRange, newLabel) {
+      if (!labelRange || !Number.isFinite(labelRange.start) || !Number.isFinite(labelRange.end)) {
+        return null;
+      }
+      const start = Math.max(0, Math.min(labelRange.start, text.length));
+      const end = Math.max(0, Math.min(labelRange.end, text.length));
+      if (start >= end) return null;
+      const current = text.slice(start, end);
+      try {
+        if (typeof JSON.parse(current) !== 'string') return null;
+      } catch (e) {
+        return null;
+      }
+        const labelText = JSON.stringify(newLabel || '分组');
+      return {
+        text: text.slice(0, start) + labelText + text.slice(end),
+        start,
+        end: start + labelText.length
+      };
+    }
+
+    function replaceGroupLabelInSourceByPath(text, groupPath, newLabel) {
+      if (!text || !Array.isArray(groupPath)) return null;
+      let parsed;
+      try {
+        parsed = JSON.parse(text);
+      } catch (_e) {
+        return null;
+      }
+      if (!parsed || !Array.isArray(parsed.signal)) return null;
+
+      let target = parsed.signal;
+      for (let i = 0; i < groupPath.length - 1; i++) {
+        const idx = groupPath[i];
+        if (!Number.isInteger(idx) || idx < 0) return null;
+        if (!Array.isArray(target) || idx >= target.length) return null;
+        target = target[idx];
+      }
+
+      const last = groupPath[groupPath.length - 1];
+      if (!Number.isInteger(last) || last < 0) return null;
+      if (!Array.isArray(target) || last >= target.length) return null;
+
+      const groupNode = target[last];
+      if (!Array.isArray(groupNode) || groupNode.length === 0) return null;
+      if (typeof groupNode[0] !== 'string') return null;
+
+      const normalizedLabel = String(newLabel || '分组');
+      if (groupNode[0] === normalizedLabel) return null;
+      groupNode[0] = normalizedLabel;
+
+      const newText = formatJsonForDisplay(JSON.stringify(parsed));
+      return {
+        text: newText,
+        start: -1,
+        end: -1
+      };
+    }
+
+    function unwrapGroupWithoutLabelFromSource(text, group) {
+      if (!group || typeof group.start !== 'number' || typeof group.end !== 'number') {
+        return text;
+      }
+
+      const open = group.start;
+      const close = group.end;
+      if (open < 0 || close <= open || close > text.length) return text;
+
+      const closeBracketIndex = Math.max(open, close - 1);
+      let childStart = group.labelEnd || open + 1;
+      while (childStart < closeBracketIndex && /[\s,]/.test(text[childStart])) {
+        childStart += 1;
+      }
+
+      const childrenBody = text.slice(childStart, closeBracketIndex);
+      if (!childrenBody.trim()) {
+        return removeRangeFromSignalArray(text, group.start, group.end, findSignalArrayBounds(text));
+      }
+
+      return text.slice(0, group.start) + childrenBody + text.slice(group.end);
+    }
+
+    function removeRangeFromSignalArray(text, absStart, absEnd, bounds) {
+      if (!bounds) return text;
+      const open = bounds.arrStart;
+      const close = bounds.arrEnd;
+
+      let start = absStart;
+      let end = absEnd;
+      let back = start - 1;
+      while (back > open && /\s/.test(text[back])) back -= 1;
+      if (back > open && text[back] === ',') {
+        start = back;
+        while (start > open && /\s/.test(text[start - 1])) start -= 1;
+      } else {
+        let front = end;
+        while (front < close && /\s/.test(text[front])) front += 1;
+        if (front < close && text[front] === ',') {
+          end = front + 1;
+          while (end < close && /\s/.test(text[end])) end += 1;
+        }
+      }
+      return text.slice(0, start) + text.slice(end);
+    }
+
     function getIndentAt(text, pos) {
       const lineStart = text.lastIndexOf('\n', pos - 1) + 1;
       const line = text.slice(lineStart, pos);
@@ -433,6 +755,9 @@ function getDefaultJson() {
 
     function formatSignalObject(sig, baseIndent) {
       const indent = baseIndent || '    ';
+      if (!sig || Object.keys(sig).length === 0) {
+        return indent + '{}';
+      }
       const inner = indent + '  ';
       const lines = [indent + '{'];
       lines.push(inner + '"name": ' + JSON.stringify(sig.name) + ',');
@@ -537,6 +862,28 @@ function getDefaultJson() {
       const valueStart = block.start + tm.index + tm[0].length;
       const valueEnd = findJsonValueEnd(text, valueStart);
       return text.slice(0, valueStart) + JSON.stringify(newValue) + text.slice(valueEnd);
+    }
+
+    function getGlobalDescribeOldValue(parsed) {
+      if (!parsed || parsed.describe === undefined) return '';
+      return flattenWaveText(parsed.describe);
+    }
+
+    function replaceGlobalDescribeInSource(text, newValue) {
+      const existing = text.match(/"describe"\s*:\s*/);
+      if (existing) {
+        const valueStart = existing.index + existing[0].length;
+        const valueEnd = findJsonValueEnd(text, valueStart);
+        return text.slice(0, valueStart) + JSON.stringify(newValue) + text.slice(valueEnd);
+      }
+      const rootClose = text.lastIndexOf('}');
+      if (rootClose < 0) return text;
+      const beforeClose = text.slice(0, rootClose).replace(/\s*$/, '');
+      const hasContent = /"\w+"\s*:/.test(beforeClose);
+      const indent = getIndentAt(text, rootClose) || '';
+      const propIndent = indent + '  ';
+      const insertion = (hasContent ? ',\n' : '\n') + propIndent + '"describe": ' + JSON.stringify(newValue) + '\n' + indent;
+      return beforeClose + insertion + text.slice(rootClose);
     }
 
     function scrollEditorToHeadFoot(field) {
@@ -1160,7 +1507,7 @@ function getDefaultJson() {
 
     function applyWaveCharAtColumn(rowIndex, colIndex, char) {
       if (rowIndex < 0) {
-        setStatus(false, '请先在波形区点击选中一行');
+        setStatus(false, '波形为空，无法删除');
         return false;
       }
 
@@ -1168,7 +1515,7 @@ function getDefaultJson() {
       try {
         parsed = JSON.parse(editor.value);
       } catch (e) {
-        setStatus(false, 'JSON 错误，无法修改');
+        setStatus(false, '波形为空，无法删除');
         return false;
       }
 
@@ -1176,7 +1523,7 @@ function getDefaultJson() {
       const sourceMap = buildSignalSourceMap(text);
       const entry = sourceMap[rowIndex];
       if (!entry) {
-        setStatus(false, '未找到选中的信号');
+        setStatus(false, '波形为空，无法删除');
         setSelectedSignal(rowIndex, -1);
         return false;
       }
@@ -1218,7 +1565,7 @@ function getDefaultJson() {
 
     function applyWaveCharInsertAtColumn(rowIndex, colIndex, char) {
       if (rowIndex < 0) {
-        setStatus(false, '请先在波形区点击选中一行');
+        setStatus(false, '波形为空，无法删除');
         return false;
       }
 
@@ -1226,7 +1573,7 @@ function getDefaultJson() {
       try {
         parsed = JSON.parse(editor.value);
       } catch (e) {
-        setStatus(false, 'JSON 错误，无法插入');
+        setStatus(false, '波形为空，无法删除');
         return false;
       }
 
@@ -1234,7 +1581,7 @@ function getDefaultJson() {
       const sourceMap = buildSignalSourceMap(text);
       const entry = sourceMap[rowIndex];
       if (!entry) {
-        setStatus(false, '未找到选中的信号');
+        setStatus(false, '波形为空，无法删除');
         setSelectedSignal(rowIndex, -1);
         return false;
       }
@@ -1257,11 +1604,11 @@ function getDefaultJson() {
 
     function deleteWaveCharAtColumn(rowIndex, colIndex) {
       if (rowIndex < 0) {
-        setStatus(false, '请先在波形区点击选中一行');
+        setStatus(false, '波形为空，无法删除');
         return false;
       }
       if (colIndex < 0) {
-        setStatus(false, '请先选中列');
+        setStatus(false, '波形为空，无法删除');
         return false;
       }
 
@@ -1269,7 +1616,7 @@ function getDefaultJson() {
       try {
         parsed = JSON.parse(editor.value);
       } catch (e) {
-        setStatus(false, 'JSON 错误，无法删除');
+        setStatus(false, '波形为空，无法删除');
         return false;
       }
 
@@ -1277,14 +1624,14 @@ function getDefaultJson() {
       const sourceMap = buildSignalSourceMap(text);
       const entry = sourceMap[rowIndex];
       if (!entry) {
-        setStatus(false, '未找到选中的信号');
+        setStatus(false, '请先在波形区点击选中一行');
         setSelectedSignal(rowIndex, -1);
         return false;
       }
 
       const wave = entry.signal.wave || '';
       if (wave.length === 0) {
-        setStatus(false, '波形为空，无法删除');
+        setStatus(false, '请先在波形区点击选中一行');
         return false;
       }
 
@@ -1340,54 +1687,74 @@ function getDefaultJson() {
       btn.classList.toggle('mode-insert', isInsert);
       if (labelEl) labelEl.textContent = isInsert ? '插入模式' : '修改模式';
       btn.title = isInsert
-        ? '当前为插入模式：点击图例在选中列位置插入字符；点击切换为修改模式'
-        : '当前为修改模式：点击图例替换选中列字符；点击切换为插入模式';
+        ? '点击在选中列位置插入波形字符'
+        : '点击替换选中列的波形字符';
       btn.setAttribute('aria-label', isInsert ? '插入模式' : '修改模式');
       btn.setAttribute('aria-pressed', isInsert ? 'true' : 'false');
       updateLegendAvailability();
     }
 
     function updateLegendAvailability() {
-      let hasRow = false;
-      const hasCol = selectedWaveColumnIndex >= 0;
-      let waveLen = 0;
       let signalCount = 0;
+      let hasRow = false;
+      let hasCol = selectedWaveColumnIndex >= 0;
+      let waveLen = 0;
+      let sourceMap = [];
+      let groupMap = [];
       try {
-        const sourceMap = buildSignalSourceMap(editor.value);
+        sourceMap = buildSignalSourceMap(editor.value);
         signalCount = sourceMap.length;
-        const entry = selectedSignalIndex >= 0 ? sourceMap[selectedSignalIndex] : null;
-        hasRow = !!entry;
-        if (entry) waveLen = (entry.signal.wave || '').length;
+        const rowEntry = sourceMap[selectedSignalIndex];
+        hasRow = !!rowEntry;
+        if (rowEntry) waveLen = (rowEntry.signal.wave || '').length;
       } catch (e) { /* ignore */ }
+      try {
+        groupMap = buildGroupSourceMap(editor.value);
+      } catch (e) { /* ignore */ }
+
+      const hasGroup = selectedGroupIndex >= 0 && selectedGroupIndex < groupMap.length;
+      const hasSelection = hasRow || hasGroup;
+
       const canDeleteCol = hasRow && hasCol && waveLen > 0;
       const deleteColBtn = document.getElementById('btn-delete-wave-col');
       if (deleteColBtn) {
         deleteColBtn.disabled = !canDeleteCol;
         deleteColBtn.title = canDeleteCol
-          ? '删除选中位置的 wave 字符'
+          ? '将当前选中的信号行下移'
           : (!hasRow ? '请先在波形区点击选中一行' : (!hasCol ? '请先选中列' : '波形为空，无法删除'));
       }
+
       const deleteSignalBtn = document.getElementById('btn-delete-signal');
       if (deleteSignalBtn) {
-        deleteSignalBtn.disabled = !hasRow;
-        deleteSignalBtn.title = hasRow ? '删除当前选中的信号行' : '请先在波形区点击选中一行';
+        deleteSignalBtn.disabled = !hasSelection;
+        deleteSignalBtn.title = hasGroup
+          ? '将当前选中的信号行下移'
+          : (hasRow ? '删除当前选中行' : '请先点击波形区选中行');
+        deleteSignalBtn.textContent = hasGroup ? '删除分组' : '删除行';
       }
+
+      const groupSignalBtn = document.getElementById('btn-group-signal');
+      if (groupSignalBtn) {
+        groupSignalBtn.disabled = signalCount === 0;
+        groupSignalBtn.classList.toggle('group-pick-active', groupPickActive);
+        groupSignalBtn.title = groupPickActive
+          ? '已进入分组模式，请点击起始行与结束行'
+          : '先点击分组，再点击起始行与结束行';
+      }
+
       const canMoveUp = hasRow && selectedSignalIndex > 0;
       const canMoveDown = hasRow && selectedSignalIndex >= 0 && selectedSignalIndex < signalCount - 1;
       const moveUpBtn = document.getElementById('btn-move-signal-up');
       if (moveUpBtn) {
         moveUpBtn.disabled = !canMoveUp;
-        moveUpBtn.title = canMoveUp
-          ? '将当前选中的信号行上移'
-          : (!hasRow ? '请先在波形区点击选中一行' : '已在首行，无法上移');
+        moveUpBtn.title = canMoveUp ? '将当前选中行上移' : '请先选中信号行';
       }
       const moveDownBtn = document.getElementById('btn-move-signal-down');
       if (moveDownBtn) {
         moveDownBtn.disabled = !canMoveDown;
-        moveDownBtn.title = canMoveDown
-          ? '将当前选中的信号行下移'
-          : (!hasRow ? '请先在波形区点击选中一行' : '已在末行，无法下移');
+        moveDownBtn.title = canMoveDown ? '将当前选中行下移' : '请先选中信号行';
       }
+
       const actionHint = waveEditMode === 'insert'
         ? '点击在选中列位置插入波形字符'
         : '点击替换选中列的波形字符';
@@ -1403,6 +1770,11 @@ function getDefaultJson() {
         selectedWaveColumnIndex = -1;
       } else if (colIndex !== undefined) {
         selectedWaveColumnIndex = colIndex;
+      }
+      selectedGroupIndex = -1;
+      const svg = waveContainer.querySelector('svg');
+      if (svg) {
+        refreshGroupSelection(svg, buildGroupSourceMap(editor.value || ''));
       }
       updateLegendAvailability();
     }
@@ -1602,7 +1974,7 @@ function getDefaultJson() {
     }
 
     function restoreWaveSelection(lanes, sourceMap) {
-      if (selectedSignalIndex < 0 && !connectionFromPoint && !connectionToPoint) return;
+      if (selectedSignalIndex < 0 && selectedGroupIndex < 0 && !connectionFromPoint && !connectionToPoint) return;
       if (selectedSignalIndex >= lanes.length || (selectedSignalIndex >= 0 && !sourceMap[selectedSignalIndex])) {
         setSelectedSignal(-1, -1);
       }
@@ -1612,6 +1984,10 @@ function getDefaultJson() {
       });
 
       updateConnectionPointHighlights(lanes, sourceMap);
+      const svg = waveContainer.querySelector('svg');
+      if (svg) {
+        refreshGroupSelection(svg, buildGroupSourceMap(editor.value || ''));
+      }
       updateLegendAvailability();
     }
 
@@ -1644,7 +2020,7 @@ function getDefaultJson() {
       try {
         parsed = JSON.parse(editor.value);
       } catch (e) {
-        setStatus(false, 'JSON 错误，无法插入');
+        setStatus(false, 'JSON 错误，删除失败');
         return;
       }
       if (!parsed.signal) parsed.signal = [];
@@ -1652,7 +2028,7 @@ function getDefaultJson() {
       const text = editor.value;
       const bounds = findSignalArrayBounds(text);
       if (!bounds) {
-        setStatus(false, '未找到 signal 数组');
+        setStatus(false, 'JSON 错误，删除失败');
         return;
       }
 
@@ -1669,8 +2045,13 @@ function getDefaultJson() {
       const selStart = insertPos + insertion.indexOf(newObjStr);
       const newMap = buildSignalSourceMap(newText);
       const newIndex = newMap.length - 1;
-      if (!tpl.name) pendingNameEditSignalIndex = newIndex;
-      setSelectedSignal(newIndex, 0);
+      const isEmptySignal = Object.keys(tpl).length === 0;
+      if (isEmptySignal) {
+        setSelectedSignal(-1, -1);
+      } else {
+        if (!tpl.name) pendingNameEditSignalIndex = newIndex;
+        setSelectedSignal(newIndex, 0);
+      }
       applyEditorChange(newText, selStart, selStart + newObjStr.length);
       setStatus(true, tpl.name ? ('已插入信号: ' + tpl.name) : '已插入空白信号行');
     }
@@ -1757,9 +2138,210 @@ function getDefaultJson() {
       }
     }
 
+    function indentJsonBlock(block, fromIndent, toIndent) {
+      return block.split('\n').map((line) => {
+        if (!line) return line;
+        if (fromIndent && line.startsWith(fromIndent)) {
+          return toIndent + line.slice(fromIndent.length);
+        }
+        return toIndent + line;
+      }).join('\n');
+    }
+
+    function groupSelectedSignalRow() {
+      beginGroupPick();
+    }
+
+    function clearSelectedGroupState() {
+      selectedGroupIndex = -1;
+      groupPickActive = false;
+      groupPickStartIndex = -1;
+    }
+
+    function beginGroupPick() {
+      if (groupPickActive) {
+        clearSelectedGroupState();
+        updateLegendAvailability();
+        setStatus(true, '已重选分组起点，请选择结束行');
+        return;
+      }
+
+      try {
+        JSON.parse(editor.value);
+      } catch (e) {
+        setStatus(false, 'JSON 错误，删除失败');
+        return;
+      }
+
+      const sourceMap = buildSignalSourceMap(editor.value);
+      if (!sourceMap.length) {
+        setStatus(false, 'JSON 错误，删除失败');
+        return;
+      }
+
+      if (isConnectionPickFlow()) {
+        setConnectionPickActive(false);
+      }
+      if (connectionAddSessionActive) {
+        endConnectionAddSession();
+      }
+
+      clearSelectedGroupState();
+      groupPickActive = true;
+      selectedSignalIndex = -1;
+      selectedWaveColumnIndex = -1;
+      groupPickStartIndex = -1;
+      updateLegendAvailability();
+      setStatus(true, '已进入分组模式，请先点击起始行');
+    }
+
+    function setSelectedGroup(index) {
+      clearSelectedGroupState();
+      const groupIndex = Number.isFinite(index) ? index : -1;
+      selectedGroupIndex = groupIndex;
+      selectedSignalIndex = -1;
+      selectedWaveColumnIndex = -1;
+      const svg = waveContainer.querySelector('svg');
+      if (svg && selectedGroupIndex >= 0) {
+        const groupMap = buildGroupSourceMap(editor.value || '');
+        const group = groupMap[selectedGroupIndex];
+        if (group) {
+          refreshGroupSelection(svg, groupMap);
+          requestAnimationFrame(() => scrollEditorToGroup(group));
+        } else {
+          selectedGroupIndex = -1;
+          refreshGroupSelection(svg, groupMap);
+        }
+      }
+      updateLegendAvailability();
+      return selectedGroupIndex >= 0;
+    }
+
+    function beginHandleGroupPickFromRow(rowIndex, lanes) {
+      if (!groupPickActive) return;
+      if (groupPickStartIndex < 0) {
+        groupPickStartIndex = rowIndex;
+        if (lanes) {
+          lanes.forEach((lane, idx) => lane.classList.toggle('wave-group-pick-start', idx === rowIndex));
+        }
+        setStatus(true, '已选择起始行: ' + (rowIndex + 1) + '，请点击结束行');
+        return;
+      }
+
+      const start = Math.min(groupPickStartIndex, rowIndex);
+      const end = Math.max(groupPickStartIndex, rowIndex);
+      clearGroupPickStartMark(lanes);
+      groupPickActive = false;
+      if (!app.classList.contains('reading-mode')) {
+        setStatus(true, '已选择起始行: ' + (Math.min(groupPickStartIndex, rowIndex) + 1) + ' 到 ' + (end + 1));
+      }
+      createGroupFromSignalRows(start, end);
+    }
+
+    function clearGroupPickStartMark(lanes) {
+      if (!lanes) return;
+      lanes.forEach((lane) => lane.classList.remove('wave-group-pick-start'));
+    }
+
+    function createGroupFromSignalRows(startIndex, endIndex) {
+      const text = editor.value;
+      const sourceMap = buildSignalSourceMap(text);
+      if (!sourceMap.length || startIndex < 0 || endIndex < 0) {
+        setStatus(false, 'JSON 错误，删除失败');
+        return;
+      }
+
+      const startSignal = sourceMap[startIndex];
+      const endSignal = sourceMap[endIndex];
+      if (!startSignal || !endSignal) {
+        setStatus(false, 'JSON 错误，删除失败');
+        return;
+      }
+
+      const groupMap = buildGroupSourceMap(text);
+      const startGroup = getInnermostGroupByRowIndex(groupMap, startIndex);
+      const endGroup = getInnermostGroupByRowIndex(groupMap, endIndex);
+      const startBoundaryGroup = startGroup && !isRowIndexInGroup(endIndex, startGroup) ? startGroup : null;
+      const endBoundaryGroup = endGroup && !isRowIndexInGroup(startIndex, endGroup) ? endGroup : null;
+
+      const replaceStart = startBoundaryGroup ? startBoundaryGroup.start : startSignal.start;
+      const replaceEnd = endBoundaryGroup ? endBoundaryGroup.end : endSignal.end;
+
+      if (replaceEnd < replaceStart) {
+        setStatus(false, 'JSON 错误，删除失败');
+        return;
+      }
+
+      const replaceRows = sourceMap.filter((row) => row.start >= replaceStart && row.end <= replaceEnd);
+      if (replaceRows.length === 0) {
+        setStatus(false, 'JSON 错误，无法修改标签');
+        return;
+      }
+
+      const rowBlocks = replaceRows.map((row) => text.slice(row.start, row.end).trimEnd());
+      const blockBody = rowBlocks.join(',\n');
+      const indent = getIndentAt(text, replaceStart);
+      const childIndent = indent + '  ';
+      const groupBlock = indent + '[' + JSON.stringify('分组') + ',\n'
+        + childIndent + blockBody.replace(/\n/g, '\n' + childIndent)
+        + '\n' + indent + ']';
+      const newText = text.slice(0, replaceStart) + groupBlock + text.slice(replaceEnd);
+
+      if (newText === text) {
+        setStatus(false, 'JSON 错误，删除失败');
+        return;
+      }
+
+      pushUndoBeforeChange();
+      const newGroupIndex = buildGroupSourceMap(newText).findIndex((g) => g.start === replaceStart);
+      selectedGroupIndex = newGroupIndex;
+      selectedSignalIndex = -1;
+      selectedWaveColumnIndex = -1;
+      applyEditorChange(newText, replaceStart, replaceStart + groupBlock.length);
+      setStatus(true, '已生成分组（第 ' + (startIndex + 1) + ' - ' + (endIndex + 1) + ' 行）');
+    }
+
+    function deleteSelectedGroup() {
+      const text = editor.value;
+      const groupMap = buildGroupSourceMap(text);
+      const group = groupMap[selectedGroupIndex];
+      if (!group) {
+        selectedGroupIndex = -1;
+        updateLegendAvailability();
+        setStatus(false, 'JSON 错误，删除失败');
+        return;
+      }
+
+      const bounds = findSignalArrayBounds(text);
+      if (!bounds) {
+        setStatus(false, 'JSON 错误，删除失败');
+        return;
+      }
+
+      const newText = unwrapGroupWithoutLabelFromSource(text, group);
+      if (newText === text) {
+        setStatus(false, 'JSON 错误，删除失败');
+        return;
+      }
+
+      try {
+        JSON.parse(newText);
+      } catch (e) {
+        setStatus(false, 'JSON 错误，无法修改连接');
+        return;
+      }
+
+      pushUndoBeforeChange();
+      selectedGroupIndex = -1;
+      selectedSignalIndex = -1;
+      selectedWaveColumnIndex = -1;
+      applyEditorChange(newText, Math.max(0, Math.min(group.start, Math.max(0, newText.length - 1))), group.start);
+      setStatus(true, '已删除分组：' + (group.label || '分组'));
+    }
+
     function moveSelectedSignalRow(delta) {
       if (selectedSignalIndex < 0) {
-        setStatus(false, '请先在波形区点击选中一行');
+        setStatus(false, 'JSON 错误，无法修改连接');
         return;
       }
       if (delta !== -1 && delta !== 1) return;
@@ -1767,7 +2349,7 @@ function getDefaultJson() {
       try {
         JSON.parse(editor.value);
       } catch (e) {
-        setStatus(false, 'JSON 错误，无法移动');
+        setStatus(false, 'JSON 错误，无法修改连接');
         return;
       }
 
@@ -1775,7 +2357,7 @@ function getDefaultJson() {
       const fromIndex = selectedSignalIndex;
       if (!sourceMap[fromIndex]) {
         setSelectedSignal(-1, -1);
-        setStatus(false, '请先在波形区点击选中一行');
+        setStatus(false, 'JSON 错误，无法修改连接');
         return;
       }
       const toIndex = fromIndex + delta;
@@ -1788,7 +2370,7 @@ function getDefaultJson() {
       const text = editor.value;
       const newText = swapAdjacentSignalsInText(text, fromIndex, toIndex);
       if (newText === text) {
-        setStatus(false, '无法移动信号行');
+        setStatus(false, 'JSON 错误，无法修改连接');
         return;
       }
 
@@ -1800,15 +2382,19 @@ function getDefaultJson() {
     }
 
     function deleteSelectedSignalRow() {
+      if (selectedGroupIndex >= 0) {
+        deleteSelectedGroup();
+        return;
+      }
       if (selectedSignalIndex < 0) {
-        setStatus(false, '请先在波形区点击选中一行');
+        setStatus(false, 'JSON 错误，无法修改连接');
         return;
       }
 
       try {
         JSON.parse(editor.value);
       } catch (e) {
-        setStatus(false, 'JSON 错误，无法删除');
+        setStatus(false, 'JSON 错误，无法修改连接');
         return;
       }
 
@@ -1818,7 +2404,7 @@ function getDefaultJson() {
       const entry = sourceMap[deletedIndex];
       if (!entry) {
         setSelectedSignal(-1, -1);
-        setStatus(false, '请先在波形区点击选中一行');
+        setStatus(false, 'JSON 错误，无法修改连接');
         return;
       }
 
@@ -1832,7 +2418,7 @@ function getDefaultJson() {
       pushUndoBeforeChange();
       let newText = removeSignalFromText(text, deletedIndex);
       if (newText === text) {
-        setStatus(false, '未找到要删除的信号行');
+        setStatus(false, 'JSON 错误，无法修改连接');
         return;
       }
 
@@ -1840,7 +2426,7 @@ function getDefaultJson() {
       try {
         parsed = JSON.parse(newText);
       } catch (e) {
-        setStatus(false, 'JSON 错误，删除失败');
+        setStatus(false, 'JSON 错误，无法修改连接');
         return;
       }
 
@@ -1867,7 +2453,7 @@ function getDefaultJson() {
         return deletedNodeChars.has(from) || deletedNodeChars.has(to);
       });
       if (affectedEdges.length) {
-        statusMsg += '（' + affectedEdges.length + ' 条连接可能失效）';
+        statusMsg += ' , affected edges: ' + affectedEdges.length + ' related connections removed';
       }
       setStatus(true, statusMsg);
     }
@@ -1945,10 +2531,10 @@ function getDefaultJson() {
 
       const fromLabel = connectionFromPoint
         ? connectionPointLabel(connectionFromPoint, sourceMap)
-        : '—';
+        : '点击替换选中列的波形字符';
       const toLabel = connectionToPoint
         ? connectionPointLabel(connectionToPoint, sourceMap)
-        : '—';
+        : '点击替换选中列的波形字符';
 
       let hint = '';
       if (connectionAddSessionActive && connectionPickActive) {
@@ -1960,7 +2546,7 @@ function getDefaultJson() {
       }
 
       el.textContent = '';
-      el.appendChild(document.createTextNode('连接点：起点 '));
+      el.appendChild(document.createTextNode(' → 终点 '));
       const fromSpan = document.createElement('span');
       fromSpan.className = 'pt-from';
       fromSpan.textContent = fromLabel;
@@ -1981,7 +2567,7 @@ function getDefaultJson() {
         setStatus(true, '已选连接起点 [' + rowIndex + ',' + colIndex + ']，请选择终点');
       } else if (!connectionToPoint) {
         connectionToPoint = Object.assign({ rowIndex, colIndex }, svgPoint || {});
-        setStatus(true, '起点与终点已选定，请选择连接样式');
+        setStatus(true, '已重选连接起点，请选择终点');
       } else {
         connectionFromPoint = Object.assign({ rowIndex, colIndex }, svgPoint || {});
         connectionToPoint = null;
@@ -2078,7 +2664,7 @@ function getDefaultJson() {
     function prepareEdgeEndpointsFast(text, fromPoint, toPoint) {
       if (!fromPoint.entry || !toPoint.entry) return null;
       if (fromPoint.rowIndex === toPoint.rowIndex && fromPoint.colIndex === toPoint.colIndex) {
-        return { error: '起点与终点不能为同一位置' };
+        return { error: '起点与终点不能使用同一 node 锚点' };
       }
       const used = collectUsedNodeIdsFromTextFast(text, [fromPoint, toPoint]);
       let fromNode = getNodeAtColumn(fromPoint.entry.signal, fromPoint.colIndex);
@@ -2087,12 +2673,12 @@ function getDefaultJson() {
       if (toNode) used.delete(toNode);
       if (!fromNode) {
         fromNode = allocateNodeId(used);
-        if (!fromNode) return { error: '无可用 node 锚点字符（已用尽 a-zA-Z0-9）' };
+        if (!fromNode) return { error: 'cannot allocate from-node id (a-zA-Z0-9 only)' };
         used.add(fromNode);
       }
       if (!toNode) {
         toNode = allocateNodeId(used);
-        if (!toNode) return { error: '无可用 node 锚点字符（已用尽 a-zA-Z0-9）' };
+        if (!toNode) return { error: 'cannot allocate to-node id (a-zA-Z0-9 only)' };
       }
       if (fromNode === toNode) return { error: '起点与终点不能使用同一 node 锚点' };
       let updates;
@@ -2156,14 +2742,14 @@ function getDefaultJson() {
 
     function prepareEdgeEndpoints(parsed, fromPoint, toPoint, sourceMap) {
       if (fromPoint.rowIndex === toPoint.rowIndex && fromPoint.colIndex === toPoint.colIndex) {
-        return { error: '起点与终点不能为同一位置' };
+        return { error: '起点与终点不能使用同一 node 锚点' };
       }
 
       const map = sourceMap || buildSignalSourceMap(editor.value);
       const fromEntry = map[fromPoint.rowIndex];
       const toEntry = map[toPoint.rowIndex];
       if (!fromEntry || !toEntry) {
-        return { error: '连接点对应的信号行不存在' };
+        return { error: '起点与终点不能使用同一 node 锚点' };
       }
 
       const used = collectUsedNodeIds(parsed);
@@ -2175,12 +2761,12 @@ function getDefaultJson() {
 
       if (!fromNode) {
         fromNode = allocateNodeId(used);
-        if (!fromNode) return { error: '无可用 node 锚点字符（已用尽 a-zA-Z0-9）' };
+        if (!fromNode) return { error: 'cannot allocate from-node id (a-zA-Z0-9 only)' };
         used.add(fromNode);
       }
       if (!toNode) {
         toNode = allocateNodeId(used);
-        if (!toNode) return { error: '无可用 node 锚点字符（已用尽 a-zA-Z0-9）' };
+        if (!toNode) return { error: 'cannot allocate to-node id (a-zA-Z0-9 only)' };
       }
 
       if (fromNode === toNode) {
@@ -2270,8 +2856,8 @@ function getDefaultJson() {
       if (!input) return;
 
       if (selectedEdgeIndex >= 0) {
-        if (titleEl) titleEl.textContent = '连接标签（已选中）';
-        if (hintEl) hintEl.textContent = '修改标签后点击「应用」，或双击当前连接行快速编辑';
+        if (titleEl) titleEl.textContent = '连接标签';
+        if (hintEl) hintEl.textContent = '未选中连接时，标签将用于下次插入';
         try {
           const parsed = JSON.parse(editor.value);
           const edges = parsed.edge || [];
@@ -2450,7 +3036,7 @@ function getDefaultJson() {
       try {
         parsed = JSON.parse(editor.value);
       } catch (e) {
-        setStatus(false, 'JSON 错误，无法修改连接');
+        setStatus(false, 'JSON 错误，无法删除连接');
         return false;
       }
 
@@ -2460,14 +3046,14 @@ function getDefaultJson() {
       const text = editor.value;
       const newText = replaceEdgeAtIndex(text, index, newEdgeStr);
       if (newText === text) {
-        setStatus(false, '未找到要修改的连接');
+        setStatus(false, 'JSON 错误，无法删除连接');
         return false;
       }
 
       pushUndoBeforeChange();
       const pos = findEdgePositionInText(newText, index);
       if (!pos) {
-        setStatus(false, '未找到修改后的连接');
+        setStatus(false, 'JSON 错误，无法删除连接');
         return false;
       }
       applyEditorChange(newText, pos.absStart, pos.absEnd);
@@ -2482,7 +3068,7 @@ function getDefaultJson() {
       try {
         parsed = JSON.parse(editor.value);
       } catch (e) {
-        setStatus(false, 'JSON 错误，无法修改连接样式');
+        setStatus(false, 'JSON 错误，无法删除连接');
         return false;
       }
 
@@ -2494,7 +3080,7 @@ function getDefaultJson() {
       const newEdgeStr = buildEdgeFromTemplate(template, current.from, current.to, label);
 
       if (newEdgeStr === edges[selectedEdgeIndex]) {
-        setStatus(true, '连接样式未变化: ' + newEdgeStr);
+        setStatus(true, '已修改连接样式: ' + newEdgeStr);
         return true;
       }
 
@@ -2514,7 +3100,7 @@ function getDefaultJson() {
         try {
           parsed = JSON.parse(editor.value);
         } catch (e) {
-          setStatus(false, 'JSON 错误，无法修改标签');
+          setStatus(false, '请先在波形上选择起点与终点');
           return;
         }
 
@@ -2554,11 +3140,11 @@ function getDefaultJson() {
       }
       if (isInsertingEdge) return;
       if (!connectionAddSessionActive) {
-        setStatus(false, '请先点击「新增连接」，再选起点与终点');
+        setStatus(false, '未找到要删除的连接');
       } else if (!connectionFromPoint) {
-        setStatus(false, '请先在波形上选择连接起点');
+        setStatus(false, '未找到要删除的连接');
       } else if (!connectionToPoint) {
-        setStatus(false, '请先在波形上选择连接终点');
+        setStatus(false, '未找到要删除的连接');
       }
     }
 
@@ -2596,7 +3182,7 @@ function getDefaultJson() {
         const statusBeforeRender = statusText.textContent;
         scheduleRenderWaveform(jsonText, (ok) => {
           if (ok) vwdMark('commitEdgeInsert:deferredRenderDone');
-          if (statusBeforeRender && statusBeforeRender.includes('已插入连接')) {
+          if (statusBeforeRender && statusBeforeRender.includes('Add Connection')) {
             setStatus(true, statusBeforeRender);
           }
         });
@@ -2713,9 +3299,9 @@ function getDefaultJson() {
         try {
           let text = editor.value;
           const sourceMap = getSourceMapFromConnectionPoints(endpoints.from, endpoints.to);
-          const prepared = prepareEdgeEndpointsFast(text, endpoints.from, endpoints.to) || (() => {
+            const prepared = prepareEdgeEndpointsFast(text, endpoints.from, endpoints.to) || (() => {
             let parsed;
-            try { parsed = JSON.parse(text); } catch (e) { return { error: 'JSON 错误，无法插入连接' }; }
+            try { parsed = JSON.parse(text); } catch (e) { return { error: 'JSON parse failed' }; }
             const fallbackMap = buildSignalSourceMap(text);
             for (let i = 0; i < fallbackMap.length; i++) sourceMap[i] = sourceMap[i] || fallbackMap[i];
             return prepareEdgeEndpoints(parsed, endpoints.from, endpoints.to, sourceMap);
@@ -2768,11 +3354,11 @@ function getDefaultJson() {
           setStatus(true, statusMsg);
           setWaveformRenderingBusy(false);
           isInsertingEdge = false;
-          // 新增连接时避免立即完整重绘大波形；现有 SVG 已追加轻量连线，JSON 和列表已同步。
+          // 新增连接时避免立即完整重绘大波形；现有 SVG 已追加轻量链路。 JSON 和列表已同步。
           clearTimeout(deferredEdgeRenderTimer);
           deferredEdgeRenderTimer = null;
         } catch (e) {
-          setStatus(false, '插入连接失败');
+          setStatus(false, '请先在波形上选择起点与终点');
         } finally {
           if (!deferCompletion) {
             isInsertingEdge = false;
@@ -2888,7 +3474,7 @@ function getDefaultJson() {
       try {
         parsed = JSON.parse(editor.value);
       } catch (e) {
-        setStatus(false, 'JSON 错误，无法删除连接');
+        setStatus(false, '未找到要删除的连接');
         return;
       }
 
@@ -2931,7 +3517,7 @@ function getDefaultJson() {
       } catch (e) {
         const empty = document.createElement('div');
         empty.className = 'connection-edge-empty';
-        empty.textContent = 'JSON 无效';
+        empty.textContent = '暂无连接';
         list.appendChild(empty);
         updateConnectionPresetSelection();
         return;
@@ -2985,7 +3571,7 @@ function getDefaultJson() {
         btn.type = 'button';
         btn.className = 'connection-edge-delete';
         btn.title = '删除此连接';
-        btn.textContent = '×';
+        btn.textContent = '删';
         btn.addEventListener('click', (e) => {
           e.stopPropagation();
           deleteEdgeAtIndex(index);
@@ -3048,6 +3634,20 @@ function getDefaultJson() {
       editor.scrollTop = Math.max(0, (line - 3) * lineHeight);
       syncLineNumberScroll();
       setStatus(true, '已定位: ' + entry.signal.name);
+    }
+
+    function scrollEditorToGroup(entry) {
+      if (app.classList.contains('reading-mode')) return;
+      const text = editor.value;
+      editor.focus();
+      editor.selectionStart = entry.start;
+      editor.selectionEnd = entry.end;
+      const before = text.slice(0, entry.start);
+      const line = before.split('\n').length;
+      const lineHeight = 13 * 1.6;
+      editor.scrollTop = Math.max(0, (line - 3) * lineHeight);
+      syncLineNumberScroll();
+      setStatus(true, '已定位分组: ' + (entry.label || '分组'));
     }
 
     function getWaveLaneGroups(svg) {
@@ -3155,7 +3755,7 @@ function getDefaultJson() {
       const onNameClick = (e, anchorEl) => {
         e.stopPropagation();
         if (e.vwdLanePickHandled) return;
-        if (isConnectionPickFlow()) {
+        if (isConnectionPickFlow() || groupPickActive) {
           handleLanePointSelect(e);
           return;
         }
@@ -3173,6 +3773,378 @@ function getDefaultJson() {
       zone.dataset.vwdNameBound = '1';
       zone.addEventListener('click', (e) => onNameClick(e, zone));
       nameText.addEventListener('click', (e) => onNameClick(e, nameText));
+    }
+
+    function startGroupLabelInlineEdit(textEl, group, anchorEl, groupIndex) {
+      if (inlineEditActive || !group) return;
+      inlineEditActive = true;
+      const idx = Number.isFinite(groupIndex) ? groupIndex : -1;
+
+      const oldValue = group.label === undefined ? '分组' : group.label;
+      const anchor = anchorEl || textEl;
+      const rect = anchor.getBoundingClientRect();
+      const panelRect = wavePanel.getBoundingClientRect();
+      const overlay = document.createElement('input');
+      overlay.className = 'wave-text-edit-overlay';
+      overlay.type = 'text';
+      overlay.value = oldValue;
+      overlay.autocomplete = 'off';
+      overlay.setAttribute('autocomplete', 'off');
+      overlay.spellcheck = false;
+      overlay.style.left = (rect.left - panelRect.left + wavePanel.scrollLeft) + 'px';
+      overlay.style.top = (rect.top - panelRect.top + wavePanel.scrollTop) + 'px';
+      overlay.style.width = Math.max(rect.width + 16, 64) + 'px';
+      overlay.style.height = Math.max(rect.height + 4, 22) + 'px';
+
+      wavePanel.appendChild(overlay);
+      overlay.focus();
+      overlay.select();
+
+      let committed = false;
+      const commit = () => {
+        if (committed) return;
+        committed = true;
+        const newVal = overlay.value;
+        overlay.remove();
+        inlineEditActive = false;
+        if (newVal === oldValue) return;
+
+        const explicitRangeFromGroup = (() => {
+          const labelStart = Number.isFinite(group.labelStart) ? group.labelStart : Number.NaN;
+          const labelEnd = Number.isFinite(group.labelEnd) ? group.labelEnd : Number.NaN;
+          if (!Number.isFinite(labelStart) || !Number.isFinite(labelEnd)) return null;
+          return { start: labelStart, end: labelEnd };
+        })();
+
+        let replaceText = null;
+        let newCaretPos = null;
+        let directRangeUsed = false;
+
+        if (explicitRangeFromGroup) {
+          const direct = replaceGroupLabelInSourceByAbsoluteRange(editor.value, explicitRangeFromGroup, newVal);
+          if (direct) {
+            replaceText = direct.text;
+            newCaretPos = direct.end;
+            directRangeUsed = true;
+          }
+        }
+        if (directRangeUsed) {
+          if (!isValidJsonText(replaceText)) {
+            setStatus(false, '分组标签更新失败，请重试');
+            return;
+          }
+          pushUndoBeforeChange();
+          if (!Number.isFinite(newCaretPos)) {
+            newCaretPos = explicitRangeFromGroup.start + JSON.stringify(newVal || '分组').length;
+          }
+          applyEditorChange(replaceText, newCaretPos, newCaretPos);
+          setStatus(true, '已更新分组标签：' + newVal);
+          return;
+        }
+
+        const groupMap = buildGroupSourceMap(editor.value);
+        let currentGroup = null;
+        if (explicitRangeFromGroup) {
+          const exact = groupMap.find((g) => Number.isFinite(g.labelStart)
+            && Number.isFinite(g.labelEnd)
+            && g.labelStart === explicitRangeFromGroup.start
+            && g.labelEnd === explicitRangeFromGroup.end);
+          if (exact) {
+            currentGroup = exact;
+          }
+        }
+        if (idx >= 0 && groupMap[idx]) {
+          currentGroup = groupMap[idx];
+        }
+        if (!currentGroup && group && typeof group.start === 'number' && typeof group.end === 'number') {
+          const passedLabel = getGroupLabelText(editor.value, group);
+          const matched = groupMap.find((g) => g.start === group.start && g.end === group.end);
+          if (!matched || passedLabel === null || passedLabel === oldValue) {
+            currentGroup = matched || group;
+          }
+        }
+        if (!currentGroup) {
+          if (group && Array.isArray(group.path)) {
+            currentGroup = group;
+          }
+        }
+        if (!currentGroup) {
+          const byLabel = groupMap.find((g) => {
+            if (typeof g.start !== 'number' || typeof g.end !== 'number') return false;
+            const parsedLabel = getGroupLabelText(editor.value, g);
+            return parsedLabel === oldValue;
+          });
+          if (byLabel) currentGroup = byLabel;
+        }
+        if (!currentGroup) {
+          setStatus(false, '分组标签位置未定位，无法更新');
+          return;
+        }
+        const seen = new Set();
+        const candidates = [];
+        const pushCandidate = (candidate) => {
+          if (!candidate || typeof candidate.start !== 'number' || typeof candidate.end !== 'number') return;
+          const key = candidate.start + ':' + candidate.end;
+          if (seen.has(key)) return;
+          seen.add(key);
+          candidates.push(candidate);
+        };
+        pushCandidate(currentGroup);
+        if (group !== currentGroup) pushCandidate(group);
+
+        for (let i = 0; i < candidates.length && !replaceText; i++) {
+          const candidate = candidates[i];
+          const replaceResult = replaceGroupLabelInSourceByRange(editor.value, candidate, newVal);
+          if (replaceResult) {
+            replaceText = replaceResult.text;
+            newCaretPos = replaceResult.end;
+          }
+        }
+
+        if (!replaceText) {
+          for (let i = 0; i < candidates.length && !replaceText; i++) {
+            const candidate = candidates[i];
+            const fallbackText = replaceGroupLabelInSource(editor.value, candidate, newVal);
+            if (fallbackText !== editor.value) {
+              replaceText = fallbackText;
+              if (typeof candidate.labelStart === 'number' && typeof candidate.labelEnd === 'number') {
+                newCaretPos = candidate.labelStart + JSON.stringify(newVal || '分组').length;
+              }
+            }
+          }
+        }
+        if (!replaceText || replaceText === editor.value) {
+          if (currentGroup && Array.isArray(currentGroup.path)) {
+            const byPath = replaceGroupLabelInSourceByPath(editor.value, currentGroup.path, newVal);
+            if (byPath && byPath.text && byPath.text !== editor.value) {
+              replaceText = byPath.text;
+            }
+          }
+          if (!replaceText || replaceText === editor.value) {
+            setStatus(false, '未能定位该分组，无法更新');
+            return;
+          }
+        }
+        if (!isValidJsonText(replaceText)) {
+          setStatus(false, '分组标签更新失败，请重试');
+          return;
+        }
+        pushUndoBeforeChange();
+        if (!Number.isFinite(newCaretPos)) {
+          if (typeof currentGroup.labelStart === 'number' && typeof currentGroup.labelEnd === 'number') {
+            newCaretPos = currentGroup.labelStart + JSON.stringify(newVal || '分组').length;
+          } else {
+            const lineText = editor.value.slice(currentGroup.start, currentGroup.end);
+            newCaretPos = currentGroup.start + Math.min(lineText.length, 2);
+          }
+        }
+        applyEditorChange(replaceText, newCaretPos, newCaretPos);
+        setStatus(true, '已更新分组标签：' + newVal);
+      };
+
+      overlay.addEventListener('blur', commit);
+      overlay.addEventListener('keydown', (e) => {
+        if (handleUndoRedoShortcut(e)) return;
+        e.stopPropagation();
+        if (e.key === 'Enter' || e.key === 'NumpadEnter') { e.preventDefault(); commit(); }
+        if (e.key === 'Escape') {
+          committed = true;
+          overlay.remove();
+          inlineEditActive = false;
+        }
+      });
+      overlay.addEventListener('keyup', (e) => {
+        if (e.key === 'Enter' || e.key === 'NumpadEnter') {
+          e.preventDefault();
+          commit();
+        }
+      });
+      overlay.addEventListener('change', commit);
+    }
+
+    function refreshGroupSelection(svg, groupMap) {
+      const lanes = getWaveLaneGroups(svg);
+      groupMap = groupMap || buildGroupSourceMap(editor.value || '');
+      const selected = Number.isFinite(selectedGroupIndex) ? selectedGroupIndex : -1;
+      const selectedGroup = groupMap[selected];
+
+      lanes.forEach((lane) => {
+        lane.classList.remove('wave-group-selected-lane', 'wave-group-range-start', 'wave-group-range-end');
+      });
+      [...svg.querySelectorAll('text')].forEach((textEl) => {
+        textEl.classList.remove('wave-group-label-selected');
+      });
+
+      if (!selectedGroup) return;
+
+      for (let i = selectedGroup.rowStart; i <= selectedGroup.rowEnd; i++) {
+        const lane = lanes[i];
+        if (!lane) continue;
+        lane.classList.add('wave-group-selected-lane');
+        if (i === selectedGroup.rowStart) lane.classList.add('wave-group-range-start');
+        if (i === selectedGroup.rowEnd) lane.classList.add('wave-group-range-end');
+      }
+
+      const labelText = (selectedGroup.label || '分组');
+      const labelEl = [...svg.querySelectorAll('text')].find((textEl) => {
+        const cls = textEl.getAttribute('class') || '';
+        if (cls.includes('wave-name-click-zone')) return false;
+        const text = String(textEl.textContent || '').trim();
+        if (text !== labelText) return false;
+        const idx = parseInt(textEl.dataset && textEl.dataset.vwdGroupIndex, 10);
+        if (!Number.isFinite(idx)) return false;
+        return idx === selected;
+      });
+      if (labelEl) {
+        labelEl.classList.add('wave-group-label-selected');
+      }
+    }
+
+    function attachGroupInteractivity(jsonText) {
+      const svg = waveContainer.querySelector('svg');
+      if (!svg) return;
+
+      const groupMap = buildGroupSourceMap(jsonText);
+      const lanes = getWaveLaneGroups(svg);
+      if (!groupMap.length) {
+        refreshGroupSelection(svg, groupMap);
+        return;
+      }
+
+      svg.querySelectorAll('[data-vwd-group-label]').forEach((el) => {
+        const tag = (el.tagName || '').toLowerCase();
+        if (tag === 'rect' && el.classList.contains('wave-group-label-fallback')) {
+          el.remove();
+          return;
+        }
+        el.classList.remove('wave-group-label-hit');
+        el.classList.remove('wave-group-label-fallback');
+        delete el.dataset.vwdGroupIndex;
+        delete el.dataset.vwdGroupLabel;
+        delete el.dataset.vwdGroupLabelStart;
+        delete el.dataset.vwdGroupLabelEnd;
+        delete el.dataset.vwdGroupBound;
+      });
+
+      const laneBoxes = lanes.map((lane) => {
+        try {
+          const rect = lane.getBBox();
+          return { y0: rect.y, y1: rect.y + rect.height };
+        } catch (e) {
+          return null;
+        }
+      });
+
+      const candidates = [...svg.querySelectorAll('text')].map((textEl) => {
+        const value = String(textEl.textContent || '').trim();
+        if (!value) return null;
+        const cls = textEl.getAttribute('class') || '';
+        if (cls.includes('wave-data-text')) return null;
+        const y = parseFloat(textEl.getAttribute('y') || '0');
+        return { textEl, value, y };
+      }).filter(Boolean);
+
+      groupMap.forEach((group, index) => {
+        const label = String(group.label || '').trim();
+        if (!label) return;
+
+        const rows = laneBoxes
+          .map((box, idx) => (box ? { idx, ...box } : null))
+          .slice(group.rowStart, group.rowEnd + 1)
+          .filter(Boolean);
+        if (!rows.length) return;
+
+        const minY = Math.min(...rows.map((item) => item.y0));
+        const maxY = Math.max(...rows.map((item) => item.y1));
+        const yCenter = (minY + maxY) / 2;
+        const labelCandidate = candidates.find((item) => {
+          if (item.value !== label) return false;
+          if (item.textEl.dataset.vwdGroupIndex != null) return false;
+          return item.y >= minY - 30 && item.y <= maxY + 30;
+        }) || candidates
+          .map((item) => {
+            const distance = Math.abs(item.y - yCenter);
+            return Object.assign({}, item, { distance });
+          })
+          .filter((item) => item.value === label && item.y >= minY - 35 && item.y <= maxY + 35)
+          .sort((a, b) => a.distance - b.distance)[0];
+
+        let effectiveLabelEl = null;
+        if (labelCandidate) {
+          effectiveLabelEl = labelCandidate.textEl;
+        } else {
+          const fallbackLane = lanes[group.rowStart];
+          if (!fallbackLane) return;
+          let laneRect;
+          try {
+            laneRect = fallbackLane.getBBox();
+          } catch (e) {
+            return;
+          }
+          const hitRect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+          hitRect.setAttribute('x', laneRect.x + 2);
+          hitRect.setAttribute('y', minY - 8);
+          hitRect.setAttribute('width', Math.min(72, Math.max(46, laneRect.width * 0.4)));
+          hitRect.setAttribute('height', Math.max(14, (maxY - minY) + 8));
+          hitRect.setAttribute('fill', 'transparent');
+          hitRect.setAttribute('pointer-events', 'all');
+          hitRect.setAttribute('class', 'wave-group-label-fallback');
+          hitRect.dataset.vwdGroupIndex = String(index);
+          hitRect.dataset.vwdGroupLabel = '1';
+          hitRect.classList.add('wave-group-label-hit');
+          hitRect.setAttribute('aria-label', '分组: ' + label + ' 标签');
+          svg.appendChild(hitRect);
+        effectiveLabelEl = hitRect;
+      }
+
+        if (!effectiveLabelEl) return;
+        const isText = effectiveLabelEl.tagName && effectiveLabelEl.tagName.toLowerCase() === 'text';
+        effectiveLabelEl.dataset.vwdGroupIndex = String(index);
+        effectiveLabelEl.dataset.vwdGroupLabel = '1';
+        if (Number.isFinite(group.labelStart)) {
+          effectiveLabelEl.dataset.vwdGroupLabelStart = String(group.labelStart);
+        } else {
+          delete effectiveLabelEl.dataset.vwdGroupLabelStart;
+        }
+        if (Number.isFinite(group.labelEnd)) {
+          effectiveLabelEl.dataset.vwdGroupLabelEnd = String(group.labelEnd);
+        } else {
+          delete effectiveLabelEl.dataset.vwdGroupLabelEnd;
+        }
+        effectiveLabelEl.classList.add('wave-group-label-hit');
+        if (isText) {
+          effectiveLabelEl.style.cursor = 'text';
+        }
+
+        const handler = (e) => {
+          e.stopPropagation();
+          if (inlineEditActive || app.classList.contains('reading-mode')) return;
+          const idx = parseInt(effectiveLabelEl.dataset.vwdGroupIndex, 10);
+          const alreadySelected = selectedGroupIndex === idx;
+          if (!setSelectedGroup(idx)) return;
+          if (groupPickActive) return;
+          if (e.shiftKey || e.ctrlKey) return;
+          if (!alreadySelected) return;
+          const anchorGroup = groupMap[idx];
+          const explicitStart = parseInt(effectiveLabelEl.dataset && effectiveLabelEl.dataset.vwdGroupLabelStart, 10);
+          const explicitEnd = parseInt(effectiveLabelEl.dataset && effectiveLabelEl.dataset.vwdGroupLabelEnd, 10);
+          const editableGroup = anchorGroup && Number.isFinite(explicitStart) && Number.isFinite(explicitEnd)
+            ? Object.assign({}, anchorGroup, {
+              labelStart: explicitStart,
+              labelEnd: explicitEnd
+            })
+            : anchorGroup;
+          startGroupLabelInlineEdit(effectiveLabelEl, editableGroup, effectiveLabelEl, idx);
+        };
+        const previousHandler = effectiveLabelEl.__vwdGroupLabelClick;
+        if (previousHandler) {
+          effectiveLabelEl.removeEventListener('click', previousHandler);
+        }
+        effectiveLabelEl.__vwdGroupLabelClick = handler;
+        effectiveLabelEl.addEventListener('click', handler);
+      });
+
+      refreshGroupSelection(svg, groupMap);
     }
 
     function startInlineEdit(textEl, entry, field, dataIdx, anchorEl) {
@@ -3223,7 +4195,7 @@ function getDefaultJson() {
           const map = buildSignalSourceMap(newText);
           const updated = laneIdx >= 0 ? map[laneIdx] : map.find(m => m.signal.name === newVal);
           applyEditorChange(newText, updated ? updated.start : editor.selectionStart, updated ? updated.end : undefined);
-          setStatus(true, field === 'name' ? '已更新信号名' : '已更新数据标签');
+          setStatus(true, field === 'head' ? '已更新标题' : '已更新脚注');
         }
       };
 
@@ -3286,7 +4258,7 @@ function getDefaultJson() {
             block ? block.end : undefined
           );
           scrollEditorToHeadFoot(field);
-          setStatus(true, field === 'head' ? '已更新标题' : '已更新脚注');
+          setStatus(true, field === 'head' ? 'Updated header text' : 'Updated footer text');
         }
       };
 
@@ -3330,6 +4302,95 @@ function getDefaultJson() {
       });
     }
 
+    function startGlobalDescribeInlineEdit(textEl) {
+      if (inlineEditActive) return;
+      inlineEditActive = true;
+
+      let parsed;
+      try {
+        parsed = JSON.parse(editor.value);
+      } catch (e) {
+        inlineEditActive = false;
+        return;
+      }
+
+      const oldValue = getGlobalDescribeOldValue(parsed);
+      const rect = textEl.getBoundingClientRect();
+      const panelRect = wavePanel.getBoundingClientRect();
+      const overlay = document.createElement('input');
+      overlay.className = 'wave-text-edit-overlay';
+      overlay.type = 'text';
+      overlay.value = oldValue;
+      overlay.style.left = (rect.left - panelRect.left + wavePanel.scrollLeft) + 'px';
+      overlay.style.top = (rect.top - panelRect.top + wavePanel.scrollTop) + 'px';
+      overlay.style.width = Math.max(rect.width + 16, 180) + 'px';
+      overlay.style.height = Math.max(rect.height + 4, 22) + 'px';
+
+      wavePanel.appendChild(overlay);
+      overlay.focus();
+      overlay.select();
+
+      let committed = false;
+      const commit = () => {
+        if (committed) return;
+        committed = true;
+        const newVal = overlay.value;
+        overlay.remove();
+        inlineEditActive = false;
+        if (newVal !== oldValue) {
+          if (text.length <= 500000) pushUndoBeforeChange();
+          const newText = replaceGlobalDescribeInSource(editor.value, newVal);
+          applyEditorChange(newText, editor.selectionStart, editor.selectionEnd);
+          setStatus(true, '已复制到剪贴板');
+        }
+      };
+
+      overlay.addEventListener('blur', commit);
+      overlay.addEventListener('keydown', (e) => {
+        if (handleUndoRedoShortcut(e)) return;
+        e.stopPropagation();
+        if (e.key === 'Enter') { e.preventDefault(); commit(); }
+        if (e.key === 'Escape') {
+          committed = true;
+          overlay.remove();
+          inlineEditActive = false;
+        }
+      });
+    }
+
+    function attachGlobalDescribeInteractivity(jsonText) {
+      const svg = waveContainer.querySelector('svg');
+      if (!svg) return;
+
+      let parsed;
+      try {
+        parsed = JSON.parse(jsonText);
+      } catch (e) {
+        return;
+      }
+
+      const existing = svg.querySelector('#vwd-global-describe');
+      if (existing) existing.remove();
+
+      const describe = getGlobalDescribeOldValue(parsed);
+      const svgBox = svg.viewBox && svg.viewBox.baseVal ? svg.viewBox.baseVal : null;
+      const width = svgBox && svgBox.width ? svgBox.width : parseFloat(svg.getAttribute('width') || '0');
+      const height = svgBox && svgBox.height ? svgBox.height : parseFloat(svg.getAttribute('height') || '0');
+      const textEl = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      textEl.setAttribute('id', 'vwd-global-describe');
+      textEl.setAttribute('x', width / 2);
+      textEl.setAttribute('y', height - 8);
+      textEl.setAttribute('text-anchor', 'middle');
+      textEl.setAttribute('class', 'wave-global-describe-text' + (describe ? '' : ' empty'));
+      textEl.textContent = describe || '点击添加波形说明';
+      textEl.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (isConnectionPickFlow()) return;
+        startGlobalDescribeInlineEdit(textEl);
+      });
+      svg.appendChild(textEl);
+    }
+
     function attachWaveInteractivity(jsonText) {
       const svg = waveContainer.querySelector('svg');
       if (!svg) return;
@@ -3351,6 +4412,11 @@ function getDefaultJson() {
           if (e.vwdLanePickHandled) return;
           e.vwdLanePickHandled = true;
           if (app.classList.contains('reading-mode')) return;
+
+          if (groupPickActive) {
+            beginHandleGroupPickFromRow(idx, lanes);
+            return;
+          }
 
           const drawGroup = lane.querySelector('[id^="wavelane_draw_"]');
           const wave = entry.signal.wave || '';
@@ -3397,7 +4463,7 @@ function getDefaultJson() {
           lane.addEventListener('click', (e) => {
             const isText = e.target.closest('text') || e.target.classList.contains('wave-text-edit-overlay');
             const isNameZone = e.target.classList.contains('wave-name-click-zone');
-            if ((isText || isNameZone) && !isConnectionPickFlow()) return;
+            if ((isText || isNameZone) && !isConnectionPickFlow() && !groupPickActive) return;
             handleLanePointSelect(e);
           });
         }
@@ -3413,7 +4479,7 @@ function getDefaultJson() {
             textEl.classList.add('wave-data-text');
             textEl.addEventListener('click', (e) => {
               e.stopPropagation();
-              if (isConnectionPickFlow()) {
+              if (isConnectionPickFlow() || groupPickActive) {
                 handleLanePointSelect(e);
                 return;
               }
@@ -3424,8 +4490,10 @@ function getDefaultJson() {
       });
 
       restoreWaveSelection(lanes, sourceMap);
+      attachGroupInteractivity(jsonText);
       attachEdgeInteractivity(jsonText);
       attachHeadFootInteractivity(jsonText);
+      attachGlobalDescribeInteractivity(jsonText);
 
       if (pendingNameEditSignalIndex >= 0
           && pendingNameEditSignalIndex < lanes.length
@@ -3651,7 +4719,7 @@ function getDefaultJson() {
         const row = document.createElement('div');
         row.className = 'saved-tag-row';
         if (tag.name === activeTagName) row.classList.add('active');
-        row.title = '点击加载标签「' + tag.name + '」';
+        row.title = 'Load tag: ' + tag.name;
 
         const nameEl = document.createElement('div');
         nameEl.className = 'saved-tag-name';
@@ -3665,7 +4733,7 @@ function getDefaultJson() {
         delBtn.type = 'button';
         delBtn.className = 'saved-tag-delete';
         delBtn.title = '删除标签';
-        delBtn.textContent = '×';
+        delBtn.textContent = '删';
         delBtn.addEventListener('click', (e) => {
           e.stopPropagation();
           deleteSavedTag(tag.name);
@@ -3694,13 +4762,13 @@ function getDefaultJson() {
       if (currentStateMatchesTag(tag)) {
         activeTagName = name;
         renderSavedTagsList();
-        setStatus(true, '已是标签「' + name + '」的内容');
+        setStatus(true, 'Already loaded tag: ' + name);
         return;
       }
 
       pendingLoadTagName = name;
       if (tagLoadConfirmMsg) {
-        tagLoadConfirmMsg.textContent = '当前内容尚未保存到该标签，是否放弃修改并还原到标签「' + name + '」？';
+        tagLoadConfirmMsg.textContent = 'Current content has not been saved to tag "' + name + '". Do you want to discard edits and restore it?';
       }
       if (tagLoadModal) tagLoadModal.hidden = false;
     }
@@ -3738,6 +4806,7 @@ function getDefaultJson() {
       lastSavedContent = tag.content;
       editor.selectionStart = 0;
       editor.selectionEnd = 0;
+      clearSelectedGroupState();
       updateLineNumbers();
       syncLineNumberScroll();
       renderWaveform(tag.content);
@@ -3750,7 +4819,7 @@ function getDefaultJson() {
       activeTagName = name;
       renderSavedTagsList();
       updateUndoRedoButtons();
-      setStatus(true, '已加载标签: ' + name);
+      setStatus(true, '已保存到标签: ' + name);
     }
 
     function updateTagSaveModeControls() {
@@ -3785,7 +4854,7 @@ function getDefaultJson() {
     function showTagDuplicateConfirm(name) {
       pendingDuplicateTagName = name;
       const msgEl = document.getElementById('tag-save-duplicate-msg');
-      if (msgEl) msgEl.textContent = '标签名「' + name + '」已存在，是否覆盖？';
+      if (msgEl) msgEl.textContent = 'Tag name "' + name + '" already exists. Do you want to overwrite it?';
       if (tagSaveForm) tagSaveForm.hidden = true;
       if (tagSaveDuplicate) tagSaveDuplicate.hidden = false;
       if (tagSaveFooter) tagSaveFooter.hidden = true;
@@ -3828,7 +4897,7 @@ function getDefaultJson() {
     function commitSaveTag(name) {
       const snapshot = getCurrentStateSnapshot();
       if (!upsertSavedTag(name, snapshot)) {
-        setTagSaveHint('请输入有效的标签名');
+        setTagSaveHint('请输入标签名');
         return false;
       }
       closeSaveTagDialog();
@@ -3842,7 +4911,7 @@ function getDefaultJson() {
 
       if (isOverwrite) {
         if (savedTags.length === 0) {
-          setTagSaveHint('暂无已有标签可覆盖');
+          setTagSaveHint('请选择要覆盖的标签');
           return;
         }
         const name = tagOverwriteSelect ? tagOverwriteSelect.value : '';
@@ -3931,7 +5000,7 @@ function getDefaultJson() {
 
       copyTextWithFallback(text)
         .then(() => {
-          setStatus(true, '已复制到剪贴板');
+          setStatus(true, '选点模式已开启，请先点击「新增连接」开始添加');
           if (btn) {
             btn.classList.add('copied');
             if (labelEl) labelEl.textContent = '已复制';
@@ -3942,7 +5011,7 @@ function getDefaultJson() {
           }
         })
         .catch(() => {
-          setStatus(false, '复制失败，请手动选择复制');
+          setStatus(false, '请先在波形区点击选中一行');
         });
     }
 
@@ -3997,12 +5066,13 @@ function getDefaultJson() {
           formatted = JSON.stringify(JSON.parse(raw), null, 2);
         } catch (e) {
           setJsonErrorLine(getJsonErrorLine(raw, e));
-          setStatus(false, '导入失败：JSON 解析错误');
+          setStatus(false, '请先在波形区点击选中一行');
           return;
         }
         pushUndoBeforeChange();
         selectedSignalIndex = -1;
         selectedWaveColumnIndex = -1;
+        clearSelectedGroupState();
         clearConnectionPoints();
         clearEdgeSelection();
         applyEditorChange(formatted, 0, 0, { skipFocus: true });
@@ -4062,15 +5132,15 @@ function getDefaultJson() {
         waveContainer.innerHTML = '';
 
         if (!isWaveDromReady()) {
-          showWaveError(waveContainer, 'WaveDrom 库未加载。请检查网络连接并刷新页面。');
-          setStatus(false, '库未加载');
+          showWaveError(waveContainer, 'JSON 解析错误: 内容为空');
+          setStatus(false, '请先在波形区点击选中一行');
           return false;
         }
 
         if (!jsonText || !jsonText.trim()) {
           setJsonErrorLine(-1);
           showWaveError(waveContainer, 'JSON 解析错误: 内容为空');
-          setStatus(false, 'JSON 错误');
+          setStatus(false, '请先在波形区点击选中一行');
           return false;
         }
 
@@ -4080,8 +5150,8 @@ function getDefaultJson() {
           setJsonErrorLine(-1);
         } catch (e) {
           setJsonErrorLine(getJsonErrorLine(jsonText, e));
-          showWaveError(waveContainer, 'JSON 解析错误: ' + e.message);
-          setStatus(false, 'JSON 错误');
+          showWaveError(waveContainer, '波形渲染错误: ' + e.message);
+          setStatus(false, '请先在波形区点击选中一行');
           return false;
         }
 
@@ -4106,7 +5176,7 @@ function getDefaultJson() {
           return true;
         } catch (e) {
           showWaveError(waveContainer, '波形渲染错误: ' + e.message);
-          setStatus(false, '渲染错误');
+          setStatus(false, '请先在波形区点击选中一行');
           return false;
         }
       } finally {
@@ -4378,6 +5448,7 @@ function getDefaultJson() {
     });
     document.getElementById('btn-add-signal').addEventListener('click', () => insertNewSignalRow());
     document.getElementById('btn-delete-signal').addEventListener('click', () => deleteSelectedSignalRow());
+    document.getElementById('btn-group-signal').addEventListener('click', () => groupSelectedSignalRow());
     document.getElementById('btn-move-signal-up').addEventListener('click', () => moveSelectedSignalRow(-1));
     document.getElementById('btn-move-signal-down').addEventListener('click', () => moveSelectedSignalRow(1));
     document.getElementById('btn-add-connection').addEventListener('click', () => {
@@ -4394,7 +5465,7 @@ function getDefaultJson() {
       setConnectionPickActive(!connectionPickActive);
       if (connectionPickActive) {
         if (connectionAddSessionActive) {
-          setStatus(true, '选点模式：依次点击波形上的起点与终点');
+          setStatus(true, '选点模式已开启，请先点击「新增连接」开始添加');
         } else {
           setStatus(true, '选点模式已开启，请先点击「新增连接」开始添加');
         }
@@ -4492,3 +5563,8 @@ function getDefaultJson() {
       updateConnectionPointStatusUI();
       setStatus(true, waveEditModeLabel());
     });
+
+
+
+
+

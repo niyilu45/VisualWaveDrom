@@ -33,10 +33,11 @@
 
     /* Sidebar */
     .sidebar {
+      order: 2;
       width: var(--sidebar-width);
       min-width: var(--sidebar-width);
       background: var(--surface);
-      border-right: 1px solid var(--border);
+      border-left: 1px solid var(--border);
       display: flex;
       flex-direction: column;
       overflow-y: auto;
@@ -187,6 +188,7 @@
 
     .wave-add-delete-row,
     .wave-move-row,
+    .wave-group-row,
     .wave-mode-delete-row {
       display: flex;
       gap: 6px;
@@ -196,6 +198,7 @@
     .wave-add-delete-row .legend-add-btn,
     .wave-add-delete-row .wave-delete-signal-btn,
     .wave-move-row .wave-move-signal-btn,
+    .wave-group-row .wave-group-signal-btn,
     .wave-mode-delete-row .wave-edit-mode-btn,
     .wave-mode-delete-row .wave-delete-col-btn {
       flex: 1 1 0;
@@ -209,22 +212,31 @@
 
     .wave-add-delete-row .legend-add-btn svg,
     .wave-add-delete-row .wave-delete-signal-btn svg,
-    .wave-move-row .wave-move-signal-btn svg {
+    .wave-move-row .wave-move-signal-btn svg,
+    .wave-group-row .wave-group-signal-btn svg {
       width: 16px;
       height: 16px;
     }
 
-    .wave-move-row .wave-move-signal-btn {
+    .wave-move-row .wave-move-signal-btn,
+    .wave-group-row .wave-group-signal-btn {
       border-radius: 8px;
       background: var(--surface-2);
       border: 1px solid var(--border);
       color: var(--text-muted);
     }
 
-    .wave-move-row .wave-move-signal-btn:not(:disabled):hover {
+    .wave-move-row .wave-move-signal-btn:not(:disabled):hover,
+    .wave-group-row .wave-group-signal-btn:not(:disabled):hover {
       border-color: var(--accent);
       background: var(--border);
       color: var(--text);
+    }
+
+    .wave-group-signal-btn.group-pick-active {
+      background: rgba(59, 130, 246, 0.18);
+      border-color: rgba(59, 130, 246, 0.75);
+      color: #93c5fd;
     }
 
     .wave-mode-delete-row .wave-edit-mode-btn {
@@ -662,6 +674,7 @@
 
     /* Main content */
     .main {
+      order: 1;
       flex: 1;
       display: flex;
       flex-direction: column;
@@ -1119,6 +1132,30 @@
       stroke-width: 1;
     }
 
+    .wave-group-selected-lane > rect.lane-hover-bg {
+      fill: rgba(168, 85, 247, 0.14);
+      stroke: rgba(168, 85, 247, 0.55);
+      stroke-width: 1;
+    }
+
+    .wave-group-range-start > rect.lane-hover-bg {
+      stroke-width: 1.7;
+      stroke: rgba(168, 85, 247, 0.75);
+      stroke-dasharray: 5 2;
+    }
+
+    .wave-group-range-end > rect.lane-hover-bg {
+      stroke-width: 1.7;
+      stroke: rgba(168, 85, 247, 0.75);
+      stroke-dasharray: 5 2;
+    }
+
+    .wave-group-pick-start > rect.lane-hover-bg {
+      fill: rgba(34, 197, 94, 0.2);
+      stroke: rgba(34, 197, 94, 0.75);
+      stroke-width: 1.5;
+    }
+
     .wave-col-highlight {
       fill: rgba(59, 130, 246, 0.22);
       stroke: rgba(59, 130, 246, 0.75);
@@ -1177,8 +1214,28 @@
     .wave-lane-interactive text.info,
     .wave-lane-interactive .wave-name-click-zone,
     .wave-lane-interactive .wave-data-text,
+    .wave-group-label-hit,
+    .wave-global-describe-text,
     .wave-headfoot-text {
       cursor: text;
+    }
+
+    .wave-group-label-hit {
+      cursor: pointer;
+      fill: rgba(15, 23, 42, 0.9);
+      user-select: none;
+    }
+
+    .wave-group-label-selected {
+      fill: #7c3aed !important;
+      font-weight: 700;
+      text-decoration: underline;
+    }
+
+    .wave-group-label-fallback {
+      fill: transparent;
+      stroke: transparent;
+      pointer-events: all;
     }
 
     .wave-lane-interactive .wave-name-click-zone:hover {
@@ -1186,6 +1243,21 @@
     }
 
     .wave-headfoot-text:hover {
+      fill: #0041c4;
+      text-decoration: underline;
+    }
+
+    .wave-global-describe-text {
+      fill: #64748b;
+      font-size: 12px;
+    }
+
+    .wave-global-describe-text.empty {
+      fill: #94a3b8;
+      font-style: italic;
+    }
+
+    .wave-global-describe-text:hover {
       fill: #0041c4;
       text-decoration: underline;
     }
@@ -1211,10 +1283,12 @@
       .menu-btn .shortcut { display: none; }
       .wave-add-delete-row,
       .wave-move-row,
+      .wave-group-row,
       .wave-mode-delete-row { gap: 4px; }
       .wave-add-delete-row .legend-add-btn,
       .wave-add-delete-row .wave-delete-signal-btn,
       .wave-move-row .wave-move-signal-btn,
+      .wave-group-row .wave-group-signal-btn,
       .wave-mode-delete-row .wave-edit-mode-btn,
       .wave-mode-delete-row .wave-delete-col-btn {
         padding: 7px 4px;
@@ -1224,6 +1298,7 @@
       .wave-add-delete-row .legend-add-btn svg,
       .wave-add-delete-row .wave-delete-signal-btn svg,
       .wave-move-row .wave-move-signal-btn svg,
+      .wave-group-row .wave-group-signal-btn svg,
       .wave-mode-delete-row .wave-edit-mode-btn svg,
       .wave-mode-delete-row .wave-delete-col-btn svg {
         width: 14px;
