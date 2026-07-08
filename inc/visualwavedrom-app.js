@@ -4673,7 +4673,7 @@ ${lines.join('\n')}`;
           const explicitStart = parseInt(targetEl.dataset.vwdGroupLabelStart, 10);
           const explicitEnd = parseInt(targetEl.dataset.vwdGroupLabelEnd, 10);
           const anchorEl = targetEl.__vwdGroupLabelAnchor || targetEl;
-          const shouldOpen = e.detail >= 2;
+          const shouldOpen = false;
           vwdDebugLog('group-label', {
             phase: 'click',
             idx,
@@ -4688,6 +4688,7 @@ ${lines.join('\n')}`;
 
         const dblClickHandler = (e) => {
           e.stopPropagation();
+          e.preventDefault();
           const idx = parseInt(targetEl.dataset.vwdGroupIndex, 10);
           const explicitStart = parseInt(targetEl.dataset.vwdGroupLabelStart, 10);
           const explicitEnd = parseInt(targetEl.dataset.vwdGroupLabelEnd, 10);
