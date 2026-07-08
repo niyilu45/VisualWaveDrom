@@ -4057,14 +4057,27 @@ ${lines.join('\n')}`;
         if (prev !== overlay && prev.parentElement) prev.remove();
       });
       document.body.appendChild(overlay);
-      overlay.focus();
+      requestAnimationFrame(() => {
+        overlay.focus();
+      });
       overlay.select();
 
+      const openedAt = performance.now();
+      let blurCommitArmed = false;
       let committed = false;
+      let outsideClick = null;
+
+      requestAnimationFrame(() => {
+        blurCommitArmed = true;
+      });
+
       const commit = () => {
         if (committed) return;
         committed = true;
         const newVal = overlay.value;
+        if (outsideClick) {
+          document.removeEventListener('mousedown', outsideClick, true);
+        }
         vwdDebugLog('group-label', {
           phase: 'inline-commit',
           groupIndex: idx,
@@ -4207,14 +4220,49 @@ ${lines.join('\n')}`;
         setStatus(true, '已更新分组标签：' + newVal);
       };
 
-      overlay.addEventListener('blur', commit);
+      overlay.addEventListener('blur', () => {
+        if (!blurCommitArmed && performance.now() - openedAt < 80) {
+          vwdDebugLog('group-label', {
+            phase: 'inline-blur-suppressed',
+            groupIndex: idx,
+            sinceOpenMs: Math.round(performance.now() - openedAt)
+          });
+          overlay.focus();
+          return;
+        }
+        vwdDebugLog('group-label', {
+          phase: 'inline-blur-commit',
+          groupIndex: idx
+        });
+        commit();
+      });
+      outsideClick = (e) => {
+        if (committed) return;
+        if (overlay.contains(e.target)) return;
+        if (e.target.classList && e.target.classList.contains('wave-text-edit-overlay')) return;
+        vwdDebugLog('group-label', {
+          phase: 'inline-outside-commit',
+          groupIndex: idx
+        });
+        commit();
+      };
+      document.addEventListener('mousedown', outsideClick, true);
       overlay.addEventListener('keydown', (e) => {
         if (handleUndoRedoShortcut(e)) return;
         e.stopPropagation();
+        vwdDebugLog('group-label', {
+          phase: 'inline-keydown',
+          groupIndex: idx,
+          key: e.key,
+          code: e.code
+        });
         if (e.key === 'Enter' || e.key === 'NumpadEnter') { e.preventDefault(); commit(); }
         if (e.key === 'Escape') {
           committed = true;
           overlay.remove();
+          if (outsideClick) {
+            document.removeEventListener('mousedown', outsideClick, true);
+          }
           inlineEditActive = false;
         }
       });
