@@ -279,6 +279,175 @@ function getDefaultJson() {
     let jsonErrorLine = -1;
     let waveformRenderingBusy = false;
     const vwdPerfMarks = [];
+    const vwdDebugLogEntries = [];
+    const VWD_DEBUG_LOG_MAX = 2000;
+    const vwdDebugSessionStartedAt = new Date().toISOString();
+
+    const VWD_DEBUG_FLAG_KEY = 'vwd-debug';
+    const VWD_DEBUG_QUERY = 'vwdDebug';
+    let vwdDebugEnabled = false;
+
+    function normalizeBool(raw) {
+      if (typeof raw === 'boolean') return raw;
+      if (typeof raw !== 'string') return false;
+      return ['1', 'true', 'on', 'yes', 'y'].includes(raw.trim().toLowerCase());
+    }
+
+    function initDebugMode() {
+      try {
+        const query = new URLSearchParams(window.location.search);
+        const queryFlag = query.get(VWD_DEBUG_QUERY);
+        const queryEnabled = normalizeBool(queryFlag);
+        const localFlag = localStorage.getItem(VWD_DEBUG_FLAG_KEY);
+        const localEnabled = normalizeBool(localFlag);
+        if (queryFlag !== null) {
+          vwdDebugEnabled = queryEnabled;
+          localStorage.setItem(VWD_DEBUG_FLAG_KEY, vwdDebugEnabled ? '1' : '0');
+        } else {
+          vwdDebugEnabled = localEnabled;
+        }
+      } catch (_e) {
+        vwdDebugEnabled = false;
+      }
+    }
+
+    initDebugMode();
+
+    function ensureDebugModeButton() {
+      if (document.getElementById('btn-debug-mode')) return;
+      const undoBtn = document.getElementById('btn-undo');
+      const redoBtn = document.getElementById('btn-redo');
+      if (!undoBtn || !redoBtn || !undoBtn.parentElement) return;
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.id = 'btn-debug-mode';
+      btn.className = 'menu-btn debug-mode-btn';
+      btn.setAttribute('title', 'Debug Mode Toggle');
+      const label = document.createElement('span');
+      label.id = 'debug-mode-label';
+      label.textContent = 'Debug Mode: Off';
+      btn.appendChild(label);
+      undoBtn.parentElement.insertBefore(btn, redoBtn);
+    }
+
+    function ensureCopyDebugLogButton() {
+      if (document.getElementById('btn-copy-debug-log')) return;
+      const copyJsonBtn = document.getElementById('btn-copy-json');
+      if (!copyJsonBtn || !copyJsonBtn.parentElement) return;
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.id = 'btn-copy-debug-log';
+      btn.className = 'editor-copy-btn';
+      btn.setAttribute('title', 'Copy Debug Logs');
+      btn.innerHTML = ''
+        + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">'
+        + '<rect x="4" y="4" width="16" height="16" rx="2" ry="2"/>'
+        + '<path d="M8 10h8M8 14h8M8 18h5"/>'
+        + '<path d="M8 4a2 2 0 0 0-2 2v12"/>'
+        + '</svg>'
+        + '<span class="btn-copy-label">Copy Debug Logs</span>';
+      copyJsonBtn.parentElement.insertBefore(btn, copyJsonBtn.nextSibling);
+    }
+
+    function setDebugModeUI(enabled) {
+      const btn = document.getElementById('btn-debug-mode');
+      const label = document.getElementById('debug-mode-label');
+      if (btn) {
+        btn.classList.toggle('debug-mode-active', !!enabled);
+        btn.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+      }
+      if (label) {
+        label.textContent = enabled ? 'Debug Mode: On' : 'Debug Mode: Off';
+      }
+    }
+
+    function setDebugMode(enabled) {
+      vwdDebugEnabled = !!enabled;
+      try {
+        localStorage.setItem(VWD_DEBUG_FLAG_KEY, vwdDebugEnabled ? '1' : '0');
+      } catch (_e) {
+        // noop
+      }
+      setDebugModeUI(vwdDebugEnabled);
+      if (vwdDebugEnabled) {
+        console.info('[VWD] Debug mode enabled');
+      } else {
+        console.info('[VWD] Debug mode disabled');
+      }
+    }
+
+    function toggleDebugMode() {
+      setDebugMode(!vwdDebugEnabled);
+      setStatus(true, 'Debug mode: ' + (vwdDebugEnabled ? 'on' : 'off'));
+      if (vwdDebugEnabled && typeof vwdDebugLog === 'function') {
+        vwdDebugLog('mode', { enabled: true });
+      }
+    }
+
+    function vwdDebugLog(category, payload) {
+      if (!vwdDebugEnabled) return;
+      const ts = new Date().toISOString();
+      const payloadText = (() => {
+        if (payload === undefined) return '';
+        if (typeof payload === 'string') return payload;
+        try {
+          return JSON.stringify(payload);
+        } catch (_e) {
+          return String(payload);
+        }
+      })();
+      vwdDebugLogEntries.push({ ts, category, payloadText });
+      if (vwdDebugLogEntries.length > VWD_DEBUG_LOG_MAX) {
+        vwdDebugLogEntries.shift();
+      }
+      if (payload === undefined) {
+        console.debug('[VWD][' + category + ']');
+      } else {
+        console.debug('[VWD][' + category + ']', payload);
+      }
+    }
+
+    function getDebugLogText() {
+      const lines = vwdDebugLogEntries.map((entry) => {
+        const payload = entry.payloadText || '';
+        return entry.ts + ' [VWD][' + entry.category + ']' + (payload ? (' ' + payload) : '');
+      });
+      if (!lines.length) {
+        return `VisualWaveDrom Debug Logs
+Session started: ${vwdDebugSessionStartedAt}
+No logs captured in this session.`;
+      }
+      return `VisualWaveDrom Debug Logs
+Session started: ${vwdDebugSessionStartedAt}
+Total logs: ${lines.length}
+
+${lines.join('\n')}`;
+    }
+
+    function copyDebugLogsToClipboard() {
+      const btn = document.getElementById('btn-copy-debug-log');
+      const labelEl = btn && btn.querySelector('.btn-copy-label');
+      const originalLabel = labelEl ? labelEl.textContent : '复制调试日志';
+      const text = getDebugLogText();
+      copyTextWithFallback(text)
+        .then(() => {
+          setStatus(true, `调试日志已复制（${vwdDebugLogEntries.length} 条）`);
+          if (btn) {
+            btn.classList.add('copied');
+            if (labelEl) labelEl.textContent = '已复制';
+            setTimeout(() => {
+              btn.classList.remove('copied');
+              if (labelEl) labelEl.textContent = originalLabel;
+            }, 1500);
+          }
+        })
+        .catch(() => {
+          setStatus(false, '复制调试日志失败');
+          if (labelEl) {
+            labelEl.textContent = originalLabel;
+          }
+        });
+    }
 
     function vwdMark(label) {
       vwdPerfMarks.push({ label, t: performance.now() });
@@ -3775,15 +3944,99 @@ function getDefaultJson() {
       nameText.addEventListener('click', (e) => onNameClick(e, nameText));
     }
 
-    function startGroupLabelInlineEdit(textEl, group, anchorEl, groupIndex) {
-      if (inlineEditActive || !group) return;
+    function startGroupLabelInlineEdit(textEl, group, anchorEl, groupIndex, inputEvent) {
+      const oldText = String(textEl && textEl.textContent || '');
+      if (inlineEditActive) {
+        vwdDebugLog('group-label', {
+          phase: 'inline-open-blocked',
+          reason: 'inline-edit-active',
+          groupIndex,
+          oldText
+        });
+        return;
+      }
+      if (!group) {
+        vwdDebugLog('group-label', {
+          phase: 'inline-open-blocked',
+          reason: 'group-missing',
+          groupIndex,
+          oldText
+        });
+        return;
+      }
+      const anchor = anchorEl || textEl;
+      if (!anchor || typeof anchor.getBoundingClientRect !== 'function') {
+        vwdDebugLog('group-label', {
+          phase: 'inline-open-blocked',
+          reason: 'anchor-missing',
+          groupIndex,
+          oldText
+        });
+        return;
+      }
+      vwdDebugLog('group-label', {
+        phase: 'inline-start',
+        groupIndex,
+        oldLabel: group && group.label,
+        text: oldText
+      });
       inlineEditActive = true;
       const idx = Number.isFinite(groupIndex) ? groupIndex : -1;
 
       const oldValue = group.label === undefined ? '分组' : group.label;
-      const anchor = anchorEl || textEl;
       const rect = anchor.getBoundingClientRect();
       const panelRect = wavePanel.getBoundingClientRect();
+      const fallbackByEvent = inputEvent && Number.isFinite(inputEvent.clientX) && Number.isFinite(inputEvent.clientY);
+      let left = rect.left;
+      let top = rect.top;
+      let width = rect.width;
+      let height = rect.height;
+
+      if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(height) || height <= 0) {
+        if (fallbackByEvent) {
+          left = inputEvent.clientX - 90;
+          top = inputEvent.clientY - 12;
+          width = 64;
+          height = 22;
+        } else {
+          vwdDebugLog('group-label', {
+            phase: 'inline-open-blocked',
+            reason: 'invalid-anchor-rect',
+            rect: {
+              left: rect.left,
+              top: rect.top,
+              width: rect.width,
+              height: rect.height
+            },
+            fallbackByEvent,
+            groupIndex
+          });
+          inlineEditActive = false;
+          return;
+        }
+      }
+
+      if (!Number.isFinite(left) || !Number.isFinite(top) || !Number.isFinite(width) || !Number.isFinite(height)) {
+        vwdDebugLog('group-label', {
+          phase: 'inline-open-blocked',
+          reason: 'invalid-overlay-rect',
+          rect: {
+            left: rect.left,
+            top: rect.top,
+            width: rect.width,
+            height: rect.height
+          },
+          groupIndex
+        });
+        inlineEditActive = false;
+        return;
+      }
+
+      const overlayLeft = Math.round(left - panelRect.left + wavePanel.scrollLeft);
+      const overlayTop = Math.round(top - panelRect.top + wavePanel.scrollTop);
+      const overlayWidth = Math.max(width + 16, 64);
+      const overlayHeight = Math.max(height + 4, 22);
+
       const overlay = document.createElement('input');
       overlay.className = 'wave-text-edit-overlay';
       overlay.type = 'text';
@@ -3791,12 +4044,19 @@ function getDefaultJson() {
       overlay.autocomplete = 'off';
       overlay.setAttribute('autocomplete', 'off');
       overlay.spellcheck = false;
-      overlay.style.left = (rect.left - panelRect.left + wavePanel.scrollLeft) + 'px';
-      overlay.style.top = (rect.top - panelRect.top + wavePanel.scrollTop) + 'px';
-      overlay.style.width = Math.max(rect.width + 16, 64) + 'px';
-      overlay.style.height = Math.max(rect.height + 4, 22) + 'px';
+      overlay.style.left = overlayLeft + 'px';
+      overlay.style.top = overlayTop + 'px';
+      overlay.style.position = 'absolute';
+      overlay.style.zIndex = '10000';
+      overlay.style.width = overlayWidth + 'px';
+      overlay.style.height = overlayHeight + 'px';
+      overlay.style.boxSizing = 'border-box';
 
-      wavePanel.appendChild(overlay);
+      // Remove stale inline editors if any before opening a new one.
+      document.querySelectorAll('.wave-text-edit-overlay').forEach((prev) => {
+        if (prev !== overlay && prev.parentElement) prev.remove();
+      });
+      document.body.appendChild(overlay);
       overlay.focus();
       overlay.select();
 
@@ -3805,6 +4065,11 @@ function getDefaultJson() {
         if (committed) return;
         committed = true;
         const newVal = overlay.value;
+        vwdDebugLog('group-label', {
+          phase: 'inline-commit',
+          groupIndex: idx,
+          newVal
+        });
         overlay.remove();
         inlineEditActive = false;
         if (newVal === oldValue) return;
@@ -4003,11 +4268,17 @@ function getDefaultJson() {
     function attachGroupInteractivity(jsonText) {
       const svg = waveContainer.querySelector('svg');
       if (!svg) return;
+      vwdDebugLog('group-label', {
+        phase: 'attach-start',
+        hasText: typeof editor.value === 'string',
+        jsonTextLength: jsonText ? jsonText.length : 0
+      });
 
       const groupMap = buildGroupSourceMap(jsonText);
       const lanes = getWaveLaneGroups(svg);
       if (!groupMap.length) {
         refreshGroupSelection(svg, groupMap);
+        vwdDebugLog('group-label', { phase: 'attach-empty', groupCount: 0 });
         return;
       }
 
@@ -4023,6 +4294,7 @@ function getDefaultJson() {
         delete el.dataset.vwdGroupLabel;
         delete el.dataset.vwdGroupLabelStart;
         delete el.dataset.vwdGroupLabelEnd;
+        delete el.dataset.vwdGroupPath;
         delete el.dataset.vwdGroupBound;
       });
 
@@ -4043,6 +4315,243 @@ function getDefaultJson() {
         const y = parseFloat(textEl.getAttribute('y') || '0');
         return { textEl, value, y };
       }).filter(Boolean);
+
+      const openGroupLabelEditor = (inputEvent, idx, explicitStart, explicitEnd, labelEl, fallbackGroupIndex) => {
+        vwdDebugLog('group-label', {
+          phase: 'open-editor',
+          idx,
+          explicitStart,
+          explicitEnd,
+          fallbackGroupIndex,
+          label: labelEl ? String((labelEl.textContent || '').trim()) : ''
+        });
+        const currentGroupMap = buildGroupSourceMap(editor.value || '');
+        let selectableGroupIndex = Number.isFinite(fallbackGroupIndex) ? fallbackGroupIndex : idx;
+        if ((!Number.isFinite(selectableGroupIndex) || selectableGroupIndex < 0 || selectableGroupIndex >= currentGroupMap.length)
+          && Number.isFinite(explicitStart)
+          && Number.isFinite(explicitEnd)) {
+          const byRange = currentGroupMap.find((g) => g.labelStart === explicitStart && g.labelEnd === explicitEnd);
+          if (byRange) selectableGroupIndex = currentGroupMap.indexOf(byRange);
+        }
+        if (!Number.isFinite(selectableGroupIndex) || selectableGroupIndex < 0 || currentGroupMap.length === 0 || selectableGroupIndex >= currentGroupMap.length) {
+          vwdDebugLog('group-label', {
+            phase: 'open-editor-abort',
+            reason: 'index-out-of-range',
+            selectableGroupIndex,
+            fallbackGroupIndex,
+            idx,
+            count: currentGroupMap.length
+          });
+          return;
+        }
+        if (inputEvent && inputEvent.type) {
+          vwdDebugLog('group-label', {
+            phase: 'open-editor-ok',
+            selectableGroupIndex,
+            inputType: inputEvent.type,
+            count: currentGroupMap.length
+          });
+        }
+
+        const selectedGroup = currentGroupMap[selectableGroupIndex];
+        const editableGroup = selectedGroup && Number.isFinite(explicitStart) && Number.isFinite(explicitEnd)
+          ? Object.assign({}, selectedGroup, {
+            labelStart: explicitStart,
+            labelEnd: explicitEnd
+          })
+          : selectedGroup;
+        if (!editableGroup) {
+          vwdDebugLog('group-label', {
+            phase: 'open-editor-abort',
+            reason: 'editable-group-missing',
+            selectableGroupIndex,
+            explicitStart,
+            explicitEnd,
+            count: currentGroupMap.length
+          });
+          return;
+        }
+
+        selectedGroupIndex = selectableGroupIndex;
+        selectedSignalIndex = -1;
+        selectedWaveColumnIndex = -1;
+        const svg = waveContainer.querySelector('svg');
+        if (svg) {
+          refreshGroupSelection(svg, currentGroupMap);
+          const groupForHint = currentGroupMap[selectableGroupIndex];
+          requestAnimationFrame(() => {
+            if (!groupForHint || app.classList.contains('reading-mode')) return;
+            const sourceText = editor.value || '';
+            const before = sourceText.slice(0, groupForHint.start);
+            const line = before.split('\n').length;
+            const lineHeight = 13 * 1.6;
+            editor.scrollTop = Math.max(0, (line - 3) * lineHeight);
+            syncLineNumberScroll();
+          });
+        }
+        updateLegendAvailability();
+
+        inputEvent?.preventDefault?.();
+        inputEvent?.stopPropagation?.();
+        startGroupLabelInlineEdit(labelEl, editableGroup, labelEl, selectableGroupIndex, inputEvent);
+      };
+
+      const resolveGroupIndexForLabelClick = (rawIndex, explicitStart, explicitEnd, labelEl) => {
+        const currentGroupMap = buildGroupSourceMap(editor.value || '');
+        if (Number.isFinite(explicitStart) && Number.isFinite(explicitEnd)) {
+          const byRange = currentGroupMap.find((g) => g.labelStart === explicitStart && g.labelEnd === explicitEnd);
+          if (byRange) {
+            const matchIndex = currentGroupMap.indexOf(byRange);
+            vwdDebugLog('group-label', {
+              phase: 'resolve',
+              method: 'range',
+              rawIndex,
+              explicitStart,
+              explicitEnd,
+              resolvedIndex: matchIndex
+            });
+            return matchIndex;
+          }
+        }
+
+        if (labelEl && labelEl.dataset && typeof labelEl.dataset.vwdGroupPath === 'string') {
+          const pathText = labelEl.dataset.vwdGroupPath;
+          const path = pathText.split(',').map((n) => {
+            const idx = parseInt(n, 10);
+            return Number.isFinite(idx) ? idx : -1;
+          }).filter((idx) => idx >= 0);
+          if (path.length) {
+            const byPath = currentGroupMap.find((g) => Array.isArray(g.path)
+              && g.path.length === path.length
+              && g.path.every((value, i) => value === path[i]));
+            if (byPath) {
+              const matchIndex = currentGroupMap.indexOf(byPath);
+              vwdDebugLog('group-label', {
+                phase: 'resolve',
+                method: 'path',
+                rawIndex,
+                resolvedIndex: matchIndex,
+                path
+              });
+              return matchIndex;
+            }
+          }
+        }
+
+        if (Number.isFinite(rawIndex) && rawIndex >= 0 && rawIndex < currentGroupMap.length) {
+          return rawIndex;
+        }
+
+        const labelText = String((labelEl && labelEl.textContent) || '').trim();
+        if (labelText) {
+          const byText = currentGroupMap.find((g) => String(g.label || '').trim() === labelText);
+          if (byText) {
+            const matchIndex = currentGroupMap.indexOf(byText);
+            vwdDebugLog('group-label', {
+              phase: 'resolve',
+              method: 'text',
+              rawIndex,
+              resolvedIndex: matchIndex,
+              labelText
+            });
+            return matchIndex;
+          }
+        }
+
+        vwdDebugLog('group-label', {
+          phase: 'resolve',
+          method: 'fallback-fail',
+          rawIndex,
+          explicitStart,
+          explicitEnd,
+          labelText: String((labelEl && labelEl.textContent) || '').trim()
+        });
+        return -1;
+      };
+
+      const handleGroupLabelAction = (inputEvent, idx, explicitStart, explicitEnd, labelEl, forceOpen) => {
+        if (inlineEditActive || app.classList.contains('reading-mode')) return;
+        if (groupPickActive) {
+          clearSelectedGroupState();
+        }
+        if (forceOpen === undefined) forceOpen = false;
+
+        const resolvedIndex = resolveGroupIndexForLabelClick(idx, explicitStart, explicitEnd, labelEl);
+        if (!Number.isFinite(resolvedIndex) || resolvedIndex < 0) {
+          setStatus(false, '未定位到当前分组，请先选中分组标签或重渲染');
+          vwdDebugLog('group-label', {
+            phase: 'action',
+            step: 'resolve-failed',
+            idx,
+            explicitStart,
+            explicitEnd
+          });
+          return;
+        }
+
+        const freshGroupMap = buildGroupSourceMap(editor.value || '');
+        if (resolvedIndex < 0 || resolvedIndex >= freshGroupMap.length) return;
+        vwdDebugLog('group-label', {
+          phase: 'action',
+          step: 'selected',
+          idx,
+          resolvedIndex,
+          forceOpen,
+          groupLabel: freshGroupMap[resolvedIndex] ? freshGroupMap[resolvedIndex].label : ''
+        });
+
+        const shouldOpenEditor = !!forceOpen;
+        selectedGroupIndex = resolvedIndex;
+        selectedSignalIndex = -1;
+        selectedWaveColumnIndex = -1;
+        const svg = waveContainer.querySelector('svg');
+        if (svg) {
+          refreshGroupSelection(svg, freshGroupMap);
+          requestAnimationFrame(() => scrollEditorToGroup(freshGroupMap[resolvedIndex]));
+        }
+        updateLegendAvailability();
+        if (!shouldOpenEditor) {
+          setStatus(true, '已选中分组：' + (freshGroupMap[resolvedIndex].label || '分组') + '（双击可编辑标签）');
+        }
+        if (!shouldOpenEditor) return;
+
+        vwdDebugLog('group-label', {
+          phase: 'action',
+          step: 'open-inline',
+          idx,
+          resolvedIndex
+        });
+        if (inputEvent?.preventDefault) {
+          inputEvent.preventDefault();
+        }
+        try {
+          openGroupLabelEditor(inputEvent, idx, explicitStart, explicitEnd, labelEl, resolvedIndex);
+        } catch (err) {
+          vwdDebugLog('group-label', {
+            phase: 'action',
+            step: 'open-inline-error',
+            idx,
+            resolvedIndex,
+            error: String(err && err.message ? err.message : err)
+          });
+          inlineEditActive = false;
+          setStatus(false, '分组标签编辑打开失败，请重试');
+        }
+      };
+
+      if (svg.__vwdGroupLabelDelegatedBound) {
+        if (typeof svg.__vwdGroupLabelDelegatedClick === 'function') {
+          svg.removeEventListener('click', svg.__vwdGroupLabelDelegatedClick, true);
+        }
+        if (typeof svg.__vwdGroupLabelDelegatedDbl === 'function') {
+          svg.removeEventListener('dblclick', svg.__vwdGroupLabelDelegatedDbl, true);
+        }
+        delete svg.__vwdGroupLabelDelegatedClick;
+        delete svg.__vwdGroupLabelDelegatedDbl;
+        svg.__vwdGroupLabelDelegatedBound = false;
+      }
+
+      const allGroupLabelTargets = [];
 
       groupMap.forEach((group, index) => {
         const label = String(group.label || '').trim();
@@ -4069,9 +4578,29 @@ function getDefaultJson() {
           .filter((item) => item.value === label && item.y >= minY - 35 && item.y <= maxY + 35)
           .sort((a, b) => a.distance - b.distance)[0];
 
-        let effectiveLabelEl = null;
+        const labelTargets = [];
+        let popupAnchor = null;
+        let fallbackRect;
         if (labelCandidate) {
-          effectiveLabelEl = labelCandidate.textEl;
+          popupAnchor = labelCandidate.textEl;
+          labelTargets.push(labelCandidate.textEl);
+          try {
+            const box = labelCandidate.textEl.getBBox();
+            const hitRect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+            hitRect.setAttribute('x', box.x - 2);
+            hitRect.setAttribute('y', box.y - 2);
+            hitRect.setAttribute('width', Math.max(48, box.width + 8));
+            hitRect.setAttribute('height', Math.max(18, box.height + 4));
+            hitRect.setAttribute('fill', 'transparent');
+            hitRect.setAttribute('pointer-events', 'all');
+            hitRect.setAttribute('class', 'wave-group-label-fallback');
+            hitRect.setAttribute('aria-label', '分组: ' + label + ' 标签');
+            svg.appendChild(hitRect);
+            fallbackRect = hitRect;
+            labelTargets.push(hitRect);
+          } catch (_e) {
+            // ignore fallback rect creation failure
+          }
         } else {
           const fallbackLane = lanes[group.rowStart];
           if (!fallbackLane) return;
@@ -4089,59 +4618,101 @@ function getDefaultJson() {
           hitRect.setAttribute('fill', 'transparent');
           hitRect.setAttribute('pointer-events', 'all');
           hitRect.setAttribute('class', 'wave-group-label-fallback');
-          hitRect.dataset.vwdGroupIndex = String(index);
-          hitRect.dataset.vwdGroupLabel = '1';
-          hitRect.classList.add('wave-group-label-hit');
           hitRect.setAttribute('aria-label', '分组: ' + label + ' 标签');
           svg.appendChild(hitRect);
-        effectiveLabelEl = hitRect;
-      }
-
-        if (!effectiveLabelEl) return;
-        const isText = effectiveLabelEl.tagName && effectiveLabelEl.tagName.toLowerCase() === 'text';
-        effectiveLabelEl.dataset.vwdGroupIndex = String(index);
-        effectiveLabelEl.dataset.vwdGroupLabel = '1';
-        if (Number.isFinite(group.labelStart)) {
-          effectiveLabelEl.dataset.vwdGroupLabelStart = String(group.labelStart);
-        } else {
-          delete effectiveLabelEl.dataset.vwdGroupLabelStart;
-        }
-        if (Number.isFinite(group.labelEnd)) {
-          effectiveLabelEl.dataset.vwdGroupLabelEnd = String(group.labelEnd);
-        } else {
-          delete effectiveLabelEl.dataset.vwdGroupLabelEnd;
-        }
-        effectiveLabelEl.classList.add('wave-group-label-hit');
-        if (isText) {
-          effectiveLabelEl.style.cursor = 'text';
+          fallbackRect = hitRect;
+          labelTargets.push(hitRect);
         }
 
-        const handler = (e) => {
+        if (!labelTargets.length) return;
+        const labelEditAnchor = popupAnchor || labelTargets[0];
+        if (!labelEditAnchor) return;
+        vwdDebugLog('group-label', {
+          phase: 'attach-targets',
+          index,
+          label,
+          targetCount: labelTargets.length,
+          hasFallback: !!fallbackRect
+        });
+        labelTargets.forEach((targetEl) => {
+          const isText = targetEl.tagName && targetEl.tagName.toLowerCase() === 'text';
+          targetEl.dataset.vwdGroupIndex = String(index);
+          targetEl.dataset.vwdGroupLabel = '1';
+          if (Number.isFinite(group.labelStart)) {
+            targetEl.dataset.vwdGroupLabelStart = String(group.labelStart);
+          } else {
+            delete targetEl.dataset.vwdGroupLabelStart;
+          }
+          if (Number.isFinite(group.labelEnd)) {
+            targetEl.dataset.vwdGroupLabelEnd = String(group.labelEnd);
+          } else {
+            delete targetEl.dataset.vwdGroupLabelEnd;
+          }
+          if (Array.isArray(group.path)) {
+            targetEl.dataset.vwdGroupPath = group.path.join(',');
+          } else {
+            delete targetEl.dataset.vwdGroupPath;
+          }
+          targetEl.dataset.vwdGroupBound = fallbackRect ? '1' : '0';
+          targetEl.setAttribute('pointer-events', 'all');
+          targetEl.classList.add('wave-group-label-hit');
+          if (isText) {
+            targetEl.style.cursor = 'text';
+          } else {
+            targetEl.style.cursor = 'pointer';
+          }
+          allGroupLabelTargets.push(targetEl);
+          targetEl.__vwdGroupLabelAnchor = labelEditAnchor;
+        });
+      });
+
+      allGroupLabelTargets.forEach((targetEl) => {
+        const clickHandler = (e) => {
           e.stopPropagation();
-          if (inlineEditActive || app.classList.contains('reading-mode')) return;
-          const idx = parseInt(effectiveLabelEl.dataset.vwdGroupIndex, 10);
-          const alreadySelected = selectedGroupIndex === idx;
-          if (!setSelectedGroup(idx)) return;
-          if (groupPickActive) return;
-          if (e.shiftKey || e.ctrlKey) return;
-          if (!alreadySelected) return;
-          const anchorGroup = groupMap[idx];
-          const explicitStart = parseInt(effectiveLabelEl.dataset && effectiveLabelEl.dataset.vwdGroupLabelStart, 10);
-          const explicitEnd = parseInt(effectiveLabelEl.dataset && effectiveLabelEl.dataset.vwdGroupLabelEnd, 10);
-          const editableGroup = anchorGroup && Number.isFinite(explicitStart) && Number.isFinite(explicitEnd)
-            ? Object.assign({}, anchorGroup, {
-              labelStart: explicitStart,
-              labelEnd: explicitEnd
-            })
-            : anchorGroup;
-          startGroupLabelInlineEdit(effectiveLabelEl, editableGroup, effectiveLabelEl, idx);
+          const idx = parseInt(targetEl.dataset.vwdGroupIndex, 10);
+          const explicitStart = parseInt(targetEl.dataset.vwdGroupLabelStart, 10);
+          const explicitEnd = parseInt(targetEl.dataset.vwdGroupLabelEnd, 10);
+          const anchorEl = targetEl.__vwdGroupLabelAnchor || targetEl;
+          const shouldOpen = e.detail >= 2;
+          vwdDebugLog('group-label', {
+            phase: 'click',
+            idx,
+            explicitStart,
+            explicitEnd,
+            shouldOpen,
+            clickDetail: e.detail,
+            eventType: e.type
+          });
+          handleGroupLabelAction(e, idx, explicitStart, explicitEnd, anchorEl, shouldOpen);
         };
-        const previousHandler = effectiveLabelEl.__vwdGroupLabelClick;
-        if (previousHandler) {
-          effectiveLabelEl.removeEventListener('click', previousHandler);
-        }
-        effectiveLabelEl.__vwdGroupLabelClick = handler;
-        effectiveLabelEl.addEventListener('click', handler);
+
+        const dblClickHandler = (e) => {
+          e.stopPropagation();
+          const idx = parseInt(targetEl.dataset.vwdGroupIndex, 10);
+          const explicitStart = parseInt(targetEl.dataset.vwdGroupLabelStart, 10);
+          const explicitEnd = parseInt(targetEl.dataset.vwdGroupLabelEnd, 10);
+          const anchorEl = targetEl.__vwdGroupLabelAnchor || targetEl;
+          vwdDebugLog('group-label', {
+            phase: 'click',
+            idx,
+            explicitStart,
+            explicitEnd,
+            shouldOpen: true,
+            clickDetail: e.detail,
+            eventType: e.type
+          });
+          handleGroupLabelAction(e, idx, explicitStart, explicitEnd, anchorEl, true);
+        };
+
+        const previousClick = targetEl.__vwdGroupLabelDirectClick;
+        if (previousClick) targetEl.removeEventListener('click', previousClick);
+        targetEl.__vwdGroupLabelDirectClick = clickHandler;
+        targetEl.addEventListener('click', clickHandler);
+
+        const previousDblClick = targetEl.__vwdGroupLabelDirectDbl;
+        if (previousDblClick) targetEl.removeEventListener('dblclick', previousDblClick);
+        targetEl.__vwdGroupLabelDirectDbl = dblClickHandler;
+        targetEl.addEventListener('dblclick', dblClickHandler);
       });
 
       refreshGroupSelection(svg, groupMap);
@@ -4188,10 +4759,11 @@ function getDefaultJson() {
         overlay.remove();
         inlineEditActive = false;
         if (newVal !== oldValue) {
-          if (text.length <= 500000) pushUndoBeforeChange();
-          const mapBefore = buildSignalSourceMap(editor.value);
+          const currentText = editor.value || '';
+          if (currentText.length <= 500000) pushUndoBeforeChange();
+          const mapBefore = buildSignalSourceMap(currentText);
           const laneIdx = mapBefore.findIndex(m => m.start === entry.start);
-          const newText = replaceFieldInSource(editor.value, entry, field, newVal, dataIdx);
+          const newText = replaceFieldInSource(currentText, entry, field, newVal, dataIdx);
           const map = buildSignalSourceMap(newText);
           const updated = laneIdx >= 0 ? map[laneIdx] : map.find(m => m.signal.name === newVal);
           applyEditorChange(newText, updated ? updated.start : editor.selectionStart, updated ? updated.end : undefined);
@@ -4249,8 +4821,9 @@ function getDefaultJson() {
         overlay.remove();
         inlineEditActive = false;
         if (newVal !== oldValue) {
-          if (text.length <= 500000) pushUndoBeforeChange();
-          const newText = replaceHeadFootTextInSource(editor.value, field, newVal);
+          const currentText = editor.value || '';
+          if (currentText.length <= 500000) pushUndoBeforeChange();
+          const newText = replaceHeadFootTextInSource(currentText, field, newVal);
           const block = findTopLevelKeyBlock(newText, field);
           applyEditorChange(
             newText,
@@ -4338,8 +4911,9 @@ function getDefaultJson() {
         overlay.remove();
         inlineEditActive = false;
         if (newVal !== oldValue) {
-          if (text.length <= 500000) pushUndoBeforeChange();
-          const newText = replaceGlobalDescribeInSource(editor.value, newVal);
+          const currentText = editor.value || '';
+          if (currentText.length <= 500000) pushUndoBeforeChange();
+          const newText = replaceGlobalDescribeInSource(currentText, newVal);
           applyEditorChange(newText, editor.selectionStart, editor.selectionEnd);
           setStatus(true, '已复制到剪贴板');
         }
@@ -5434,9 +6008,16 @@ function getDefaultJson() {
 
     window.addEventListener('beforeunload', flushPersistEditorJson);
 
+    ensureDebugModeButton();
+    ensureCopyDebugLogButton();
+
     document.getElementById('btn-reading-mode').addEventListener('click', enterReadingMode);
     document.getElementById('btn-undo').addEventListener('click', undo);
     document.getElementById('btn-redo').addEventListener('click', redo);
+    const debugModeBtn = document.getElementById('btn-debug-mode');
+    if (debugModeBtn) {
+      debugModeBtn.addEventListener('click', toggleDebugMode);
+    }
     hscaleInput.addEventListener('change', applyHscaleFromInput);
     hscaleInput.addEventListener('blur', applyHscaleFromInput);
     hscaleInput.addEventListener('keydown', (e) => {
@@ -5503,6 +6084,10 @@ function getDefaultJson() {
     document.getElementById('btn-format-json').addEventListener('click', formatEditorJson);
     document.getElementById('btn-export-json').addEventListener('click', exportWaveJson);
     document.getElementById('btn-import-json').addEventListener('click', requestImportWaveJson);
+    const copyDebugLogBtn = document.getElementById('btn-copy-debug-log');
+    if (copyDebugLogBtn) {
+      copyDebugLogBtn.addEventListener('click', copyDebugLogsToClipboard);
+    }
     document.getElementById('json-import-input').addEventListener('change', (e) => {
       importWaveJsonFile(e.target.files && e.target.files[0]);
     });
@@ -5561,6 +6146,7 @@ function getDefaultJson() {
       updateEdgeLabelEditUI();
       restoreBackBtnPosition();
       updateConnectionPointStatusUI();
+      setDebugModeUI(vwdDebugEnabled);
       setStatus(true, waveEditModeLabel());
     });
 
