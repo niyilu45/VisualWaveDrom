@@ -1307,6 +1307,13 @@
       font-size: 13px;
       outline: none;
       box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+      overflow: auto;
+      line-height: 1.35;
+      resize: none;
+    }
+
+    .wave-text-edit-overlay[rows] {
+      min-height: 48px;
     }
 
     /* Responsive */

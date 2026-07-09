@@ -252,6 +252,7 @@ function getDefaultJson() {
     let lastSavedContent = getDefaultJson();
     let undoBurstCaptured = false;
     let inlineEditActive = false;
+    let activeInlineEditState = null;
     let pendingNameEditSignalIndex = -1;
     let selectedSignalIndex = -1;
     let selectedWaveColumnIndex = -1;
@@ -404,6 +405,36 @@ function getDefaultJson() {
         console.debug('[VWD][' + category + ']');
       } else {
         console.debug('[VWD][' + category + ']', payload);
+      }
+    }
+
+    function setActiveInlineEditState(state) {
+      activeInlineEditState = state ? Object.assign({}, state) : null;
+      vwdDebugLog('inline-edit', state ? {
+        phase: 'active-state',
+        state: Object.assign({}, state, { overlayValueLen: state && state.overlay && state.overlay.value != null ? state.overlay.value.length : -1 })
+      } : {
+        phase: 'active-state-clear'
+      });
+    }
+
+    function insertInlineNewline(overlay, event) {
+      const start = typeof overlay.selectionStart === 'number' ? overlay.selectionStart : overlay.value.length;
+      const end = typeof overlay.selectionEnd === 'number' ? overlay.selectionEnd : start;
+      overlay.value = overlay.value.slice(0, start) + '\n' + overlay.value.slice(end);
+      const nextPos = start + 1;
+      overlay.selectionStart = nextPos;
+      overlay.selectionEnd = nextPos;
+      if (event && event.type) {
+        vwdDebugLog('inline-edit', {
+          phase: 'insert-newline',
+          method: 'manual',
+          eventType: event.type,
+          start,
+          end,
+          key: event.key,
+          code: event.code
+        });
       }
     }
 
@@ -1015,6 +1046,29 @@ ${lines.join('\n')}`;
       return String(node);
     }
 
+    function renderMultilineSvgText(textEl, value) {
+      const raw = value == null ? '' : String(value).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+      const lines = raw.split('\n');
+      while (textEl.firstChild) {
+        textEl.removeChild(textEl.firstChild);
+      }
+      textEl.setAttribute('xml:space', 'preserve');
+      const svgNs = 'http://www.w3.org/2000/svg';
+      const xAttr = textEl.getAttribute('x') || '0';
+      lines.forEach((line, idx) => {
+        const tspan = document.createElementNS(svgNs, 'tspan');
+        tspan.textContent = line;
+        if (idx > 0) {
+          tspan.setAttribute('x', xAttr);
+          tspan.setAttribute('dy', '1.2em');
+        }
+        textEl.appendChild(tspan);
+      });
+      if (!lines.length) {
+        textEl.textContent = '';
+      }
+    }
+
     function getHeadFootOldValue(parsed, field) {
       const block = parsed[field];
       if (!block || block.text === undefined) return '';
@@ -1034,23 +1088,25 @@ ${lines.join('\n')}`;
     }
 
     function getGlobalDescribeOldValue(parsed) {
-      if (!parsed || parsed.describe === undefined) return '';
-      return flattenWaveText(parsed.describe);
+      if (!parsed) return '';
+      if (parsed.description !== undefined) return flattenWaveText(parsed.description);
+      if (parsed.describe !== undefined) return flattenWaveText(parsed.describe);
+      return '';
     }
 
     function getSignalDescribeOldValue(signal) {
       if (!signal || typeof signal !== 'object') return '';
       if (signal.description !== undefined) return flattenWaveText(signal.description);
-      if (signal.describe !== undefined) return flattenWaveText(signal.describe);
       return '';
     }
 
     function replaceGlobalDescribeInSource(text, newValue) {
-      const existing = text.match(/"describe"\s*:\s*/);
+      const existing = text.match(/"(?:description|describe)"\s*:\s*/);
       if (existing) {
         const valueStart = existing.index + existing[0].length;
         const valueEnd = findJsonValueEnd(text, valueStart);
-        return text.slice(0, valueStart) + JSON.stringify(newValue) + text.slice(valueEnd);
+        const keyStart = existing.index;
+        return text.slice(0, keyStart) + '"description": ' + JSON.stringify(newValue) + text.slice(valueEnd);
       }
       const rootClose = text.lastIndexOf('}');
       if (rootClose < 0) return text;
@@ -1058,7 +1114,7 @@ ${lines.join('\n')}`;
       const hasContent = /"\w+"\s*:/.test(beforeClose);
       const indent = getIndentAt(text, rootClose) || '';
       const propIndent = indent + '  ';
-      const insertion = (hasContent ? ',\n' : '\n') + propIndent + '"describe": ' + JSON.stringify(newValue) + '\n' + indent;
+      const insertion = (hasContent ? ',\n' : '\n') + propIndent + '"description": ' + JSON.stringify(newValue) + '\n' + indent;
       return beforeClose + insertion + text.slice(rootClose);
     }
 
@@ -1388,13 +1444,11 @@ ${lines.join('\n')}`;
         const inner = getIndentAt(text, entry.start) + '  ';
         return text.slice(0, abs) + ',\n' + inner + '"data": ' + JSON.stringify(dataArr) + text.slice(abs);
       }
-      if (field === 'description' || field === 'describe') {
+      if (field === 'description') {
         const descRe = /"(?:description|describe)"\s*:\s*"([^"\\]|\\.)*"/;
         const existing = slice.match(descRe);
         if (existing) {
-          const existingText = existing[0];
-          const useDescription = existingText.includes('"description"');
-          const key = useDescription ? '"description"' : '"describe"';
+          const key = '"description"';
           const abs = entry.start + existing.index;
           return text.slice(0, abs) + key + ': ' + JSON.stringify(newValue) + text.slice(abs + existing[0].length);
         }
@@ -3993,6 +4047,8 @@ ${lines.join('\n')}`;
 
       if (entry.signal === null || typeof entry.signal !== 'object') return;
       const descValue = getSignalDescribeOldValue(entry.signal);
+      const displayDesc = descValue || '点击添加波形说明';
+
       const drawGroup = lane.querySelector('[id^="wavelane_draw_"]');
       if (app.classList.contains('reading-mode')) return;
 
@@ -4008,12 +4064,13 @@ ${lines.join('\n')}`;
       }
 
       const describeText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-      describeText.setAttribute('class', 'wave-describe-text' + (descValue ? '' : ' empty'));
+      describeText.setAttribute('class', 'wave-describe-text');
       describeText.setAttribute('x', x + '');
       describeText.setAttribute('y', (y + (height || 16) + 5) + '');
       describeText.setAttribute('data-vwdDescribeBound', '1');
       describeText.setAttribute('text-anchor', 'start');
-      describeText.textContent = descValue || '点击添加说明';
+      if (!descValue) describeText.classList.add('empty');
+      renderMultilineSvgText(describeText, displayDesc);
       if (drawGroup && drawGroup.parentNode) {
         drawGroup.parentNode.insertBefore(describeText, drawGroup.nextSibling);
       } else {
@@ -4857,6 +4914,20 @@ ${lines.join('\n')}`;
     function startInlineEdit(textEl, entry, field, dataIdx, anchorEl) {
       if (inlineEditActive) return;
       inlineEditActive = true;
+      setActiveInlineEditState({
+        kind: 'inline',
+        field,
+        dataIdx,
+        entryStart: entry && entry.start,
+        entryEnd: entry && entry.end
+      });
+      vwdDebugLog('inline-edit', {
+        phase: 'open-start',
+        field,
+        dataIdx,
+        isDescription: field === 'description',
+        hasEntry: !!entry
+      });
 
       let oldValue;
       if (field === 'name') {
@@ -4865,26 +4936,35 @@ ${lines.join('\n')}`;
         oldValue = (entry.signal.data && entry.signal.data[dataIdx] !== undefined
           ? entry.signal.data[dataIdx]
           : textEl.textContent);
-      } else if (field === 'description' || field === 'describe') {
+      } else if (field === 'description') {
         oldValue = getSignalDescribeOldValue(entry.signal);
       } else {
         oldValue = textEl.textContent;
       }
 
+      const isDescriptionField = (field === 'description');
       const anchor = anchorEl || textEl;
       const rect = anchor.getBoundingClientRect();
       const panelRect = wavePanel.getBoundingClientRect();
-      const overlay = document.createElement('input');
+      const overlay = isDescriptionField
+        ? document.createElement('textarea')
+        : document.createElement('input');
       overlay.className = 'wave-text-edit-overlay';
-      overlay.type = 'text';
+      if (!isDescriptionField) overlay.type = 'text';
       overlay.value = oldValue;
       overlay.autocomplete = 'off';
       overlay.setAttribute('autocomplete', 'off');
       overlay.spellcheck = false;
       overlay.style.left = (rect.left - panelRect.left + wavePanel.scrollLeft) + 'px';
       overlay.style.top = (rect.top - panelRect.top + wavePanel.scrollTop) + 'px';
-      overlay.style.width = Math.max(rect.width + 16, 48) + 'px';
-      overlay.style.height = Math.max(rect.height + 4, 22) + 'px';
+      overlay.style.width = Math.max(rect.width + 16, isDescriptionField ? 180 : 48) + 'px';
+      overlay.style.height = Math.max(rect.height + 4, isDescriptionField ? 86 : 22) + 'px';
+
+      if (isDescriptionField) {
+        overlay.rows = 4;
+        overlay.style.resize = 'vertical';
+        overlay.style.whiteSpace = 'pre-wrap';
+      }
 
       wavePanel.appendChild(overlay);
       overlay.focus();
@@ -4899,8 +4979,16 @@ ${lines.join('\n')}`;
         if (committed) return;
         committed = true;
         const newVal = overlay.value;
+        vwdDebugLog('inline-edit', {
+          phase: 'commit',
+          field,
+          targetValueLen: newVal.length,
+          oldValueLen: oldValue ? oldValue.length : 0,
+          sameValue: newVal === oldValue
+        });
         overlay.remove();
         inlineEditActive = false;
+        setActiveInlineEditState(null);
         if (newVal !== oldValue) {
           const currentText = editor.value || '';
           if (currentText.length <= 500000) pushUndoBeforeChange();
@@ -4912,20 +5000,42 @@ ${lines.join('\n')}`;
           applyEditorChange(newText, updated ? updated.start : editor.selectionStart, updated ? updated.end : undefined);
           if (field === 'name') setStatus(true, '已更新名称');
           else if (field === 'data') setStatus(true, '已更新数据标签');
-          else if (field === 'description' || field === 'describe') setStatus(true, '已更新波形说明');
+          else if (field === 'description') setStatus(true, '已更新波形说明');
           else setStatus(true, '已更新字段');
         }
       };
 
       overlay.addEventListener('blur', commit);
       overlay.addEventListener('keydown', (e) => {
-        if (handleUndoRedoShortcut(e)) return;
+        if (!isDescriptionField && handleUndoRedoShortcut(e)) return;
         e.stopPropagation();
-        if (e.key === 'Enter') { e.preventDefault(); commit(); }
+        vwdDebugLog('inline-edit', {
+          phase: 'key-down',
+          field,
+          isDescription: isDescriptionField,
+          key: e.key,
+          code: e.code,
+          ctrlKey: e.ctrlKey,
+          metaKey: e.metaKey,
+          altKey: e.altKey,
+          shiftKey: e.shiftKey,
+          targetValueLen: overlay.value.length
+        });
+        const isSubmitKey = (e.key === 'Enter' || e.key === 'NumpadEnter');
+        if (isSubmitKey) {
+          if (isDescriptionField && (e.ctrlKey || e.metaKey)) {
+            e.preventDefault();
+            insertInlineNewline(overlay, e);
+            return;
+          }
+          e.preventDefault();
+          commit();
+        }
         if (e.key === 'Escape') {
           committed = true;
           overlay.remove();
           inlineEditActive = false;
+          setActiveInlineEditState(null);
         }
       });
     }
@@ -5024,6 +5134,10 @@ ${lines.join('\n')}`;
     function startGlobalDescribeInlineEdit(textEl) {
       if (inlineEditActive) return;
       inlineEditActive = true;
+      setActiveInlineEditState({
+        kind: 'global-description'
+      });
+      vwdDebugLog('inline-edit', { phase: 'open-start', field: 'description', kind: 'global' });
 
       let parsed;
       try {
@@ -5036,14 +5150,16 @@ ${lines.join('\n')}`;
       const oldValue = getGlobalDescribeOldValue(parsed);
       const rect = textEl.getBoundingClientRect();
       const panelRect = wavePanel.getBoundingClientRect();
-      const overlay = document.createElement('input');
+      const overlay = document.createElement('textarea');
       overlay.className = 'wave-text-edit-overlay';
-      overlay.type = 'text';
       overlay.value = oldValue;
       overlay.style.left = (rect.left - panelRect.left + wavePanel.scrollLeft) + 'px';
       overlay.style.top = (rect.top - panelRect.top + wavePanel.scrollTop) + 'px';
       overlay.style.width = Math.max(rect.width + 16, 180) + 'px';
-      overlay.style.height = Math.max(rect.height + 4, 22) + 'px';
+      overlay.style.height = Math.max(rect.height + 4, 86) + 'px';
+      overlay.rows = 4;
+      overlay.style.resize = 'vertical';
+      overlay.style.whiteSpace = 'pre-wrap';
 
       wavePanel.appendChild(overlay);
       overlay.focus();
@@ -5054,26 +5170,54 @@ ${lines.join('\n')}`;
         if (committed) return;
         committed = true;
         const newVal = overlay.value;
+        vwdDebugLog('inline-edit', {
+          phase: 'commit',
+          field: 'description',
+          isGlobal: true,
+          targetValueLen: newVal.length,
+          oldValueLen: oldValue ? oldValue.length : 0,
+          sameValue: newVal === oldValue
+        });
         overlay.remove();
         inlineEditActive = false;
+        setActiveInlineEditState(null);
         if (newVal !== oldValue) {
           const currentText = editor.value || '';
           if (currentText.length <= 500000) pushUndoBeforeChange();
           const newText = replaceGlobalDescribeInSource(currentText, newVal);
           applyEditorChange(newText, editor.selectionStart, editor.selectionEnd);
-          setStatus(true, '已复制到剪贴板');
+          setStatus(true, '已更新波形说明');
         }
       };
 
       overlay.addEventListener('blur', commit);
       overlay.addEventListener('keydown', (e) => {
-        if (handleUndoRedoShortcut(e)) return;
         e.stopPropagation();
-        if (e.key === 'Enter') { e.preventDefault(); commit(); }
+        vwdDebugLog('inline-edit', {
+          phase: 'key-down',
+          field: 'description',
+          isGlobal: true,
+          key: e.key,
+          code: e.code,
+          ctrlKey: e.ctrlKey,
+          metaKey: e.metaKey,
+          targetValueLen: overlay.value.length
+        });
+        const isSubmitKey = (e.key === 'Enter' || e.key === 'NumpadEnter');
+        if (isSubmitKey) {
+          if (e.ctrlKey || e.metaKey) {
+            e.preventDefault();
+            insertInlineNewline(overlay, e);
+            return;
+          }
+          e.preventDefault();
+          commit();
+        }
         if (e.key === 'Escape') {
           committed = true;
           overlay.remove();
           inlineEditActive = false;
+          setActiveInlineEditState(null);
         }
       });
     }
@@ -5102,7 +5246,7 @@ ${lines.join('\n')}`;
       textEl.setAttribute('y', height - 8);
       textEl.setAttribute('text-anchor', 'middle');
       textEl.setAttribute('class', 'wave-global-describe-text' + (describe ? '' : ' empty'));
-      textEl.textContent = describe || '点击添加波形说明';
+      renderMultilineSvgText(textEl, describe || '点击添加波形说明');
       textEl.addEventListener('click', (e) => {
         e.stopPropagation();
         if (isConnectionPickFlow()) return;
@@ -6205,6 +6349,19 @@ ${lines.join('\n')}`;
     });
 
     if (typeof window !== 'undefined') {
+      window.__vwdSetDebugMode = (enabled) => {
+        setDebugMode(!!enabled);
+      };
+      window.__vwdGetDebugState = () => ({
+        enabled: vwdDebugEnabled,
+        sessionStartedAt: vwdDebugSessionStartedAt,
+        totalLogs: vwdDebugLogEntries.length,
+        inlineEditState: activeInlineEditState
+      });
+      window.__vwdGetDebugLogText = () => getDebugLogText();
+      window.__vwdClearDebugLogs = () => {
+        vwdDebugLogEntries.length = 0;
+      };
       window.__vwdGetConnectionState = () => ({
         connectionPickActive,
         connectionAddSessionActive,
