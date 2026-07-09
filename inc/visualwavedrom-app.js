@@ -38,8 +38,8 @@ function getDefaultJson() {
     const HSCALE_EPS = 1e-6;
 
     const DEFAULT_EDGE_TEMPLATE = '{from}->{to} : {label}';
-    const SIGNAL_DESCRIPTION_X_OFFSET = -24;
-    const SIGNAL_DESCRIPTION_OVERLAY_OFFSET = -24;
+    const SIGNAL_DESCRIPTION_X_OFFSET = 0;
+    const SIGNAL_DESCRIPTION_OVERLAY_OFFSET = 0;
 
     const EDGE_STYLE_PRESETS = [
       {
@@ -5148,8 +5148,9 @@ ${lines.join('\n')}`;
       overlay.autocomplete = 'off';
       overlay.setAttribute('autocomplete', 'off');
       overlay.spellcheck = false;
-      const overlayLeft = (rect.left - panelRect.left + wavePanel.scrollLeft)
-        + (isDescriptionField ? SIGNAL_DESCRIPTION_OVERLAY_OFFSET : 0);
+      const overlayLeft = isDescriptionField
+        ? Math.max(0, wavePanel.scrollLeft)
+        : (rect.left - panelRect.left + wavePanel.scrollLeft);
       if (isDescriptionField) {
         vwdDebugLog('signal-description-layout', {
           phase: 'overlay-left',

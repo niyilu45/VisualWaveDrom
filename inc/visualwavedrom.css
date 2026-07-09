@@ -704,8 +704,8 @@
       overflow: auto;
       display: flex;
       align-items: flex-start;
-      justify-content: center;
-      padding: 24px;
+      justify-content: flex-start;
+      padding: 24px 24px 24px 0;
       position: relative;
     }
 
