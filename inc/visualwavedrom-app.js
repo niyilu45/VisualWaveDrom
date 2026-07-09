@@ -38,8 +38,8 @@ function getDefaultJson() {
     const HSCALE_EPS = 1e-6;
 
     const DEFAULT_EDGE_TEMPLATE = '{from}->{to} : {label}';
-    const SIGNAL_DESCRIPTION_X_OFFSET = -16;
-    const SIGNAL_DESCRIPTION_OVERLAY_OFFSET = -16;
+    const SIGNAL_DESCRIPTION_X_OFFSET = -24;
+    const SIGNAL_DESCRIPTION_OVERLAY_OFFSET = -24;
 
     const EDGE_STYLE_PRESETS = [
       {
@@ -4183,6 +4183,7 @@ ${lines.join('\n')}`;
 
       const describeText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
       describeText.setAttribute('class', 'wave-describe-text');
+      const anchorTextX = parseFloat(anchorText.getAttribute('x') || '0');
       const describeTextX = Number.isFinite(x) ? (x + SIGNAL_DESCRIPTION_X_OFFSET) : x;
       describeText.setAttribute('x', describeTextX + '');
       describeText.setAttribute('y', (y + (height || 16) + 5) + '');
@@ -4190,6 +4191,14 @@ ${lines.join('\n')}`;
       describeText.setAttribute('text-anchor', 'start');
       if (!descValue) describeText.classList.add('empty');
       renderMultilineSvgText(describeText, displayDesc);
+      vwdDebugLog('signal-description-layout', {
+        phase: 'positioned',
+        signal: entry.signal && entry.signal.name ? entry.signal.name : '',
+        drawX: Number.isFinite(x) ? x : null,
+        anchorX: anchorTextX,
+        finalX: describeTextX,
+        offset: SIGNAL_DESCRIPTION_X_OFFSET
+      });
       if (drawGroup && drawGroup.parentNode) {
         drawGroup.parentNode.insertBefore(describeText, drawGroup.nextSibling);
       } else {
@@ -5141,6 +5150,17 @@ ${lines.join('\n')}`;
       overlay.spellcheck = false;
       const overlayLeft = (rect.left - panelRect.left + wavePanel.scrollLeft)
         + (isDescriptionField ? SIGNAL_DESCRIPTION_OVERLAY_OFFSET : 0);
+      if (isDescriptionField) {
+        vwdDebugLog('signal-description-layout', {
+          phase: 'overlay-left',
+          field,
+          rectLeft: rect.left,
+          panelLeft: panelRect.left,
+          scrollLeft: wavePanel.scrollLeft,
+          finalLeft: overlayLeft,
+          offset: SIGNAL_DESCRIPTION_OVERLAY_OFFSET
+        });
+      }
       overlay.style.left = overlayLeft + 'px';
       overlay.style.top = (rect.top - panelRect.top + wavePanel.scrollTop) + 'px';
       overlay.style.width = Math.max(rect.width + 16, isDescriptionField ? 180 : 48) + 'px';
