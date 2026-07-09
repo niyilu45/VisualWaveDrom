@@ -1069,15 +1069,20 @@ ${lines.join('\n')}`;
       while (textEl.firstChild) {
         textEl.removeChild(textEl.firstChild);
       }
+      const resolvedX = textEl.getAttribute('x') || '0';
       textEl.setAttribute('xml:space', 'preserve');
+      textEl.setAttribute('text-anchor', 'start');
+      textEl.setAttribute('style', 'text-anchor: start; text-align: start;');
       const svgNs = 'http://www.w3.org/2000/svg';
-      const xAttr = textEl.getAttribute('x') || '0';
       lines.forEach((line, idx) => {
         const tspan = document.createElementNS(svgNs, 'tspan');
         tspan.textContent = line;
         if (idx > 0) {
-          tspan.setAttribute('x', xAttr);
+          tspan.setAttribute('x', resolvedX);
           tspan.setAttribute('dy', '1.2em');
+        }
+        if (idx === 0) {
+          tspan.setAttribute('x', resolvedX);
         }
         textEl.appendChild(tspan);
       });
