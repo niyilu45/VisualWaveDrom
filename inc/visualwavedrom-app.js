@@ -4053,6 +4053,14 @@ ${lines.join('\n')}`;
       if (app.classList.contains('reading-mode')) return;
 
       let x = parseFloat(anchorText.getAttribute('x') || '-10');
+      try {
+        if (drawGroup && drawGroup.getBBox) {
+          const drawBbox = drawGroup.getBBox();
+          if (Number.isFinite(drawBbox.x)) x = drawBbox.x;
+        }
+      } catch (_e) {
+        // fallback to name text x
+      }
       let y = parseFloat(anchorText.getAttribute('y') || '15');
       let height;
       try {
@@ -4086,6 +4094,60 @@ ${lines.join('\n')}`;
         }
         startInlineEdit(describeText, entry, 'description', undefined, describeText);
       });
+    }
+
+    function fitWaveSvgToContent() {
+      const svg = waveContainer.querySelector('svg');
+      if (!svg) return;
+      svg.setAttribute('overflow', 'visible');
+      svg.style.overflow = 'visible';
+
+      const targetEls = [
+        ...svg.querySelectorAll('text.wave-describe-text'),
+        svg.querySelector('#vwd-global-describe')
+      ].filter(Boolean);
+      if (!targetEls.length) return;
+
+      let maxY = -Infinity;
+      let minX = Infinity;
+      let maxX = -Infinity;
+      targetEls.forEach((el) => {
+        try {
+          const bbox = el.getBBox();
+          if (!bbox || !Number.isFinite(bbox.x) || !Number.isFinite(bbox.y)) return;
+          maxY = Math.max(maxY, bbox.y + bbox.height);
+          minX = Math.min(minX, bbox.x);
+          maxX = Math.max(maxX, bbox.x + bbox.width);
+        } catch (_e) {
+          // ignore
+        }
+      });
+
+      if (!Number.isFinite(maxY) || !Number.isFinite(minX) || !Number.isFinite(maxX)) return;
+
+      const pad = 8;
+      const vb = svg.viewBox && svg.viewBox.baseVal;
+      const hasVB = vb && Number.isFinite(vb.x) && Number.isFinite(vb.width) && Number.isFinite(vb.height);
+      const targetBottom = Math.ceil(maxY + pad);
+      if (hasVB) {
+        if (targetBottom > vb.y + vb.height) {
+          svg.setAttribute('viewBox', `${vb.x} ${vb.y} ${vb.width} ${Math.ceil(targetBottom - vb.y)}`);
+        }
+      } else {
+        const currentHeight = parseFloat(svg.getAttribute('height') || '0');
+        if (Number.isFinite(currentHeight) && targetBottom > currentHeight) {
+          svg.setAttribute('height', String(targetBottom));
+        }
+      }
+
+      const widthTarget = Math.ceil(maxX + pad);
+      if (hasVB && widthTarget > vb.x + vb.width) {
+        svg.setAttribute('viewBox', `${Math.min(vb.x, minX - pad)} ${vb.y} ${Math.max(vb.width, widthTarget - Math.min(vb.x, minX - pad))} ${hasVB ? (Math.ceil(targetBottom - vb.y)) : parseFloat(svg.getAttribute('height') || '0')}`);
+      }
+      const widthAttr = parseFloat(svg.getAttribute('width') || '0');
+      if (Number.isFinite(widthAttr) && widthTarget > widthAttr) {
+        svg.setAttribute('width', String(widthTarget));
+      }
     }
 
     function startGroupLabelInlineEdit(textEl, group, anchorEl, groupIndex, inputEvent) {
@@ -6034,6 +6096,7 @@ ${lines.join('\n')}`;
           syncHscaleInputFromJson(jsonText);
           attachWaveInteractivity(jsonText);
           renderConnectionEdgeList();
+          fitWaveSvgToContent();
           vwdMark('renderWaveform:done');
           if (!isInsertingEdge && !waveformRenderingBusy) {
             setStatus(true, '波形已更新');
