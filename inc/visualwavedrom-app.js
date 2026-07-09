@@ -38,6 +38,7 @@ function getDefaultJson() {
     const HSCALE_EPS = 1e-6;
 
     const DEFAULT_EDGE_TEMPLATE = '{from}->{to} : {label}';
+    const SIGNAL_DESCRIPTION_X_OFFSET = -4;
 
     const EDGE_STYLE_PRESETS = [
       {
@@ -4181,7 +4182,7 @@ ${lines.join('\n')}`;
 
       const describeText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
       describeText.setAttribute('class', 'wave-describe-text');
-      describeText.setAttribute('x', x + '');
+      describeText.setAttribute('x', (Number.isFinite(x) ? (x + SIGNAL_DESCRIPTION_X_OFFSET) : x) + '');
       describeText.setAttribute('y', (y + (height || 16) + 5) + '');
       describeText.setAttribute('data-vwdDescribeBound', '1');
       describeText.setAttribute('text-anchor', 'start');
