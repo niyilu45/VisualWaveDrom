@@ -38,7 +38,8 @@ function getDefaultJson() {
     const HSCALE_EPS = 1e-6;
 
     const DEFAULT_EDGE_TEMPLATE = '{from}->{to} : {label}';
-    const SIGNAL_DESCRIPTION_X_OFFSET = -4;
+    const SIGNAL_DESCRIPTION_X_OFFSET = -16;
+    const SIGNAL_DESCRIPTION_OVERLAY_OFFSET = -16;
 
     const EDGE_STYLE_PRESETS = [
       {
@@ -4182,7 +4183,8 @@ ${lines.join('\n')}`;
 
       const describeText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
       describeText.setAttribute('class', 'wave-describe-text');
-      describeText.setAttribute('x', (Number.isFinite(x) ? (x + SIGNAL_DESCRIPTION_X_OFFSET) : x) + '');
+      const describeTextX = Number.isFinite(x) ? (x + SIGNAL_DESCRIPTION_X_OFFSET) : x;
+      describeText.setAttribute('x', describeTextX + '');
       describeText.setAttribute('y', (y + (height || 16) + 5) + '');
       describeText.setAttribute('data-vwdDescribeBound', '1');
       describeText.setAttribute('text-anchor', 'start');
@@ -5137,7 +5139,9 @@ ${lines.join('\n')}`;
       overlay.autocomplete = 'off';
       overlay.setAttribute('autocomplete', 'off');
       overlay.spellcheck = false;
-      overlay.style.left = (rect.left - panelRect.left + wavePanel.scrollLeft) + 'px';
+      const overlayLeft = (rect.left - panelRect.left + wavePanel.scrollLeft)
+        + (isDescriptionField ? SIGNAL_DESCRIPTION_OVERLAY_OFFSET : 0);
+      overlay.style.left = overlayLeft + 'px';
       overlay.style.top = (rect.top - panelRect.top + wavePanel.scrollTop) + 'px';
       overlay.style.width = Math.max(rect.width + 16, isDescriptionField ? 180 : 48) + 'px';
       overlay.style.height = Math.max(rect.height + 4, isDescriptionField ? 86 : 22) + 'px';
