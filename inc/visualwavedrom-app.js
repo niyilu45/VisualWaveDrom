@@ -425,6 +425,13 @@ function getDefaultJson() {
       const nextPos = start + 1;
       overlay.selectionStart = nextPos;
       overlay.selectionEnd = nextPos;
+      if (typeof overlay.dispatchEvent === 'function') {
+        try {
+          overlay.dispatchEvent(new Event('input', { bubbles: true }));
+        } catch (_e) {
+          // ignore input dispatch compatibility errors
+        }
+      }
       if (event && event.type) {
         vwdDebugLog('inline-edit', {
           phase: 'insert-newline',
@@ -436,6 +443,16 @@ function getDefaultJson() {
           code: event.code
         });
       }
+    }
+
+    function autoResizeDescriptionOverlay(overlay, options) {
+      if (!overlay || overlay.tagName !== 'TEXTAREA') return;
+      const cfg = options || {};
+      const minHeight = Number.isFinite(cfg.minHeight) ? cfg.minHeight : 86;
+      const maxHeight = Number.isFinite(cfg.maxHeight) ? cfg.maxHeight : 360;
+      const target = Math.max(minHeight, overlay.scrollHeight + 4);
+      overlay.style.height = Math.min(maxHeight, target) + 'px';
+      overlay.style.overflowY = target > maxHeight ? 'auto' : 'hidden';
     }
 
     function getDebugLogText() {
@@ -4053,13 +4070,32 @@ ${lines.join('\n')}`;
       if (app.classList.contains('reading-mode')) return;
 
       let x = parseFloat(anchorText.getAttribute('x') || '-10');
+      let waveLeft = Number.NaN;
       try {
         if (drawGroup && drawGroup.getBBox) {
           const drawBbox = drawGroup.getBBox();
-          if (Number.isFinite(drawBbox.x)) x = drawBbox.x;
+          if (Number.isFinite(drawBbox.x) && Number.isFinite(drawBbox.width) && drawBbox.width > 0) {
+            waveLeft = drawBbox.x;
+          }
+          if (!Number.isFinite(waveLeft)) {
+            const firstShape = drawGroup.querySelector('path, rect, polyline, line, text');
+            if (firstShape && firstShape.getBBox) {
+              const firstBbox = firstShape.getBBox();
+              if (Number.isFinite(firstBbox.x)) {
+                waveLeft = firstBbox.x;
+              }
+            }
+          }
         }
       } catch (_e) {
         // fallback to name text x
+      }
+      if (Number.isFinite(waveLeft)) {
+        x = waveLeft;
+      }
+      const nameX = parseFloat(anchorText.getAttribute('x') || '0');
+      if (!Number.isFinite(x) && Number.isFinite(nameX)) {
+        x = nameX;
       }
       let y = parseFloat(anchorText.getAttribute('y') || '15');
       let height;
@@ -4101,53 +4137,7 @@ ${lines.join('\n')}`;
       if (!svg) return;
       svg.setAttribute('overflow', 'visible');
       svg.style.overflow = 'visible';
-
-      const targetEls = [
-        ...svg.querySelectorAll('text.wave-describe-text'),
-        svg.querySelector('#vwd-global-describe')
-      ].filter(Boolean);
-      if (!targetEls.length) return;
-
-      let maxY = -Infinity;
-      let minX = Infinity;
-      let maxX = -Infinity;
-      targetEls.forEach((el) => {
-        try {
-          const bbox = el.getBBox();
-          if (!bbox || !Number.isFinite(bbox.x) || !Number.isFinite(bbox.y)) return;
-          maxY = Math.max(maxY, bbox.y + bbox.height);
-          minX = Math.min(minX, bbox.x);
-          maxX = Math.max(maxX, bbox.x + bbox.width);
-        } catch (_e) {
-          // ignore
-        }
-      });
-
-      if (!Number.isFinite(maxY) || !Number.isFinite(minX) || !Number.isFinite(maxX)) return;
-
-      const pad = 8;
-      const vb = svg.viewBox && svg.viewBox.baseVal;
-      const hasVB = vb && Number.isFinite(vb.x) && Number.isFinite(vb.width) && Number.isFinite(vb.height);
-      const targetBottom = Math.ceil(maxY + pad);
-      if (hasVB) {
-        if (targetBottom > vb.y + vb.height) {
-          svg.setAttribute('viewBox', `${vb.x} ${vb.y} ${vb.width} ${Math.ceil(targetBottom - vb.y)}`);
-        }
-      } else {
-        const currentHeight = parseFloat(svg.getAttribute('height') || '0');
-        if (Number.isFinite(currentHeight) && targetBottom > currentHeight) {
-          svg.setAttribute('height', String(targetBottom));
-        }
-      }
-
-      const widthTarget = Math.ceil(maxX + pad);
-      if (hasVB && widthTarget > vb.x + vb.width) {
-        svg.setAttribute('viewBox', `${Math.min(vb.x, minX - pad)} ${vb.y} ${Math.max(vb.width, widthTarget - Math.min(vb.x, minX - pad))} ${hasVB ? (Math.ceil(targetBottom - vb.y)) : parseFloat(svg.getAttribute('height') || '0')}`);
-      }
-      const widthAttr = parseFloat(svg.getAttribute('width') || '0');
-      if (Number.isFinite(widthAttr) && widthTarget > widthAttr) {
-        svg.setAttribute('width', String(widthTarget));
-      }
+      svg.setAttribute('preserveAspectRatio', 'xMinYMin meet');
     }
 
     function startGroupLabelInlineEdit(textEl, group, anchorEl, groupIndex, inputEvent) {
@@ -5022,13 +5012,23 @@ ${lines.join('\n')}`;
       overlay.style.width = Math.max(rect.width + 16, isDescriptionField ? 180 : 48) + 'px';
       overlay.style.height = Math.max(rect.height + 4, isDescriptionField ? 86 : 22) + 'px';
 
+      let resizeDescriptionOverlay = null;
       if (isDescriptionField) {
         overlay.rows = 4;
         overlay.style.resize = 'vertical';
         overlay.style.whiteSpace = 'pre-wrap';
+        resizeDescriptionOverlay = () => autoResizeDescriptionOverlay(overlay, {
+          minHeight: 86,
+          maxHeight: 360
+        });
+        resizeDescriptionOverlay();
+        overlay.addEventListener('input', resizeDescriptionOverlay);
       }
 
       wavePanel.appendChild(overlay);
+      if (resizeDescriptionOverlay) {
+        requestAnimationFrame(() => resizeDescriptionOverlay());
+      }
       overlay.focus();
       if (field === 'name' && oldValue === '') {
         overlay.setSelectionRange(0, 0);
@@ -5088,6 +5088,9 @@ ${lines.join('\n')}`;
           if (isDescriptionField && (e.ctrlKey || e.metaKey)) {
             e.preventDefault();
             insertInlineNewline(overlay, e);
+            if (resizeDescriptionOverlay) {
+              resizeDescriptionOverlay();
+            }
             return;
           }
           e.preventDefault();
@@ -5222,8 +5225,15 @@ ${lines.join('\n')}`;
       overlay.rows = 4;
       overlay.style.resize = 'vertical';
       overlay.style.whiteSpace = 'pre-wrap';
+      const resizeDescriptionOverlay = () => autoResizeDescriptionOverlay(overlay, {
+        minHeight: 86,
+        maxHeight: 360
+      });
+      resizeDescriptionOverlay();
+      overlay.addEventListener('input', resizeDescriptionOverlay);
 
       wavePanel.appendChild(overlay);
+      requestAnimationFrame(() => resizeDescriptionOverlay());
       overlay.focus();
       overlay.select();
 
@@ -5270,6 +5280,7 @@ ${lines.join('\n')}`;
           if (e.ctrlKey || e.metaKey) {
             e.preventDefault();
             insertInlineNewline(overlay, e);
+            resizeDescriptionOverlay();
             return;
           }
           e.preventDefault();
