@@ -4064,7 +4064,7 @@ ${lines.join('\n')}`;
 
       if (entry.signal === null || typeof entry.signal !== 'object') return;
       const descValue = getSignalDescribeOldValue(entry.signal);
-      const displayDesc = descValue || '点击添加波形说明';
+      const displayDesc = descValue || '';
 
       const drawGroup = lane.querySelector('[id^="wavelane_draw_"]');
       if (app.classList.contains('reading-mode')) return;
