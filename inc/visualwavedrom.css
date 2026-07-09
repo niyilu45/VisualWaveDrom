@@ -1229,6 +1229,7 @@
     .wave-lane-interactive text.info,
     .wave-lane-interactive .wave-name-click-zone,
     .wave-lane-interactive .wave-data-text,
+    .wave-lane-interactive .wave-describe-text,
     .wave-group-label-hit,
     .wave-global-describe-text,
     .wave-headfoot-text {
@@ -1256,6 +1257,21 @@
 
     .wave-lane-interactive .wave-name-click-zone:hover {
       fill: rgba(0, 65, 196, 0.06);
+    }
+
+    .wave-describe-text {
+      fill: #94a3b8;
+      font-size: 10px;
+      user-select: none;
+    }
+
+    .wave-describe-text.empty {
+      fill: #64748b;
+      font-style: italic;
+    }
+
+    .wave-describe-text:hover {
+      fill: #38bdf8;
     }
 
     .wave-headfoot-text:hover {

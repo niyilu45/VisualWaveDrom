@@ -1038,6 +1038,13 @@ ${lines.join('\n')}`;
       return flattenWaveText(parsed.describe);
     }
 
+    function getSignalDescribeOldValue(signal) {
+      if (!signal || typeof signal !== 'object') return '';
+      if (signal.description !== undefined) return flattenWaveText(signal.description);
+      if (signal.describe !== undefined) return flattenWaveText(signal.describe);
+      return '';
+    }
+
     function replaceGlobalDescribeInSource(text, newValue) {
       const existing = text.match(/"describe"\s*:\s*/);
       if (existing) {
@@ -1380,6 +1387,41 @@ ${lines.join('\n')}`;
         const abs = entry.start + wm.index + wm[0].length;
         const inner = getIndentAt(text, entry.start) + '  ';
         return text.slice(0, abs) + ',\n' + inner + '"data": ' + JSON.stringify(dataArr) + text.slice(abs);
+      }
+      if (field === 'description' || field === 'describe') {
+        const descRe = /"(?:description|describe)"\s*:\s*"([^"\\]|\\.)*"/;
+        const existing = slice.match(descRe);
+        if (existing) {
+          const existingText = existing[0];
+          const useDescription = existingText.includes('"description"');
+          const key = useDescription ? '"description"' : '"describe"';
+          const abs = entry.start + existing.index;
+          return text.slice(0, abs) + key + ': ' + JSON.stringify(newValue) + text.slice(abs + existing[0].length);
+        }
+
+        const insertionRefs = [
+          /"node"\s*:\s*"([^"\\]|\\.)*"/,
+          /"wave"\s*:\s*"([^"\\]|\\.)*"/,
+          /"name"\s*:\s*"([^"\\]|\\.)*"/
+        ];
+        let insertAt = -1;
+        for (let i = 0; i < insertionRefs.length; i++) {
+          const m = slice.match(insertionRefs[i]);
+          if (m) {
+            insertAt = entry.start + m.index + m[0].length;
+            break;
+          }
+        }
+        if (insertAt < 0) {
+          insertAt = Math.max(entry.start + 1, entry.end - 1);
+        }
+        if (insertAt < entry.start || insertAt > entry.end) return text;
+        const beforeInsert = text.slice(0, insertAt);
+        const afterInsert = text.slice(insertAt);
+        const needsComma = !/,\s*$/.test(beforeInsert.slice(entry.start, insertAt));
+        const indent = getIndentAt(text, entry.start) + '  ';
+        const insertion = (needsComma ? ',\n' : '\n') + indent + '"description": ' + JSON.stringify(newValue);
+        return beforeInsert + insertion + afterInsert;
       }
       return text;
     }
@@ -3944,6 +3986,51 @@ ${lines.join('\n')}`;
       nameText.addEventListener('click', (e) => onNameClick(e, nameText));
     }
 
+    function attachSignalDescribeInteractivity(lane, entry, handleLanePointSelect) {
+      const anchorText = lane.querySelector('text.info');
+      if (!anchorText) return;
+      lane.querySelectorAll('text.wave-describe-text').forEach((existing) => existing.remove());
+
+      if (entry.signal === null || typeof entry.signal !== 'object') return;
+      const descValue = getSignalDescribeOldValue(entry.signal);
+      const drawGroup = lane.querySelector('[id^="wavelane_draw_"]');
+      if (app.classList.contains('reading-mode')) return;
+
+      let x = parseFloat(anchorText.getAttribute('x') || '-10');
+      let y = parseFloat(anchorText.getAttribute('y') || '15');
+      let height;
+      try {
+        const anchorBbox = anchorText.getBBox();
+        y = anchorBbox.y + anchorBbox.height;
+        height = Math.max(10, anchorBbox.height);
+      } catch (_e) {
+        // keep fallback
+      }
+
+      const describeText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      describeText.setAttribute('class', 'wave-describe-text' + (descValue ? '' : ' empty'));
+      describeText.setAttribute('x', x + '');
+      describeText.setAttribute('y', (y + (height || 16) + 5) + '');
+      describeText.setAttribute('data-vwdDescribeBound', '1');
+      describeText.setAttribute('text-anchor', 'start');
+      describeText.textContent = descValue || '点击添加说明';
+      if (drawGroup && drawGroup.parentNode) {
+        drawGroup.parentNode.insertBefore(describeText, drawGroup.nextSibling);
+      } else {
+        lane.appendChild(describeText);
+      }
+
+      describeText.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (e.vwdLanePickHandled) return;
+        if (isConnectionPickFlow() || groupPickActive) {
+          handleLanePointSelect(e);
+          return;
+        }
+        startInlineEdit(describeText, entry, 'description', undefined, describeText);
+      });
+    }
+
     function startGroupLabelInlineEdit(textEl, group, anchorEl, groupIndex, inputEvent) {
       const oldText = String(textEl && textEl.textContent || '');
       if (inlineEditActive) {
@@ -4771,11 +4858,18 @@ ${lines.join('\n')}`;
       if (inlineEditActive) return;
       inlineEditActive = true;
 
-      const oldValue = field === 'name'
-        ? entry.signal.name
-        : (entry.signal.data && entry.signal.data[dataIdx] !== undefined
+      let oldValue;
+      if (field === 'name') {
+        oldValue = entry.signal.name || '';
+      } else if (field === 'data') {
+        oldValue = (entry.signal.data && entry.signal.data[dataIdx] !== undefined
           ? entry.signal.data[dataIdx]
           : textEl.textContent);
+      } else if (field === 'description' || field === 'describe') {
+        oldValue = getSignalDescribeOldValue(entry.signal);
+      } else {
+        oldValue = textEl.textContent;
+      }
 
       const anchor = anchorEl || textEl;
       const rect = anchor.getBoundingClientRect();
@@ -4816,7 +4910,10 @@ ${lines.join('\n')}`;
           const map = buildSignalSourceMap(newText);
           const updated = laneIdx >= 0 ? map[laneIdx] : map.find(m => m.signal.name === newVal);
           applyEditorChange(newText, updated ? updated.start : editor.selectionStart, updated ? updated.end : undefined);
-          setStatus(true, field === 'head' ? '已更新标题' : '已更新脚注');
+          if (field === 'name') setStatus(true, '已更新名称');
+          else if (field === 'data') setStatus(true, '已更新数据标签');
+          else if (field === 'description' || field === 'describe') setStatus(true, '已更新波形说明');
+          else setStatus(true, '已更新字段');
         }
       };
 
@@ -5092,6 +5189,7 @@ ${lines.join('\n')}`;
         }
 
         attachSignalNameEdit(lane, entry, handleLanePointSelect);
+        attachSignalDescribeInteractivity(lane, entry, handleLanePointSelect);
 
         const drawGroup = lane.querySelector('[id^="wavelane_draw_"]');
         if (drawGroup) {
