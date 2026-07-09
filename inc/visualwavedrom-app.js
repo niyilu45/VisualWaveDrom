@@ -4071,8 +4071,9 @@ ${lines.join('\n')}`;
 
       let x = parseFloat(anchorText.getAttribute('x') || '-10');
       let waveLeft = Number.NaN;
+      const isFiniteNum = (value) => Number.isFinite(value);
       const setWaveLeftIfFinite = (value) => {
-        if (Number.isFinite(value)) {
+        if (isFiniteNum(value)) {
           waveLeft = value;
         }
       };
@@ -4095,6 +4096,10 @@ ${lines.join('\n')}`;
       const ensureWaveLeft = () => {
         if (!drawGroup) return;
         try {
+          if (drawGroup.getCTM) {
+            const ctmX = drawGroup.getCTM()?.e;
+            setWaveLeftIfFinite(ctmX);
+          }
           const transformX = parseTransformX(drawGroup);
           setWaveLeftIfFinite(transformX);
         } catch (_e) {
@@ -4106,7 +4111,7 @@ ${lines.join('\n')}`;
       try {
         if (drawGroup && drawGroup.getBBox) {
           const drawBbox = drawGroup.getBBox();
-          if (Number.isFinite(drawBbox.x) && Number.isFinite(drawBbox.width) && drawBbox.width > 0) {
+          if (isFiniteNum(drawBbox.x)) {
             waveLeft = drawBbox.x;
           }
           if (!Number.isFinite(waveLeft)) {
@@ -4123,12 +4128,12 @@ ${lines.join('\n')}`;
             if (firstShape && firstShape.getCTM && firstShape.getBBox) {
               const shapeBox = firstShape.getBBox();
               const pt = lane.ownerSVGElement ? lane.ownerSVGElement.createSVGPoint() : null;
-              if (pt && Number.isFinite(shapeBox.x) && Number.isFinite(shapeBox.width) && Number.isFinite(shapeBox.y)) {
+              if (pt && isFiniteNum(shapeBox.x) && isFiniteNum(shapeBox.width) && isFiniteNum(shapeBox.y)) {
                 pt.x = shapeBox.x;
                 pt.y = shapeBox.y;
                 const matrix = firstShape.getCTM ? firstShape.getCTM() : null;
                 const p = matrix ? pt.matrixTransform(matrix) : pt;
-                if (p && Number.isFinite(p.x)) setWaveLeftIfFinite(p.x);
+                if (p && isFiniteNum(p.x)) setWaveLeftIfFinite(p.x);
               }
             }
           }
@@ -4139,7 +4144,7 @@ ${lines.join('\n')}`;
               if (!shape || !shape.getBBox) return;
               try {
                 const box = shape.getBBox();
-                if (Number.isFinite(box.x)) {
+                if (isFiniteNum(box.x)) {
                   minX = Math.min(minX, box.x);
                 }
               } catch (_e) {
