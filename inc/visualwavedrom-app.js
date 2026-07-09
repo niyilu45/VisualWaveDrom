@@ -4071,6 +4071,38 @@ ${lines.join('\n')}`;
 
       let x = parseFloat(anchorText.getAttribute('x') || '-10');
       let waveLeft = Number.NaN;
+      const setWaveLeftIfFinite = (value) => {
+        if (Number.isFinite(value)) {
+          waveLeft = value;
+        }
+      };
+
+      const parseTransformX = (el) => {
+        if (!el || typeof el.getAttribute !== 'function') return Number.NaN;
+        const transform = el.getAttribute('transform');
+        if (!transform) return Number.NaN;
+        const translateMatch = transform.match(/translate\(\s*(-?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?)\s*(?:,\s*|\s+)\s*(-?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?)?\s*\)/i);
+        if (translateMatch && Number.isFinite(parseFloat(translateMatch[1]))) {
+          return parseFloat(translateMatch[1]);
+        }
+        const matrixMatch = transform.match(/matrix\(\s*(-?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?)\s*,\s*(-?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?)\s*,\s*(-?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?)\s*,\s*(-?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?)\s*,\s*(-?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?)\s*,\s*(-?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?)\s*\)/i);
+        if (matrixMatch && Number.isFinite(parseFloat(matrixMatch[5]))) {
+          return parseFloat(matrixMatch[5]);
+        }
+        return Number.NaN;
+      };
+
+      const ensureWaveLeft = () => {
+        if (!drawGroup) return;
+        try {
+          const transformX = parseTransformX(drawGroup);
+          setWaveLeftIfFinite(transformX);
+        } catch (_e) {
+          // ignore and continue to bbox fallback
+        }
+      };
+
+      ensureWaveLeft();
       try {
         if (drawGroup && drawGroup.getBBox) {
           const drawBbox = drawGroup.getBBox();
@@ -4085,6 +4117,36 @@ ${lines.join('\n')}`;
                 waveLeft = firstBbox.x;
               }
             }
+          }
+          if (!Number.isFinite(waveLeft)) {
+            const firstShape = drawGroup.querySelector('path, rect, polyline, line, text');
+            if (firstShape && firstShape.getCTM && firstShape.getBBox) {
+              const shapeBox = firstShape.getBBox();
+              const pt = lane.ownerSVGElement ? lane.ownerSVGElement.createSVGPoint() : null;
+              if (pt && Number.isFinite(shapeBox.x) && Number.isFinite(shapeBox.width) && Number.isFinite(shapeBox.y)) {
+                pt.x = shapeBox.x;
+                pt.y = shapeBox.y;
+                const matrix = firstShape.getCTM ? firstShape.getCTM() : null;
+                const p = matrix ? pt.matrixTransform(matrix) : pt;
+                if (p && Number.isFinite(p.x)) setWaveLeftIfFinite(p.x);
+              }
+            }
+          }
+          if (!Number.isFinite(waveLeft)) {
+            const allShapes = [...drawGroup.querySelectorAll('path, rect, polyline, line, text, use')];
+            let minX = Number.POSITIVE_INFINITY;
+            allShapes.forEach((shape) => {
+              if (!shape || !shape.getBBox) return;
+              try {
+                const box = shape.getBBox();
+                if (Number.isFinite(box.x)) {
+                  minX = Math.min(minX, box.x);
+                }
+              } catch (_e) {
+                // ignore
+              }
+            });
+            if (minX !== Number.POSITIVE_INFINITY) setWaveLeftIfFinite(minX);
           }
         }
       } catch (_e) {
