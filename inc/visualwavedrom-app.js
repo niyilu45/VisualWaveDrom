@@ -4135,9 +4135,66 @@ ${lines.join('\n')}`;
     function fitWaveSvgToContent() {
       const svg = waveContainer.querySelector('svg');
       if (!svg) return;
+      if (waveContainer) {
+        waveContainer.style.paddingBottom = '';
+      }
       svg.setAttribute('overflow', 'visible');
       svg.style.overflow = 'visible';
       svg.setAttribute('preserveAspectRatio', 'xMinYMin meet');
+
+      const describeEls = [
+        ...svg.querySelectorAll('text.wave-describe-text'),
+        svg.querySelector('#vwd-global-describe')
+      ].filter(Boolean);
+      if (!describeEls.length) return;
+
+      try {
+        const svgRect = svg.getBoundingClientRect();
+        let maxBottom = -Infinity;
+        describeEls.forEach((el) => {
+          try {
+            const elRect = el.getBoundingClientRect();
+            if (!elRect || !Number.isFinite(elRect.bottom) || !Number.isFinite(elRect.top)) return;
+            maxBottom = Math.max(maxBottom, elRect.bottom);
+          } catch (_e) {
+            // ignore
+          }
+        });
+        if (!Number.isFinite(maxBottom) || !Number.isFinite(svgRect.bottom)) return;
+        const extraBottom = Math.max(0, Math.ceil(maxBottom - svgRect.bottom + 12));
+        if (extraBottom > 0 && waveContainer) {
+          waveContainer.style.paddingBottom = extraBottom + 'px';
+        }
+      } catch (_e) {
+        // ignore sizing failures
+      }
+    }
+
+    function handleWavePanelWheelPaging(e) {
+      if (!wavePanel || !e) return;
+      if (inlineEditActive) return;
+      if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
+      const hasScrollY = wavePanel.scrollHeight > wavePanel.clientHeight + 4;
+      if (!hasScrollY) return;
+
+      const target = e.target;
+      if (!target || !(target instanceof Element)) return;
+      if (!wavePanel.contains(target)) return;
+      if (target.closest && target.closest('.wave-text-edit-overlay')) return;
+
+      if (e.ctrlKey || e.metaKey) return;
+      e.preventDefault();
+
+      const pageHeight = Math.max(1, Math.floor((wavePanel.clientHeight - 32) * 0.9));
+      const delta = e.deltaY > 0 ? 1 : -1;
+      const nextTop = wavePanel.scrollTop + delta * pageHeight;
+      const maxTop = Math.max(0, wavePanel.scrollHeight - wavePanel.clientHeight);
+      const clampedTop = Math.max(0, Math.min(maxTop, nextTop));
+      wavePanel.scrollTo({
+        top: clampedTop,
+        left: wavePanel.scrollLeft,
+        behavior: 'smooth'
+      });
     }
 
     function startGroupLabelInlineEdit(textEl, group, anchorEl, groupIndex, inputEvent) {
@@ -6460,6 +6517,9 @@ ${lines.join('\n')}`;
       deleteWaveCharAtColumn(selectedSignalIndex, selectedWaveColumnIndex);
     });
     document.getElementById('btn-format-json').addEventListener('click', formatEditorJson);
+    if (wavePanel) {
+      wavePanel.addEventListener('wheel', handleWavePanelWheelPaging, { passive: false });
+    }
     document.getElementById('btn-export-json').addEventListener('click', exportWaveJson);
     document.getElementById('btn-import-json').addEventListener('click', requestImportWaveJson);
     const copyDebugLogBtn = document.getElementById('btn-copy-debug-log');
