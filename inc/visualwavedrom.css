@@ -1,5 +1,6 @@
-    :root {
+:root {
       --sidebar-width: 220px;
+      --nav-sidebar-width: 240px;
       --bg: #0f1419;
       --surface: #1a2332;
       --surface-2: #243044;
@@ -33,7 +34,7 @@
 
     /* Sidebar */
     .sidebar {
-      order: 2;
+      order: 3;
       width: var(--sidebar-width);
       min-width: var(--sidebar-width);
       background: var(--surface);
@@ -47,6 +48,197 @@
     .sidebar-header {
       padding: 16px;
       border-bottom: 1px solid var(--border);
+    }
+
+    .nav-sidebar {
+      order: 1;
+      width: var(--nav-sidebar-width);
+      min-width: var(--nav-sidebar-width);
+      max-width: var(--nav-sidebar-width);
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow-y: auto;
+      transition: transform 0.25s ease, width 0.25s ease, min-width 0.25s ease;
+    }
+
+    .nav-toolbar {
+      padding: 8px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-bottom: 8px;
+    }
+
+    .nav-btn {
+      padding: 8px 10px !important;
+      justify-content: center;
+      font-size: 0.74rem !important;
+      border-radius: 6px;
+    }
+
+    .nav-tree {
+      min-height: 0;
+      flex: 1;
+      overflow: auto;
+      padding: 0 12px 12px;
+    }
+
+    .nav-tree-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+    }
+
+    .nav-tree-node {
+      margin-top: 4px;
+    }
+
+    .nav-tree-node-label {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 8px;
+      border-radius: 6px;
+      border: 1px solid transparent;
+      cursor: pointer;
+      color: var(--text);
+      font-size: 0.82rem;
+      line-height: 1.2;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      background: transparent;
+    }
+
+    .nav-tree-node-label:hover {
+      border-color: var(--border);
+      background: rgba(255, 255, 255, 0.03);
+    }
+
+    .nav-tree-node-label.active {
+      background: var(--surface-2);
+      border-color: rgba(96, 165, 250, 0.55);
+    }
+
+    .nav-tree-node-label .toggle {
+      width: 12px;
+      color: var(--text-muted);
+      opacity: 0.9;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .nav-tree-node-label .toggle:not(:disabled) {
+      cursor: pointer;
+    }
+
+    .nav-tree-node-label .name {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .nav-tree-node-label .count {
+      color: var(--text-muted);
+      font-size: 0.7rem;
+      flex-shrink: 0;
+    }
+
+    .nav-tree-document {
+      margin-top: 3px;
+      list-style: none;
+      display: flex;
+      align-items: center;
+    }
+
+    .nav-tree-document-label {
+      min-width: 0;
+      flex: 1;
+      display: block;
+      padding: 6px 8px 6px 24px;
+      border: 0;
+      border-radius: 4px;
+      background: transparent;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 0.8rem;
+      text-align: left;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .nav-tree-document-label::before {
+      content: '▤';
+      margin-right: 7px;
+      color: var(--accent);
+    }
+
+    .nav-tree-document-label:hover,
+    .nav-tree-document-label.active {
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--text);
+    }
+
+    .nav-tree-document-move {
+      width: 24px;
+      height: 24px;
+      flex: 0 0 24px;
+      border: 0;
+      border-radius: 4px;
+      background: transparent;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 15px;
+    }
+
+    .nav-tree-document-move:hover,
+    .nav-tree-action-delete:hover {
+      background: rgba(239, 68, 68, 0.14);
+      color: #fca5a5;
+    }
+
+    .nav-tree-actions {
+      display: inline-flex;
+      gap: 2px;
+      margin-left: 4px;
+    }
+
+    .nav-tree-action {
+      appearance: none;
+      border: none;
+      background: transparent;
+      color: var(--text-muted);
+      width: 18px;
+      height: 18px;
+      border-radius: 4px;
+      font-size: 12px;
+      cursor: pointer;
+      line-height: 1;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .nav-tree-action:hover {
+      color: var(--text);
+      background: rgba(255, 255, 255, 0.08);
+    }
+
+    .nav-tree-children {
+      margin: 2px 0 0;
+      padding-left: 14px;
+      border-left: 1px solid transparent;
+      display: none;
+    }
+
+    .nav-tree-node.expanded > .nav-tree-children {
+      display: block;
+      border-left-color: rgba(148, 163, 184, 0.2);
     }
 
     .sidebar-header h1 {
@@ -112,6 +304,14 @@
       font-size: 0.7rem;
       color: var(--text-muted);
       font-family: var(--editor-font);
+    }
+
+    .wave-library-file-status {
+      padding: 6px 16px 8px;
+      color: var(--text-muted);
+      font-size: 0.72rem;
+      line-height: 1.4;
+      overflow-wrap: anywhere;
     }
 
     .menu-btn.debug-mode-btn {
@@ -689,7 +889,7 @@
 
     /* Main content */
     .main {
-      order: 1;
+      order: 2;
       flex: 1;
       display: flex;
       flex-direction: column;
@@ -703,6 +903,7 @@
       background: #ffffff;
       overflow: auto;
       display: flex;
+      flex-direction: column;
       align-items: flex-start;
       justify-content: flex-start;
       padding: 24px 24px 24px 0;
@@ -713,6 +914,150 @@
       width: 100%;
       max-width: 100%;
       position: relative;
+    }
+
+    .wave-library-container {
+      width: 100%;
+      display: grid;
+      gap: 16px;
+      margin-top: 20px;
+    }
+
+    .wave-document-card {
+      width: 100%;
+      border: 1px solid #d8e0ea;
+      border-radius: 6px;
+      background: #fff;
+      overflow: hidden;
+      scroll-margin-top: 16px;
+    }
+
+    .wave-document-card.focused {
+      border-color: #3b82f6;
+      box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.18);
+    }
+
+    .wave-document-card-header {
+      min-height: 38px;
+      padding: 7px 10px 7px 14px;
+      border-bottom: 1px solid #d8e0ea;
+      background: #f7fafc;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .wave-document-card-header h2 {
+      margin: 0;
+      min-width: 0;
+      flex: 1;
+      color: #263445;
+      font-size: 14px;
+      font-weight: 600;
+      line-height: 1.3;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .wave-document-open {
+      width: 28px;
+      height: 26px;
+      border: 1px solid #c9d4e1;
+      border-radius: 4px;
+      background: #fff;
+      color: #315b87;
+      cursor: pointer;
+      font-size: 12px;
+    }
+
+    .wave-document-delete {
+      width: 26px;
+      height: 26px;
+      border: 1px solid #fecaca;
+      border-radius: 4px;
+      background: #fff;
+      color: #dc2626;
+      cursor: pointer;
+      font-size: 17px;
+      line-height: 1;
+    }
+
+    .wave-document-delete:hover {
+      background: #fef2f2;
+      border-color: #ef4444;
+    }
+
+    .wave-document-open:hover {
+      border-color: #3b82f6;
+      color: #1d4ed8;
+    }
+
+    .wave-document-canvas {
+      min-height: 70px;
+      padding: 12px;
+      overflow: auto;
+    }
+
+    .wave-document-description {
+      min-height: 42px;
+      margin-top: 10px;
+      padding: 9px 10px;
+      border: 1px solid #cbd5e1;
+      border-radius: 4px;
+      background: #f8fafc;
+      position: relative;
+      color: #475569;
+      font-size: 12px;
+      line-height: 1.5;
+      text-align: left;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .wave-document-description.empty {
+      color: #94a3b8;
+      font-style: italic;
+    }
+
+    .wave-document-description.editable:hover {
+      border-color: #60a5fa;
+      background: #f1f7ff;
+      cursor: text;
+    }
+
+    .wave-document-description-editor {
+      display: block;
+      width: 100%;
+      min-height: 62px;
+      padding: 34px 6px 6px;
+      border: 1px solid #60a5fa;
+      border-radius: 3px;
+      outline: none;
+      background: #fff;
+      color: #334155;
+      font: inherit;
+      line-height: 1.5;
+      resize: vertical;
+      white-space: pre-wrap;
+    }
+
+    .wave-document-description-done {
+      position: absolute;
+      top: 14px;
+      right: 14px;
+      height: 26px;
+      padding: 0 9px;
+      border: 1px solid #60a5fa;
+      border-radius: 4px;
+      background: #eff6ff;
+      color: #1d4ed8;
+      cursor: pointer;
+      font-size: 12px;
+    }
+
+    .wave-document-description-done:hover {
+      background: #dbeafe;
     }
 
     .wave-container.rendering {
@@ -753,6 +1098,14 @@
       display: flex;
       flex-direction: column;
       border-top: 2px solid var(--border);
+    }
+
+    .app.json-panel-hidden .editor-panel {
+      display: none;
+    }
+
+    .app.json-panel-hidden .wave-panel {
+      flex: 1;
     }
 
     .editor-header {
@@ -896,6 +1249,31 @@
       font-size: 0.72rem;
       color: var(--error);
       min-height: 1em;
+    }
+
+    .nav-move-options {
+      display: grid;
+      gap: 6px;
+      max-height: min(52vh, 360px);
+      overflow-y: auto;
+    }
+
+    .nav-move-option {
+      width: 100%;
+      padding: 9px 10px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--surface-2);
+      color: var(--text);
+      font: inherit;
+      font-size: 0.82rem;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .nav-move-option:hover {
+      border-color: var(--accent);
+      background: var(--border);
     }
 
     .modal-duplicate-confirm p {
@@ -1137,6 +1515,10 @@
       cursor: pointer;
     }
 
+    .wave-lane-hidden {
+      display: none !important;
+    }
+
     .wave-lane-interactive:hover > rect.lane-hover-bg {
       fill: rgba(59, 130, 246, 0.08);
     }
@@ -1229,6 +1611,7 @@
     .wave-lane-interactive text.info,
     .wave-lane-interactive .wave-name-click-zone,
     .wave-lane-interactive .wave-data-text,
+    .wave-lane-interactive .wave-data-click-zone,
     .wave-lane-interactive .wave-describe-text,
     .wave-group-label-hit,
     .wave-global-describe-text,
@@ -1257,6 +1640,10 @@
 
     .wave-lane-interactive .wave-name-click-zone:hover {
       fill: rgba(0, 65, 196, 0.06);
+    }
+
+    .wave-lane-interactive .wave-data-click-zone:hover {
+      fill: rgba(0, 65, 196, 0.08);
     }
 
     .wave-describe-text {
@@ -1314,13 +1701,23 @@
       resize: none;
     }
 
+    .wave-description-overlay {
+      left: 0 !important;
+      right: auto;
+    }
+
     .wave-text-edit-overlay[rows] {
       min-height: 48px;
     }
 
+    html, body {
+      margin: 0 !important;
+      padding: 0 !important;
+    }
+
     /* Responsive */
     @media (max-width: 768px) {
-      :root { --sidebar-width: 180px; }
+      :root { --sidebar-width: 180px; --nav-sidebar-width: 180px; }
       .menu-btn .shortcut { display: none; }
       .wave-add-delete-row,
       .wave-move-row,

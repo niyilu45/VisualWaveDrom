@@ -140,7 +140,9 @@ function getDefaultJson() {
       }
     ];
 
-    const DEFAULT_NEW_SIGNAL_TEMPLATE = {};
+    // Keep the row visually blank while preserving a real WaveDrom lane that
+    // can be selected and edited immediately.
+    const DEFAULT_NEW_SIGNAL_TEMPLATE = { name: '', wave: '' };
 
     const LEGEND_ITEMS = [
       {
@@ -238,15 +240,28 @@ function getDefaultJson() {
     const editor = document.getElementById('code-editor');
     const lineNumbersEl = document.getElementById('line-numbers');
     const waveContainer = document.getElementById('wave-container');
+    const waveLibraryContainer = document.getElementById('wave-library-container');
     const statusDot = document.getElementById('status-dot');
     const statusText = document.getElementById('status-text');
     const app = document.getElementById('app');
     const wavePanel = document.getElementById('wave-panel');
+    const toggleJsonPanelBtn = document.getElementById('btn-toggle-json-panel');
+    const toggleJsonPanelLabel = document.getElementById('toggle-json-panel-label');
     const backBtn = document.getElementById('btn-back');
     const hscaleInput = document.getElementById('input-hscale');
+    const navSidebar = document.getElementById('nav-sidebar');
+    const navTreeEl = document.getElementById('nav-tree');
+    const waveLibraryFileStatus = document.getElementById('wave-library-file-status');
+    const importWaveLibraryBtn = document.getElementById('btn-import-wave-library');
+    const saveWaveLibraryBtn = document.getElementById('btn-save-wave-library');
+    const saveWaveLibraryLabel = document.getElementById('save-wave-library-label');
+    const changeWaveLibraryBtn = document.getElementById('btn-change-wave-library');
+    const waveLibraryImportInput = document.getElementById('wave-library-import-input');
 
     let undoStack = [];
     let redoStack = [];
+    let waveLibraryUndoStack = [];
+    let waveLibraryRedoStack = [];
     let isApplyingHistory = false;
     let renderTimer = null;
     let saveTimer = null;
@@ -259,6 +274,13 @@ function getDefaultJson() {
     let selectedSignalIndex = -1;
     let selectedWaveColumnIndex = -1;
     let selectedGroupIndex = -1;
+    let selectedNavNodeId = 'nav-root';
+    let navTreeState = null;
+    let navTreeSignalCount = 0;
+    let navVisibleRows = [];
+    let navRenderContext = null;
+    let navSortToken = 0;
+    let navTitleRefreshTimer = null;
     let groupPickActive = false;
     let groupPickStartIndex = -1;
     let connectionPickActive = false;
@@ -288,6 +310,9 @@ function getDefaultJson() {
 
     const VWD_DEBUG_FLAG_KEY = 'vwd-debug';
     const VWD_DEBUG_QUERY = 'vwdDebug';
+    // Kept separate from the legacy signal/tag navigation tree. This tree only
+    // stores wave directories and wave-document references.
+    const NAV_TREE_KEY = 'vwd-wave-directory-v2';
     let vwdDebugEnabled = false;
 
     function normalizeBool(raw) {
@@ -388,7 +413,7 @@ function getDefaultJson() {
     }
 
     function vwdDebugLog(category, payload) {
-      if (!vwdDebugEnabled) return;
+      if (!vwdDebugEnabled && category !== 'runtime-error') return;
       const ts = new Date().toISOString();
       const payloadText = (() => {
         if (payload === undefined) return '';
@@ -409,6 +434,25 @@ function getDefaultJson() {
         console.debug('[VWD][' + category + ']', payload);
       }
     }
+
+    // Keep startup failures in the session log even when Debug Mode is enabled
+    // only after the page has finished loading.
+    window.addEventListener('error', (event) => {
+      vwdDebugLog('runtime-error', {
+        phase: 'window-error',
+        message: event && event.message ? event.message : 'Unknown error',
+        source: event && event.filename ? event.filename : '',
+        line: event && Number.isFinite(event.lineno) ? event.lineno : 0,
+        column: event && Number.isFinite(event.colno) ? event.colno : 0
+      });
+    }, true);
+    window.addEventListener('unhandledrejection', (event) => {
+      const reason = event ? event.reason : null;
+      vwdDebugLog('runtime-error', {
+        phase: 'unhandled-rejection',
+        message: reason && reason.message ? reason.message : String(reason || 'Unknown rejection')
+      });
+    });
 
     function setActiveInlineEditState(state) {
       activeInlineEditState = state ? Object.assign({}, state) : null;
@@ -513,9 +557,12 @@ ${lines.join('\n')}`;
 
     const BACK_BTN_POS_KEY = 'vwd-back-btn-pos';
     const WAVE_EDIT_MODE_KEY = 'vwd-wave-edit-mode';
+    const JSON_PANEL_HIDDEN_KEY = 'vwd-json-panel-hidden';
     const EDITOR_JSON_KEY = 'vwd-editor-json';
     const EDITOR_JSON_VALID_KEY = 'vwd-editor-json-valid';
-    const SAVED_TAGS_KEY = 'vwd-saved-tags';
+    const WAVE_DOCUMENTS_KEY = 'vwd-wave-documents';
+    const LEGACY_SAVED_TAGS_KEY = 'vwd-saved-tags';
+    const NAV_COPY_SEED_KEY = 'vwd-nav-copy-seed-2222-51515-v2';
     const PERSIST_DEBOUNCE_MS = 500;
     const DRAG_THRESHOLD = 5;
     let backBtnDrag = null;
@@ -523,8 +570,14 @@ ${lines.join('\n')}`;
     let isUpdatingHscaleFromJson = false;
     let savedTags = [];
     let activeTagName = null;
+    let editingWaveDocumentName = null;
     let pendingDuplicateTagName = null;
     let pendingLoadTagName = null;
+    const WAVE_LIBRARY_KIND = 'VisualWaveDromWaveLibrary';
+    const waveLibraryServerMode = /^https?:$/.test(window.location.protocol);
+    let currentWaveLibraryFile = '';
+    let waveLibrarySaveTimer = null;
+    let applyingWaveLibraryBundle = false;
 
     const tagSaveModal = document.getElementById('tag-save-modal');
     const tagSaveForm = document.getElementById('tag-save-form');
@@ -540,6 +593,10 @@ ${lines.join('\n')}`;
     const savedTagsEmptyEl = document.getElementById('saved-tags-empty');
     const tagLoadModal = document.getElementById('tag-load-modal');
     const tagLoadConfirmMsg = document.getElementById('tag-load-confirm-msg');
+    const navMoveModal = document.getElementById('nav-move-modal');
+    const navMoveOptions = document.getElementById('nav-move-options');
+    const waveLibraryPickerModal = document.getElementById('wave-library-picker-modal');
+    const waveLibraryPickerOptions = document.getElementById('wave-library-picker-options');
 
     function escapeRegex(str) {
       return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -562,6 +619,947 @@ ${lines.join('\n')}`;
         }
       });
       return out;
+    }
+
+    function createNavNode(label, rows, children, options) {
+      return {
+        id: 'nav-' + String(Math.random()).slice(2) + '-' + Date.now().toString(36),
+        label: label == null ? '未命名目录' : String(label),
+        rows: Array.isArray(rows) ? rows.slice() : [],
+        documents: Array.isArray(options && options.documents) ? options.documents.slice() : [],
+        children: Array.isArray(children) ? children : [],
+        expanded: true,
+        isCustom: !!(options && options.isCustom),
+      };
+    }
+
+    function normalizeNavRows(rows, maxIndex) {
+      const count = Number.isFinite(maxIndex) ? maxIndex : 0;
+      const uniq = new Set();
+      (rows || []).forEach((item) => {
+        const num = Number(item);
+        if (!Number.isFinite(num)) return;
+        if (num < 0 || num >= count) return;
+        uniq.add(Math.floor(num));
+      });
+      return [...uniq].sort((a, b) => a - b);
+    }
+
+    function buildNavTreeFromParsedSignals(signals, state) {
+      if (!Array.isArray(signals)) return { rows: [], children: [] };
+      const stateRef = state || { nextRow: 0 };
+      const rows = [];
+      const children = [];
+
+      signals.forEach((item) => {
+        if (Array.isArray(item)) {
+          if (!item.length || typeof item[0] !== 'string') return;
+          const nested = buildNavTreeFromParsedSignals(item.slice(1), stateRef);
+          if (nested.rows.length > 0 || nested.children.length > 0) {
+            const node = createNavNode(item[0], nested.rows, nested.children, {});
+            children.push(node);
+            nested.rows.forEach((v) => rows.push(v));
+          }
+          return;
+        }
+        if (!item || typeof item !== 'object') return;
+        if (item.wave === undefined || item.name === undefined) return;
+        const index = stateRef.nextRow;
+        stateRef.nextRow += 1;
+        rows.push(index);
+        const signalName = item.name != null && String(item.name).trim() !== '' ? item.name : 'signal ' + (index + 1);
+        children.push(createNavNode(signalName, [index], [], {}));
+      });
+
+      return { rows: normalizeNavRows(rows, Number.POSITIVE_INFINITY), children };
+    }
+
+    function buildNavStateFromJson(text) {
+      const root = createNavNode('波形图', [], [], {});
+      root.id = 'nav-root';
+
+      const customMeta = loadNavCustomTreeFromStorage();
+      if (customMeta && Array.isArray(customMeta.nodes)) {
+        for (let i = 0; i < customMeta.nodes.length; i++) {
+          const child = normalizeNavCustomNode(customMeta.nodes[i], true);
+          if (!child) continue;
+          root.children.push(child);
+        }
+      }
+      const assigned = new Set();
+      (function collectAssigned(nodes) {
+        (nodes || []).forEach((node) => {
+          (node.documents || []).forEach((name) => assigned.add(name));
+          collectAssigned(node.children || []);
+        });
+      })(root.children);
+      root.documents = savedTags.filter((tag) => !assigned.has(tag.name)).map((tag) => tag.name);
+      ensureNavCustomMetaPaths(root, ['nav-root'], 'nav-root');
+      return root;
+    }
+
+    function getNavNodeById(node, targetId) {
+      if (!node || !targetId) return null;
+      if (node.id === targetId) return node;
+      const children = node.children || [];
+      for (let i = 0; i < children.length; i++) {
+        const hit = getNavNodeById(children[i], targetId);
+        if (hit) return hit;
+      }
+      return null;
+    }
+
+    function getAllNavNodeCount(node) {
+      if (!node) return 0;
+      const children = node.children || [];
+      return 1 + children.reduce((sum, child) => sum + getAllNavNodeCount(child), 0);
+    }
+
+    function getNavDirectoryNumber(targetNode) {
+      let result = '';
+      function walk(nodes, prefix) {
+        let directoryIndex = 0;
+        for (let i = 0; i < (nodes || []).length; i++) {
+          const node = nodes[i];
+          if (!node || !node.isCustom) continue;
+          directoryIndex += 1;
+          const number = prefix ? (prefix + '.' + directoryIndex) : (directoryIndex + '.');
+          if (node === targetNode) {
+            result = number;
+            return true;
+          }
+          if (walk(node.children || [], number.replace(/\.$/, ''))) return true;
+        }
+        return false;
+      }
+      walk(navTreeState ? navTreeState.children : [], '');
+      return result;
+    }
+
+    function getNavDirectoryDisplayName(node) {
+      const number = getNavDirectoryNumber(node) || '';
+      const label = node && node.label && node.label !== '目录' ? String(node.label).trim() : '';
+      return label ? (number + ' ' + label) : number;
+    }
+
+    function cloneObjectShallow(value) {
+      if (!value || typeof value !== 'object') return value;
+      if (Array.isArray(value)) return value.slice();
+      return Object.assign({}, value);
+    }
+
+    function normalizeNavRangeInput(raw) {
+      const text = String(raw == null ? '' : raw).trim();
+      if (!text) return [];
+      const set = new Set();
+      const parts = text.split(/[,;\\s]+/);
+      parts.forEach((part) => {
+        if (!part) return;
+        const seg = part.trim();
+        if (!seg) return;
+        if (seg.indexOf('-') >= 0) {
+          const rangeParts = seg.split('-');
+          if (rangeParts.length !== 2) return;
+          const start = Number(rangeParts[0]);
+          const end = Number(rangeParts[1]);
+          if (!Number.isFinite(start) || !Number.isFinite(end)) return;
+          const lo = Math.min(start, end);
+          const hi = Math.max(start, end);
+          for (let i = lo; i <= hi; i++) set.add(i);
+          return;
+        }
+        const idx = Number(seg);
+        if (Number.isFinite(idx)) {
+          set.add(idx);
+        }
+      });
+      return Array.from(set).sort((a, b) => a - b);
+    }
+
+    function normalizeNavSelectedRows(rows, totalRows) {
+      const count = Number.isFinite(totalRows) ? totalRows : 0;
+      const set = new Set();
+      (rows || []).forEach((raw) => {
+        const num = Number(raw);
+        if (!Number.isFinite(num)) return;
+        let idx = Math.floor(num);
+        if (idx < 0) return;
+        if (idx >= count) return;
+        set.add(idx);
+      });
+      return Array.from(set).sort((a, b) => a - b);
+    }
+
+    function convertRowsToZeroBased(rows, totalRows) {
+      const parsed = normalizeNavRangeInput(rows);
+      if (!parsed.length) return [];
+      const set = new Set();
+      parsed.forEach((num) => {
+        if (!Number.isFinite(num)) return;
+        let idx = num;
+        if (idx > 0) idx -= 1;
+        set.add(idx);
+      });
+      return normalizeNavSelectedRows(Array.from(set), Number.isFinite(totalRows) ? totalRows : Number.MAX_SAFE_INTEGER);
+    }
+
+    function normalizeNavCustomNodeRows(node, totalRows) {
+      if (!node || typeof node !== 'object') return;
+      const children = node.children || [];
+      node.rows = normalizeNavSelectedRows(node.rows || [], totalRows);
+      for (let i = 0; i < children.length; i++) {
+        normalizeNavCustomNodeRows(children[i], totalRows);
+      }
+    }
+
+    function getNavNodeAllRows(node, outRows) {
+      const rows = outRows || [];
+      if (!node) return rows;
+      const selfRows = normalizeNavSelectedRows(node.rows || [], Number.MAX_SAFE_INTEGER);
+      selfRows.forEach((r) => rows.push(r));
+      const children = node.children || [];
+      for (let i = 0; i < children.length; i++) {
+        getNavNodeAllRows(children[i], rows);
+      }
+      return rows;
+    }
+
+    function collectNavRows(node) {
+      return normalizeNavSelectedRows(getNavNodeAllRows(node, []), Number.MAX_SAFE_INTEGER);
+    }
+
+    function collectNavDocuments(node, output) {
+      const result = output || [];
+      if (!node) return result;
+      (node.documents || []).forEach((name) => {
+        if (name && !result.includes(name)) result.push(name);
+      });
+      (node.children || []).forEach((child) => collectNavDocuments(child, result));
+      return result;
+    }
+
+    function getNavNodePath(node, treeRoot) {
+      const path = [];
+      function find(target, current, chain) {
+        if (!current) return false;
+        if (current === target) {
+          path.push.apply(path, chain);
+          return true;
+        }
+        const kids = current.children || [];
+        for (let i = 0; i < kids.length; i++) {
+          const next = chain.concat([current.id + '>' + kids[i].id]);
+          if (find(target, kids[i], next)) return true;
+        }
+        return false;
+      }
+      find(node, treeRoot || navTreeState, ['nav-root']);
+      if (!path.length && treeRoot && treeRoot.children) {
+        for (let i = 0; i < treeRoot.children.length; i++) {
+          if (treeRoot.children[i] === node) {
+            return ['nav-root', treeRoot.children[i].id];
+          }
+        }
+      }
+      return [treeRoot && treeRoot.id ? treeRoot.id : 'nav-root'];
+    }
+
+    function findNavNodeParent(root, targetId, path) {
+      const start = root && root.children;
+      if (!start || !Array.isArray(start)) return null;
+      for (let i = 0; i < start.length; i++) {
+        const child = start[i];
+        if (child.id === targetId) return root;
+        const kids = child.children || [];
+        for (let j = 0; j < kids.length; j++) {
+          if (kids[j].id === targetId) return child;
+          const deep = findNavNodeParent(child, targetId);
+          if (deep) return deep;
+        }
+      }
+      return null;
+    }
+
+    function cloneNavNode(node, keepId) {
+      const clone = createNavNode(node.label, node.rows, [], { isCustom: !!node.isCustom, documents: node.documents || [] });
+      if (keepId && node.id) clone.id = node.id;
+      if (typeof node.expanded === 'boolean') clone.expanded = node.expanded;
+      const children = node.children || [];
+      for (let i = 0; i < children.length; i++) {
+        clone.children.push(cloneNavNode(children[i], keepId));
+      }
+      return clone;
+    }
+
+    function loadNavCustomTreeFromStorage() {
+      try {
+        const raw = localStorage.getItem(NAV_TREE_KEY);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        if (!parsed || !Array.isArray(parsed.nodes)) return null;
+        return parsed;
+      } catch (_e) {
+        return null;
+      }
+    }
+
+    function normalizeNavCustomNode(raw, keepPath) {
+      if (!raw || typeof raw !== 'object') return null;
+      const label = String(raw.label == null ? '' : raw.label).trim();
+      if (!label) return null;
+      const rawRows = raw.rows != null ? raw.rows : (raw.rowIndexes != null ? raw.rowIndexes : []);
+      const result = createNavNode(label, rawRows, [], { isCustom: true, documents: Array.isArray(raw.documents) ? raw.documents : [] });
+      result.id = String(raw.id || ('nav-custom-' + Math.random().toString(16).slice(2) + '-' + Date.now().toString(36)));
+      result.expanded = raw.expanded !== false;
+      result.path = keepPath && Array.isArray(raw.path) ? raw.path.slice() : [];
+      if (Array.isArray(raw.children)) {
+        for (let i = 0; i < raw.children.length; i++) {
+          const child = normalizeNavCustomNode(raw.children[i], true);
+          if (child) result.children.push(child);
+        }
+      }
+      return result;
+    }
+
+    function saveNavCustomTreeToStorage(nodes) {
+      try {
+        localStorage.setItem(NAV_TREE_KEY, JSON.stringify({ version: 2, kind: 'wave-directory', nodes: nodes || [], updatedAt: new Date().toISOString() }));
+        vwdDebugLog('nav-tree', { phase: 'storage-save', ok: true, nodeCount: Array.isArray(nodes) ? nodes.length : 0 });
+        scheduleWaveLibraryServerSave();
+        return true;
+      } catch (error) {
+        vwdDebugLog('nav-tree', { phase: 'storage-save', ok: false, message: error && error.message ? error.message : String(error) });
+        return false;
+      }
+    }
+
+    function stripNavRuntimeMeta(node) {
+      if (!node || typeof node !== 'object') return null;
+      const copy = {
+        label: node.label,
+        rows: (node.rows || []).slice(),
+        documents: (node.documents || []).slice(),
+        expanded: node.expanded,
+        isCustom: !!node.isCustom,
+        path: node.path ? node.path.slice() : [],
+        children: []
+      };
+      if (copy.isCustom) copy.id = node.id;
+      const kids = node.children || [];
+      for (let i = 0; i < kids.length; i++) {
+        const child = stripNavRuntimeMeta(kids[i]);
+        if (child) copy.children.push(child);
+      }
+      return copy;
+    }
+
+    function collectCustomNavNodes(root) {
+      const list = [];
+      if (!root || !Array.isArray(root.children)) return list;
+
+      function walk(nodes) {
+        for (let i = 0; i < nodes.length; i++) {
+          const node = nodes[i];
+          if (!node || typeof node !== 'object') continue;
+          if (node.isCustom) {
+            const copy = stripNavRuntimeMeta(node);
+            if (copy) list.push(copy);
+            continue;
+          }
+          walk(node.children || []);
+        }
+      }
+
+      walk(root.children);
+      return list;
+    }
+
+    function getNavVisibleRowSet() {
+      const rows = Array.isArray(navVisibleRows) ? navVisibleRows : [];
+      return new Set(rows);
+    }
+
+    function isNavFilteringActive() {
+      return false;
+    }
+
+    function setSelectedNavNode(nodeId, options) {
+      const opt = options || {};
+      if (!navTreeState) return null;
+
+      const targetId = nodeId || 'nav-root';
+      const found = getNavNodeById(navTreeState, targetId);
+      const target = found || navTreeState;
+      selectedNavNodeId = target.id || 'nav-root';
+      navVisibleRows = [];
+      navRenderContext = {
+        selectedNodeId: selectedNavNodeId,
+        selectedNodeLabel: target.label || '波形图',
+        visibleRows: [],
+        totalRows: navTreeSignalCount,
+        sortToken: ++navSortToken
+      };
+      renderNavTree();
+      renderWaveLibrary();
+      if (!opt.skipFilter) {
+        applyNavVisibilityToWave();
+      }
+      return target;
+    }
+
+    function parseNavRowInput(input) {
+      const raw = input == null ? '' : String(input).trim();
+      return convertRowsToZeroBased(raw, navTreeSignalCount);
+    }
+
+    function rebuildNavTreeStateFromJson(jsonText) {
+      const oldId = selectedNavNodeId || 'nav-root';
+      navTreeState = buildNavStateFromJson(jsonText);
+      navTreeSignalCount = Array.isArray(navTreeState && navTreeState.rows) ? navTreeState.rows.length : 0;
+      if (!navTreeState) {
+        navTreeSignalCount = 0;
+        navVisibleRows = [];
+        return navTreeState;
+      }
+      if (!navTreeState.id) navTreeState.id = 'nav-root';
+
+      const selected = getNavNodeById(navTreeState, oldId) || navTreeState;
+      navTreeState.expanded = true;
+      setSelectedNavNode(selected.id, { skipFilter: true });
+      return navTreeState;
+    }
+
+    function saveNavCustomNodesFromTree() {
+      const nodes = collectCustomNavNodes(navTreeState || { children: [] });
+      return saveNavCustomTreeToStorage(nodes);
+    }
+
+    function renderNavTree() {
+      if (!navTreeEl) {
+        vwdDebugLog('nav-tree', { phase: 'render', ok: false, reason: 'missing-container' });
+        return;
+      }
+      navTreeEl.innerHTML = '';
+      if (!navTreeState) {
+        vwdDebugLog('nav-tree', { phase: 'render', ok: false, reason: 'missing-state' });
+        return;
+      }
+
+      const rootNode = navTreeState;
+      const rootList = document.createElement('ul');
+      rootList.className = 'nav-tree-list';
+
+      function createDocumentRow(documentName, parentNode) {
+        const tag = savedTags.find((item) => item.name === documentName);
+        if (!tag) return null;
+        const item = document.createElement('li');
+        item.className = 'nav-tree-document';
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'nav-tree-document-label';
+        if (tag.name === activeTagName) button.classList.add('active');
+        button.title = '打开波形图: ' + getSavedTagTitle(tag);
+        button.textContent = getSavedTagTitle(tag);
+        button.addEventListener('click', () => {
+          setSelectedNavNode(parentNode.id, { skipFilter: true });
+          openWaveDocumentForEditing(tag.name);
+        });
+        const moveBtn = document.createElement('button');
+        moveBtn.type = 'button';
+        moveBtn.className = 'nav-tree-document-move';
+        moveBtn.title = '移动波形图到其他目录';
+        moveBtn.textContent = '↳';
+        moveBtn.addEventListener('click', (event) => {
+          event.stopPropagation();
+          moveNavDocument(tag.name, parentNode);
+        });
+        item.appendChild(button);
+        item.appendChild(moveBtn);
+        return item;
+      }
+
+      function createNodeActionRow(node) {
+        const item = document.createElement('li');
+        item.className = 'nav-tree-node';
+        item.classList.toggle('expanded', !!node.expanded);
+
+        const labelBtn = document.createElement('button');
+        labelBtn.type = 'button';
+        labelBtn.className = 'nav-tree-node-label';
+        if (node.id === selectedNavNodeId) labelBtn.classList.add('active');
+        if (node.isCustom) labelBtn.classList.add('nav-tree-node-custom');
+
+        const toggle = document.createElement('span');
+        toggle.className = 'toggle';
+        toggle.textContent = (node.children && node.children.length) || (node.documents && node.documents.length)
+          ? (node.expanded ? '▾' : '▸')
+          : ' ';
+        toggle.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if ((!node.children || node.children.length === 0) && (!node.documents || node.documents.length === 0)) return;
+          node.expanded = !node.expanded;
+          renderNavTree();
+        });
+
+        const name = document.createElement('span');
+        name.className = 'name';
+        name.textContent = getNavDirectoryDisplayName(node) || '未编号目录';
+
+        const count = document.createElement('span');
+        count.className = 'count';
+        count.textContent = '(' + ((node.documents || []).length) + ')';
+
+        const actions = document.createElement('span');
+        actions.className = 'nav-tree-actions';
+        const addChild = document.createElement('button');
+        addChild.type = 'button';
+        addChild.className = 'nav-tree-action';
+        addChild.title = '在当前目录下添加子目录';
+        addChild.textContent = '+';
+        addChild.addEventListener('click', (e) => {
+          e.stopPropagation();
+          handleAddNavChildNode(node);
+        });
+        const deleteDirectory = document.createElement('button');
+        deleteDirectory.type = 'button';
+        deleteDirectory.className = 'nav-tree-action nav-tree-action-delete';
+        deleteDirectory.title = '删除目录，波形图将移至上级目录';
+        deleteDirectory.textContent = '×';
+        deleteDirectory.addEventListener('click', (e) => {
+          e.stopPropagation();
+          deleteNavDirectory(node);
+        });
+
+        actions.appendChild(addChild);
+        if (node.isCustom) actions.appendChild(deleteDirectory);
+        labelBtn.appendChild(toggle);
+        labelBtn.appendChild(name);
+        labelBtn.appendChild(count);
+        if (node.id === 'nav-root' || node.isCustom) {
+          labelBtn.appendChild(actions);
+        }
+
+        labelBtn.addEventListener('click', () => {
+          setSelectedNavNode(node.id);
+        });
+
+        const children = document.createElement('div');
+        children.className = 'nav-tree-children';
+        if ((!node.children || node.children.length === 0) && (!node.documents || node.documents.length === 0)) {
+          children.className += ' empty';
+        }
+
+        const childList = document.createElement('ul');
+        childList.className = 'nav-tree-list';
+
+        if (Array.isArray(node.children)) {
+          node.children.forEach((child) => {
+            childList.appendChild(renderNode(child));
+          });
+        }
+        (node.documents || []).forEach((name) => {
+          const documentRow = createDocumentRow(name, node);
+          if (documentRow) childList.appendChild(documentRow);
+        });
+
+        children.appendChild(childList);
+        item.appendChild(labelBtn);
+        item.appendChild(children);
+        if (node.expanded) {
+          children.style.display = '';
+        } else {
+          children.style.display = 'none';
+        }
+
+        return item;
+      }
+
+      function renderNode(node) {
+        return createNodeActionRow(node);
+      }
+
+      const rootListItem = document.createElement('li');
+      rootListItem.className = 'nav-tree-node';
+      rootListItem.classList.toggle('expanded', !!rootNode.expanded);
+      const rootLabel = document.createElement('button');
+      rootLabel.type = 'button';
+      rootLabel.className = 'nav-tree-node-label';
+      if (selectedNavNodeId === 'nav-root') rootLabel.classList.add('active');
+
+      const rootToggle = document.createElement('span');
+      rootToggle.className = 'toggle';
+      rootToggle.textContent = rootNode.expanded ? '▾' : '▸';
+      rootToggle.addEventListener('click', (e) => {
+        e.stopPropagation();
+        rootNode.expanded = !rootNode.expanded;
+        renderNavTree();
+      });
+
+      const rootName = document.createElement('span');
+      rootName.className = 'name';
+        rootName.textContent = rootNode.label || '波形图';
+
+      const rootCount = document.createElement('span');
+      rootCount.className = 'count';
+        rootCount.textContent = '(' + ((rootNode.documents || []).length) + ')';
+
+      const rootActions = document.createElement('span');
+      rootActions.className = 'nav-tree-actions';
+      const rootAddChild = document.createElement('button');
+      rootAddChild.type = 'button';
+      rootAddChild.className = 'nav-tree-action';
+      rootAddChild.title = '在根目录下创建子标题';
+      rootAddChild.textContent = '+';
+      rootAddChild.addEventListener('click', (event) => {
+        event.stopPropagation();
+        handleAddNavChildNode(rootNode);
+      });
+      rootActions.appendChild(rootAddChild);
+
+      rootLabel.appendChild(rootToggle);
+      rootLabel.appendChild(rootName);
+      rootLabel.appendChild(rootCount);
+      rootLabel.appendChild(rootActions);
+      rootLabel.addEventListener('click', () => {
+        setSelectedNavNode('nav-root');
+      });
+      rootListItem.appendChild(rootLabel);
+
+      const rootChildren = document.createElement('div');
+      rootChildren.className = 'nav-tree-children';
+      rootChildren.style.display = rootNode.expanded ? '' : 'none';
+        const rootChildrenList = document.createElement('ul');
+        rootChildrenList.className = 'nav-tree-list';
+        (rootNode.children || []).forEach((node) => rootChildrenList.appendChild(renderNode(node)));
+        (rootNode.documents || []).forEach((name) => {
+          const documentRow = createDocumentRow(name, rootNode);
+          if (documentRow) rootChildrenList.appendChild(documentRow);
+        });
+      rootChildren.appendChild(rootChildrenList);
+      rootListItem.appendChild(rootChildren);
+      rootList.appendChild(rootListItem);
+
+      rootList.style.listStyle = 'none';
+      navTreeEl.appendChild(rootList);
+      vwdDebugLog('nav-tree', {
+        phase: 'render',
+        ok: true,
+        selectedId: selectedNavNodeId,
+        rootExpanded: !!rootNode.expanded,
+        nodeCount: getAllNavNodeCount(rootNode),
+        renderedNodeCount: navTreeEl.querySelectorAll('.nav-tree-node').length,
+        renderedDocumentCount: navTreeEl.querySelectorAll('.nav-tree-document').length,
+        expandedNodeCount: navTreeEl.querySelectorAll('.nav-tree-node.expanded').length
+      });
+      return;
+    }
+
+    function ensureNavStateReady() {
+      if (navTreeState) return true;
+      navTreeState = buildNavStateFromJson(editor.value || '');
+      navTreeSignalCount = Array.isArray(navTreeState && navTreeState.rows) ? navTreeState.rows.length : 0;
+      setSelectedNavNode('nav-root', { skipFilter: true });
+      return true;
+    }
+
+    function handleAddNavRootNode() {
+      vwdDebugLog('nav-tree', { phase: 'add-root-click' });
+      if (!ensureNavStateReady()) {
+        vwdDebugLog('nav-tree', { phase: 'add-root-abort', reason: 'state-not-ready' });
+        return;
+      }
+      const label = window.prompt('请输入目录名称');
+      if (!label || !label.trim()) return;
+      const before = captureWaveLibrarySnapshot();
+      const child = createNavNode(label.trim(), [], [], { isCustom: true });
+      navTreeState.children = navTreeState.children || [];
+      navTreeState.children.push(child);
+      navTreeState.expanded = true;
+      const saved = saveNavCustomNodesFromTree();
+      vwdDebugLog('nav-tree', { phase: 'add-root-created', id: child.id, label: child.label, saved: saved });
+      setSelectedNavNode(child.id);
+      pushWaveLibraryHistory(before, captureWaveLibrarySnapshot());
+      setStatus(true, '已添加目录: ' + getNavDirectoryDisplayName(child));
+    }
+
+    function handleAddNavChildNode(parentNode) {
+      vwdDebugLog('nav-tree', { phase: 'add-child-click', suppliedParentId: parentNode && parentNode.id ? parentNode.id : null, selectedId: selectedNavNodeId });
+      if (!ensureNavStateReady()) {
+        vwdDebugLog('nav-tree', { phase: 'add-child-abort', reason: 'state-not-ready' });
+        return;
+      }
+      let parent = parentNode;
+      if (!parent || !(parent.id === 'nav-root' || parent.isCustom)) {
+        parent = getNavNodeById(navTreeState, selectedNavNodeId) || navTreeState;
+      }
+      if (!parent) {
+        parent = navTreeState;
+      }
+      const label = window.prompt('请输入目录名称');
+      if (!label || !label.trim()) return;
+      const before = captureWaveLibrarySnapshot();
+      parent.children = parent.children || [];
+      const child = createNavNode(label.trim(), [], [], { isCustom: true });
+      parent.children.push(child);
+      parent.expanded = true;
+      const saved = saveNavCustomNodesFromTree();
+      vwdDebugLog('nav-tree', { phase: 'add-child-created', id: child.id, parentId: parent.id, label: child.label, saved: saved });
+      setSelectedNavNode(child.id);
+      pushWaveLibraryHistory(before, captureWaveLibrarySnapshot());
+      setStatus(true, '已添加目录: ' + getNavDirectoryDisplayName(child));
+    }
+
+    function addCurrentWaveToNavDirectory() {
+      if (!ensureNavStateReady()) return;
+      const before = captureWaveLibrarySnapshot();
+      let directory = getNavNodeById(navTreeState, selectedNavNodeId);
+      if (!directory || directory.id === 'nav-root' || !directory.isCustom) {
+        setStatus(false, '请先选择一个目录，再收录当前波形图');
+        vwdDebugLog('nav-tree', { phase: 'add-document-abort', reason: 'directory-not-selected', selectedId: selectedNavNodeId });
+        return;
+      }
+      let documentName = activeTagName;
+      if (!documentName) {
+        documentName = getCurrentWaveTitle() || window.prompt('请输入波形图标题');
+        if (!documentName || !String(documentName).trim()) return;
+        upsertSavedTag(String(documentName).trim(), getCurrentStateSnapshot());
+        directory = getNavNodeById(navTreeState, selectedNavNodeId);
+        if (!directory) return;
+      }
+      directory.documents = Array.isArray(directory.documents) ? directory.documents : [];
+      if (!directory.documents.includes(documentName)) directory.documents.push(documentName);
+      directory.expanded = true;
+      const saved = saveNavCustomNodesFromTree();
+      setSelectedNavNode(directory.id);
+      pushWaveLibraryHistory(before, captureWaveLibrarySnapshot());
+      setStatus(true, '已收录波形图: ' + getSavedTagTitle(savedTags.find((tag) => tag.name === documentName) || { name: documentName }));
+      vwdDebugLog('nav-tree', { phase: 'add-document', directoryId: directory.id, documentName: documentName, saved: saved });
+    }
+
+    function createEmptyWaveDocument() {
+      if (!ensureNavStateReady()) return;
+      if (!saveCurrentWaveDocumentBeforeSwitch()) {
+        setStatus(false, '当前波形图自动保存失败');
+        return;
+      }
+      const before = captureWaveLibrarySnapshot();
+      const target = getNavNodeById(navTreeState, selectedNavNodeId) || navTreeState;
+      const ordinal = savedTags.length + 1;
+      const documentName = 'wave-document-' + Date.now().toString(36);
+      const content = JSON.stringify({
+        signal: [],
+        head: { text: '波形图 ' + ordinal }
+      }, null, 2);
+      if (!upsertSavedTag(documentName, {
+        content: content,
+        hscale: 1,
+        waveEditMode: waveEditMode,
+        savedAt: new Date().toISOString()
+      })) {
+        setStatus(false, '新建波形图失败');
+        return;
+      }
+      target.documents = Array.isArray(target.documents) ? target.documents : [];
+      if (target.id !== 'nav-root' && !target.documents.includes(documentName)) target.documents.push(documentName);
+      target.expanded = true;
+      saveNavCustomNodesFromTree();
+      rebuildNavTreeStateFromJson(editor.value || '');
+      setSelectedNavNode(target.id);
+      openWaveDocumentForEditing(documentName);
+      pushWaveLibraryHistory(before, captureWaveLibrarySnapshot());
+      requestAnimationFrame(() => formatEditorJson());
+      vwdDebugLog('wave-library', { phase: 'create-empty-document', documentName: documentName, targetId: target.id });
+    }
+
+    function findNavDirectoryByLabel(node, label) {
+      if (!node) return null;
+      if (node.isCustom && node.label === label) return node;
+      const children = node.children || [];
+      for (let i = 0; i < children.length; i++) {
+        const found = findNavDirectoryByLabel(children[i], label);
+        if (found) return found;
+      }
+      return null;
+    }
+
+    function getNavDirectoryChoices(root) {
+      const choices = [{ node: root, label: '未归类（根目录）' }];
+      function walk(nodes) {
+        (nodes || []).forEach((node) => {
+          if (!node || !node.isCustom) return;
+          choices.push({ node: node, label: getNavDirectoryDisplayName(node) || '未编号目录' });
+          walk(node.children || []);
+        });
+      }
+      walk(root.children || []);
+      return choices;
+    }
+
+    function deleteNavDirectory(node) {
+      if (!node || !node.isCustom || !navTreeState) return;
+      const before = captureWaveLibrarySnapshot();
+      const parent = findNavNodeParent(navTreeState, node.id) || navTreeState;
+      parent.documents = Array.isArray(parent.documents) ? parent.documents : [];
+      (node.documents || []).forEach((name) => {
+        if (!parent.documents.includes(name)) parent.documents.push(name);
+      });
+      parent.children = Array.isArray(parent.children) ? parent.children : [];
+      const index = parent.children.findIndex((child) => child.id === node.id);
+      if (index >= 0) {
+        const promotedChildren = Array.isArray(node.children) ? node.children : [];
+        parent.children.splice(index, 1, ...promotedChildren);
+      }
+      parent.expanded = true;
+      const saved = saveNavCustomNodesFromTree();
+      setSelectedNavNode(parent.id);
+      pushWaveLibraryHistory(before, captureWaveLibrarySnapshot());
+      setStatus(true, '已删除目录，波形图已移至上级目录');
+      vwdDebugLog('nav-tree', { phase: 'delete-directory', deletedId: node.id, parentId: parent.id, documentCount: (node.documents || []).length, saved: saved });
+    }
+
+    function moveNavDocument(documentName, fromNode) {
+      if (!navTreeState || !documentName || !fromNode) return;
+      const choices = getNavDirectoryChoices(navTreeState);
+      if (!navMoveModal || !navMoveOptions) return;
+      navMoveOptions.innerHTML = '';
+      choices.forEach((choice) => {
+        const option = document.createElement('button');
+        option.type = 'button';
+        option.className = 'nav-move-option';
+        option.textContent = choice.label;
+        option.disabled = choice.node.id === fromNode.id;
+        option.addEventListener('click', () => {
+          navMoveModal.hidden = true;
+          moveNavDocumentToDirectory(documentName, fromNode, choice.node, choice.label);
+        });
+        navMoveOptions.appendChild(option);
+      });
+      navMoveModal.hidden = false;
+    }
+
+    function moveNavDocumentToDirectory(documentName, fromNode, target, targetLabel) {
+      if (!navTreeState || !documentName || !fromNode || !target) return;
+      if (target.id === fromNode.id) return;
+      const before = captureWaveLibrarySnapshot();
+      fromNode.documents = (fromNode.documents || []).filter((name) => name !== documentName);
+      target.documents = Array.isArray(target.documents) ? target.documents : [];
+      if (!target.documents.includes(documentName)) target.documents.push(documentName);
+      target.expanded = true;
+      const saved = saveNavCustomNodesFromTree();
+      setSelectedNavNode(target.id);
+      pushWaveLibraryHistory(before, captureWaveLibrarySnapshot());
+      setStatus(true, '已移动波形图到：' + (targetLabel || getNavDirectoryDisplayName(target)));
+      vwdDebugLog('nav-tree', { phase: 'move-document', documentName: documentName, fromId: fromNode.id, toId: target.id, saved: saved });
+    }
+
+    function seedRequestedWaveCopies() {
+      try {
+        if (localStorage.getItem(NAV_COPY_SEED_KEY) === '1') return;
+      } catch (_e) {
+        return;
+      }
+      if (!ensureNavStateReady()) return;
+      const snapshot = getCurrentStateSnapshot();
+      const targets = ['2222', '51515'];
+      const created = [];
+      targets.forEach((label) => {
+        let directory = findNavDirectoryByLabel(navTreeState, label);
+        if (!directory) {
+          directory = createNavNode(label, [], [], { isCustom: true });
+          navTreeState.children.push(directory);
+        }
+        const documentName = '__vwd-copy-' + label;
+        if (findSavedTagIndex(documentName) < 0) {
+          upsertSavedTag(documentName, snapshot);
+        }
+        directory.documents = Array.isArray(directory.documents) ? directory.documents : [];
+        if (!directory.documents.includes(documentName)) directory.documents.push(documentName);
+        directory.expanded = true;
+        created.push({ directory: label, document: documentName });
+      });
+      navTreeState.expanded = true;
+      saveNavCustomNodesFromTree();
+      setSelectedNavNode('nav-root');
+      try { localStorage.setItem(NAV_COPY_SEED_KEY, '1'); } catch (_e) { /* ignore */ }
+      vwdDebugLog('nav-tree', { phase: 'seed-copies', created: created });
+    }
+
+    let navControlButtonsBound = false;
+
+    function bindNavControlButtons() {
+      if (navControlButtonsBound) return;
+      const navAddRootBtn = document.getElementById('btn-nav-add-root');
+      const navAddRowsBtn = document.getElementById('btn-nav-add-rows');
+      const navAddDocumentBtn = document.getElementById('btn-nav-add-document');
+      const navAddWaveDocumentBtn = document.getElementById('btn-nav-add-wave-document');
+      if (!navAddRootBtn && !navAddRowsBtn && !navAddDocumentBtn && !navAddWaveDocumentBtn) {
+        vwdDebugLog('nav-tree', { phase: 'buttons-bound', ok: false, reason: 'buttons-not-found' });
+        return;
+      }
+
+      if (navAddRootBtn) {
+        navAddRootBtn.addEventListener('click', () => {
+          vwdDebugLog('nav-tree', { phase: 'button-event', action: 'add-root' });
+          try {
+            handleAddNavRootNode();
+          } catch (error) {
+            vwdDebugLog('nav-tree', { phase: 'button-error', action: 'add-root', message: error && error.message ? error.message : String(error) });
+            setStatus(false, '新建目录失败，请复制 Debug 日志');
+          }
+        });
+      }
+      if (navAddRowsBtn) {
+        navAddRowsBtn.addEventListener('click', () => {
+          vwdDebugLog('nav-tree', { phase: 'button-event', action: 'add-child' });
+          try {
+            handleAddNavChildNode();
+          } catch (error) {
+            vwdDebugLog('nav-tree', { phase: 'button-error', action: 'add-child', message: error && error.message ? error.message : String(error) });
+            setStatus(false, '新建子目录失败，请复制 Debug 日志');
+          }
+        });
+      }
+      if (navAddDocumentBtn) {
+        navAddDocumentBtn.addEventListener('click', () => {
+          vwdDebugLog('nav-tree', { phase: 'button-event', action: 'add-document' });
+          try {
+            addCurrentWaveToNavDirectory();
+          } catch (error) {
+            vwdDebugLog('nav-tree', { phase: 'button-error', action: 'add-document', message: error && error.message ? error.message : String(error) });
+            setStatus(false, '收录波形图失败，请复制 Debug 日志');
+          }
+        });
+      }
+      if (navAddWaveDocumentBtn) {
+        navAddWaveDocumentBtn.addEventListener('click', () => {
+          vwdDebugLog('wave-library', { phase: 'button-event', action: 'create-empty-document' });
+          try {
+            createEmptyWaveDocument();
+          } catch (error) {
+            vwdDebugLog('wave-library', { phase: 'button-error', action: 'create-empty-document', message: error && error.message ? error.message : String(error) });
+            setStatus(false, '新建波形图失败，请复制 Debug 日志');
+          }
+        });
+      }
+      navControlButtonsBound = true;
+      vwdDebugLog('nav-tree', { phase: 'buttons-bound', ok: true, addRoot: !!navAddRootBtn, addChild: !!navAddRowsBtn, addDocument: !!navAddDocumentBtn, addWaveDocument: !!navAddWaveDocumentBtn });
+    }
+
+    // Bind navigation controls before the rest of the page initialization so an
+    // unrelated optional control cannot leave the directory buttons inactive.
+    bindNavControlButtons();
+
+    function ensureNavCustomMetaPaths(node, parentPath, parentId) {
+      if (!node || typeof node !== 'object') return;
+      const path = Array.isArray(parentPath) ? parentPath.slice() : [];
+      path.push(parentId || (node.id || ''));
+      if (node.isCustom) {
+        node.path = node.path && node.path.length ? node.path : path;
+      }
+      const kids = node.children || [];
+      for (let i = 0; i < kids.length; i++) {
+        ensureNavCustomMetaPaths(kids[i], path, node.id);
+      }
     }
 
     function findObjectStart(text, pos) {
@@ -609,6 +1607,41 @@ ${lines.join('\n')}`;
       pushUndoBeforeChange();
       applyEditorChange(formatted, 0, 0, { skipFocus: false });
       setStatus(true, 'JSON 已格式化对齐');
+    }
+
+    function setJsonPanelHidden(hidden, persist) {
+      const shouldHide = !!hidden;
+      app.classList.toggle('json-panel-hidden', shouldHide);
+      if (toggleJsonPanelLabel) {
+        toggleJsonPanelLabel.textContent = shouldHide ? '显示 JSON' : '隐藏 JSON';
+      }
+      if (toggleJsonPanelBtn) {
+        toggleJsonPanelBtn.title = shouldHide ? '显示 WaveDrom JSON 窗口' : '隐藏 WaveDrom JSON 窗口';
+        toggleJsonPanelBtn.setAttribute('aria-pressed', String(shouldHide));
+      }
+      if (persist) {
+        try { localStorage.setItem(JSON_PANEL_HIDDEN_KEY, shouldHide ? '1' : '0'); } catch (e) { /* ignore */ }
+      }
+    }
+
+    function restoreJsonPanelVisibility() {
+      try {
+        setJsonPanelHidden(localStorage.getItem(JSON_PANEL_HIDDEN_KEY) === '1', false);
+      } catch (e) {
+        setJsonPanelHidden(false, false);
+      }
+    }
+
+    let formatAfterWaveChangeRaf = null;
+
+    // Toolbar actions may update only a small JSON fragment. Normalize the full source
+    // once the action finishes, while coalescing rapid clicks into one format pass.
+    function scheduleFormatAfterWaveChange() {
+      if (formatAfterWaveChangeRaf !== null) return;
+      formatAfterWaveChangeRaf = requestAnimationFrame(() => {
+        formatAfterWaveChangeRaf = null;
+        formatEditorJson();
+      });
     }
     function buildSignalSourceMap(jsonText) {
       let parsed;
@@ -1398,6 +2431,7 @@ ${lines.join('\n')}`;
 
       pushUndoBeforeChange();
       applyEditorChange(newText, editor.selectionStart, editor.selectionEnd);
+      scheduleFormatAfterWaveChange();
     }
 
     function flushUndoDebounce() {
@@ -1417,6 +2451,7 @@ ${lines.join('\n')}`;
       undoStack.push(lastSavedContent);
       if (undoStack.length > 100) undoStack.shift();
       redoStack = [];
+      waveLibraryRedoStack = [];
       undoBurstCaptured = true;
       updateUndoRedoButtons();
     }
@@ -1431,6 +2466,7 @@ ${lines.join('\n')}`;
       undoStack.push(editor.value);
       if (undoStack.length > 100) undoStack.shift();
       redoStack = [];
+      waveLibraryRedoStack = [];
       lastSavedContent = editor.value;
       updateUndoRedoButtons();
     }
@@ -1835,6 +2871,7 @@ ${lines.join('\n')}`;
         : (newWave.length > 0 ? Math.min(safeCol + 1, newWave.length - 1) : -1);
       setSelectedSignal(rowIndex, nextCol);
       applyEditorChange(newText, entry.start, entry.start + newObjStr.length);
+      scheduleFormatAfterWaveChange();
       if (atLastColumn) {
         setStatus(
           true,
@@ -1886,6 +2923,7 @@ ${lines.join('\n')}`;
       const newObjStr = formatSignalObject(updatedSignal, indent);
       const newText = text.slice(0, entry.start) + newObjStr + text.slice(entry.end);
       applyEditorChange(newText, entry.start, entry.start + newObjStr.length);
+      scheduleFormatAfterWaveChange();
       setSelectedSignal(rowIndex, insertCol);
       setStatus(true, waveEditModeLabel() + ' · 已插入 ' + updatedSignal.name + ' [' + insertCol + ']=' + JSON.stringify(char));
       return true;
@@ -1936,6 +2974,7 @@ ${lines.join('\n')}`;
       const nextCol = newWave.length > 0 ? Math.min(safeCol, newWave.length - 1) : -1;
       setSelectedSignal(rowIndex, nextCol);
       applyEditorChange(newText, entry.start, entry.start + newObjStr.length);
+      scheduleFormatAfterWaveChange();
       setStatus(true, '已删除 ' + updatedSignal.name + ' [' + safeCol + ']');
       return true;
     }
@@ -2054,6 +3093,12 @@ ${lines.join('\n')}`;
     }
 
     function setSelectedSignal(rowIndex, colIndex) {
+      const hasFilter = isNavFilteringActive();
+      const visibleSet = getNavVisibleRowSet();
+      if (hasFilter && Number.isFinite(rowIndex) && rowIndex >= 0 && !visibleSet.has(rowIndex)) {
+        rowIndex = -1;
+        colIndex = -1;
+      }
       selectedSignalIndex = rowIndex;
       if (rowIndex < 0) {
         selectedWaveColumnIndex = -1;
@@ -2264,7 +3309,11 @@ ${lines.join('\n')}`;
 
     function restoreWaveSelection(lanes, sourceMap) {
       if (selectedSignalIndex < 0 && selectedGroupIndex < 0 && !connectionFromPoint && !connectionToPoint) return;
+      const visibleSet = getNavVisibleRowSet();
+      const hasFilter = isNavFilteringActive();
       if (selectedSignalIndex >= lanes.length || (selectedSignalIndex >= 0 && !sourceMap[selectedSignalIndex])) {
+        setSelectedSignal(-1, -1);
+      } else if (hasFilter && !visibleSet.has(selectedSignalIndex)) {
         setSelectedSignal(-1, -1);
       }
 
@@ -2278,6 +3327,24 @@ ${lines.join('\n')}`;
         refreshGroupSelection(svg, buildGroupSourceMap(editor.value || ''));
       }
       updateLegendAvailability();
+    }
+
+    function applyNavVisibilityToWave() {
+      const svg = waveContainer.querySelector('svg');
+      if (!svg) return;
+      const lanes = getWaveLaneGroups(svg);
+      const visibleSet = getNavVisibleRowSet();
+      const hasFilter = isNavFilteringActive();
+      lanes.forEach((lane, idx) => {
+        const visible = !hasFilter || visibleSet.has(idx);
+        lane.classList.toggle('wave-lane-hidden', !visible);
+        lane.style.display = visible ? '' : 'none';
+      });
+      if (selectedSignalIndex >= 0 && !hasFilter) return;
+      if (selectedSignalIndex >= 0 && !visibleSet.has(selectedSignalIndex)) {
+        setSelectedSignal(-1, -1);
+      }
+      updateConnectionPointStatusUI();
     }
 
     function applyLegendCharToSelection(char) {
@@ -2310,7 +3377,7 @@ ${lines.join('\n')}`;
         parsed = JSON.parse(editor.value);
       } catch (e) {
         setStatus(false, 'JSON 错误，删除失败');
-        return;
+        return false;
       }
       if (!parsed.signal) parsed.signal = [];
 
@@ -2318,7 +3385,7 @@ ${lines.join('\n')}`;
       const bounds = findSignalArrayBounds(text);
       if (!bounds) {
         setStatus(false, 'JSON 错误，删除失败');
-        return;
+        return false;
       }
 
       pushUndoBeforeChange();
@@ -2334,15 +3401,12 @@ ${lines.join('\n')}`;
       const selStart = insertPos + insertion.indexOf(newObjStr);
       const newMap = buildSignalSourceMap(newText);
       const newIndex = newMap.length - 1;
-      const isEmptySignal = Object.keys(tpl).length === 0;
-      if (isEmptySignal) {
-        setSelectedSignal(-1, -1);
-      } else {
-        if (!tpl.name) pendingNameEditSignalIndex = newIndex;
-        setSelectedSignal(newIndex, 0);
-      }
+      if (!tpl.name) pendingNameEditSignalIndex = newIndex;
+      setSelectedSignal(newIndex, 0);
       applyEditorChange(newText, selStart, selStart + newObjStr.length);
+      scheduleFormatAfterWaveChange();
       setStatus(true, tpl.name ? ('已插入信号: ' + tpl.name) : '已插入空白信号行');
+      return true;
     }
 
     function removeSignalFromText(text, index) {
@@ -2587,6 +3651,7 @@ ${lines.join('\n')}`;
       selectedSignalIndex = -1;
       selectedWaveColumnIndex = -1;
       applyEditorChange(newText, replaceStart, replaceStart + groupBlock.length);
+      scheduleFormatAfterWaveChange();
       setStatus(true, '已生成分组（第 ' + (startIndex + 1) + ' - ' + (endIndex + 1) + ' 行）');
     }
 
@@ -2625,6 +3690,7 @@ ${lines.join('\n')}`;
       selectedSignalIndex = -1;
       selectedWaveColumnIndex = -1;
       applyEditorChange(newText, Math.max(0, Math.min(group.start, Math.max(0, newText.length - 1))), group.start);
+      scheduleFormatAfterWaveChange();
       setStatus(true, '已删除分组：' + (group.label || '分组'));
     }
 
@@ -2667,6 +3733,7 @@ ${lines.join('\n')}`;
       adjustPendingNameEditAfterRowSwap(fromIndex, toIndex);
       setSelectedSignal(toIndex, selectedWaveColumnIndex >= 0 ? selectedWaveColumnIndex : 0);
       applyEditorChange(newText, editor.selectionStart, editor.selectionEnd);
+      scheduleFormatAfterWaveChange();
       setStatus(true, (delta < 0 ? '已上移信号行: ' : '已下移信号行: ') + signalName);
     }
 
@@ -2735,6 +3802,7 @@ ${lines.join('\n')}`;
       }
       setSelectedSignal(newSelectedIndex, newSelectedIndex >= 0 ? 0 : -1);
       applyEditorChange(newText, editor.selectionStart, editor.selectionEnd);
+      scheduleFormatAfterWaveChange();
 
       let statusMsg = '已删除信号行: ' + signalName;
       const affectedEdges = (parsed.edge || []).filter((edgeStr) => {
@@ -3346,6 +4414,7 @@ ${lines.join('\n')}`;
         return false;
       }
       applyEditorChange(newText, pos.absStart, pos.absEnd);
+      scheduleFormatAfterWaveChange();
       scrollEditorToEdge(newText, newEdgeStr);
       return true;
     }
@@ -3630,6 +4699,7 @@ ${lines.join('\n')}`;
           const newEdgeIndex = -1;
 
           applyEdgeInsertTextFast(newText, selStart, selEnd, fromPickFlow);
+          scheduleFormatAfterWaveChange();
 
           appendOptimisticEdge(edgeStr, endpoints.from, endpoints.to, newEdgeIndex, sourceMap);
           vwdMark('commitEdgeInsert:optimisticEdge');
@@ -3786,6 +4856,7 @@ ${lines.join('\n')}`;
 
       pushUndoBeforeChange();
       applyEditorChange(text, editor.selectionStart, editor.selectionEnd);
+      scheduleFormatAfterWaveChange();
       if (wasSelected) {
         clearEdgeSelection();
       } else if (selectedEdgeIndex > index) {
@@ -4064,6 +5135,56 @@ ${lines.join('\n')}`;
       nameText.addEventListener('click', (e) => onNameClick(e, nameText));
     }
 
+    function getWaveDataSlots(wave) {
+      const slots = [];
+      const value = String(wave || '');
+      for (let col = 0; col < value.length; col++) {
+        const ch = value[col];
+        if (!/[2-9=]/.test(ch)) continue;
+        slots.push({ dataIdx: slots.length, col });
+      }
+      return slots;
+    }
+
+    function getWaveDataSlotAtColumn(wave, col) {
+      const value = String(wave || '');
+      if (col < 0 || col >= value.length) return null;
+      let slotCol = col;
+      if (value[slotCol] === '.') {
+        while (slotCol > 0 && value[slotCol] === '.') slotCol--;
+      }
+      if (!/[2-9=]/.test(value[slotCol])) return null;
+      return getWaveDataSlots(value).find((slot) => slot.col === slotCol) || null;
+    }
+
+    function attachEmptyDataLabelClickHandler(drawGroup, entry, svg, handleLanePointSelect) {
+      if (drawGroup.dataset.vwdEmptyDataBound === '1') return;
+      drawGroup.dataset.vwdEmptyDataBound = '1';
+      drawGroup.addEventListener('click', (e) => {
+        if (isConnectionPickFlow() || groupPickActive) return;
+        const wave = entry.signal.wave || '';
+        const col = columnIndexFromClick(drawGroup, wave, svg, e.clientX, getWaveUnitWidth(editor.value));
+        const slot = getWaveDataSlotAtColumn(wave, col);
+        const data = Array.isArray(entry.signal.data) ? entry.signal.data : [];
+        const isEmpty = !!slot && (data[slot.dataIdx] === undefined || data[slot.dataIdx] === '');
+        vwdDebugLog('data-label', {
+          phase: 'draw-click',
+          signal: entry.signal.name || '',
+          col,
+          waveChar: wave[col] || '',
+          slotStart: slot ? slot.col : -1,
+          dataIdx: slot ? slot.dataIdx : -1,
+          isEmpty,
+          target: (e.target && e.target.tagName) || ''
+        });
+        if (!isEmpty) return;
+        e.stopPropagation();
+        e.preventDefault();
+        vwdDebugLog('data-label', { phase: 'open-editor', dataIdx: slot.dataIdx, col });
+        startInlineEdit(e.target || drawGroup, entry, 'data', slot.dataIdx, e.target || drawGroup);
+      }, true);
+    }
+
     function attachSignalDescribeInteractivity(lane, entry, handleLanePointSelect) {
       const anchorText = lane.querySelector('text.info');
       if (!anchorText) return;
@@ -4184,7 +5305,7 @@ ${lines.join('\n')}`;
       const describeText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
       describeText.setAttribute('class', 'wave-describe-text');
       const anchorTextX = parseFloat(anchorText.getAttribute('x') || '0');
-      const describeTextX = Number.isFinite(x) ? (x + SIGNAL_DESCRIPTION_X_OFFSET) : x;
+      const describeTextX = Number.isFinite(x) ? Math.max(0, SIGNAL_DESCRIPTION_X_OFFSET - x) : SIGNAL_DESCRIPTION_X_OFFSET;
       describeText.setAttribute('x', describeTextX + '');
       describeText.setAttribute('y', (y + (height || 16) + 5) + '');
       describeText.setAttribute('data-vwdDescribeBound', '1');
@@ -5142,14 +6263,16 @@ ${lines.join('\n')}`;
       const overlay = isDescriptionField
         ? document.createElement('textarea')
         : document.createElement('input');
-      overlay.className = 'wave-text-edit-overlay';
+      overlay.className = isDescriptionField
+        ? 'wave-text-edit-overlay wave-description-overlay'
+        : 'wave-text-edit-overlay';
       if (!isDescriptionField) overlay.type = 'text';
       overlay.value = oldValue;
       overlay.autocomplete = 'off';
       overlay.setAttribute('autocomplete', 'off');
       overlay.spellcheck = false;
       const overlayLeft = isDescriptionField
-        ? Math.max(0, wavePanel.scrollLeft)
+        ? 0
         : (rect.left - panelRect.left + wavePanel.scrollLeft);
       if (isDescriptionField) {
         vwdDebugLog('signal-description-layout', {
@@ -5162,9 +6285,30 @@ ${lines.join('\n')}`;
           offset: SIGNAL_DESCRIPTION_OVERLAY_OFFSET
         });
       }
-      overlay.style.left = overlayLeft + 'px';
-      overlay.style.top = (rect.top - panelRect.top + wavePanel.scrollTop) + 'px';
-      overlay.style.width = Math.max(rect.width + 16, isDescriptionField ? 180 : 48) + 'px';
+      vwdDebugLog('inline-edit', {
+        phase: 'overlay-place',
+        field,
+        isDescriptionField,
+        panelTop: panelRect.top,
+        panelLeft: panelRect.left,
+        left: isDescriptionField ? 0 : overlayLeft,
+        top: isDescriptionField ? rect.top : (rect.top - panelRect.top + wavePanel.scrollTop),
+        parent: isDescriptionField ? 'body' : 'wavePanel',
+        isFixed: isDescriptionField
+      });
+      const overlayTop = isDescriptionField
+        ? rect.top
+        : (rect.top - panelRect.top + wavePanel.scrollTop);
+      overlay.style.left = isDescriptionField ? '0px' : (overlayLeft + 'px');
+      overlay.style.top = overlayTop + 'px';
+      if (isDescriptionField) {
+        overlay.style.right = 'auto';
+        overlay.style.transform = 'none';
+        overlay.style.margin = '0';
+        overlay.style.paddingLeft = '6px';
+      }
+      const descriptionBaseWidth = Math.max(180, Math.floor(Math.max(0, (window.innerWidth || document.documentElement.clientWidth || panelRect.width) - 8)));
+      overlay.style.width = Math.max(rect.width + 16, isDescriptionField ? descriptionBaseWidth : 48) + 'px';
       overlay.style.height = Math.max(rect.height + 4, isDescriptionField ? 86 : 22) + 'px';
 
       let resizeDescriptionOverlay = null;
@@ -5180,7 +6324,12 @@ ${lines.join('\n')}`;
         overlay.addEventListener('input', resizeDescriptionOverlay);
       }
 
-      wavePanel.appendChild(overlay);
+      const overlayParent = isDescriptionField ? document.body : wavePanel;
+      if (isDescriptionField) {
+        overlay.style.position = 'fixed';
+        overlay.style.left = '0px';
+      }
+      overlayParent.appendChild(overlay);
       if (resizeDescriptionOverlay) {
         requestAnimationFrame(() => resizeDescriptionOverlay());
       }
@@ -5371,11 +6520,27 @@ ${lines.join('\n')}`;
       const rect = textEl.getBoundingClientRect();
       const panelRect = wavePanel.getBoundingClientRect();
       const overlay = document.createElement('textarea');
-      overlay.className = 'wave-text-edit-overlay';
+      overlay.className = 'wave-text-edit-overlay wave-description-overlay';
       overlay.value = oldValue;
-      overlay.style.left = (rect.left - panelRect.left + wavePanel.scrollLeft) + 'px';
-      overlay.style.top = (rect.top - panelRect.top + wavePanel.scrollTop) + 'px';
-      overlay.style.width = Math.max(rect.width + 16, 180) + 'px';
+      const overlayLeft = 0;
+      const overlayTop = rect.top;
+      vwdDebugLog('inline-edit', {
+        phase: 'overlay-place',
+        field: 'global-description',
+        isDescriptionField: true,
+        left: overlayLeft,
+        top: overlayTop,
+        parent: 'body',
+        isFixed: true
+      });
+      overlay.style.position = 'fixed';
+      overlay.style.left = overlayLeft + 'px';
+      overlay.style.top = overlayTop + 'px';
+      overlay.style.right = 'auto';
+      overlay.style.transform = 'none';
+      overlay.style.margin = '0';
+      overlay.style.paddingLeft = '6px';
+      overlay.style.width = Math.max(rect.width + 16, Math.max(180, Math.floor(Math.max(0, (window.innerWidth || document.documentElement.clientWidth || panelRect.width) - 8)))) + 'px';
       overlay.style.height = Math.max(rect.height + 4, 86) + 'px';
       overlay.rows = 4;
       overlay.style.resize = 'vertical';
@@ -5387,7 +6552,7 @@ ${lines.join('\n')}`;
       resizeDescriptionOverlay();
       overlay.addEventListener('input', resizeDescriptionOverlay);
 
-      wavePanel.appendChild(overlay);
+      document.body.appendChild(overlay);
       requestAnimationFrame(() => resizeDescriptionOverlay());
       overlay.focus();
       overlay.select();
@@ -5454,6 +6619,10 @@ ${lines.join('\n')}`;
       const svg = waveContainer.querySelector('svg');
       if (!svg) return;
 
+      // Multi-wave cards render the document description below the SVG so it
+      // never overlaps WaveDrom's foot area.
+      if (waveContainer.closest('.wave-document-card')) return;
+
       let parsed;
       try {
         parsed = JSON.parse(jsonText);
@@ -5470,9 +6639,10 @@ ${lines.join('\n')}`;
       const height = svgBox && svgBox.height ? svgBox.height : parseFloat(svg.getAttribute('height') || '0');
       const textEl = document.createElementNS('http://www.w3.org/2000/svg', 'text');
       textEl.setAttribute('id', 'vwd-global-describe');
-      textEl.setAttribute('x', width / 2);
-      textEl.setAttribute('y', height - 8);
-      textEl.setAttribute('text-anchor', 'middle');
+      const lineCount = Math.max(1, String(describe || '点击添加波形说明').split(/\r?\n/).length);
+      textEl.setAttribute('x', '8');
+      textEl.setAttribute('y', String(Math.max(14, height - 8 - ((lineCount - 1) * 15))));
+      textEl.setAttribute('text-anchor', 'start');
       textEl.setAttribute('class', 'wave-global-describe-text' + (describe ? '' : ' empty'));
       renderMultilineSvgText(textEl, describe || '点击添加波形说明');
       textEl.addEventListener('click', (e) => {
@@ -5491,10 +6661,16 @@ ${lines.join('\n')}`;
       const lanes = getWaveLaneGroups(svg);
       const unitWidth = getWaveUnitWidth(jsonText);
       const maxBoundaryIndex = getMaxWaveBoundaryIndex(sourceMap);
+      const visibleSet = getNavVisibleRowSet();
+      const hasFilter = isNavFilteringActive();
 
       lanes.forEach((lane, idx) => {
         const entry = sourceMap[idx];
+        const visible = !hasFilter || visibleSet.has(idx);
+        lane.classList.toggle('wave-lane-hidden', !visible);
+        lane.style.display = visible ? '' : 'none';
         if (!entry) return;
+        if (!visible) return;
 
         lane.classList.add('wave-lane-interactive');
         addLaneHoverRect(lane, maxBoundaryIndex, unitWidth);
@@ -5579,6 +6755,7 @@ ${lines.join('\n')}`;
               startInlineEdit(textEl, entry, 'data', dataIdx);
             });
           });
+          attachEmptyDataLabelClickHandler(drawGroup, entry, svg, handleLanePointSelect);
         }
       });
 
@@ -5733,13 +6910,72 @@ ${lines.join('\n')}`;
       };
     }
 
+    function getWaveTitleFromJson(text) {
+      try {
+        const parsed = JSON.parse(text);
+        const title = parsed && parsed.head && typeof parsed.head.text === 'string' ? parsed.head.text.trim() : '';
+        return title;
+      } catch (_e) {
+        return '';
+      }
+    }
+
+    function getSavedTagTitle(tag) {
+      if (!tag) return '';
+      if (tag.name === editingWaveDocumentName) {
+        const pendingTitle = getWaveTitleFromJson(editor.value || '');
+        if (pendingTitle) return pendingTitle;
+      }
+      return getWaveTitleFromJson(tag.content) || tag.name || '未命名波形图';
+    }
+
+    function getWaveDocumentDescription(tag) {
+      if (!tag || !tag.content) return '';
+      if (tag.name === editingWaveDocumentName) {
+        try {
+          return getGlobalDescribeOldValue(JSON.parse(editor.value || ''));
+        } catch (_e) {
+          // Fall back to the last saved document below.
+        }
+      }
+      try {
+        return getGlobalDescribeOldValue(JSON.parse(tag.content));
+      } catch (_e) {
+        return '';
+      }
+    }
+
+    function scheduleNavTitleRefresh() {
+      if (!editingWaveDocumentName || !navTreeState) return;
+      if (navTitleRefreshTimer !== null) clearTimeout(navTitleRefreshTimer);
+      navTitleRefreshTimer = setTimeout(() => {
+        navTitleRefreshTimer = null;
+        renderNavTree();
+        vwdDebugLog('wave-library', { phase: 'refresh-title', documentName: editingWaveDocumentName, title: getCurrentWaveTitle() });
+      }, 180);
+    }
+
+    function getCurrentWaveTitle() {
+      return getWaveTitleFromJson(editor.value || '') || activeTagName || '';
+    }
+
     function loadSavedTagsFromStorage() {
       try {
-        const raw = localStorage.getItem(SAVED_TAGS_KEY);
+        let raw = localStorage.getItem(WAVE_DOCUMENTS_KEY);
+        let isLegacy = false;
+        if (!raw) {
+          raw = localStorage.getItem(LEGACY_SAVED_TAGS_KEY);
+          isLegacy = !!raw;
+        }
         if (!raw) return [];
         const parsed = JSON.parse(raw);
         if (!Array.isArray(parsed)) return [];
-        return parsed.map(normalizeSavedTag).filter(Boolean);
+        const documents = parsed.map(normalizeSavedTag).filter(Boolean);
+        if (isLegacy) {
+          localStorage.setItem(WAVE_DOCUMENTS_KEY, JSON.stringify(documents));
+          vwdDebugLog('wave-library', { phase: 'migrate-legacy-tags', documentCount: documents.length });
+        }
+        return documents;
       } catch (e) {
         return [];
       }
@@ -5747,8 +6983,166 @@ ${lines.join('\n')}`;
 
     function persistSavedTags() {
       try {
-        localStorage.setItem(SAVED_TAGS_KEY, JSON.stringify(savedTags));
+        localStorage.setItem(WAVE_DOCUMENTS_KEY, JSON.stringify(savedTags));
       } catch (e) { /* quota / private mode */ }
+      scheduleWaveLibraryServerSave();
+      scheduleWaveLibraryServerSave();
+    }
+
+    function getWaveLibraryBundle() {
+      const documents = savedTags.map((tag) => Object.assign({}, tag));
+      const current = documents.find((tag) => tag.name === editingWaveDocumentName);
+      if (current) Object.assign(current, getCurrentStateSnapshot());
+      return {
+        kind: WAVE_LIBRARY_KIND,
+        version: 1,
+        updatedAt: new Date().toISOString(),
+        documents,
+        directories: collectCustomNavNodes(navTreeState || { children: [] }),
+        activeDocumentName: editingWaveDocumentName || '',
+        selectedDirectoryId: selectedNavNodeId || 'nav-root'
+      };
+    }
+
+    function updateWaveLibraryFileStatus() {
+      if (waveLibraryFileStatus) {
+        waveLibraryFileStatus.textContent = waveLibraryServerMode
+          ? ('波形库：' + (currentWaveLibraryFile || '未加载'))
+          : ('波形库：' + (currentWaveLibraryFile || '本地浏览器数据'));
+      }
+      if (saveWaveLibraryLabel) saveWaveLibraryLabel.textContent = waveLibraryServerMode ? '保存波形库' : '保存波形库';
+      if (changeWaveLibraryBtn) changeWaveLibraryBtn.hidden = !waveLibraryServerMode;
+    }
+
+    function scheduleWaveLibraryServerSave() {
+      if (!waveLibraryServerMode || applyingWaveLibraryBundle || !currentWaveLibraryFile) return;
+      clearTimeout(waveLibrarySaveTimer);
+      waveLibrarySaveTimer = setTimeout(() => {
+        waveLibrarySaveTimer = null;
+        fetch('/api/wave-library?file=' + encodeURIComponent(currentWaveLibraryFile), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(getWaveLibraryBundle())
+        }).catch(() => setStatus(false, '波形库自动保存失败'));
+      }, 350);
+    }
+
+    function applyWaveLibraryBundle(bundle, fileName) {
+      if (!bundle || bundle.kind !== WAVE_LIBRARY_KIND || !Array.isArray(bundle.documents)) {
+        setStatus(false, '波形库文件格式无效');
+        return false;
+      }
+      applyingWaveLibraryBundle = true;
+      try {
+        savedTags = bundle.documents.map(normalizeSavedTag).filter(Boolean);
+        persistSavedTags();
+        saveNavCustomTreeToStorage(Array.isArray(bundle.directories) ? bundle.directories : []);
+        selectedNavNodeId = bundle.selectedDirectoryId || 'nav-root';
+        editingWaveDocumentName = null;
+        activeTagName = null;
+        const preferredName = bundle.activeDocumentName || (savedTags[0] && savedTags[0].name);
+        const preferred = savedTags.find((tag) => tag.name === preferredName) || savedTags[0];
+        if (preferred) {
+          editor.value = preferred.content;
+          lastSavedContent = editor.value;
+        }
+        rebuildNavTreeStateFromJson(editor.value || getDefaultJson());
+        if (preferred) openWaveDocumentForEditing(preferred.name);
+        else {
+          renderNavTree();
+          renderWaveLibrary();
+        }
+        currentWaveLibraryFile = fileName || currentWaveLibraryFile;
+        updateWaveLibraryFileStatus();
+        setStatus(true, '已导入波形库：' + (currentWaveLibraryFile || '未命名'));
+        return true;
+      } finally {
+        applyingWaveLibraryBundle = false;
+      }
+    }
+
+    function downloadWaveLibraryBundle() {
+      const blob = new Blob([JSON.stringify(getWaveLibraryBundle(), null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = currentWaveLibraryFile || 'VisualWaveDrom-library.json';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+      setStatus(true, '已保存波形库文件');
+    }
+
+    function importWaveLibraryFile(file) {
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          const bundle = JSON.parse(String(reader.result || ''));
+          applyWaveLibraryBundle(bundle, file.name);
+        } catch (e) {
+          setStatus(false, '波形库文件无法解析');
+        }
+      };
+      reader.onerror = () => setStatus(false, '波形库文件读取失败');
+      reader.readAsText(file, 'utf-8');
+    }
+
+    async function loadServerWaveLibrary(fileName) {
+      const response = await fetch('/api/wave-library?file=' + encodeURIComponent(fileName));
+      if (!response.ok) throw new Error('load failed');
+      const bundle = await response.json();
+      applyWaveLibraryBundle(bundle, fileName);
+    }
+
+    async function initializeServerWaveLibrary() {
+      if (!waveLibraryServerMode) {
+        updateWaveLibraryFileStatus();
+        return;
+      }
+      fetch('/api/client-connect', { method: 'POST', keepalive: true }).catch(() => {});
+      window.addEventListener('pagehide', () => {
+        navigator.sendBeacon('/api/client-disconnect', '');
+      }, { once: true });
+      try {
+        const response = await fetch('/api/wave-libraries');
+        const catalog = await response.json();
+        const fileName = catalog.current || (catalog.files && catalog.files[0]);
+        if (fileName) await loadServerWaveLibrary(fileName);
+        else updateWaveLibraryFileStatus();
+      } catch (e) {
+        updateWaveLibraryFileStatus();
+        setStatus(false, '本地波形库服务不可用');
+      }
+    }
+
+    async function changeServerWaveLibrary() {
+      try {
+        const response = await fetch('/api/wave-libraries');
+        const catalog = await response.json();
+        const files = catalog.files || [];
+        if (!waveLibraryPickerModal || !waveLibraryPickerOptions) return;
+        waveLibraryPickerOptions.innerHTML = '';
+        files.forEach((fileName) => {
+          const option = document.createElement('button');
+          option.type = 'button';
+          option.className = 'nav-move-option';
+          option.textContent = fileName;
+          option.addEventListener('click', async () => {
+            waveLibraryPickerModal.hidden = true;
+            try {
+              await loadServerWaveLibrary(fileName);
+            } catch (e) {
+              setStatus(false, '更换波形库失败');
+            }
+          });
+          waveLibraryPickerOptions.appendChild(option);
+        });
+        waveLibraryPickerModal.hidden = false;
+      } catch (e) {
+        setStatus(false, '更换波形库失败');
+      }
     }
 
     function formatTagSavedTime(iso) {
@@ -5792,13 +7186,72 @@ ${lines.join('\n')}`;
       return true;
     }
 
+    function cloneWaveLibrarySnapshotValue(value) {
+      return JSON.parse(JSON.stringify(value));
+    }
+
+    function captureWaveLibrarySnapshot() {
+      return {
+        savedTags: cloneWaveLibrarySnapshotValue(savedTags),
+        customNodes: cloneWaveLibrarySnapshotValue(collectCustomNavNodes(navTreeState || { children: [] })),
+        selectedNavNodeId,
+        editingWaveDocumentName,
+        activeTagName,
+        editorValue: editor.value,
+        selectionStart: editor.selectionStart,
+        selectionEnd: editor.selectionEnd
+      };
+    }
+
+    function restoreWaveLibrarySnapshot(snapshot) {
+      if (!snapshot) return false;
+      savedTags = (snapshot.savedTags || []).map(normalizeSavedTag).filter(Boolean);
+      persistSavedTags();
+      saveNavCustomTreeToStorage(snapshot.customNodes || []);
+
+      selectedNavNodeId = snapshot.selectedNavNodeId || 'nav-root';
+      editingWaveDocumentName = snapshot.editingWaveDocumentName || null;
+      activeTagName = snapshot.activeTagName || null;
+      editor.value = snapshot.editorValue || getDefaultJson();
+      lastSavedContent = editor.value;
+      editor.selectionStart = Math.min(snapshot.selectionStart || 0, editor.value.length);
+      editor.selectionEnd = Math.min(snapshot.selectionEnd || 0, editor.value.length);
+      updateLineNumbers();
+      syncLineNumberScroll();
+      saveEditorJsonToStorage(editor.value);
+
+      rebuildNavTreeStateFromJson(editor.value);
+      renderWaveform(editor.value);
+      renderNavTree();
+      renderWaveLibrary();
+      return true;
+    }
+
+    function pushWaveLibraryHistory(before, after) {
+      waveLibraryUndoStack.push({ before, after });
+      if (waveLibraryUndoStack.length > 20) waveLibraryUndoStack.shift();
+      waveLibraryRedoStack = [];
+      updateUndoRedoButtons();
+    }
+
     function deleteSavedTag(name) {
+      const before = captureWaveLibrarySnapshot();
       const idx = findSavedTagIndex(name);
       if (idx < 0) return false;
       savedTags.splice(idx, 1);
       persistSavedTags();
       if (activeTagName === name) activeTagName = null;
+      if (editingWaveDocumentName === name) editingWaveDocumentName = null;
       renderSavedTagsList();
+      if (navTreeState) {
+        (function removeDocumentReference(node) {
+          node.documents = (node.documents || []).filter((documentName) => documentName !== name);
+          (node.children || []).forEach(removeDocumentReference);
+        })(navTreeState);
+        saveNavCustomNodesFromTree();
+        rebuildNavTreeStateFromJson(editor.value || '');
+      }
+      pushWaveLibraryHistory(before, captureWaveLibrarySnapshot());
       return true;
     }
 
@@ -5812,7 +7265,7 @@ ${lines.join('\n')}`;
         const row = document.createElement('div');
         row.className = 'saved-tag-row';
         if (tag.name === activeTagName) row.classList.add('active');
-        row.title = 'Load tag: ' + tag.name;
+        row.title = '打开波形图: ' + getSavedTagTitle(tag);
 
         const nameEl = document.createElement('div');
         nameEl.className = 'saved-tag-name';
@@ -5825,12 +7278,12 @@ ${lines.join('\n')}`;
         const delBtn = document.createElement('button');
         delBtn.type = 'button';
         delBtn.className = 'saved-tag-delete';
-        delBtn.title = '删除标签';
+        delBtn.title = '删除波形图';
         delBtn.textContent = '删';
         delBtn.addEventListener('click', (e) => {
           e.stopPropagation();
           deleteSavedTag(tag.name);
-          setStatus(true, '已删除标签: ' + tag.name);
+          setStatus(true, '已删除波形图: ' + getSavedTagTitle(tag));
         });
 
         row.addEventListener('click', () => requestLoadTag(tag.name));
@@ -5851,19 +7304,7 @@ ${lines.join('\n')}`;
     function requestLoadTag(name) {
       const tag = savedTags.find(t => t.name === name);
       if (!tag) return;
-
-      if (currentStateMatchesTag(tag)) {
-        activeTagName = name;
-        renderSavedTagsList();
-        setStatus(true, 'Already loaded tag: ' + name);
-        return;
-      }
-
-      pendingLoadTagName = name;
-      if (tagLoadConfirmMsg) {
-        tagLoadConfirmMsg.textContent = 'Current content has not been saved to tag "' + name + '". Do you want to discard edits and restore it?';
-      }
-      if (tagLoadModal) tagLoadModal.hidden = false;
+      openWaveDocumentForEditing(name);
     }
 
     function closeTagLoadModal() {
@@ -5871,10 +7312,18 @@ ${lines.join('\n')}`;
       pendingLoadTagName = null;
     }
 
+    function closeNavMoveModal() {
+      if (navMoveModal) navMoveModal.hidden = true;
+    }
+
+    function closeWaveLibraryPickerModal() {
+      if (waveLibraryPickerModal) waveLibraryPickerModal.hidden = true;
+    }
+
     function confirmTagLoad() {
       const name = pendingLoadTagName;
       closeTagLoadModal();
-      if (name) loadSavedTag(name);
+      if (name) openWaveDocumentForEditing(name);
     }
 
     function clearActiveTagIfModified() {
@@ -5884,6 +7333,47 @@ ${lines.join('\n')}`;
         activeTagName = null;
         renderSavedTagsList();
       }
+    }
+
+    function saveCurrentWaveDocumentBeforeSwitch() {
+      const name = editingWaveDocumentName;
+      if (!name) return true;
+      const documentEntry = savedTags.find((item) => item.name === name);
+      if (!documentEntry || currentStateMatchesTag(documentEntry)) return true;
+      const saved = upsertSavedTag(name, getCurrentStateSnapshot());
+      if (saved) {
+        renderNavTree();
+        renderWaveLibrary();
+        vwdDebugLog('wave-library', { phase: 'auto-save-before-switch', documentName: name });
+      }
+      return saved;
+    }
+
+    function persistEditingWaveDocumentOnExit() {
+      const name = editingWaveDocumentName;
+      const documentEntry = name && savedTags.find((item) => item.name === name);
+      if (!documentEntry || currentStateMatchesTag(documentEntry)) return;
+      upsertSavedTag(name, getCurrentStateSnapshot());
+      vwdDebugLog('wave-library', { phase: 'auto-save-on-exit', documentName: name });
+    }
+
+    function openWaveDocumentForEditing(name) {
+      if (!name) return;
+      if (editingWaveDocumentName === name) {
+        focusWaveDocument(name);
+        return;
+      }
+      if (!saveCurrentWaveDocumentBeforeSwitch()) {
+        setStatus(false, '当前波形图自动保存失败');
+        return;
+      }
+      editingWaveDocumentName = name;
+      loadSavedTag(name);
+      activeTagName = name;
+      renderWaveLibrary();
+      focusWaveDocument(name);
+      setStatus(true, '正在编辑波形图: ' + getSavedTagTitle(savedTags.find((item) => item.name === name) || { name: name }));
+      vwdDebugLog('wave-library', { phase: 'open-for-edit', documentName: name });
     }
 
     function loadSavedTag(name) {
@@ -5911,8 +7401,9 @@ ${lines.join('\n')}`;
 
       activeTagName = name;
       renderSavedTagsList();
+      renderWaveLibrary();
       updateUndoRedoButtons();
-      setStatus(true, '已保存到标签: ' + name);
+      setStatus(true, '已打开波形图: ' + getSavedTagTitle(tag));
     }
 
     function updateTagSaveModeControls() {
@@ -5947,7 +7438,7 @@ ${lines.join('\n')}`;
     function showTagDuplicateConfirm(name) {
       pendingDuplicateTagName = name;
       const msgEl = document.getElementById('tag-save-duplicate-msg');
-      if (msgEl) msgEl.textContent = 'Tag name "' + name + '" already exists. Do you want to overwrite it?';
+      if (msgEl) msgEl.textContent = '波形图名称“' + name + '”已存在，是否覆盖？';
       if (tagSaveForm) tagSaveForm.hidden = true;
       if (tagSaveDuplicate) tagSaveDuplicate.hidden = false;
       if (tagSaveFooter) tagSaveFooter.hidden = true;
@@ -5990,11 +7481,15 @@ ${lines.join('\n')}`;
     function commitSaveTag(name) {
       const snapshot = getCurrentStateSnapshot();
       if (!upsertSavedTag(name, snapshot)) {
-        setTagSaveHint('请输入标签名');
+        setTagSaveHint('请输入波形图名称');
         return false;
       }
+      editingWaveDocumentName = name;
+      activeTagName = name;
+      if (navTreeState) rebuildNavTreeStateFromJson(editor.value || '');
       closeSaveTagDialog();
-      setStatus(true, '已保存到标签: ' + name);
+      const savedDocument = savedTags.find((item) => item.name === name);
+      setStatus(true, '已保存波形图: ' + getSavedTagTitle(savedDocument || { name: name }));
       return true;
     }
 
@@ -6004,12 +7499,12 @@ ${lines.join('\n')}`;
 
       if (isOverwrite) {
         if (savedTags.length === 0) {
-          setTagSaveHint('请选择要覆盖的标签');
+          setTagSaveHint('请选择要覆盖的波形图');
           return;
         }
         const name = tagOverwriteSelect ? tagOverwriteSelect.value : '';
         if (!name) {
-          setTagSaveHint('请选择要覆盖的标签');
+          setTagSaveHint('请选择要覆盖的波形图');
           return;
         }
         commitSaveTag(name);
@@ -6018,7 +7513,7 @@ ${lines.join('\n')}`;
 
       const name = tagNewNameInput ? tagNewNameInput.value.trim() : '';
       if (!name) {
-        setTagSaveHint('请输入标签名');
+        setTagSaveHint('请输入波形图名称');
         if (tagNewNameInput) tagNewNameInput.focus();
         return;
       }
@@ -6241,6 +7736,7 @@ ${lines.join('\n')}`;
         try {
           source = JSON.parse(jsonText);
           setJsonErrorLine(-1);
+          rebuildNavTreeStateFromJson(jsonText);
         } catch (e) {
           setJsonErrorLine(getJsonErrorLine(jsonText, e));
           showWaveError(waveContainer, '波形渲染错误: ' + e.message);
@@ -6261,6 +7757,7 @@ ${lines.join('\n')}`;
           }
           syncHscaleInputFromJson(jsonText);
           attachWaveInteractivity(jsonText);
+          applyNavVisibilityToWave();
           renderConnectionEdgeList();
           fitWaveSvgToContent();
           vwdMark('renderWaveform:done');
@@ -6298,8 +7795,8 @@ ${lines.join('\n')}`;
     function updateUndoRedoButtons() {
       const btnUndo = document.getElementById('btn-undo');
       const btnRedo = document.getElementById('btn-redo');
-      btnUndo.disabled = undoStack.length === 0;
-      btnRedo.disabled = redoStack.length === 0;
+      btnUndo.disabled = undoStack.length === 0 && waveLibraryUndoStack.length === 0;
+      btnRedo.disabled = redoStack.length === 0 && waveLibraryRedoStack.length === 0;
     }
 
     function isModKey(e) {
@@ -6332,6 +7829,15 @@ ${lines.join('\n')}`;
     }
 
     function undo() {
+      if (waveLibraryUndoStack.length > 0) {
+        const entry = waveLibraryUndoStack.pop();
+        waveLibraryRedoStack.push(entry);
+        restoreWaveLibrarySnapshot(entry.before);
+        setStatus(true, '已撤销删除波形图');
+        vwdDebugLog('wave-library', { phase: 'undo-delete-document' });
+        updateUndoRedoButtons();
+        return;
+      }
       if (undoStack.length === 0) return;
       flushUndoDebounce();
       undoBurstCaptured = false;
@@ -6347,6 +7853,15 @@ ${lines.join('\n')}`;
     }
 
     function redo() {
+      if (waveLibraryRedoStack.length > 0) {
+        const entry = waveLibraryRedoStack.pop();
+        waveLibraryUndoStack.push(entry);
+        restoreWaveLibrarySnapshot(entry.after);
+        setStatus(true, '已重做删除波形图');
+        vwdDebugLog('wave-library', { phase: 'redo-delete-document' });
+        updateUndoRedoButtons();
+        return;
+      }
       if (redoStack.length === 0) return;
       flushUndoDebounce();
       undoBurstCaptured = false;
@@ -6408,6 +7923,197 @@ ${lines.join('\n')}`;
       div.appendChild(waveDiv);
 
       return div;
+    }
+
+    function focusWaveDocument(documentName) {
+      if (!waveLibraryContainer) return;
+      const cards = waveLibraryContainer.querySelectorAll('.wave-document-card');
+      let target = null;
+      cards.forEach((card) => {
+        const isTarget = card.dataset.documentName === documentName;
+        card.classList.toggle('focused', isTarget);
+        if (isTarget) target = card;
+      });
+      if (target && typeof target.scrollIntoView === 'function') {
+        target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+      vwdDebugLog('wave-library', { phase: 'focus-document', documentName: documentName, found: !!target });
+    }
+
+    function startWaveDocumentDescriptionEdit(tag, descriptionEl) {
+      if (!tag || !descriptionEl) return;
+      if (tag.name !== editingWaveDocumentName) {
+        openWaveDocumentForEditing(tag.name);
+        setTimeout(() => {
+          const card = waveLibraryContainer && waveLibraryContainer.querySelector('.wave-document-card.focused');
+          const nextDescription = card && card.querySelector('.wave-document-description');
+          if (nextDescription) startWaveDocumentDescriptionEdit(tag, nextDescription);
+        }, 0);
+        return;
+      }
+      if (descriptionEl.querySelector('textarea')) return;
+
+      const oldValue = getWaveDocumentDescription(tag);
+      const editorBox = document.createElement('textarea');
+      editorBox.className = 'wave-document-description-editor';
+      editorBox.value = oldValue;
+      editorBox.placeholder = '输入波形图说明';
+      descriptionEl.innerHTML = '';
+      descriptionEl.classList.remove('empty');
+      descriptionEl.appendChild(editorBox);
+      autoResizeDescriptionOverlay(editorBox, { minHeight: 62, maxHeight: 260 });
+      editorBox.focus();
+      editorBox.select();
+
+      let committed = false;
+      const commit = () => {
+        if (committed) return;
+        committed = true;
+        const nextValue = editorBox.value;
+        vwdDebugLog('wave-library', { phase: 'commit-description', documentName: tag.name, changed: nextValue !== oldValue, valueLength: nextValue.length });
+        if (nextValue === oldValue) {
+          renderWaveLibrary();
+          return;
+        }
+        let newText = replaceGlobalDescribeInSource(editor.value || '', nextValue);
+        try {
+          const verified = JSON.parse(newText);
+          if (getGlobalDescribeOldValue(verified) !== nextValue) {
+            const structured = JSON.parse(editor.value || '{}');
+            structured.description = nextValue;
+            delete structured.describe;
+            newText = JSON.stringify(structured, null, 2);
+          }
+        } catch (_e) {
+          setStatus(false, '说明保存失败：当前 JSON 无法解析');
+          vwdDebugLog('wave-library', { phase: 'commit-description-error', documentName: tag.name, reason: 'invalid-json' });
+          renderWaveLibrary();
+          return;
+        }
+        pushUndoBeforeChange();
+        // A document description is rendered outside the SVG card, so avoid a
+        // costly full WaveDrom redraw for large documents.
+        editor.value = newText;
+        updateLineNumbers();
+        debouncedPersistEditorJson();
+        debouncedSaveUndo();
+        if (editingWaveDocumentName === tag.name) {
+          upsertSavedTag(tag.name, getCurrentStateSnapshot());
+        }
+        descriptionEl.textContent = nextValue || '暂无波形图说明';
+        descriptionEl.classList.toggle('empty', !nextValue);
+        descriptionEl.title = '点击编辑波形图说明';
+        setStatus(true, '已保存波形图说明');
+      };
+      const doneButton = document.createElement('button');
+      doneButton.type = 'button';
+      doneButton.className = 'wave-document-description-done';
+      doneButton.textContent = '完成';
+      doneButton.title = '保存说明';
+      doneButton.addEventListener('mousedown', (event) => event.preventDefault());
+      doneButton.addEventListener('click', commit);
+      descriptionEl.appendChild(doneButton);
+      editorBox.addEventListener('input', () => autoResizeDescriptionOverlay(editorBox, { minHeight: 62, maxHeight: 260 }));
+      editorBox.addEventListener('keydown', (event) => {
+        event.stopPropagation();
+        if (event.key === 'Tab') {
+          event.preventDefault();
+          const start = editorBox.selectionStart;
+          const end = editorBox.selectionEnd;
+          editorBox.value = editorBox.value.slice(0, start) + '  ' + editorBox.value.slice(end);
+          editorBox.selectionStart = editorBox.selectionEnd = start + 2;
+          autoResizeDescriptionOverlay(editorBox, { minHeight: 62, maxHeight: 260 });
+          return;
+        }
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          committed = true;
+          renderWaveLibrary();
+        }
+      });
+      vwdDebugLog('wave-library', { phase: 'open-description-editor', documentName: tag.name });
+    }
+
+    function renderWaveLibrary() {
+      if (!waveLibraryContainer) return;
+      waveLibraryContainer.innerHTML = '';
+      if (!isWaveDromReady() || !navTreeState) return;
+
+      const selected = getNavNodeById(navTreeState, selectedNavNodeId) || navTreeState;
+      const documentNames = collectNavDocuments(selected, []);
+      documentNames.forEach((documentName, index) => {
+        const tag = savedTags.find((item) => item.name === documentName);
+        if (!tag) return;
+        const card = document.createElement('article');
+        card.className = 'wave-document-card';
+        card.dataset.documentName = tag.name;
+        if (tag.name === editingWaveDocumentName) card.classList.add('focused');
+
+        const header = document.createElement('div');
+        header.className = 'wave-document-card-header';
+        const title = document.createElement('h2');
+        title.textContent = getSavedTagTitle(tag);
+        const openButton = document.createElement('button');
+        openButton.type = 'button';
+        openButton.className = 'wave-document-open';
+        openButton.title = '打开此波形图进行编辑';
+        openButton.textContent = '打开';
+        openButton.addEventListener('click', () => openWaveDocumentForEditing(tag.name));
+        const deleteButton = document.createElement('button');
+        deleteButton.type = 'button';
+        deleteButton.className = 'wave-document-delete';
+        deleteButton.title = '删除波形图';
+        deleteButton.textContent = '×';
+        deleteButton.addEventListener('click', () => {
+          if (deleteSavedTag(tag.name)) {
+            setStatus(true, '已删除波形图: ' + getSavedTagTitle(tag));
+            vwdDebugLog('wave-library', { phase: 'delete-document', documentName: tag.name });
+          }
+        });
+        header.appendChild(title);
+        header.appendChild(openButton);
+        header.appendChild(deleteButton);
+
+        const canvas = document.createElement('div');
+        canvas.className = 'wave-document-canvas';
+        const prefix = 'wave-library-display-' + index + '-';
+        const display = document.createElement('div');
+        display.id = prefix + '0';
+        canvas.appendChild(display);
+        card.appendChild(header);
+        card.appendChild(canvas);
+        waveLibraryContainer.appendChild(card);
+
+        const description = document.createElement('div');
+        const descriptionText = getWaveDocumentDescription(tag);
+        const isEditingDocument = tag.name === editingWaveDocumentName;
+        description.className = 'wave-document-description'
+          + (descriptionText ? '' : ' empty')
+          + (isEditingDocument ? ' editable' : '');
+        description.textContent = descriptionText || '暂无波形图说明';
+        if (isEditingDocument) {
+          description.title = '点击编辑波形图说明';
+          description.addEventListener('click', () => startWaveDocumentDescriptionEdit(tag, description));
+        }
+
+        if (isEditingDocument) {
+          canvas.innerHTML = '';
+          canvas.appendChild(waveContainer);
+          canvas.appendChild(description);
+          vwdDebugLog('wave-library', { phase: 'mount-editor', documentName: tag.name });
+          return;
+        }
+        canvas.appendChild(description);
+
+        try {
+          WaveDrom.RenderWaveForm(0, JSON.parse(tag.content), prefix, false);
+        } catch (error) {
+          showWaveError(canvas, '波形图渲染失败: ' + (error && error.message ? error.message : '无效 JSON'));
+        }
+      });
+
+      waveLibraryContainer.hidden = documentNames.length === 0;
+      vwdDebugLog('wave-library', { phase: 'render', selectedId: selected.id, documentCount: documentNames.length });
     }
 
     function renderLegends() {
@@ -6499,6 +8205,7 @@ ${lines.join('\n')}`;
       debouncedRender();
       debouncedPersistEditorJson();
       clearActiveTagIfModified();
+      scheduleNavTitleRefresh();
     });
 
     editor.addEventListener('scroll', syncLineNumberScroll);
@@ -6526,12 +8233,52 @@ ${lines.join('\n')}`;
       }
     });
 
-    window.addEventListener('beforeunload', flushPersistEditorJson);
+    window.addEventListener('beforeunload', () => {
+      persistEditingWaveDocumentOnExit();
+      flushPersistEditorJson();
+    });
 
     ensureDebugModeButton();
     ensureCopyDebugLogButton();
 
     document.getElementById('btn-reading-mode').addEventListener('click', enterReadingMode);
+    if (importWaveLibraryBtn && waveLibraryImportInput) {
+      importWaveLibraryBtn.addEventListener('click', () => {
+        if (waveLibraryServerMode) {
+          changeServerWaveLibrary();
+          return;
+        }
+        waveLibraryImportInput.value = '';
+        waveLibraryImportInput.click();
+      });
+      waveLibraryImportInput.addEventListener('change', (e) => importWaveLibraryFile(e.target.files && e.target.files[0]));
+    }
+    if (saveWaveLibraryBtn) {
+      saveWaveLibraryBtn.addEventListener('click', async () => {
+        if (!waveLibraryServerMode) {
+          downloadWaveLibraryBundle();
+          return;
+        }
+        if (!currentWaveLibraryFile) return;
+        try {
+          const response = await fetch('/api/wave-library?file=' + encodeURIComponent(currentWaveLibraryFile), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(getWaveLibraryBundle())
+          });
+          if (!response.ok) throw new Error('save failed');
+          setStatus(true, '已保存波形库：' + currentWaveLibraryFile);
+        } catch (e) {
+          setStatus(false, '波形库保存失败');
+        }
+      });
+    }
+    if (changeWaveLibraryBtn) changeWaveLibraryBtn.addEventListener('click', changeServerWaveLibrary);
+    if (toggleJsonPanelBtn) {
+      toggleJsonPanelBtn.addEventListener('click', () => {
+        setJsonPanelHidden(!app.classList.contains('json-panel-hidden'), true);
+      });
+    }
     document.getElementById('btn-undo').addEventListener('click', undo);
     document.getElementById('btn-redo').addEventListener('click', redo);
     const debugModeBtn = document.getElementById('btn-debug-mode');
@@ -6555,6 +8302,7 @@ ${lines.join('\n')}`;
     document.getElementById('btn-add-connection').addEventListener('click', () => {
       beginEdgeAddSession();
     });
+    bindNavControlButtons();
     document.getElementById('btn-apply-edge-label').addEventListener('click', applyEdgeLabelFromInput);
     document.getElementById('connection-label-input').addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
@@ -6655,6 +8403,20 @@ ${lines.join('\n')}`;
         if (e.target === tagLoadModal) closeTagLoadModal();
       });
     }
+    const navMoveCancelBtn = document.getElementById('nav-move-cancel');
+    if (navMoveCancelBtn) navMoveCancelBtn.addEventListener('click', closeNavMoveModal);
+    if (navMoveModal) {
+      navMoveModal.addEventListener('click', (e) => {
+        if (e.target === navMoveModal) closeNavMoveModal();
+      });
+    }
+    const waveLibraryPickerCancelBtn = document.getElementById('wave-library-picker-cancel');
+    if (waveLibraryPickerCancelBtn) waveLibraryPickerCancelBtn.addEventListener('click', closeWaveLibraryPickerModal);
+    if (waveLibraryPickerModal) {
+      waveLibraryPickerModal.addEventListener('click', (e) => {
+        if (e.target === waveLibraryPickerModal) closeWaveLibraryPickerModal();
+      });
+    }
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && tagSaveModal && !tagSaveModal.hidden) {
         e.preventDefault();
@@ -6664,6 +8426,16 @@ ${lines.join('\n')}`;
       if (e.key === 'Escape' && tagLoadModal && !tagLoadModal.hidden) {
         e.preventDefault();
         closeTagLoadModal();
+        return;
+      }
+      if (e.key === 'Escape' && navMoveModal && !navMoveModal.hidden) {
+        e.preventDefault();
+        closeNavMoveModal();
+        return;
+      }
+      if (e.key === 'Escape' && waveLibraryPickerModal && !waveLibraryPickerModal.hidden) {
+        e.preventDefault();
+        closeWaveLibraryPickerModal();
       }
     });
 
@@ -6672,9 +8444,12 @@ ${lines.join('\n')}`;
     window.addEventListener('load', () => {
       migrateSessionStorageToLocal(WAVE_EDIT_MODE_KEY);
       migrateSessionStorageToLocal(BACK_BTN_POS_KEY);
+      migrateSessionStorageToLocal(JSON_PANEL_HIDDEN_KEY);
+      restoreJsonPanelVisibility();
       loadWaveEditMode();
       initSavedTags();
       initEditor();
+      seedRequestedWaveCopies();
       renderLegends();
       renderConnectionPresets();
       updateConnectionPresetDisabledState();
@@ -6684,6 +8459,7 @@ ${lines.join('\n')}`;
       updateConnectionPointStatusUI();
       setDebugModeUI(vwdDebugEnabled);
       setStatus(true, waveEditModeLabel());
+      initializeServerWaveLibrary();
     });
 
 

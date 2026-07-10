@@ -4,12 +4,30 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>VisualWaveDrom</title>
-  <script src="inc/skins/default.js"></script>
-  <script src="inc/wavedrom.min.js"></script>
-  <link rel="stylesheet" href="inc/visualwavedrom.css">
+  <script src="inc/skins/default.js?v=20260712"></script>
+  <script src="inc/wavedrom.min.js?v=20260712"></script>
+  <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260711-description-edit-state">
 </head>
 <body>
   <div class="app" id="app">
+    <!-- Nav Sidebar -->
+    <aside class="nav-sidebar" id="nav-sidebar">
+      <div class="sidebar-header">
+        <h1>波形目录</h1>
+        <p>目录与波形图</p>
+      </div>
+
+      <div class="menu-section">
+        <div class="menu-section-title">波形目录</div>
+        <div class="nav-toolbar">
+          <button class="menu-btn nav-btn" id="btn-nav-add-wave-document" type="button" title="在当前标题下新建空波形图">
+            <span>新增波形图</span>
+          </button>
+        </div>
+        <div class="nav-tree" id="nav-tree"></div>
+      </div>
+    </aside>
+
     <!-- Sidebar -->
     <aside class="sidebar" id="sidebar">
       <div class="sidebar-header">
@@ -20,6 +38,26 @@
       <!-- Function Menu -->
       <div class="menu-section">
         <div class="menu-section-title">功能菜单</div>
+        <button class="menu-btn" id="btn-toggle-json-panel" type="button" title="隐藏 WaveDrom JSON 窗口">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path d="M4 4l16 16"/>
+            <path d="M9.9 4.2A10.7 10.7 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-3.2 4.2"/>
+            <path d="M6.6 6.6C3.9 8.4 1 12 1 12s4 8 11 8a10.7 10.7 0 0 0 3.4-.6"/>
+            <circle cx="12" cy="12" r="3"/>
+          </svg>
+          <span id="toggle-json-panel-label">隐藏 JSON</span>
+        </button>
+        <div class="wave-library-file-status" id="wave-library-file-status">波形库：本地浏览器数据</div>
+        <button class="menu-btn" id="btn-import-wave-library" type="button" title="导入完整波形库 JSON 文件">
+          <span>导入波形库</span>
+        </button>
+        <button class="menu-btn" id="btn-save-wave-library" type="button" title="保存完整波形库 JSON 文件">
+          <span id="save-wave-library-label">保存波形库</span>
+        </button>
+        <button class="menu-btn" id="btn-change-wave-library" type="button" title="更换当前波形库文件" hidden>
+          <span>更换波形库</span>
+        </button>
+        <input type="file" id="wave-library-import-input" accept="application/json,.json" hidden>
         <button class="menu-btn" id="btn-reading-mode" title="阅读模式">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
@@ -145,12 +183,6 @@
         </div>
       </div>
 
-      <!-- Saved Tags -->
-      <div class="menu-section">
-        <div class="menu-section-title">已保存标签</div>
-        <div class="saved-tags-list" id="saved-tags-list"></div>
-        <div class="saved-tags-empty" id="saved-tags-empty">暂无保存的标签</div>
-      </div>
     </aside>
 
     <!-- Main -->
@@ -163,19 +195,20 @@
 
       <div class="wave-panel" id="wave-panel">
         <div class="wave-container" id="wave-container"></div>
+        <div class="wave-library-container" id="wave-library-container"></div>
       </div>
 
       <div class="editor-panel" id="editor-panel">
         <div class="editor-header">
           <span>WaveDrom JSON</span>
           <div class="editor-header-actions">
-            <button type="button" class="editor-copy-btn" id="btn-save-tag" title="将当前 JSON 与编辑状态保存到标签">
+            <button type="button" class="editor-copy-btn" id="btn-save-tag" title="保存当前波形图">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                 <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
                 <polyline points="17 21 17 13 7 13 7 21"/>
                 <polyline points="7 3 7 8 15 8"/>
               </svg>
-              <span>保存到标签</span>
+              <span>保存波形</span>
             </button>
             <button type="button" class="editor-copy-btn" id="btn-format-json" title="格式化并对齐当前 JSON">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
@@ -229,27 +262,27 @@
   <!-- Save tag modal -->
   <div class="modal-overlay" id="tag-save-modal" hidden>
     <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="tag-save-modal-title">
-      <div class="modal-header" id="tag-save-modal-title">保存到标签</div>
+      <div class="modal-header" id="tag-save-modal-title">保存波形图</div>
       <div class="modal-body" id="tag-save-form">
         <label class="modal-radio">
           <div class="modal-radio-row">
             <input type="radio" name="tag-save-mode" id="tag-mode-overwrite" value="overwrite">
-            <span>覆盖已有标签</span>
+            <span>覆盖已有波形图</span>
           </div>
           <select class="modal-select modal-radio-control" id="tag-overwrite-select" disabled></select>
         </label>
         <label class="modal-radio">
           <div class="modal-radio-row">
             <input type="radio" name="tag-save-mode" id="tag-mode-new" value="new" checked>
-            <span>新增标签</span>
+            <span>新增波形图</span>
           </div>
           <input type="text" class="modal-input modal-radio-control" id="tag-new-name-input"
-            placeholder="输入标签名" spellcheck="false" autocomplete="off">
+            placeholder="输入波形图名称" spellcheck="false" autocomplete="off">
         </label>
         <div class="modal-hint" id="tag-save-hint"></div>
       </div>
       <div class="modal-body modal-duplicate-confirm" id="tag-save-duplicate" hidden>
-        <p id="tag-save-duplicate-msg">标签名已存在，是否覆盖？</p>
+        <p id="tag-save-duplicate-msg">波形图名称已存在，是否覆盖？</p>
       </div>
       <div class="modal-footer" id="tag-save-footer">
         <button type="button" class="modal-btn" id="tag-save-cancel">取消</button>
@@ -276,6 +309,30 @@
     </div>
   </div>
 
-    <script src="inc/visualwavedrom-app.js"></script>
+  <div class="modal-overlay" id="nav-move-modal" hidden>
+    <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="nav-move-modal-title">
+      <div class="modal-header" id="nav-move-modal-title">移动波形图</div>
+      <div class="modal-body">
+        <div class="nav-move-options" id="nav-move-options"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="modal-btn" id="nav-move-cancel">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="wave-library-picker-modal" hidden>
+    <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="wave-library-picker-title">
+      <div class="modal-header" id="wave-library-picker-title">选择波形库</div>
+      <div class="modal-body">
+        <div class="nav-move-options" id="wave-library-picker-options"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="modal-btn" id="wave-library-picker-cancel">取消</button>
+      </div>
+    </div>
+  </div>
+
+    <script src="inc/visualwavedrom-app.js?v=20260711-clickable-library-picker"></script>
 </body>
 </html>
