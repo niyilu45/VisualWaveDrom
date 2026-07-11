@@ -251,6 +251,7 @@ function getDefaultJson() {
     const hscaleInput = document.getElementById('input-hscale');
     const navSidebar = document.getElementById('nav-sidebar');
     const navTreeEl = document.getElementById('nav-tree');
+    const navResizeHandle = document.getElementById('nav-resize-handle');
     const waveLibraryFileStatus = document.getElementById('wave-library-file-status');
     const importWaveLibraryBtn = document.getElementById('btn-import-wave-library');
     const saveWaveLibraryBtn = document.getElementById('btn-save-wave-library');
@@ -556,6 +557,7 @@ ${lines.join('\n')}`;
     }
 
     const BACK_BTN_POS_KEY = 'vwd-back-btn-pos';
+    const NAV_SIDEBAR_WIDTH_KEY = 'vwd-nav-sidebar-width';
     const WAVE_EDIT_MODE_KEY = 'vwd-wave-edit-mode';
     const JSON_PANEL_HIDDEN_KEY = 'vwd-json-panel-hidden';
     const EDITOR_JSON_KEY = 'vwd-editor-json';
@@ -740,6 +742,28 @@ ${lines.join('\n')}`;
       const number = getNavDirectoryNumber(node) || '';
       const label = node && node.label && node.label !== '目录' ? String(node.label).trim() : '';
       return label ? (number + ' ' + label) : number;
+    }
+
+    function findNavDocumentParent(root, documentName) {
+      if (!root || !documentName) return null;
+      if ((root.documents || []).includes(documentName)) return root;
+      const children = root.children || [];
+      for (let i = 0; i < children.length; i++) {
+        const parent = findNavDocumentParent(children[i], documentName);
+        if (parent) return parent;
+      }
+      return null;
+    }
+
+    function getNavDocumentDisplayName(tag, parentNode) {
+      if (!tag) return '';
+      const parent = parentNode || findNavDocumentParent(navTreeState, tag.name);
+      const documentIndex = parent ? (parent.documents || []).indexOf(tag.name) + 1 : 0;
+      const prefix = parent && parent.id !== 'nav-root'
+        ? (getNavDirectoryNumber(parent).replace(/\.$/, '') + '.' + documentIndex)
+        : (documentIndex ? (documentIndex + '.') : '');
+      const title = getSavedTagTitle(tag);
+      return prefix ? (prefix + ' ' + title) : title;
     }
 
     function cloneObjectShallow(value) {
@@ -1058,8 +1082,8 @@ ${lines.join('\n')}`;
         button.type = 'button';
         button.className = 'nav-tree-document-label';
         if (tag.name === activeTagName) button.classList.add('active');
-        button.title = '打开波形图: ' + getSavedTagTitle(tag);
-        button.textContent = getSavedTagTitle(tag);
+        button.title = '打开波形图: ' + getNavDocumentDisplayName(tag, parentNode);
+        button.textContent = getNavDocumentDisplayName(tag, parentNode);
         button.addEventListener('click', () => {
           setSelectedNavNode(parentNode.id, { skipFilter: true });
           openWaveDocumentForEditing(tag.name);
@@ -1599,14 +1623,21 @@ ${lines.join('\n')}`;
     }
 
     function formatEditorJson() {
-      const formatted = formatJsonForDisplay(editor.value);
+      let formatted;
+      try {
+        formatted = JSON.stringify(JSON.parse(editor.value), null, 2);
+      } catch (e) {
+        setStatus(false, 'JSON 错误，无法格式化');
+        return false;
+      }
       if (formatted === editor.value) {
         setStatus(true, 'JSON 已对齐');
-        return;
+        return true;
       }
       pushUndoBeforeChange();
       applyEditorChange(formatted, 0, 0, { skipFocus: false });
       setStatus(true, 'JSON 已格式化对齐');
+      return true;
     }
 
     function setJsonPanelHidden(hidden, persist) {
@@ -1630,6 +1661,45 @@ ${lines.join('\n')}`;
       } catch (e) {
         setJsonPanelHidden(false, false);
       }
+    }
+
+    function setNavSidebarWidth(width, persist) {
+      const maxWidth = Math.max(220, Math.min(520, window.innerWidth - 420));
+      const nextWidth = Math.max(180, Math.min(maxWidth, Math.round(Number(width) || 240)));
+      document.documentElement.style.setProperty('--nav-sidebar-width', nextWidth + 'px');
+      if (persist) {
+        try { localStorage.setItem(NAV_SIDEBAR_WIDTH_KEY, String(nextWidth)); } catch (e) { /* ignore */ }
+      }
+    }
+
+    function restoreNavSidebarWidth() {
+      try {
+        const saved = parseInt(localStorage.getItem(NAV_SIDEBAR_WIDTH_KEY), 10);
+        if (Number.isFinite(saved)) setNavSidebarWidth(saved, false);
+      } catch (e) { /* ignore */ }
+    }
+
+    function initNavSidebarResize() {
+      if (!navResizeHandle) return;
+      navResizeHandle.addEventListener('pointerdown', (event) => {
+        if (event.button !== 0 || window.innerWidth <= 768) return;
+        event.preventDefault();
+        navResizeHandle.setPointerCapture(event.pointerId);
+        app.classList.add('nav-resizing');
+        const onMove = (moveEvent) => setNavSidebarWidth(moveEvent.clientX, false);
+        const onEnd = (endEvent) => {
+          if (endEvent.pointerId !== event.pointerId) return;
+          navResizeHandle.releasePointerCapture(event.pointerId);
+          navResizeHandle.removeEventListener('pointermove', onMove);
+          navResizeHandle.removeEventListener('pointerup', onEnd);
+          navResizeHandle.removeEventListener('pointercancel', onEnd);
+          app.classList.remove('nav-resizing');
+          setNavSidebarWidth(endEvent.clientX, true);
+        };
+        navResizeHandle.addEventListener('pointermove', onMove);
+        navResizeHandle.addEventListener('pointerup', onEnd);
+        navResizeHandle.addEventListener('pointercancel', onEnd);
+      });
     }
 
     let formatAfterWaveChangeRaf = null;
@@ -4548,9 +4618,6 @@ ${lines.join('\n')}`;
     }
 
     function getOptimisticEdgePoint(point, sourceMap) {
-      if (point && Number.isFinite(point.svgX) && Number.isFinite(point.svgY)) {
-        return { x: point.svgX, y: point.svgY };
-      }
       const svg = waveContainer.querySelector('svg');
       if (!svg || !point) return null;
       const lane = getWaveLaneGroups(svg)[point.rowIndex];
@@ -4692,6 +4759,14 @@ ${lines.join('\n')}`;
           const selStart = insertPos + insertion.indexOf(edgeJson);
           const selEnd = selStart + edgeJson.length;
           statusMsg = '已插入连接: ' + edgeStr + '（node ' + prepared.fromNode + ' → ' + prepared.toNode + '）';
+
+          try {
+            JSON.parse(newText);
+          } catch (error) {
+            vwdDebugLog('connection', { phase: 'insert-validation-error', message: error && error.message ? error.message : String(error) });
+            setStatus(false, '连接写入失败：JSON 校验未通过');
+            return;
+          }
 
           vwdMark('commitEdgeInsert:beforeApply');
           deferCompletion = true;
@@ -6913,11 +6988,22 @@ ${lines.join('\n')}`;
     function getWaveTitleFromJson(text) {
       try {
         const parsed = JSON.parse(text);
-        const title = parsed && parsed.head && typeof parsed.head.text === 'string' ? parsed.head.text.trim() : '';
-        return title;
+        const title = parsed && typeof parsed.title === 'string' ? parsed.title.trim() : '';
+        const head = parsed && parsed.head && typeof parsed.head.text === 'string' ? parsed.head.text.trim() : '';
+        return title || head;
       } catch (_e) {
         return '';
       }
+    }
+
+    function getWaveRenderSource(source) {
+      if (!source || typeof source !== 'object') return source;
+      const title = typeof source.title === 'string' ? source.title.trim() : '';
+      const head = source.head && typeof source.head.text === 'string' ? source.head.text.trim() : '';
+      if (!title || head) return source;
+      return Object.assign({}, source, {
+        head: Object.assign({}, source.head || {}, { text: title })
+      });
     }
 
     function getSavedTagTitle(tag) {
@@ -7735,6 +7821,7 @@ ${lines.join('\n')}`;
         let source;
         try {
           source = JSON.parse(jsonText);
+          source = getWaveRenderSource(source);
           setJsonErrorLine(-1);
           rebuildNavTreeStateFromJson(jsonText);
         } catch (e) {
@@ -8042,8 +8129,9 @@ ${lines.join('\n')}`;
       const selected = getNavNodeById(navTreeState, selectedNavNodeId) || navTreeState;
       const documentNames = collectNavDocuments(selected, []);
       documentNames.forEach((documentName, index) => {
-        const tag = savedTags.find((item) => item.name === documentName);
-        if (!tag) return;
+        try {
+          const tag = savedTags.find((item) => item.name === documentName);
+          if (!tag) return;
         const card = document.createElement('article');
         card.className = 'wave-document-card';
         card.dataset.documentName = tag.name;
@@ -8052,7 +8140,7 @@ ${lines.join('\n')}`;
         const header = document.createElement('div');
         header.className = 'wave-document-card-header';
         const title = document.createElement('h2');
-        title.textContent = getSavedTagTitle(tag);
+        title.textContent = getNavDocumentDisplayName(tag, findNavDocumentParent(navTreeState, tag.name));
         const openButton = document.createElement('button');
         openButton.type = 'button';
         openButton.className = 'wave-document-open';
@@ -8105,10 +8193,24 @@ ${lines.join('\n')}`;
         }
         canvas.appendChild(description);
 
-        try {
-          WaveDrom.RenderWaveForm(0, JSON.parse(tag.content), prefix, false);
+          try {
+            WaveDrom.RenderWaveForm(0, getWaveRenderSource(JSON.parse(tag.content)), prefix, false);
+          } catch (error) {
+            showWaveError(canvas, '波形图渲染失败: ' + (error && error.message ? error.message : '无效 JSON'));
+            vwdDebugLog('wave-library', { phase: 'document-render-error', documentName: tag.name, message: error && error.message ? error.message : String(error) });
+          }
         } catch (error) {
-          showWaveError(canvas, '波形图渲染失败: ' + (error && error.message ? error.message : '无效 JSON'));
+          const failedCard = document.createElement('article');
+          failedCard.className = 'wave-document-card wave-document-card-error';
+          const failedTitle = document.createElement('h2');
+          failedTitle.textContent = documentName || '未命名波形图';
+          const failedMessage = document.createElement('div');
+          failedMessage.className = 'wave-error';
+          failedMessage.textContent = '波形图加载失败: ' + (error && error.message ? error.message : '未知错误');
+          failedCard.appendChild(failedTitle);
+          failedCard.appendChild(failedMessage);
+          waveLibraryContainer.appendChild(failedCard);
+          vwdDebugLog('wave-library', { phase: 'document-card-error', documentName, message: error && error.message ? error.message : String(error) });
         }
       });
 
@@ -8440,12 +8542,15 @@ ${lines.join('\n')}`;
     });
 
     initBackBtnDrag();
+    initNavSidebarResize();
 
     window.addEventListener('load', () => {
       migrateSessionStorageToLocal(WAVE_EDIT_MODE_KEY);
       migrateSessionStorageToLocal(BACK_BTN_POS_KEY);
+      migrateSessionStorageToLocal(NAV_SIDEBAR_WIDTH_KEY);
       migrateSessionStorageToLocal(JSON_PANEL_HIDDEN_KEY);
       restoreJsonPanelVisibility();
+      restoreNavSidebarWidth();
       loadWaveEditMode();
       initSavedTags();
       initEditor();

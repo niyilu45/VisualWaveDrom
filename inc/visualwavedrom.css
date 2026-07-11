@@ -63,6 +63,21 @@
       transition: transform 0.25s ease, width 0.25s ease, min-width 0.25s ease;
     }
 
+    .nav-resize-handle {
+      order: 1;
+      width: 6px;
+      flex: 0 0 6px;
+      cursor: col-resize;
+      background: transparent;
+      position: relative;
+      z-index: 20;
+    }
+
+    .nav-resize-handle:hover,
+    .app.nav-resizing .nav-resize-handle {
+      background: var(--accent);
+    }
+
     .nav-toolbar {
       padding: 8px 12px;
       display: flex;
@@ -98,12 +113,14 @@
     .nav-tree-node-label {
       width: 100%;
       display: flex;
+      justify-content: flex-start;
       align-items: center;
       gap: 6px;
       padding: 6px 8px;
       border-radius: 6px;
       border: 1px solid transparent;
       cursor: pointer;
+      text-align: left;
       color: var(--text);
       font-size: 0.82rem;
       line-height: 1.2;
@@ -1718,6 +1735,7 @@
     /* Responsive */
     @media (max-width: 768px) {
       :root { --sidebar-width: 180px; --nav-sidebar-width: 180px; }
+      .nav-resize-handle { display: none; }
       .menu-btn .shortcut { display: none; }
       .wave-add-delete-row,
       .wave-move-row,
