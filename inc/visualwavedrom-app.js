@@ -252,6 +252,8 @@ function getDefaultJson() {
     const navSidebar = document.getElementById('nav-sidebar');
     const navTreeEl = document.getElementById('nav-tree');
     const navResizeHandle = document.getElementById('nav-resize-handle');
+    const toggleNavSidebarBtn = document.getElementById('btn-toggle-nav-sidebar');
+    const toggleNavSidebarLabel = document.getElementById('toggle-nav-sidebar-label');
     const waveLibraryFileStatus = document.getElementById('wave-library-file-status');
     const importWaveLibraryBtn = document.getElementById('btn-import-wave-library');
     const saveWaveLibraryBtn = document.getElementById('btn-save-wave-library');
@@ -558,6 +560,7 @@ ${lines.join('\n')}`;
 
     const BACK_BTN_POS_KEY = 'vwd-back-btn-pos';
     const NAV_SIDEBAR_WIDTH_KEY = 'vwd-nav-sidebar-width';
+    const NAV_SIDEBAR_HIDDEN_KEY = 'vwd-nav-sidebar-hidden';
     const WAVE_EDIT_MODE_KEY = 'vwd-wave-edit-mode';
     const JSON_PANEL_HIDDEN_KEY = 'vwd-json-panel-hidden';
     const EDITOR_JSON_KEY = 'vwd-editor-json';
@@ -1660,6 +1663,27 @@ ${lines.join('\n')}`;
         setJsonPanelHidden(localStorage.getItem(JSON_PANEL_HIDDEN_KEY) === '1', false);
       } catch (e) {
         setJsonPanelHidden(false, false);
+      }
+    }
+
+    function setNavSidebarHidden(hidden, persist) {
+      const shouldHide = !!hidden;
+      app.classList.toggle('nav-sidebar-hidden', shouldHide);
+      if (toggleNavSidebarLabel) toggleNavSidebarLabel.textContent = shouldHide ? '显示目录' : '隐藏目录';
+      if (toggleNavSidebarBtn) {
+        toggleNavSidebarBtn.title = shouldHide ? '显示波形目录' : '隐藏波形目录';
+        toggleNavSidebarBtn.setAttribute('aria-pressed', String(shouldHide));
+      }
+      if (persist) {
+        try { localStorage.setItem(NAV_SIDEBAR_HIDDEN_KEY, shouldHide ? '1' : '0'); } catch (e) { /* ignore */ }
+      }
+    }
+
+    function restoreNavSidebarVisibility() {
+      try {
+        setNavSidebarHidden(localStorage.getItem(NAV_SIDEBAR_HIDDEN_KEY) === '1', false);
+      } catch (e) {
+        setNavSidebarHidden(false, false);
       }
     }
 
@@ -8344,6 +8368,11 @@ ${lines.join('\n')}`;
     ensureCopyDebugLogButton();
 
     document.getElementById('btn-reading-mode').addEventListener('click', enterReadingMode);
+    if (toggleNavSidebarBtn) {
+      toggleNavSidebarBtn.addEventListener('click', () => {
+        setNavSidebarHidden(!app.classList.contains('nav-sidebar-hidden'), true);
+      });
+    }
     if (importWaveLibraryBtn && waveLibraryImportInput) {
       importWaveLibraryBtn.addEventListener('click', () => {
         if (waveLibraryServerMode) {
@@ -8548,8 +8577,10 @@ ${lines.join('\n')}`;
       migrateSessionStorageToLocal(WAVE_EDIT_MODE_KEY);
       migrateSessionStorageToLocal(BACK_BTN_POS_KEY);
       migrateSessionStorageToLocal(NAV_SIDEBAR_WIDTH_KEY);
+      migrateSessionStorageToLocal(NAV_SIDEBAR_HIDDEN_KEY);
       migrateSessionStorageToLocal(JSON_PANEL_HIDDEN_KEY);
       restoreJsonPanelVisibility();
+      restoreNavSidebarVisibility();
       restoreNavSidebarWidth();
       loadWaveEditMode();
       initSavedTags();

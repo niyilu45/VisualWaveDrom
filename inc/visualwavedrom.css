@@ -78,6 +78,11 @@
       background: var(--accent);
     }
 
+    .app.nav-sidebar-hidden .nav-sidebar,
+    .app.nav-sidebar-hidden .nav-resize-handle {
+      display: none;
+    }
+
     .nav-toolbar {
       padding: 8px 12px;
       display: flex;
