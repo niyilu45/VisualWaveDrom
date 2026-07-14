@@ -37,201 +37,118 @@ function getDefaultJson() {
     const HSCALE_MAX = 20;
     const HSCALE_EPS = 1e-6;
 
-    const DEFAULT_EDGE_TEMPLATE = '{from}->{to} : {label}';
+    const MIN_CONNECTION_PICK_BOUNDARIES = 8;
+    const EMPTY_WAVE_FILL_CHAR = 'x';
     const SIGNAL_DESCRIPTION_X_OFFSET = 0;
     const SIGNAL_DESCRIPTION_OVERLAY_OFFSET = 0;
 
-    const EDGE_STYLE_PRESETS = [
-      {
-        label: '实线箭头',
-        syntax: '-> : label',
-        template: '{from}->{to} : {label}',
-        preview: {
-          signal: [
-            { name: 'A', wave: '01', node: '.a' },
-            { name: 'B', wave: '01', node: '..b' }
-          ],
-          edge: ['a->b : label']
-        }
-      },
-      {
-        label: '虚线箭头',
-        syntax: '~> : label',
-        template: '{from}~>{to} : {label}',
-        preview: {
-          signal: [
-            { name: 'A', wave: '01', node: '.a' },
-            { name: 'B', wave: '01', node: '..b' }
-          ],
-          edge: ['a~>b : label']
-        }
-      },
-      {
-        label: '粗箭头',
-        syntax: '=> : label',
-        template: '{from}=>{to} : {label}',
-        preview: {
-          signal: [
-            { name: 'A', wave: '01', node: '.a' },
-            { name: 'B', wave: '01', node: '..b' }
-          ],
-          edge: ['a=>b : label']
-        }
-      },
-      {
-        label: '负沿',
-        syntax: '-a-> : label',
-        template: '-{from}->{to} : {label}',
-        preview: {
-          signal: [
-            { name: 'A', wave: '01', node: '.a' },
-            { name: 'B', wave: '01', node: '..b' }
-          ],
-          edge: ['-a->b : label']
-        }
-      },
-      {
-        label: '正沿',
-        syntax: '+a-> : label',
-        template: '+{from}->{to} : {label}',
-        preview: {
-          signal: [
-            { name: 'A', wave: '01', node: '.a' },
-            { name: 'B', wave: '01', node: '..b' }
-          ],
-          edge: ['+a->b : label']
-        }
-      },
-      {
-        label: '带杠箭头',
-        syntax: '-|> : label',
-        template: '{from}-|>{to} : {label}',
-        preview: {
-          signal: [
-            { name: 'A', wave: '01', node: '.a' },
-            { name: 'B', wave: '01', node: '..b' }
-          ],
-          edge: ['a-|>b : label']
-        }
-      },
-      {
-        label: '带标签',
-        syntax: '-> : label',
-        template: '{from}->{to} : {label}',
-        preview: {
-          signal: [
-            { name: 'A', wave: '01', node: '.a' },
-            { name: 'B', wave: '01', node: '..b' }
-          ],
-          edge: ['a->b : My Label']
-        }
-      },
-      {
-        label: '双向箭头',
-        syntax: '<-> : label',
-        template: '{from}<->{to} : {label}',
-        preview: {
-          signal: [
-            { name: 'A', wave: '01', node: '.a' },
-            { name: 'B', wave: '01', node: '..b' }
-          ],
-          edge: ['a<->b : label']
-        }
-      }
-    ];
+    const CONNECTION_ARROW_STYLES = ['start', 'end', 'both'];
+    const CONNECTION_LINE_STYLES = ['straight', 'dashed', 'orthogonal', 'curve'];
 
     // Keep the row visually blank while preserving a real WaveDrom lane that
     // can be selected and edited immediately.
-    const DEFAULT_NEW_SIGNAL_TEMPLATE = { name: '', wave: '' };
+    const DEFAULT_NEW_SIGNAL_TEMPLATE = {};
 
     const LEGEND_ITEMS = [
       {
         char: 'p',
-        label: '时钟',
+        label: '正沿时钟',
         desc: 'Clock positive (p)',
         wave: { signal: [{ name: '_', wave: 'xp.' }] }
       },
       {
         char: '1',
-        label: '时钟',
+        label: '高电平',
         desc: 'High level (1)',
         wave: { signal: [{ name: '_', wave: 'x1x' }] }
       },
       {
         char: '0',
-        label: '高电平',
+        label: '低电平',
         desc: 'Low level (0)',
         wave: { signal: [{ name: '_', wave: 'x0x' }] }
       },
       {
         char: '.',
-        label: '低电平',
+        label: '延续',
         desc: 'Continue previous (.)',
         wave: { signal: [{ name: '_', wave: '0.1' }] }
       },
       {
         char: '|',
-        label: '延续',
+        label: '间隔',
         desc: 'Edge marker (|)',
         wave: { signal: [{ name: '_', wave: '0.|1' }] }
       },
       {
         char: '=',
-        label: '分割',
+        label: '数据',
         desc: 'Transition (=)',
         wave: { signal: [{ name: '_', wave: 'x=x' }] }
       },
       {
+        char: '2',
+        label: '数据2',
+        desc: 'Data bus (2)',
+        wave: { signal: [{ name: '_', wave: 'x2x' }] }
+      },
+      {
         char: '3',
-        label: '位置',
+        label: '数据3',
         desc: 'Data bus (3)',
         wave: { signal: [{ name: '_', wave: 'x3x' }] }
       },
       {
         char: '4',
-        label: '数据3',
+        label: '数据4',
         desc: 'Data bus (4)',
         wave: { signal: [{ name: '_', wave: 'x4x' }] }
       },
       {
         char: '5',
-        label: '数据4',
+        label: '数据5',
         desc: 'Data bus (5)',
         wave: { signal: [{ name: '_', wave: 'x5x' }] }
       },
       {
         char: '6',
-        label: '数据5',
+        label: '数据6',
         desc: 'Data bus (6)',
         wave: { signal: [{ name: '_', wave: 'x6x' }] }
       },
       {
         char: '7',
-        label: '数据6',
+        label: '数据7',
         desc: 'Data bus (7)',
         wave: { signal: [{ name: '_', wave: 'x7x' }] }
       },
       {
         char: '8',
-        label: '数据7',
+        label: '数据8',
         desc: 'Data bus (8)',
         wave: { signal: [{ name: '_', wave: 'x8x' }] }
       },
       {
+        char: '9',
+        label: '数据9',
+        desc: 'Data bus (9)',
+        wave: { signal: [{ name: '_', wave: 'x9x' }] }
+      },
+      {
         char: 'n',
-        label: '数据8',
+        label: '负沿时钟',
         desc: 'Clock negative (n)',
         wave: { signal: [{ name: '_', wave: 'xn.' }] }
       },
       {
         char: 'x',
-        label: '反相时钟',
+        label: '未知',
         desc: 'Unknown (x)',
         wave: { signal: [{ name: '_', wave: '0x0' }] }
       },
       {
         char: 'z',
-        label: '未知',
+        label: '高阻',
         desc: 'High-Z (z)',
         wave: { signal: [{ name: '_', wave: '0z0' }] }
       }
@@ -286,11 +203,16 @@ function getDefaultJson() {
     let navTitleRefreshTimer = null;
     let groupPickActive = false;
     let groupPickStartIndex = -1;
+    let wavePaintModeActive = false;
+    let wavePaintChar = '';
     let connectionPickActive = false;
     let connectionAddSessionActive = false;
+    let connectionSelectActive = false;
     let connectionFromPoint = null;
     let connectionToPoint = null;
     let pendingEdgeTemplate = null;
+    let connectionArrowStyle = 'end';
+    let connectionLineStyle = 'straight';
     let selectedEdgeIndex = -1;
     let isRenderingWaveform = false;
     let pendingRenderText = null;
@@ -1738,39 +1660,53 @@ ${lines.join('\n')}`;
       });
     }
     function buildSignalSourceMap(jsonText) {
-      let parsed;
-      try {
-        parsed = JSON.parse(jsonText);
-      } catch (e) {
-        return [];
-      }
-      const flat = flattenSignals(parsed.signal || []);
+      const bounds = findSignalArrayBounds(jsonText);
+      if (!bounds) return [];
       const map = [];
-      let searchStart = 0;
-      const signalKeyMatch = jsonText.match(/"signal"\s*:\s*\[/);
-      if (signalKeyMatch) searchStart = signalKeyMatch.index;
 
-      flat.forEach((signal) => {
-        const nameJson = JSON.stringify(signal.name);
-        const waveJson = JSON.stringify(signal.wave);
-        const slice = jsonText.slice(searchStart);
-        // Match name + wave together so empty names ("" / "") never alias another row.
-        const compositeRe = new RegExp(
-          '"name"\\s*:\\s*' + escapeRegex(nameJson)
-          + '\\s*,\\s*"wave"\\s*:\\s*' + escapeRegex(waveJson)
-        );
-        let m = compositeRe.exec(slice);
-        if (!m) {
-          const nameRe = new RegExp('"name"\\s*:\\s*' + escapeRegex(nameJson));
-          m = nameRe.exec(slice);
+      function skipSpaceComma(pos, endPos) {
+        let p = pos;
+        while (p < endPos && /\s|,/.test(jsonText[p])) p += 1;
+        return p;
+      }
+
+      function parseValue(pos, endPos) {
+        const p = skipSpaceComma(pos, endPos);
+        if (p >= endPos) return p;
+        if (jsonText[p] === '{') {
+          const end = findObjectEnd(jsonText, p);
+          try {
+            const signal = JSON.parse(jsonText.slice(p, end));
+            if (signal && typeof signal === 'object' && !Array.isArray(signal)) {
+              map.push({ start: p, end, signal });
+            }
+          } catch (e) { /* JSON validation occurs before editing */ }
+          return end;
         }
-        if (!m) return;
-        const nameAbs = searchStart + m.index;
-        const objStart = findObjectStart(jsonText, nameAbs);
-        const objEnd = findObjectEnd(jsonText, objStart);
-        map.push({ start: objStart, end: objEnd, signal });
-        searchStart = objEnd;
-      });
+        if (jsonText[p] === '[') return parseGroup(p, endPos);
+        return findJsonValueEnd(jsonText, p);
+      }
+
+      function parseGroup(startPos, endPos) {
+        const groupEnd = findArrayEnd(jsonText, startPos);
+        if (groupEnd <= startPos) return groupEnd;
+        let p = skipSpaceComma(startPos + 1, groupEnd);
+        // A WaveDrom group starts with its string label; nested entries follow it.
+        if (p < groupEnd && jsonText[p] === '"') p = findJsonValueEnd(jsonText, p);
+        while (p < groupEnd) {
+          const next = parseValue(p, groupEnd);
+          if (next <= p) break;
+          p = next;
+        }
+        return groupEnd;
+      }
+
+      let cursor = bounds.arrStart;
+      while (cursor < bounds.arrEnd) {
+        const next = parseValue(cursor, bounds.arrEnd);
+        if (next <= cursor) break;
+        cursor = next;
+      }
       return map;
     }
 
@@ -2104,26 +2040,16 @@ ${lines.join('\n')}`;
       if (!sig || Object.keys(sig).length === 0) {
         return indent + '{}';
       }
-      const inner = indent + '  ';
-      const lines = [indent + '{'];
-      lines.push(inner + '"name": ' + JSON.stringify(sig.name) + ',');
-      lines.push(inner + '"wave": ' + JSON.stringify(sig.wave));
-      if (sig.data && sig.data.length) {
-        lines[lines.length - 1] += ',';
-        lines.push(inner + '"data": ' + JSON.stringify(sig.data));
+      const normalized = Object.assign({}, sig);
+      if (normalized.name === undefined) normalized.name = '';
+      if (normalized.wave === undefined) normalized.wave = '';
+      if (normalized.node !== undefined && normalized.node !== '') {
+        normalized.node = padNodeToWaveLength(normalized.node, normalized.wave.length);
       }
-      if (sig.node !== undefined && sig.node !== '') {
-        lines[lines.length - 1] += ',';
-        const waveLen = (sig.wave || '').length;
-        const nodeStr = padNodeToWaveLength(sig.node, waveLen);
-        lines.push(inner + '"node": ' + JSON.stringify(nodeStr));
-      }
-      if (sig.phase !== undefined) {
-        lines[lines.length - 1] += ',';
-        lines.push(inner + '"phase": ' + sig.phase);
-      }
-      lines.push(indent + '}');
-      return lines.join('\n');
+      return JSON.stringify(normalized, null, 2)
+        .split('\n')
+        .map((line) => indent + line)
+        .join('\n');
     }
 
     function findSignalContextAtCursor(text, cursorPos) {
@@ -2736,8 +2662,12 @@ ${lines.join('\n')}`;
       return step * 8;
     }
 
+    function getWaveColumnWidth(unitWidth) {
+      return (unitWidth || WAVE_UNIT_WIDTH) * 2;
+    }
+
     function buildVirtualColumnMap(numCols, unitWidth) {
-      const step = unitWidth || WAVE_UNIT_WIDTH;
+      const step = getWaveColumnWidth(unitWidth);
       const cols = [];
       for (let i = 0; i < numCols; i++) {
         cols.push({ charIndex: i, char: '', x0: i * step, x1: (i + 1) * step });
@@ -2746,27 +2676,26 @@ ${lines.join('\n')}`;
     }
 
     function columnIndexFromLocalX(localX, unitWidth) {
-      const step = unitWidth || WAVE_UNIT_WIDTH;
+      const step = getWaveColumnWidth(unitWidth);
       if (localX < 0) return 0;
       return Math.floor(localX / step);
     }
 
     function buildWaveColumnMap(drawGroup, wave, unitWidth) {
       const step = unitWidth || WAVE_UNIT_WIDTH;
+      const columnWidth = getWaveColumnWidth(unitWidth);
       const uses = drawGroup ? getDrawUses(drawGroup) : [];
       const n = wave.length;
       if (n === 0) {
-        const width = drawGroup ? getDrawGroupContentWidth(drawGroup, unitWidth) : step * 8;
-        const numCols = Math.max(1, Math.ceil(width / step));
-        return buildVirtualColumnMap(numCols, unitWidth);
+        return buildVirtualColumnMap(MIN_CONNECTION_PICK_BOUNDARIES, unitWidth);
       }
 
       if (uses.length === 0) {
         return [...wave].map((char, i) => ({
           charIndex: i,
           char,
-          x0: i * step,
-          x1: (i + 1) * step
+          x0: i * columnWidth,
+          x1: (i + 1) * columnWidth
         }));
       }
 
@@ -2806,7 +2735,6 @@ ${lines.join('\n')}`;
     }
 
     function columnIndexFromClick(drawGroup, wave, svgRoot, clientX, unitWidth) {
-      const step = unitWidth || WAVE_UNIT_WIDTH;
       const pt = svgRoot.createSVGPoint();
       pt.x = clientX;
       pt.y = 0;
@@ -2842,6 +2770,25 @@ ${lines.join('\n')}`;
       return clampPickColumnIndex(best, wave, cols);
     }
 
+    function paintColumnIndexFromClick(drawGroup, wave, svgRoot, clientX, unitWidth, maxColumnCount) {
+      const regularIndex = columnIndexFromClick(drawGroup, wave, svgRoot, clientX, unitWidth);
+      const ctm = drawGroup.getScreenCTM();
+      if (!ctm) return regularIndex;
+
+      const pt = svgRoot.createSVGPoint();
+      pt.x = clientX;
+      pt.y = 0;
+      const local = pt.matrixTransform(ctm.inverse());
+      const cols = buildWaveColumnMap(drawGroup, wave, unitWidth);
+      const last = cols.length ? cols[cols.length - 1] : null;
+      const contentEnd = last && last.x1 > last.x0 ? last.x1 : 0;
+      const rawIndex = (!wave.length || local.x >= contentEnd)
+        ? columnIndexFromLocalX(local.x, unitWidth)
+        : regularIndex;
+      const maxIndex = Math.max(0, Math.max(1, maxColumnCount || 1) - 1);
+      return Math.min(Math.max(0, rawIndex), maxIndex);
+    }
+
     function getMaxWaveBoundaryIndex(sourceMap) {
       return (sourceMap || []).reduce((max, entry) => {
         const wave = entry && entry.signal ? (entry.signal.wave || '') : '';
@@ -2849,8 +2796,12 @@ ${lines.join('\n')}`;
       }, 0);
     }
 
+    function getConnectionPickBoundaryIndex(sourceMap) {
+      return Math.max(MIN_CONNECTION_PICK_BOUNDARIES, getMaxWaveBoundaryIndex(sourceMap));
+    }
+
     function getWaveBoundaryPositions(drawGroup, wave, unitWidth, maxBoundaryIndex) {
-      const step = unitWidth || WAVE_UNIT_WIDTH;
+      const step = getWaveColumnWidth(unitWidth);
       const cols = buildWaveColumnMap(drawGroup, wave || '', unitWidth);
       const targetIndex = Math.max(0, maxBoundaryIndex || 0, (wave || '').length, cols.length);
       if (!cols.length) {
@@ -2895,11 +2846,28 @@ ${lines.join('\n')}`;
       return Math.max(0, best.index);
     }
 
+    function virtualLaneIndexFromClick(lane, svgRoot, clientX, unitWidth, maxCount, isBoundary) {
+      const ctm = lane && lane.getScreenCTM ? lane.getScreenCTM() : null;
+      if (!ctm) return 0;
+      const pt = svgRoot.createSVGPoint();
+      pt.x = clientX;
+      pt.y = 0;
+      const local = pt.matrixTransform(ctm.inverse());
+      const step = getWaveColumnWidth(unitWidth);
+      const rawIndex = isBoundary
+        ? Math.round(Math.max(0, local.x) / step)
+        : Math.floor(Math.max(0, local.x) / step);
+      const maxIndex = isBoundary
+        ? Math.max(0, maxCount || 0)
+        : Math.max(0, Math.max(1, maxCount || 1) - 1);
+      return Math.min(rawIndex, maxIndex);
+    }
+
     function getBoundaryXForColumn(drawGroup, wave, colIndex, unitWidth, maxBoundaryIndex) {
       const boundaries = getWaveBoundaryPositions(drawGroup, wave, unitWidth, maxBoundaryIndex);
       const exact = boundaries.find((boundary) => boundary.index === colIndex);
       if (exact) return exact.x;
-      const step = unitWidth || WAVE_UNIT_WIDTH;
+      const step = getWaveColumnWidth(unitWidth);
       return Math.max(0, colIndex) * step;
     }
 
@@ -2907,6 +2875,31 @@ ${lines.join('\n')}`;
       if (colIndex < 0) return wave;
       if (colIndex >= wave.length) return wave + char;
       return wave.slice(0, colIndex) + char + wave.slice(colIndex + 1);
+    }
+
+    function getWaveContinuationSourceChar(wave, colIndex) {
+      for (let i = Math.min(colIndex, wave.length - 1); i >= 0; i--) {
+        const current = wave[i];
+        if (current !== '.' && current !== '|') return current;
+      }
+      return 'x';
+    }
+
+    function replaceWaveCharPreservingContinuation(wave, colIndex, char) {
+      if (colIndex < 0 || colIndex >= wave.length) return replaceWaveCharAt(wave, colIndex, char);
+      const originalContinuation = getWaveContinuationSourceChar(wave, colIndex);
+      const replacementContinuation = char === '.' || char === '|'
+        ? getWaveContinuationSourceChar(wave, colIndex - 1)
+        : char;
+      let updated = replaceWaveCharAt(wave, colIndex, char);
+      if (colIndex + 1 < wave.length
+          && wave[colIndex + 1] === '.'
+          && originalContinuation !== replacementContinuation) {
+        updated = updated.slice(0, colIndex + 1)
+          + originalContinuation
+          + updated.slice(colIndex + 2);
+      }
+      return updated;
     }
 
     function insertWaveCharAt(wave, colIndex, char) {
@@ -2948,11 +2941,15 @@ ${lines.join('\n')}`;
       }
 
       const wave = entry.signal.wave || '';
-      const safeCol = colIndex < 0 ? 0 : Math.min(colIndex, Math.max(0, wave.length - 1));
-      const atLastColumn = wave.length === 0 || safeCol === wave.length - 1;
-      const newWave = atLastColumn
-        ? insertWaveCharAt(wave, wave.length, char)
-        : replaceWaveCharAt(wave, safeCol, char);
+      const safeCol = colIndex < 0 ? 0 : Math.floor(colIndex);
+      const wasEmpty = wave.length === 0;
+      const targetsEmptyPosition = safeCol >= wave.length;
+      const paddedWave = targetsEmptyPosition
+        ? wave.padEnd(safeCol, EMPTY_WAVE_FILL_CHAR)
+        : wave;
+      const newWave = targetsEmptyPosition
+        ? paddedWave + char
+        : replaceWaveCharPreservingContinuation(paddedWave, safeCol, char);
       if (newWave === wave) return false;
 
       pushUndoBeforeChange();
@@ -2960,17 +2957,16 @@ ${lines.join('\n')}`;
       const indent = getIndentAt(text, entry.start);
       const newObjStr = formatSignalObject(updatedSignal, indent);
       const newText = text.slice(0, entry.start) + newObjStr + text.slice(entry.end);
-      const nextCol = atLastColumn
-        ? newWave.length - 1
-        : (newWave.length > 0 ? Math.min(safeCol + 1, newWave.length - 1) : -1);
+      vwdDebugLog('wave-edit', { phase: 'replace', rowIndex, sourceStart: entry.start, sourceEnd: entry.end, oldWave: wave, newWave });
+      const nextCol = newWave.length > 0 ? Math.min(safeCol + 1, newWave.length - 1) : -1;
       setSelectedSignal(rowIndex, nextCol);
       applyEditorChange(newText, entry.start, entry.start + newObjStr.length);
       scheduleFormatAfterWaveChange();
-      if (atLastColumn) {
+      if (wasEmpty || targetsEmptyPosition) {
         setStatus(
           true,
           waveEditModeLabel()
-            + ' · 已在末尾新增 ' + updatedSignal.name + ' [' + nextCol + ']=' + JSON.stringify(char)
+            + ' · 已填充空位置 ' + updatedSignal.name + ' [' + safeCol + ']=' + JSON.stringify(char)
         );
       } else {
         setStatus(
@@ -2980,6 +2976,58 @@ ${lines.join('\n')}`;
             + ' · 当前列 [' + nextCol + ']=' + JSON.stringify(newWave[nextCol] || '')
         );
       }
+      return true;
+    }
+
+    function applyWavePaintCharAtColumn(rowIndex, colIndex, char) {
+      if (rowIndex < 0 || colIndex < 0 || !char) return false;
+
+      try {
+        JSON.parse(editor.value);
+      } catch (e) {
+        setStatus(false, 'JSON 错误，无法使用画笔');
+        return false;
+      }
+
+      const text = editor.value;
+      const sourceMap = buildSignalSourceMap(text);
+      const entry = sourceMap[rowIndex];
+      if (!entry) {
+        setStatus(false, '未找到要绘制的信号行');
+        return false;
+      }
+
+      const wave = entry.signal.wave || '';
+      const paintCol = Math.max(0, Math.floor(colIndex));
+      const paddedWave = paintCol >= wave.length ? wave.padEnd(paintCol, EMPTY_WAVE_FILL_CHAR) : wave;
+      const newWave = paintCol >= paddedWave.length
+        ? paddedWave + char
+        : replaceWaveCharPreservingContinuation(paddedWave, paintCol, char);
+      if (newWave === wave) {
+        setStatus(true, '该格已经是 ' + JSON.stringify(char) + '，画笔模式保持开启');
+        return false;
+      }
+
+      pushUndoBeforeChange();
+      const updatedSignal = Object.assign({}, entry.signal, { wave: newWave });
+      const indent = getIndentAt(text, entry.start);
+      const newObjStr = formatSignalObject(updatedSignal, indent);
+      const newText = text.slice(0, entry.start) + newObjStr + text.slice(entry.end);
+      setSelectedSignal(rowIndex, paintCol);
+      applyEditorChange(newText, entry.start, entry.start + newObjStr.length);
+      scheduleFormatAfterWaveChange();
+      vwdDebugLog('wave-paint', {
+        phase: 'paint',
+        rowIndex,
+        colIndex: paintCol,
+        char,
+        oldWave: wave,
+        newWave
+      });
+      setStatus(
+        true,
+        '画笔已修改第 ' + (rowIndex + 1) + ' 行第 ' + (paintCol + 1) + ' 格，画笔模式保持开启'
+      );
       return true;
     }
 
@@ -3007,8 +3055,11 @@ ${lines.join('\n')}`;
       }
 
       const wave = entry.signal.wave || '';
-      const insertCol = colIndex < 0 ? wave.length : Math.min(colIndex, wave.length);
-      const newWave = insertWaveCharAt(wave, insertCol, char);
+      const insertCol = colIndex < 0 ? wave.length : Math.max(0, Math.floor(colIndex));
+      const paddedWave = insertCol > wave.length
+        ? wave.padEnd(insertCol, EMPTY_WAVE_FILL_CHAR)
+        : wave;
+      const newWave = insertWaveCharAt(paddedWave, insertCol, char);
       if (newWave === wave) return false;
 
       pushUndoBeforeChange();
@@ -3078,6 +3129,7 @@ ${lines.join('\n')}`;
     }
 
     function toggleWaveEditMode() {
+      exitWavePaintMode('wave-edit-mode');
       setWaveEditMode(waveEditMode === 'insert' ? 'modify' : 'insert');
     }
 
@@ -3114,6 +3166,75 @@ ${lines.join('\n')}`;
       btn.setAttribute('aria-label', isInsert ? '插入模式' : '修改模式');
       btn.setAttribute('aria-pressed', isInsert ? 'true' : 'false');
       updateLegendAvailability();
+    }
+
+    function updateWavePaintModeUI() {
+      const btn = document.getElementById('btn-wave-paint-mode');
+      if (btn) {
+        const labelEl = btn.querySelector('.wave-paint-mode-label');
+        btn.classList.toggle('active', wavePaintModeActive);
+        btn.setAttribute('aria-pressed', String(wavePaintModeActive));
+        btn.setAttribute('aria-label', wavePaintModeActive ? '退出画笔模式' : '画笔模式');
+        btn.title = wavePaintModeActive
+          ? '退出画笔模式'
+          : '进入画笔模式后，先选择波形，再连续点击格子';
+        if (labelEl) labelEl.textContent = wavePaintModeActive ? '退出画笔' : '画笔模式';
+      }
+      app.classList.toggle('wave-paint-mode', wavePaintModeActive);
+      updateLegendAvailability();
+    }
+
+    function setWavePaintMode(active, reason) {
+      const nextActive = !!active;
+      if (nextActive === wavePaintModeActive) {
+        updateWavePaintModeUI();
+        return false;
+      }
+
+      if (nextActive) {
+        if (groupPickActive) {
+          const svg = waveContainer.querySelector('svg');
+          clearGroupPickStartMark(svg ? getWaveLaneGroups(svg) : []);
+          groupPickActive = false;
+          groupPickStartIndex = -1;
+        }
+        if (connectionAddSessionActive) endConnectionAddSession();
+        else if (connectionPickActive) setConnectionPickActive(false);
+        if (connectionSelectActive) setConnectionSelectActive(false);
+      }
+
+      wavePaintModeActive = nextActive;
+      if (!wavePaintModeActive) wavePaintChar = '';
+      updateWavePaintModeUI();
+      vwdDebugLog('wave-paint', {
+        phase: 'mode',
+        active: wavePaintModeActive,
+        reason: reason || 'button'
+      });
+      setStatus(
+        true,
+        wavePaintModeActive ? '画笔模式：请选择一个波形按钮' : '已退出画笔模式'
+      );
+      return true;
+    }
+
+    function toggleWavePaintMode() {
+      setWavePaintMode(!wavePaintModeActive, 'button');
+    }
+
+    function exitWavePaintMode(reason) {
+      if (!wavePaintModeActive) return false;
+      return setWavePaintMode(false, reason || 'automatic');
+    }
+
+    function selectWavePaintChar(char) {
+      if (!wavePaintModeActive) return false;
+      if (!LEGEND_ITEMS.some((item) => item.char === char)) return false;
+      wavePaintChar = char;
+      updateWavePaintModeUI();
+      vwdDebugLog('wave-paint', { phase: 'select-char', char });
+      setStatus(true, '画笔已选择 ' + JSON.stringify(char) + '，可连续点击波形格子');
+      return true;
     }
 
     function updateLegendAvailability() {
@@ -3177,12 +3298,21 @@ ${lines.join('\n')}`;
         moveDownBtn.title = canMoveDown ? '将当前选中行下移' : '请先选中信号行';
       }
 
-      const actionHint = waveEditMode === 'insert'
-        ? '点击在选中列位置插入波形字符'
-        : '点击替换选中列的波形字符';
+      const actionHint = wavePaintModeActive
+        ? (wavePaintChar
+          ? '画笔已选择 ' + JSON.stringify(wavePaintChar) + '，点击格子连续绘制'
+          : '点击选择画笔波形')
+        : (waveEditMode === 'insert'
+          ? '点击在选中列位置插入波形字符'
+          : '点击替换选中列的波形字符');
+      const canUseLegend = wavePaintModeActive || hasRow;
       document.querySelectorAll('.legend-item').forEach(item => {
-        item.classList.toggle('legend-disabled', !hasRow);
-        item.title = hasRow ? actionHint : '请先在波形区点击选中一行';
+        item.classList.toggle('legend-disabled', !canUseLegend);
+        item.classList.toggle(
+          'paint-selected',
+          wavePaintModeActive && !!wavePaintChar && item.dataset.waveChar === wavePaintChar
+        );
+        item.title = canUseLegend ? actionHint : '请先在波形区点击选中一行';
       });
     }
 
@@ -3213,7 +3343,7 @@ ${lines.join('\n')}`;
 
     function appendColumnHighlight(drawGroup, wave, colIndex, unitWidth, highlightClass, maxBoundaryIndex) {
       if (!drawGroup || colIndex < 0) return;
-      const step = unitWidth || WAVE_UNIT_WIDTH;
+      const step = getWaveColumnWidth(unitWidth);
       const cls = highlightClass || 'wave-col-highlight';
       const isConnectionPoint = cls === 'wave-col-highlight-from' || cls === 'wave-col-highlight-to';
 
@@ -3250,6 +3380,25 @@ ${lines.join('\n')}`;
       drawGroup.appendChild(rect);
     }
 
+    function appendVirtualLaneHighlight(lane, colIndex, unitWidth, highlightClass) {
+      if (!lane || colIndex < 0) return;
+      const step = getWaveColumnWidth(unitWidth);
+      const cls = highlightClass || 'wave-col-highlight';
+      const isConnectionPoint = cls === 'wave-col-highlight-from' || cls === 'wave-col-highlight-to';
+      const hoverRect = lane.querySelector('rect.lane-hover-bg');
+      const y = hoverRect ? parseFloat(hoverRect.getAttribute('y') || '-2') : -2;
+      const height = hoverRect ? parseFloat(hoverRect.getAttribute('height') || '24') : 24;
+      const x = colIndex * step;
+      const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+      rect.setAttribute('class', cls);
+      rect.setAttribute('x', isConnectionPoint ? x - 1.5 : x);
+      rect.setAttribute('y', y);
+      rect.setAttribute('width', isConnectionPoint ? 3 : step);
+      rect.setAttribute('height', Math.max(20, height));
+      rect.setAttribute('pointer-events', 'none');
+      lane.appendChild(rect);
+    }
+
     function updateColumnHighlight(lane, drawGroup, wave, colIndex, unitWidth, highlightClass) {
       if (!drawGroup) return;
       drawGroup.querySelectorAll('.wave-col-highlight, .wave-col-highlight-from, .wave-col-highlight-to')
@@ -3265,72 +3414,143 @@ ${lines.join('\n')}`;
       return connectionAddSessionActive && connectionFromPoint && connectionToPoint;
     }
 
-    function getEdgeStyleSignature(edgeStr) {
-      const { prefix, arrow } = parseEdgeString(edgeStr);
-      return prefix + '\0' + arrow;
+    function getConnectionArrowToken(arrowStyle, lineStyle) {
+      const lineToken = lineStyle === 'curve'
+        ? '~'
+        : (lineStyle === 'orthogonal' ? '-|' : '-');
+      // WaveDrom has no native start-only arrow token. Keep its valid path token
+      // and add the start marker from edgeOptions after rendering.
+      if (arrowStyle === 'start') return lineToken;
+      if (arrowStyle === 'both') return '<' + lineToken + '>';
+      return lineToken + '>';
     }
 
-    function getPresetStyleSignature(template) {
-      const sample = buildEdgeFromTemplate(template, 'x', 'y', '');
-      const { prefix, arrow } = parseEdgeString(sample);
-      return prefix + '\0' + arrow;
+    function buildConnectionTemplate(arrowStyle, lineStyle) {
+      return '{from}' + getConnectionArrowToken(arrowStyle, lineStyle) + '{to} {label}';
+    }
+
+    function getEdgeLineStyleOption(source, index) {
+      if (!source || !Array.isArray(source.edgeOptions)) return '';
+      const option = source.edgeOptions[index];
+      return option && typeof option === 'object' ? (option.lineStyle || '') : '';
+    }
+
+    function setEdgeLineStyleOption(source, index, lineStyle, arrowStyle) {
+      const options = Array.isArray(source.edgeOptions) ? source.edgeOptions.slice() : [];
+      while (options.length <= index) options.push(null);
+      const option = options[index] && typeof options[index] === 'object'
+        ? Object.assign({}, options[index])
+        : {};
+      if (lineStyle === 'dashed') option.lineStyle = 'dashed';
+      else delete option.lineStyle;
+      if (arrowStyle === 'start') option.arrowStyle = 'start';
+      else delete option.arrowStyle;
+      options[index] = Object.keys(option).length ? option : null;
+      while (options.length && !options[options.length - 1]) options.pop();
+      if (options.some(Boolean)) source.edgeOptions = options;
+      else delete source.edgeOptions;
+    }
+
+    function getEdgePresentation(edgeStr, source, index) {
+      const parsedEdge = parseEdgeString(edgeStr);
+      const arrow = parsedEdge.arrow || '';
+      let arrowStyle = 'end';
+      if (arrow.includes('<') && arrow.includes('>')) arrowStyle = 'both';
+      else if (arrow.includes('<')) arrowStyle = 'start';
+      const option = source && Array.isArray(source.edgeOptions) ? source.edgeOptions[index] : null;
+      if (option && CONNECTION_ARROW_STYLES.includes(option.arrowStyle)) arrowStyle = option.arrowStyle;
+
+      let lineStyle = 'straight';
+      if (arrow.includes('~')) lineStyle = 'curve';
+      else if (arrow.includes('|')) lineStyle = 'orthogonal';
+      if (getEdgeLineStyleOption(source, index) === 'dashed') lineStyle = 'dashed';
+      return { arrowStyle, lineStyle };
     }
 
     function findPresetIndexForEdge(edgeStr) {
-      const sig = getEdgeStyleSignature(edgeStr);
-      for (let i = 0; i < EDGE_STYLE_PRESETS.length; i++) {
-        if (getPresetStyleSignature(EDGE_STYLE_PRESETS[i].template) === sig) {
-          return i;
-        }
-      }
-      return -1;
+      let source = null;
+      try { source = JSON.parse(editor.value); } catch (e) { /* ignore */ }
+      const edges = source && Array.isArray(source.edge) ? source.edge : [];
+      const index = edges.indexOf(edgeStr);
+      return CONNECTION_LINE_STYLES.indexOf(getEdgePresentation(edgeStr, source, index).lineStyle);
     }
 
-    function findPresetIndexForTemplate(template) {
-      for (let i = 0; i < EDGE_STYLE_PRESETS.length; i++) {
-        if (EDGE_STYLE_PRESETS[i].template === template) {
-          return i;
-        }
+    function updateConnectionPropertiesUI() {
+      const addBtn = document.getElementById('btn-add-connection');
+      const selectBtn = document.getElementById('btn-select-connection');
+      if (addBtn) {
+        addBtn.classList.toggle('active', connectionAddSessionActive);
+        addBtn.setAttribute('aria-pressed', String(connectionAddSessionActive));
       }
-      return -1;
+      if (selectBtn) {
+        const labelEl = selectBtn.querySelector('.connection-select-label');
+        const hasSelectedEdge = connectionSelectActive && selectedEdgeIndex >= 0;
+        selectBtn.classList.toggle('active', connectionSelectActive);
+        selectBtn.setAttribute('aria-pressed', String(connectionSelectActive));
+        selectBtn.setAttribute('aria-label', hasSelectedEdge ? '取消选择' : '选择连接线');
+        selectBtn.title = hasSelectedEdge
+          ? '取消当前连接线选择并退出选择模式'
+          : '进入选择连接线模式，点击图中的连接线查看和修改属性';
+        if (labelEl) labelEl.textContent = hasSelectedEdge ? '取消选择' : '选择连接线';
+      }
+      app.classList.toggle('connection-select-mode', connectionSelectActive);
+
+      const canEditArrow = connectionAddSessionActive || selectedEdgeIndex >= 0;
+      const canChooseLine = areConnectionPresetsEnabledForInsert() || selectedEdgeIndex >= 0;
+      document.querySelectorAll('#connection-arrow-controls [data-arrow-style]').forEach((button) => {
+        const active = button.dataset.arrowStyle === connectionArrowStyle;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-pressed', String(active));
+        button.disabled = !canEditArrow;
+      });
+      document.querySelectorAll('#connection-list [data-line-style]').forEach((button) => {
+        const active = button.dataset.lineStyle === connectionLineStyle;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-pressed', String(active));
+        button.disabled = !canChooseLine;
+      });
+
+      const input = document.getElementById('connection-label-input');
+      const applyBtn = document.getElementById('btn-apply-edge-label');
+      const labelEnabled = connectionAddSessionActive || selectedEdgeIndex >= 0;
+      if (input) input.disabled = !labelEnabled;
+      if (applyBtn) applyBtn.disabled = !labelEnabled;
     }
 
     function updateConnectionPresetSelection() {
-      const list = document.getElementById('connection-list');
-      if (!list) return;
-
-      let activeIndex = -1;
-      if (selectedEdgeIndex >= 0) {
-        try {
-          const edges = JSON.parse(editor.value).edge || [];
-          if (selectedEdgeIndex < edges.length) {
-            activeIndex = findPresetIndexForEdge(edges[selectedEdgeIndex]);
-          }
-        } catch (e) { /* ignore */ }
-      } else if (pendingEdgeTemplate && areConnectionPresetsEnabledForInsert()) {
-        activeIndex = findPresetIndexForTemplate(pendingEdgeTemplate);
-      }
-
-      list.querySelectorAll('.connection-item').forEach((item, index) => {
-        item.classList.toggle('preset-matches-selected', index === activeIndex && activeIndex >= 0);
-      });
+      updateConnectionPropertiesUI();
     }
 
     function updateConnectionPresetDisabledState() {
-      const list = document.getElementById('connection-list');
-      if (!list) return;
-      const insertPhase = areConnectionPresetsEnabledForInsert();
-      list.querySelectorAll('.connection-item').forEach((item) => {
-        const enabled = connectionAddSessionActive
-          ? insertPhase
-          : selectedEdgeIndex >= 0;
-        item.classList.toggle('disabled', !enabled);
+      updateConnectionPropertiesUI();
+    }
+
+    function shouldKeepConnectionSelectionForButton(button) {
+      if (!button) return false;
+      if (button.id === 'btn-select-connection') return true;
+      if (button.closest('#connection-properties')) return true;
+      if (button.closest('#connection-edge-list')) return true;
+      return false;
+    }
+
+    function cancelConnectionSelectionForOtherButton(event) {
+      if (!connectionSelectActive) return;
+      const button = event.target && event.target.closest
+        ? event.target.closest('button, .legend-item')
+        : null;
+      if (!button || shouldKeepConnectionSelectionForButton(button)) return;
+      const previousIndex = selectedEdgeIndex;
+      setConnectionSelectActive(false);
+      vwdDebugLog('connection', {
+        phase: 'selection-cancelled-by-button',
+        buttonId: button.id || '',
+        previousIndex
       });
-      updateConnectionPresetSelection();
     }
 
     function endConnectionAddSession() {
       connectionAddSessionActive = false;
+      connectionPickActive = false;
       pendingEdgeTemplate = null;
       clearConnectionPoints();
       updateConnectionPresetDisabledState();
@@ -3342,8 +3562,7 @@ ${lines.join('\n')}`;
       pendingEdgeTemplate = null;
       connectionFromPoint = null;
       connectionToPoint = null;
-      const pickBtn = document.getElementById('btn-connection-pick');
-      if (pickBtn) pickBtn.classList.remove('active');
+      updateEdgeLabelEditUI();
       updateConnectionPointStatusUI();
       updateConnectionPresetDisabledState();
     }
@@ -3376,27 +3595,31 @@ ${lines.join('\n')}`;
 
     function updateConnectionPointHighlights(lanes, sourceMap) {
       const unitWidth = getWaveUnitWidth(editor.value);
-      const maxBoundaryIndex = getMaxWaveBoundaryIndex(sourceMap);
+      const maxBoundaryIndex = getConnectionPickBoundaryIndex(sourceMap);
       lanes.forEach((lane, idx) => {
         const drawGroup = lane.querySelector('[id^="wavelane_draw_"]');
-        if (!drawGroup || !sourceMap[idx]) return;
+        if (!sourceMap[idx]) return;
         const wave = sourceMap[idx].signal.wave || '';
 
         const isFrom = connectionFromPoint && connectionFromPoint.rowIndex === idx;
         const isTo = connectionToPoint && connectionToPoint.rowIndex === idx;
         const isSelected = selectedSignalIndex === idx;
 
-        drawGroup.querySelectorAll('.wave-col-highlight, .wave-col-highlight-from, .wave-col-highlight-to')
+        const highlightRoot = drawGroup || lane;
+        highlightRoot.querySelectorAll('.wave-col-highlight, .wave-col-highlight-from, .wave-col-highlight-to')
           .forEach(el => el.remove());
 
         if (isFrom) {
-          appendColumnHighlight(drawGroup, wave, connectionFromPoint.colIndex, unitWidth, 'wave-col-highlight-from', maxBoundaryIndex);
+          if (drawGroup) appendColumnHighlight(drawGroup, wave, connectionFromPoint.colIndex, unitWidth, 'wave-col-highlight-from', maxBoundaryIndex);
+          else appendVirtualLaneHighlight(lane, connectionFromPoint.colIndex, unitWidth, 'wave-col-highlight-from');
         }
         if (isTo) {
-          appendColumnHighlight(drawGroup, wave, connectionToPoint.colIndex, unitWidth, 'wave-col-highlight-to', maxBoundaryIndex);
+          if (drawGroup) appendColumnHighlight(drawGroup, wave, connectionToPoint.colIndex, unitWidth, 'wave-col-highlight-to', maxBoundaryIndex);
+          else appendVirtualLaneHighlight(lane, connectionToPoint.colIndex, unitWidth, 'wave-col-highlight-to');
         }
         if (isSelected && !isFrom && !isTo) {
-          appendColumnHighlight(drawGroup, wave, selectedWaveColumnIndex, unitWidth, 'wave-col-highlight');
+          if (drawGroup) appendColumnHighlight(drawGroup, wave, selectedWaveColumnIndex, unitWidth, 'wave-col-highlight');
+          else appendVirtualLaneHighlight(lane, selectedWaveColumnIndex, unitWidth, 'wave-col-highlight');
         }
       });
     }
@@ -3606,6 +3829,7 @@ ${lines.join('\n')}`;
     }
 
     function beginGroupPick() {
+      exitWavePaintMode('group-mode');
       if (groupPickActive) {
         clearSelectedGroupState();
         updateLegendAvailability();
@@ -3966,10 +4190,23 @@ ${lines.join('\n')}`;
 
     function setConnectionPickActive(active) {
       connectionPickActive = !!active;
-      document.getElementById('btn-connection-pick').classList.toggle('active', connectionPickActive);
       updateConnectionPointStatusUI();
       updateConnectionPresetDisabledState();
       refreshConnectionHighlightsFromDom();
+    }
+
+    function setConnectionSelectActive(active) {
+      connectionSelectActive = !!active;
+      if (connectionSelectActive) {
+        connectionAddSessionActive = false;
+        connectionPickActive = false;
+        clearConnectionPoints();
+      } else {
+        clearEdgeSelection();
+      }
+      updateConnectionPointStatusUI();
+      updateConnectionPropertiesUI();
+      vwdDebugLog('connection', { phase: 'select-mode', active: connectionSelectActive });
     }
 
     function updateConnectionPointStatusUI() {
@@ -3982,10 +4219,10 @@ ${lines.join('\n')}`;
 
       const fromLabel = connectionFromPoint
         ? connectionPointLabel(connectionFromPoint, sourceMap)
-        : '点击替换选中列的波形字符';
+        : '未选择';
       const toLabel = connectionToPoint
         ? connectionPointLabel(connectionToPoint, sourceMap)
-        : '点击替换选中列的波形字符';
+        : '未选择';
 
       let hint = '';
       if (connectionAddSessionActive && connectionPickActive) {
@@ -3994,10 +4231,12 @@ ${lines.join('\n')}`;
         else hint = ' · 请选择连接样式';
       } else if (connectionPickActive && !connectionAddSessionActive) {
         hint = ' · 请先点击「新增连接」';
+      } else if (connectionSelectActive) {
+        hint = selectedEdgeIndex >= 0 ? ' · 可修改下方属性' : ' · 请点击图中的连接线';
       }
 
       el.textContent = '';
-      el.appendChild(document.createTextNode(' → 终点 '));
+      el.appendChild(document.createTextNode('起点 '));
       const fromSpan = document.createElement('span');
       fromSpan.className = 'pt-from';
       fromSpan.textContent = fromLabel;
@@ -4018,7 +4257,7 @@ ${lines.join('\n')}`;
         setStatus(true, '已选连接起点 [' + rowIndex + ',' + colIndex + ']，请选择终点');
       } else if (!connectionToPoint) {
         connectionToPoint = Object.assign({ rowIndex, colIndex }, svgPoint || {});
-        setStatus(true, '已重选连接起点，请选择终点');
+        setStatus(true, '已选连接终点 [' + rowIndex + ',' + colIndex + ']，请选择连接线样式');
       } else {
         connectionFromPoint = Object.assign({ rowIndex, colIndex }, svgPoint || {});
         connectionToPoint = null;
@@ -4027,6 +4266,13 @@ ${lines.join('\n')}`;
 
       queueMicrotask(updateConnectionPointStatusUI);
       updateConnectionPresetDisabledState();
+      vwdDebugLog('connection', {
+        phase: 'point-picked',
+        rowIndex,
+        colIndex,
+        hasFrom: !!connectionFromPoint,
+        hasTo: !!connectionToPoint
+      });
       return true;
     }
 
@@ -4048,13 +4294,18 @@ ${lines.join('\n')}`;
 
     function ensureNodeCharAtColumn(signal, colIndex, nodeChar) {
       const safeCol = colIndex < 0 ? 0 : colIndex;
-      let wave = signal.wave || '';
+      const baseSignal = signal && typeof signal === 'object' ? signal : {};
+      let wave = baseSignal.wave || '';
       if (wave.length <= safeCol) {
         wave = wave.padEnd(safeCol + 1, '.');
       }
-      let node = padNodeToWaveLength(signal.node || '', wave.length);
+      let node = padNodeToWaveLength(baseSignal.node || '', wave.length);
       node = node.slice(0, safeCol) + nodeChar + node.slice(safeCol + 1);
-      return Object.assign({}, signal, { wave, node });
+      return Object.assign({}, baseSignal, {
+        name: baseSignal.name === undefined ? '' : baseSignal.name,
+        wave,
+        node
+      });
     }
 
     function collectUsedNodeIds(parsed) {
@@ -4246,8 +4497,7 @@ ${lines.join('\n')}`;
       let label = '';
       if (spaceIdx >= 0) {
         const rest = trimmed.slice(spaceIdx + 1).trim();
-        const colonMatch = rest.match(/^:\s*(.*)$/s);
-        if (colonMatch) label = colonMatch[1];
+        label = rest.replace(/^:\s*/, '');
       }
 
       const nodeIds = [];
@@ -4278,7 +4528,7 @@ ${lines.join('\n')}`;
     function formatEdgeFromParts(from, to, prefix, arrow, label) {
       let result = prefix + from + arrow + to;
       const trimmedLabel = (label || '').trim();
-      if (trimmedLabel) result += ' : ' + trimmedLabel;
+      if (trimmedLabel) result += ' ' + trimmedLabel;
       return result;
     }
 
@@ -4290,7 +4540,7 @@ ${lines.join('\n')}`;
       if (trimmedLabel) {
         result = result.replace(/\{label\}/g, trimmedLabel);
       } else {
-        result = result.replace(/\s*:\s*\{label\}\s*$/, '').trim();
+        result = result.replace(/\s*(?::\s*)?\{label\}\s*$/, '').trim();
       }
       return result;
     }
@@ -4307,19 +4557,25 @@ ${lines.join('\n')}`;
       if (!input) return;
 
       if (selectedEdgeIndex >= 0) {
-        if (titleEl) titleEl.textContent = '连接标签';
-        if (hintEl) hintEl.textContent = '未选中连接时，标签将用于下次插入';
+        if (titleEl) titleEl.textContent = '已选连接的标签';
+        if (hintEl) hintEl.textContent = '修改箭头、线型或标签会立即更新当前连接';
         try {
           const parsed = JSON.parse(editor.value);
           const edges = parsed.edge || [];
           if (selectedEdgeIndex < edges.length) {
             input.value = parseEdgeString(edges[selectedEdgeIndex]).label;
+            const presentation = getEdgePresentation(edges[selectedEdgeIndex], parsed, selectedEdgeIndex);
+            connectionArrowStyle = presentation.arrowStyle;
+            connectionLineStyle = presentation.lineStyle;
           }
         } catch (e) { /* ignore */ }
       } else {
         if (titleEl) titleEl.textContent = '连接标签';
-        if (hintEl) hintEl.textContent = '未选中连接时，标签将用于下次插入';
+        if (hintEl) hintEl.textContent = connectionAddSessionActive
+          ? '标签将在选择连接线样式并生成时使用'
+          : '先点击“新增连接”或进入“选择连接线”模式';
       }
+      updateConnectionPropertiesUI();
     }
 
     function findEdgeIndexByNodes(from, to, edges) {
@@ -4370,8 +4626,8 @@ ${lines.join('\n')}`;
 
     function selectEdge(index) {
       selectedEdgeIndex = index;
-      renderConnectionEdgeList();
       updateEdgeLabelEditUI();
+      renderConnectionEdgeList();
       updateConnectionPresetDisabledState();
       highlightSelectedEdgeInSvg();
       if (index >= 0) {
@@ -4379,9 +4635,11 @@ ${lines.join('\n')}`;
           const edges = JSON.parse(editor.value).edge || [];
           if (index < edges.length) {
             setStatus(true, '已选中连接: ' + edges[index]);
+            vwdDebugLog('connection', { phase: 'edge-selected', index, edge: edges[index] });
           }
         } catch (e) { /* ignore */ }
       }
+      updateConnectionPointStatusUI();
     }
 
     function clearEdgeSelection() {
@@ -4482,12 +4740,12 @@ ${lines.join('\n')}`;
       }
     }
 
-    function modifyEdgeAtIndex(index, newEdgeStr) {
+    function modifyEdgeAtIndex(index, newEdgeStr, lineStyle, arrowStyle) {
       let parsed;
       try {
         parsed = JSON.parse(editor.value);
       } catch (e) {
-        setStatus(false, 'JSON 错误，无法删除连接');
+        setStatus(false, 'JSON 错误，无法修改连接');
         return false;
       }
 
@@ -4495,32 +4753,50 @@ ${lines.join('\n')}`;
       if (index < 0 || index >= edges.length) return false;
 
       const text = editor.value;
-      const newText = replaceEdgeAtIndex(text, index, newEdgeStr);
-      if (newText === text) {
-        setStatus(false, 'JSON 错误，无法删除连接');
+      const edgeTextChanged = newEdgeStr !== edges[index];
+      let newText = edgeTextChanged ? replaceEdgeAtIndex(text, index, newEdgeStr) : text;
+      if (edgeTextChanged && newText === text) {
+        setStatus(false, 'JSON 错误，无法修改连接');
+        return false;
+      }
+
+      try {
+        const updated = JSON.parse(newText);
+        if (lineStyle || arrowStyle) {
+          setEdgeLineStyleOption(updated, index, lineStyle || connectionLineStyle, arrowStyle || connectionArrowStyle);
+        }
+        newText = JSON.stringify(updated, null, 2);
+      } catch (e) {
+        setStatus(false, '连接修改后 JSON 校验失败');
         return false;
       }
 
       pushUndoBeforeChange();
       const pos = findEdgePositionInText(newText, index);
       if (!pos) {
-        setStatus(false, 'JSON 错误，无法删除连接');
+        setStatus(false, 'JSON 错误，无法修改连接');
         return false;
       }
       applyEditorChange(newText, pos.absStart, pos.absEnd);
-      scheduleFormatAfterWaveChange();
       scrollEditorToEdge(newText, newEdgeStr);
+      vwdDebugLog('connection', {
+        phase: 'edge-modified',
+        index,
+        edge: newEdgeStr,
+        lineStyle: lineStyle || null,
+        arrowStyle: arrowStyle || null
+      });
       return true;
     }
 
-    function modifySelectedEdgeStyle(template) {
+    function modifySelectedEdgeProperties() {
       if (selectedEdgeIndex < 0) return false;
 
       let parsed;
       try {
         parsed = JSON.parse(editor.value);
       } catch (e) {
-        setStatus(false, 'JSON 错误，无法删除连接');
+        setStatus(false, 'JSON 错误，无法修改连接');
         return false;
       }
 
@@ -4528,17 +4804,25 @@ ${lines.join('\n')}`;
       if (selectedEdgeIndex >= edges.length) return false;
 
       const current = parseEdgeString(edges[selectedEdgeIndex]);
-      const label = current.label;
-      const newEdgeStr = buildEdgeFromTemplate(template, current.from, current.to, label);
+      const newEdgeStr = formatEdgeFromParts(
+        current.from,
+        current.to,
+        current.prefix,
+        getConnectionArrowToken(connectionArrowStyle, connectionLineStyle),
+        current.label
+      );
 
-      if (newEdgeStr === edges[selectedEdgeIndex]) {
-        setStatus(true, '已修改连接样式: ' + newEdgeStr);
+      const currentPresentation = getEdgePresentation(edges[selectedEdgeIndex], parsed, selectedEdgeIndex);
+      if (newEdgeStr === edges[selectedEdgeIndex]
+          && currentPresentation.lineStyle === connectionLineStyle
+          && currentPresentation.arrowStyle === connectionArrowStyle) {
+        updateConnectionPropertiesUI();
         return true;
       }
 
-      if (modifyEdgeAtIndex(selectedEdgeIndex, newEdgeStr)) {
+      if (modifyEdgeAtIndex(selectedEdgeIndex, newEdgeStr, connectionLineStyle, connectionArrowStyle)) {
         setStatus(true, '已修改连接样式: ' + newEdgeStr);
-        updateConnectionPresetSelection();
+        updateEdgeLabelEditUI();
         return true;
       }
       return false;
@@ -4569,8 +4853,9 @@ ${lines.join('\n')}`;
           return;
         }
 
-        if (modifyEdgeAtIndex(selectedEdgeIndex, newEdgeStr)) {
+        if (modifyEdgeAtIndex(selectedEdgeIndex, newEdgeStr, connectionLineStyle, connectionArrowStyle)) {
           setStatus(true, label ? ('已更新连接标签: ' + label) : '已清除连接标签');
+          updateEdgeLabelEditUI();
         }
         return;
       }
@@ -4578,37 +4863,76 @@ ${lines.join('\n')}`;
       setStatus(true, label ? ('新连接将使用标签: ' + label) : '新连接将不带标签');
     }
 
-    function handleEdgeStylePresetClick(template) {
+    function handleConnectionArrowStyleClick(arrowStyle) {
+      if (!CONNECTION_ARROW_STYLES.includes(arrowStyle)) return;
+      if (!connectionAddSessionActive && selectedEdgeIndex < 0) {
+        setStatus(false, '请先新增连接或选择一条连接线');
+        return;
+      }
+      connectionArrowStyle = arrowStyle;
+      pendingEdgeTemplate = buildConnectionTemplate(connectionArrowStyle, connectionLineStyle);
+      if (selectedEdgeIndex >= 0) modifySelectedEdgeProperties();
+      else updateConnectionPropertiesUI();
+      vwdDebugLog('connection', { phase: 'arrow-style', arrowStyle, selectedEdgeIndex });
+    }
+
+    function handleConnectionLineStyleClick(lineStyle) {
+      if (!CONNECTION_LINE_STYLES.includes(lineStyle)) return;
+      connectionLineStyle = lineStyle;
+      const template = buildConnectionTemplate(connectionArrowStyle, connectionLineStyle);
+      pendingEdgeTemplate = template;
       if (areConnectionPresetsEnabledForInsert()) {
         if (isInsertingEdge) return;
-        pendingEdgeTemplate = template;
         updateConnectionPresetSelection();
-        insertEdgeFromTemplate(template);
+        insertEdgeFromTemplate(template, lineStyle);
         return;
       }
       if (selectedEdgeIndex >= 0) {
-        modifySelectedEdgeStyle(template);
+        modifySelectedEdgeProperties();
         return;
       }
       if (isInsertingEdge) return;
       if (!connectionAddSessionActive) {
-        setStatus(false, '未找到要删除的连接');
+        setStatus(false, '请先点击“新增连接”或“选择连接线”');
       } else if (!connectionFromPoint) {
-        setStatus(false, '未找到要删除的连接');
+        setStatus(false, '请先选择连接起点');
       } else if (!connectionToPoint) {
-        setStatus(false, '未找到要删除的连接');
+        setStatus(false, '请继续选择连接终点');
       }
     }
 
     function beginEdgeAddSession() {
+      exitWavePaintMode('connection-add');
       if (isInsertingEdge) return;
       endConnectionAddSession();
+      connectionSelectActive = false;
+      app.classList.remove('connection-select-mode');
       clearEdgeSelection();
       connectionAddSessionActive = true;
+      connectionArrowStyle = 'end';
+      connectionLineStyle = 'straight';
+      pendingEdgeTemplate = buildConnectionTemplate(connectionArrowStyle, connectionLineStyle);
+      const labelInput = document.getElementById('connection-label-input');
+      if (labelInput) labelInput.value = '';
       setConnectionPickActive(true);
+      updateEdgeLabelEditUI();
       updateConnectionPointStatusUI();
       updateConnectionPresetDisabledState();
-      setStatus(false, '选点模式：请依次点击波形上的起点与终点');
+      setStatus(true, '新增连接：请依次点击起点与终点');
+      vwdDebugLog('connection', { phase: 'add-mode', active: true });
+    }
+
+    function beginEdgeSelectSession() {
+      exitWavePaintMode('connection-select');
+      if (isInsertingEdge) return;
+      endConnectionAddSession();
+      connectionSelectActive = true;
+      app.classList.add('connection-select-mode');
+      clearEdgeSelection();
+      updateConnectionPointStatusUI();
+      updateConnectionPropertiesUI();
+      setStatus(true, '选择连接线：请点击波形图中的连接线');
+      vwdDebugLog('connection', { phase: 'select-mode', active: true });
     }
 
     function scrollEditorToEdge(text, edgeStr) {
@@ -4644,26 +4968,32 @@ ${lines.join('\n')}`;
     function getOptimisticEdgePoint(point, sourceMap) {
       const svg = waveContainer.querySelector('svg');
       if (!svg || !point) return null;
+      if (Number.isFinite(point.svgX) && Number.isFinite(point.svgY)) {
+        return { x: point.svgX, y: point.svgY };
+      }
       const lane = getWaveLaneGroups(svg)[point.rowIndex];
       if (!lane) return null;
       const drawGroup = lane.querySelector('[id^="wavelane_draw_"]');
-      if (!drawGroup || !drawGroup.getCTM) return null;
+      const coordinateGroup = drawGroup || lane;
+      if (!coordinateGroup.getCTM) return null;
 
       const signal = sourceMap && sourceMap[point.rowIndex] && sourceMap[point.rowIndex].signal;
       const wave = signal ? (signal.wave || '') : '';
       const unitWidth = getWaveUnitWidth(editor.value);
-      const x = getBoundaryXForColumn(drawGroup, wave, point.colIndex, unitWidth, getMaxWaveBoundaryIndex(sourceMap));
+      const x = drawGroup
+        ? getBoundaryXForColumn(drawGroup, wave, point.colIndex, unitWidth, getConnectionPickBoundaryIndex(sourceMap))
+        : point.colIndex * getWaveColumnWidth(unitWidth);
 
       let y = 10;
       try {
-        const bbox = drawGroup.getBBox();
+        const bbox = coordinateGroup.getBBox();
         y = bbox.y + bbox.height / 2;
       } catch (e) { /* keep fallback */ }
 
       const svgPoint = svg.createSVGPoint();
       svgPoint.x = x;
       svgPoint.y = y;
-      return svgPoint.matrixTransform(drawGroup.getCTM());
+      return svgPoint.matrixTransform(coordinateGroup.getCTM());
     }
 
     function buildOptimisticEdgePath(edgeStr, fromPt, toPt) {
@@ -4680,16 +5010,18 @@ ${lines.join('\n')}`;
       return 'M ' + fromPt.x + ',' + fromPt.y + ' ' + toPt.x + ',' + toPt.y;
     }
 
-    function optimisticEdgeStyle(edgeStr) {
+    function optimisticEdgeStyle(edgeStr, lineStyle, arrowStyle) {
       const parsed = parseEdgeString(edgeStr);
       const parts = ['stroke:#0041c4', 'stroke-width:1', 'fill:none'];
-      if (parsed.arrow.includes('>')) parts.push('marker-end:url(#arrowhead)');
-      if (parsed.arrow.startsWith('<')) parts.push('marker-start:url(#arrowtail)');
+      const effectiveArrow = arrowStyle || (parsed.arrow.includes('<') ? 'both' : 'end');
+      if (effectiveArrow === 'end' || effectiveArrow === 'both') parts.push('marker-end:url(#arrowhead)');
+      if (effectiveArrow === 'start' || effectiveArrow === 'both') parts.push('marker-start:url(#arrowtail)');
+      if (lineStyle === 'dashed') parts.push('stroke-dasharray:6 4');
       if (parsed.arrow === '+') parts.push('marker-end:url(#tee)', 'marker-start:url(#tee)', 'stroke:#00F');
       return parts.join(';');
     }
 
-    function appendOptimisticEdge(edgeStr, fromPoint, toPoint, edgeIndex, sourceMap) {
+    function appendOptimisticEdge(edgeStr, fromPoint, toPoint, edgeIndex, sourceMap, lineStyle, arrowStyle) {
       const svg = waveContainer.querySelector('svg');
       if (!svg) return;
       const fromSvg = getOptimisticEdgePoint(fromPoint, sourceMap);
@@ -4707,16 +5039,12 @@ ${lines.join('\n')}`;
       const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
       path.setAttribute('id', 'gmark_' + parsed.from + '_' + parsed.to);
       path.setAttribute('d', buildOptimisticEdgePath(edgeStr, fromSvg, toSvg));
-      path.setAttribute('style', optimisticEdgeStyle(edgeStr));
+      path.setAttribute('style', optimisticEdgeStyle(edgeStr, lineStyle, arrowStyle));
       path.classList.add('wave-edge-interactive');
       path.dataset.vwdEdgeBound = '1';
-      path.addEventListener('click', (e) => {
-        e.stopPropagation();
-        if (inlineEditActive || app.classList.contains('reading-mode')) return;
-        selectEdge(edgeIndex);
-        scrollEditorToEdge(editor.value, edgeStr);
-      });
+      path.addEventListener('click', (e) => selectEdgeFromWaveform(edgeIndex, edgeStr, e));
       arcGroup.appendChild(path);
+      ensureEdgeHitTarget(path, edgeIndex, edgeStr);
 
       if (parsed.label) {
         const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
@@ -4729,7 +5057,7 @@ ${lines.join('\n')}`;
       }
     }
 
-    function commitEdgeInsert(template) {
+    function commitEdgeInsert(template, lineStyle) {
       if (isInsertingEdge) return;
 
       const endpoints = resolveConnectionEndpoints();
@@ -4777,11 +5105,25 @@ ${lines.join('\n')}`;
           const itemIndent = indent + '  ';
           const edgeJson = JSON.stringify(edgeStr);
           const needsComma = hasNonWhitespaceBetween(text, bounds.arrStart, bounds.insertBefore);
-          const insertion = (needsComma ? ',\\n' : '\\n') + itemIndent + edgeJson;
+          const insertion = (needsComma ? ',\n' : '\n') + itemIndent + edgeJson;
           const insertPos = bounds.insertBefore;
-          const newText = text.slice(0, insertPos) + insertion + text.slice(insertPos);
-          const selStart = insertPos + insertion.indexOf(edgeJson);
-          const selEnd = selStart + edgeJson.length;
+          let newText = text.slice(0, insertPos) + insertion + text.slice(insertPos);
+          let updatedSource = JSON.parse(newText);
+          const newEdgeIndex = Math.max(0, (updatedSource.edge || []).length - 1);
+          setEdgeLineStyleOption(
+            updatedSource,
+            newEdgeIndex,
+            lineStyle || connectionLineStyle,
+            connectionArrowStyle
+          );
+          newText = JSON.stringify(updatedSource, null, 2);
+          const newEdgePos = findEdgePositionInText(newText, newEdgeIndex);
+          if (!newEdgePos) {
+            setStatus(false, '连接写入失败：无法定位新连接');
+            return;
+          }
+          const selStart = newEdgePos.absStart;
+          const selEnd = newEdgePos.absEnd;
           statusMsg = '已插入连接: ' + edgeStr + '（node ' + prepared.fromNode + ' → ' + prepared.toNode + '）';
 
           try {
@@ -4795,12 +5137,18 @@ ${lines.join('\n')}`;
           vwdMark('commitEdgeInsert:beforeApply');
           deferCompletion = true;
 
-          const newEdgeIndex = -1;
-
           applyEdgeInsertTextFast(newText, selStart, selEnd, fromPickFlow);
-          scheduleFormatAfterWaveChange();
 
-          appendOptimisticEdge(edgeStr, endpoints.from, endpoints.to, newEdgeIndex, sourceMap);
+          appendOptimisticEdge(
+            edgeStr,
+            endpoints.from,
+            endpoints.to,
+            newEdgeIndex,
+            sourceMap,
+            lineStyle || connectionLineStyle,
+            connectionArrowStyle
+          );
+          renderConnectionEdgeList();
           vwdMark('commitEdgeInsert:optimisticEdge');
 
           if (fromPickFlow) {
@@ -4810,13 +5158,24 @@ ${lines.join('\n')}`;
           }
 
           setStatus(true, statusMsg);
+          vwdDebugLog('connection', {
+            phase: 'inserted',
+            edgeIndex: newEdgeIndex,
+            edge: edgeStr,
+            arrowStyle: connectionArrowStyle,
+            lineStyle: lineStyle || connectionLineStyle,
+            from: endpoints.from,
+            to: endpoints.to
+          });
           setWaveformRenderingBusy(false);
           isInsertingEdge = false;
           // 新增连接时避免立即完整重绘大波形；现有 SVG 已追加轻量链路。 JSON 和列表已同步。
           clearTimeout(deferredEdgeRenderTimer);
           deferredEdgeRenderTimer = null;
         } catch (e) {
-          setStatus(false, '请先在波形上选择起点与终点');
+          const message = e && e.message ? e.message : String(e);
+          vwdDebugLog('connection', { phase: 'insert-error', message, stack: e && e.stack ? String(e.stack) : '' });
+          setStatus(false, '连接生成失败: ' + message);
         } finally {
           if (!deferCompletion) {
             isInsertingEdge = false;
@@ -4825,7 +5184,7 @@ ${lines.join('\n')}`;
       });
     }
 
-    function insertEdgeFromTemplate(template) {
+    function insertEdgeFromTemplate(template, lineStyle) {
       if (isInsertingEdge) return;
 
       const endpoints = resolveConnectionEndpoints();
@@ -4836,7 +5195,7 @@ ${lines.join('\n')}`;
         return;
       }
 
-      commitEdgeInsert(template);
+      commitEdgeInsert(template, lineStyle || connectionLineStyle);
     }
 
     function parseEdgeArraySlice(text) {
@@ -4948,14 +5307,30 @@ ${lines.join('\n')}`;
       }
 
       parsed.edge = edges.filter((_, i) => i !== index);
+      if (Array.isArray(parsed.edgeOptions)) {
+        parsed.edgeOptions.splice(index, 1);
+        while (parsed.edgeOptions.length && !parsed.edgeOptions[parsed.edgeOptions.length - 1]) {
+          parsed.edgeOptions.pop();
+        }
+        if (!parsed.edgeOptions.some(Boolean)) delete parsed.edgeOptions;
+      }
       const nodeUpdates = cleanupOrphanedNodeUpdates(parsed);
       if (nodeUpdates.length) {
         text = applySignalUpdatesInText(text, nodeUpdates);
       }
 
+      try {
+        const normalized = JSON.parse(text);
+        if (parsed.edgeOptions) normalized.edgeOptions = parsed.edgeOptions;
+        else delete normalized.edgeOptions;
+        text = JSON.stringify(normalized, null, 2);
+      } catch (e) {
+        setStatus(false, '删除连接后 JSON 校验失败');
+        return;
+      }
+
       pushUndoBeforeChange();
       applyEditorChange(text, editor.selectionStart, editor.selectionEnd);
-      scheduleFormatAfterWaveChange();
       if (wasSelected) {
         clearEdgeSelection();
       } else if (selectedEdgeIndex > index) {
@@ -4963,6 +5338,7 @@ ${lines.join('\n')}`;
         renderConnectionEdgeList();
       }
       setStatus(true, '已删除连接: ' + removed);
+      vwdDebugLog('connection', { phase: 'edge-deleted', index, edge: removed });
     }
 
     function renderConnectionEdgeList() {
@@ -4985,6 +5361,7 @@ ${lines.join('\n')}`;
       const edges = parsed.edge || [];
       if (selectedEdgeIndex >= edges.length) {
         selectedEdgeIndex = -1;
+        updateEdgeLabelEditUI();
       }
       if (!edges.length) {
         const empty = document.createElement('div');
@@ -5008,16 +5385,18 @@ ${lines.join('\n')}`;
         const textEl = document.createElement('div');
         textEl.className = 'connection-edge-text';
         textEl.textContent = edgeStr;
-        textEl.title = '点击选中并定位到 JSON；双击编辑标签';
+        textEl.title = '点击进入选择连接线模式并显示属性';
 
         row.addEventListener('click', (e) => {
           if (e.target.closest('.connection-edge-delete')) return;
+          if (!connectionSelectActive) beginEdgeSelectSession();
           selectEdge(index);
           scrollEditorToEdge(editor.value, edgeStr);
         });
 
         row.addEventListener('dblclick', (e) => {
           if (e.target.closest('.connection-edge-delete')) return;
+          if (!connectionSelectActive) beginEdgeSelectSession();
           selectEdge(index);
           const input = document.getElementById('connection-label-input');
           if (input) {
@@ -5044,6 +5423,47 @@ ${lines.join('\n')}`;
       updateConnectionPresetSelection();
     }
 
+    function selectEdgeFromWaveform(index, edgeStr, event) {
+      if (inlineEditActive || app.classList.contains('reading-mode')) return;
+      if (!connectionSelectActive) return;
+      if (event) event.stopPropagation();
+      selectEdge(index);
+      scrollEditorToEdge(editor.value, edgeStr);
+    }
+
+    function applyEdgeLineVisual(edgeElement, presentation) {
+      const targets = edgeElement.matches && edgeElement.matches('path, line, polyline')
+        ? [edgeElement]
+        : [...edgeElement.querySelectorAll('path, line, polyline')];
+      targets.forEach((target) => {
+        target.style.strokeDasharray = presentation.lineStyle === 'dashed' ? '6 4' : '';
+        target.style.markerStart = presentation.arrowStyle === 'start' || presentation.arrowStyle === 'both'
+          ? 'url(#arrowtail)'
+          : '';
+        target.style.markerEnd = presentation.arrowStyle === 'end' || presentation.arrowStyle === 'both'
+          ? 'url(#arrowhead)'
+          : '';
+      });
+    }
+
+    function ensureEdgeHitTarget(edgeElement, index, edgeStr) {
+      if (!edgeElement || !edgeElement.parentNode || !edgeElement.cloneNode) return;
+      if (!(edgeElement.matches && edgeElement.matches('path, line, polyline'))) return;
+      const owner = edgeElement.id || ('edge-' + index);
+      const existing = edgeElement.parentNode.querySelector('.wave-edge-hit-target[data-vwd-edge-owner="' + owner + '"]');
+      if (existing) return;
+      const hit = edgeElement.cloneNode(false);
+      hit.removeAttribute('id');
+      hit.removeAttribute('marker-start');
+      hit.removeAttribute('marker-end');
+      hit.setAttribute('style', 'fill:none;stroke:transparent;stroke-width:12;pointer-events:stroke');
+      hit.setAttribute('class', 'wave-edge-hit-target');
+      hit.dataset.vwdEdgeOwner = owner;
+      hit.dataset.vwdEdgeIndex = String(index);
+      hit.addEventListener('click', (event) => selectEdgeFromWaveform(index, edgeStr, event));
+      edgeElement.parentNode.insertBefore(hit, edgeElement.nextSibling);
+    }
+
     function attachEdgeInteractivity(jsonText) {
       const svg = waveContainer.querySelector('svg');
       if (!svg) return;
@@ -5057,6 +5477,8 @@ ${lines.join('\n')}`;
 
       const edges = parsed.edge || [];
 
+      svg.querySelectorAll('.wave-edge-hit-target').forEach((el) => el.remove());
+
       svg.querySelectorAll('[id^="gmark_"]').forEach((el) => {
         const match = el.id.match(/^gmark_([a-zA-Z0-9])_([a-zA-Z0-9])/);
         if (!match) return;
@@ -5067,14 +5489,13 @@ ${lines.join('\n')}`;
         if (idx < 0) return;
 
         el.classList.add('wave-edge-interactive');
+        const presentation = getEdgePresentation(edges[idx], parsed, idx);
+        applyEdgeLineVisual(el, presentation);
+        ensureEdgeHitTarget(el, idx, edges[idx]);
         if (el.dataset.vwdEdgeBound === '1') return;
         el.dataset.vwdEdgeBound = '1';
         el.addEventListener('click', (e) => {
-          e.stopPropagation();
-          if (inlineEditActive) return;
-          if (app.classList.contains('reading-mode')) return;
-          selectEdge(idx);
-          scrollEditorToEdge(editor.value, edges[idx]);
+          selectEdgeFromWaveform(idx, edges[idx], e);
         });
       });
 
@@ -5129,12 +5550,12 @@ ${lines.join('\n')}`;
         rect.setAttribute('y', bbox.y - 2);
         let width = bbox.width + 8;
         const drawGroup = lane.querySelector('[id^="wavelane_draw_"]');
-        if (drawGroup && maxBoundaryIndex) {
-          const drawBox = drawGroup.getBBox();
-          width = Math.max(width, (drawBox.x - bbox.x) + maxBoundaryIndex * (unitWidth || WAVE_UNIT_WIDTH) + 8);
+        if (maxBoundaryIndex) {
+          const waveStartX = drawGroup ? drawGroup.getBBox().x : 0;
+          width = Math.max(width, (waveStartX - bbox.x) + maxBoundaryIndex * getWaveColumnWidth(unitWidth) + 8);
         }
         rect.setAttribute('width', width);
-        rect.setAttribute('height', bbox.height + 4);
+        rect.setAttribute('height', Math.max(20, bbox.height + 4));
         rect.setAttribute('fill', 'transparent');
         rect.setAttribute('pointer-events', 'all');
         lane.insertBefore(rect, lane.firstChild);
@@ -5260,6 +5681,7 @@ ${lines.join('\n')}`;
       if (drawGroup.dataset.vwdEmptyDataBound === '1') return;
       drawGroup.dataset.vwdEmptyDataBound = '1';
       drawGroup.addEventListener('click', (e) => {
+        if (wavePaintModeActive) return;
         if (isConnectionPickFlow() || groupPickActive) return;
         const wave = entry.signal.wave || '';
         const col = columnIndexFromClick(drawGroup, wave, svg, e.clientX, getWaveUnitWidth(editor.value));
@@ -5502,6 +5924,7 @@ ${lines.join('\n')}`;
     }
 
     function startGroupLabelInlineEdit(textEl, group, anchorEl, groupIndex, inputEvent) {
+      exitWavePaintMode('group-label');
       const oldText = String(textEl && textEl.textContent || '');
       if (inlineEditActive) {
         vwdDebugLog('group-label', {
@@ -6325,6 +6748,7 @@ ${lines.join('\n')}`;
     }
 
     function startInlineEdit(textEl, entry, field, dataIdx, anchorEl) {
+      exitWavePaintMode(field === 'description' ? 'wave-description' : 'inline-edit');
       if (inlineEditActive) return;
       inlineEditActive = true;
       setActiveInlineEditState({
@@ -6509,6 +6933,7 @@ ${lines.join('\n')}`;
     }
 
     function startHeadFootInlineEdit(textEl, field) {
+      exitWavePaintMode('head-foot');
       if (inlineEditActive) return;
       inlineEditActive = true;
 
@@ -6600,6 +7025,7 @@ ${lines.join('\n')}`;
     }
 
     function startGlobalDescribeInlineEdit(textEl) {
+      exitWavePaintMode('wave-description');
       if (inlineEditActive) return;
       inlineEditActive = true;
       setActiveInlineEditState({
@@ -6759,7 +7185,8 @@ ${lines.join('\n')}`;
       const sourceMap = buildSignalSourceMap(jsonText);
       const lanes = getWaveLaneGroups(svg);
       const unitWidth = getWaveUnitWidth(jsonText);
-      const maxBoundaryIndex = getMaxWaveBoundaryIndex(sourceMap);
+      const maxBoundaryIndex = getConnectionPickBoundaryIndex(sourceMap);
+      const maxWaveColumnCount = Math.max(1, getMaxWaveBoundaryIndex(sourceMap));
       const visibleSet = getNavVisibleRowSet();
       const hasFilter = isNavFilteringActive();
 
@@ -6793,23 +7220,50 @@ ${lines.join('\n')}`;
           if (drawGroup) {
             colIndex = inPickFlow
               ? boundaryIndexFromClick(drawGroup, wave, svg, e.clientX, unitWidth, pickMaxBoundaryIndex)
-              : columnIndexFromClick(drawGroup, wave, svg, e.clientX, unitWidth);
+              : paintColumnIndexFromClick(drawGroup, wave, svg, e.clientX, unitWidth, maxWaveColumnCount);
+          } else {
+            colIndex = virtualLaneIndexFromClick(
+              lane,
+              svg,
+              e.clientX,
+              unitWidth,
+              inPickFlow ? pickMaxBoundaryIndex : maxWaveColumnCount,
+              inPickFlow
+            );
           }
           setSelectedSignal(idx, colIndex);
           lanes.forEach((l, i) => l.classList.toggle('wave-lane-selected', i === idx));
 
+          if (wavePaintModeActive) {
+            if (!wavePaintChar) {
+              setStatus(false, '请先在波形菜单中选择要绘制的波形按钮');
+              vwdDebugLog('wave-paint', { phase: 'paint-blocked', rowIndex: idx, colIndex, reason: 'no-char' });
+              return;
+            }
+            applyWavePaintCharAtColumn(idx, colIndex, wavePaintChar);
+            return;
+          }
+
           if (inPickFlow) {
             let svgPoint = null;
-            if (drawGroup && svg && drawGroup.getScreenCTM && svg.getScreenCTM) {
+            const coordinateGroup = drawGroup || lane;
+            if (coordinateGroup && svg && coordinateGroup.getScreenCTM && svg.getScreenCTM) {
               try {
-                const boundaryX = getBoundaryXForColumn(drawGroup, wave, colIndex, unitWidth, pickMaxBoundaryIndex);
+                const boundaryX = drawGroup
+                  ? getBoundaryXForColumn(drawGroup, wave, colIndex, unitWidth, pickMaxBoundaryIndex)
+                  : colIndex * getWaveColumnWidth(unitWidth);
+                let boundaryY = 0;
+                try {
+                  const coordinateBox = coordinateGroup.getBBox();
+                  boundaryY = coordinateBox.y + coordinateBox.height / 2;
+                } catch (_e) { /* keep row-local center fallback */ }
                 const localPoint = svg.createSVGPoint();
                 localPoint.x = boundaryX;
-                localPoint.y = 0;
-                const screenPoint = localPoint.matrixTransform(drawGroup.getScreenCTM());
+                localPoint.y = boundaryY;
+                const screenPoint = localPoint.matrixTransform(coordinateGroup.getScreenCTM());
                 const clientPoint = svg.createSVGPoint();
                 clientPoint.x = screenPoint.x;
-                clientPoint.y = e.clientY;
+                clientPoint.y = screenPoint.y;
                 const svgCoords = clientPoint.matrixTransform(svg.getScreenCTM().inverse());
                 svgPoint = { svgX: svgCoords.x, svgY: svgCoords.y };
               } catch (err) { /* fall back to lazy SVG measurement */ }
@@ -6847,7 +7301,7 @@ ${lines.join('\n')}`;
             textEl.classList.add('wave-data-text');
             textEl.addEventListener('click', (e) => {
               e.stopPropagation();
-              if (isConnectionPickFlow() || groupPickActive) {
+              if (wavePaintModeActive || isConnectionPickFlow() || groupPickActive) {
                 handleLanePointSelect(e);
                 return;
               }
@@ -7469,6 +7923,7 @@ ${lines.join('\n')}`;
 
     function openWaveDocumentForEditing(name) {
       if (!name) return;
+      exitWavePaintMode('switch-wave-document');
       if (editingWaveDocumentName === name) {
         focusWaveDocument(name);
         return;
@@ -8003,8 +8458,13 @@ ${lines.join('\n')}`;
     function renderLegendItem(item, index) {
       const div = document.createElement('div');
       div.className = 'legend-item legend-disabled';
+      div.dataset.waveChar = item.char;
       div.title = item.label + ' (' + item.char + ') — ' + item.desc;
       div.addEventListener('click', () => {
+        if (wavePaintModeActive) {
+          selectWavePaintChar(item.char);
+          return;
+        }
         if (selectedSignalIndex < 0) {
           setStatus(false, '请先在波形区点击选中一行');
           return;
@@ -8052,6 +8512,7 @@ ${lines.join('\n')}`;
     }
 
     function startWaveDocumentDescriptionEdit(tag, descriptionEl) {
+      exitWavePaintMode('wave-description');
       if (!tag || !descriptionEl) return;
       if (tag.name !== editingWaveDocumentName) {
         openWaveDocumentForEditing(tag.name);
@@ -8199,6 +8660,9 @@ ${lines.join('\n')}`;
         const description = document.createElement('div');
         const descriptionText = getWaveDocumentDescription(tag);
         const isEditingDocument = tag.name === editingWaveDocumentName;
+        if (!isEditingDocument) {
+          canvas.addEventListener('pointerdown', () => exitWavePaintMode('other-wave-document'));
+        }
         description.className = 'wave-document-description'
           + (descriptionText ? '' : ' empty')
           + (isEditingDocument ? ' editable' : '');
@@ -8265,56 +8729,22 @@ ${lines.join('\n')}`;
       });
     }
 
-    function renderConnectionPresetItem(item, index) {
-      const div = document.createElement('div');
-      const example = buildEdgeFromTemplate(item.template, 'a', 'b', 'label');
-      div.className = 'connection-item';
-      div.dataset.presetIndex = String(index);
-      div.title = item.label + ' — 选中连接后修改样式，或在新增连接选完起点后选择样式 ' + example;
-      div.addEventListener('click', () => handleEdgeStylePresetClick(item.template));
-
-      const label = document.createElement('div');
-      label.className = 'connection-label';
-      label.textContent = item.label;
-
-      const syntax = document.createElement('div');
-      syntax.className = 'connection-syntax';
-      syntax.textContent = item.syntax;
-
-      const preview = document.createElement('div');
-      preview.className = 'connection-preview';
-      preview.id = 'connection-preview-' + index;
-
-      div.appendChild(label);
-      div.appendChild(syntax);
-      div.appendChild(preview);
-      return div;
-    }
-
     function renderConnectionPresets() {
-      const list = document.getElementById('connection-list');
-      EDGE_STYLE_PRESETS.forEach((item, index) => {
-        list.appendChild(renderConnectionPresetItem(item, index));
+      document.querySelectorAll('#connection-arrow-controls [data-arrow-style]').forEach((button) => {
+        if (button.dataset.vwdBound === '1') return;
+        button.dataset.vwdBound = '1';
+        button.addEventListener('click', () => handleConnectionArrowStyleClick(button.dataset.arrowStyle));
       });
-
-      if (!isWaveDromReady()) return;
-
-      EDGE_STYLE_PRESETS.forEach((item, index) => {
-        const container = document.getElementById('connection-preview-' + index);
-        if (!container) return;
-        const prefix = 'connection-display-' + index + '-';
-        const displayDiv = document.createElement('div');
-        displayDiv.id = prefix + '0';
-        container.appendChild(displayDiv);
-        try {
-          WaveDrom.RenderWaveForm(0, item.preview, prefix, false);
-        } catch (e) {
-          container.textContent = item.syntax;
-        }
+      document.querySelectorAll('#connection-list [data-line-style]').forEach((button) => {
+        if (button.dataset.vwdBound === '1') return;
+        button.dataset.vwdBound = '1';
+        button.addEventListener('click', () => handleConnectionLineStyleClick(button.dataset.lineStyle));
       });
+      updateConnectionPropertiesUI();
     }
 
     function enterReadingMode() {
+      exitWavePaintMode('reading-mode');
       app.classList.add('reading-mode');
       restoreBackBtnPosition();
       renderWaveform(editor.value);
@@ -8334,6 +8764,11 @@ ${lines.join('\n')}`;
       scheduleNavTitleRefresh();
     });
 
+    const editorPanel = document.getElementById('editor-panel');
+    if (editorPanel) {
+      editorPanel.addEventListener('pointerdown', () => exitWavePaintMode('json-panel'));
+    }
+
     editor.addEventListener('scroll', syncLineNumberScroll);
     editor.addEventListener('blur', () => {
       flushUndoDebounce();
@@ -8343,6 +8778,7 @@ ${lines.join('\n')}`;
     document.addEventListener('keydown', (e) => {
       handleUndoRedoShortcut(e);
     }, true);
+    document.addEventListener('click', cancelConnectionSelectionForOtherButton, true);
 
     editor.addEventListener('keydown', (e) => {
       if (e.key === 'Tab') {
@@ -8433,6 +8869,15 @@ ${lines.join('\n')}`;
     document.getElementById('btn-add-connection').addEventListener('click', () => {
       beginEdgeAddSession();
     });
+    document.getElementById('btn-select-connection').addEventListener('click', () => {
+      if (connectionSelectActive) {
+        const hadSelectedEdge = selectedEdgeIndex >= 0;
+        setConnectionSelectActive(false);
+        setStatus(true, hadSelectedEdge ? '已取消连接线选择' : '已退出选择连接线模式');
+      } else {
+        beginEdgeSelectSession();
+      }
+    });
     bindNavControlButtons();
     document.getElementById('btn-apply-edge-label').addEventListener('click', applyEdgeLabelFromInput);
     document.getElementById('connection-label-input').addEventListener('keydown', (e) => {
@@ -8441,21 +8886,6 @@ ${lines.join('\n')}`;
         applyEdgeLabelFromInput();
       }
     });
-    document.getElementById('btn-connection-pick').addEventListener('click', () => {
-      setConnectionPickActive(!connectionPickActive);
-      if (connectionPickActive) {
-        if (connectionAddSessionActive) {
-          setStatus(true, '选点模式已开启，请先点击「新增连接」开始添加');
-        } else {
-          setStatus(true, '选点模式已开启，请先点击「新增连接」开始添加');
-        }
-      } else {
-        endConnectionAddSession();
-        setStatus(true, '已关闭选点模式');
-      }
-      updateConnectionPointStatusUI();
-    });
-
     if (typeof window !== 'undefined') {
       window.__vwdSetDebugMode = (enabled) => {
         setDebugMode(!!enabled);
@@ -8473,23 +8903,33 @@ ${lines.join('\n')}`;
       window.__vwdGetConnectionState = () => ({
         connectionPickActive,
         connectionAddSessionActive,
+        connectionSelectActive,
         connectionFromPoint,
         connectionToPoint,
         pendingEdgeTemplate,
+        connectionArrowStyle,
+        connectionLineStyle,
         isInsertingEdge,
         isRenderingWaveform,
         waveformRenderingBusy,
         selectedEdgeIndex
       });
+      window.__vwdGetWavePaintState = () => ({
+        active: wavePaintModeActive,
+        char: wavePaintChar,
+        selectedSignalIndex,
+        selectedWaveColumnIndex
+      });
       window.__vwdGetPresetHighlightIndex = () => {
-        const el = document.querySelector('#connection-list .connection-item.preset-matches-selected');
-        return el ? parseInt(el.dataset.presetIndex, 10) : -1;
+        const el = document.querySelector('#connection-list [data-line-style].active');
+        return el ? CONNECTION_LINE_STYLES.indexOf(el.dataset.lineStyle) : -1;
       };
       window.__vwdFindPresetIndexForEdge = findPresetIndexForEdge;
       window.__vwdGetPerf = () => vwdPerfMarks.slice();
       window.__vwdClearPerf = () => { vwdPerfMarks.length = 0; };
     }
     document.getElementById('btn-wave-edit-mode').addEventListener('click', toggleWaveEditMode);
+    document.getElementById('btn-wave-paint-mode').addEventListener('click', toggleWavePaintMode);
     document.getElementById('btn-delete-wave-col').addEventListener('click', () => {
       deleteWaveCharAtColumn(selectedSignalIndex, selectedWaveColumnIndex);
     });
@@ -8587,6 +9027,7 @@ ${lines.join('\n')}`;
       initEditor();
       seedRequestedWaveCopies();
       renderLegends();
+      updateWavePaintModeUI();
       renderConnectionPresets();
       updateConnectionPresetDisabledState();
       renderConnectionEdgeList();

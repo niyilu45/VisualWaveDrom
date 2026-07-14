@@ -6,7 +6,7 @@
   <title>VisualWaveDrom</title>
   <script src="inc/skins/default.js?v=20260712"></script>
   <script src="inc/wavedrom.min.js?v=20260712"></script>
-  <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260711-description-edit-state">
+  <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260715-wave-paint">
 </head>
 <body>
   <div class="app" id="app">
@@ -150,6 +150,13 @@
             </svg>
             <span class="wave-edit-mode-label">修改模式</span>
           </button>
+          <button type="button" class="menu-btn wave-paint-mode-btn" id="btn-wave-paint-mode" aria-pressed="false" aria-label="&#30011;&#31508;&#27169;&#24335;" title="&#36827;&#20837;&#30011;&#31508;&#27169;&#24335;&#21518;&#65292;&#20808;&#36873;&#25321;&#27874;&#24418;&#65292;&#20877;&#36830;&#32493;&#28857;&#20987;&#26684;&#23376;">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path d="m9.06 11.9 8.07-8.06a2.85 2.85 0 1 1 4.03 4.03l-8.06 8.08"/>
+              <path d="M7.07 14c-1.66 0-3 1.35-3 3.02 0 1.33-2.5 1.52-2 2.98 1.08 1.1 2.49 2 4.02 2 2.2 0 4-1.8 4-4a4 4 0 0 0-3.02-3.87z"/>
+            </svg>
+            <span class="wave-paint-mode-label">&#30011;&#31508;&#27169;&#24335;</span>
+          </button>
           <button class="menu-btn wave-delete-col-btn" id="btn-delete-wave-col" type="button" disabled title="请先在波形区点击选中一行">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
               <polyline points="3 6 5 6 21 6"/>
@@ -164,28 +171,51 @@
       </div>
 
       <!-- Connection Relations -->
-      <div class="menu-section">
+      <div class="menu-section connection-menu-section">
         <div class="menu-section-title">连接关系</div>
-        <button class="menu-btn legend-add-btn" id="btn-add-connection" type="button" title="在波形上选两个点后插入连接（WaveDrom node 锚点）">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <line x1="12" y1="5" x2="12" y2="19"/>
-            <line x1="5" y1="12" x2="19" y2="12"/>
-          </svg>
-          新增连接
-        </button>
-        <div class="connection-pick-toggle">
-          <button type="button" id="btn-connection-pick" title="开启后在波形上依次点击起点与终点">选点模式</button>
+        <div class="connection-mode-row">
+          <button class="menu-btn legend-add-btn" id="btn-add-connection" type="button" title="依次选择起点和终点，再点击连接线样式生成连接">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <line x1="12" y1="5" x2="12" y2="19"/>
+              <line x1="5" y1="12" x2="19" y2="12"/>
+            </svg>
+            新增连接
+          </button>
+          <button class="menu-btn connection-select-btn" id="btn-select-connection" type="button" aria-pressed="false" title="进入选择连接线模式，点击图中的连接线查看和修改属性">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path d="M5 4l7 16 2.2-6.2L20 11 5 4z"/>
+            </svg>
+            <span class="connection-select-label">选择连接线</span>
+          </button>
         </div>
-        <div class="connection-point-status" id="connection-point-status">连接点：未选择（需起点 + 终点）</div>
-        <div class="connection-label-edit" id="connection-label-edit">
-          <div class="connection-label-edit-label" id="connection-label-edit-title">连接标签</div>
-          <div class="connection-label-edit-row">
-            <input type="text" id="connection-label-input" placeholder="新连接标签（可选，插入时使用）" spellcheck="false">
-            <button type="button" id="btn-apply-edge-label">应用</button>
+        <div class="connection-point-status" id="connection-point-status">点击“新增连接”后选择起点和终点</div>
+        <div class="connection-properties" id="connection-properties">
+          <div class="connection-property-group">
+            <div class="connection-property-label">箭头样式</div>
+            <div class="connection-segmented" id="connection-arrow-controls">
+              <button type="button" data-arrow-style="start">仅起始箭头</button>
+              <button type="button" data-arrow-style="end" class="active">仅终点箭头</button>
+              <button type="button" data-arrow-style="both">两端箭头</button>
+            </div>
           </div>
-          <div class="connection-label-edit-hint" id="connection-label-edit-hint">未选中连接时，标签将用于下次插入</div>
+          <div class="connection-property-group">
+            <div class="connection-property-label">连接线样式</div>
+            <div class="connection-line-style-controls" id="connection-list">
+              <button type="button" class="connection-line-style-btn active" data-line-style="straight"><span class="connection-line-swatch line-straight"></span><span>实线</span></button>
+              <button type="button" class="connection-line-style-btn" data-line-style="dashed"><span class="connection-line-swatch line-dashed"></span><span>虚线</span></button>
+              <button type="button" class="connection-line-style-btn" data-line-style="orthogonal"><span class="connection-line-swatch line-orthogonal"></span><span>折线</span></button>
+              <button type="button" class="connection-line-style-btn" data-line-style="curve"><span class="connection-line-swatch line-curve"></span><span>曲线</span></button>
+            </div>
+          </div>
+          <div class="connection-label-edit" id="connection-label-edit">
+            <div class="connection-label-edit-label" id="connection-label-edit-title">连接标签</div>
+            <div class="connection-label-edit-row">
+              <input type="text" id="connection-label-input" placeholder="连接线上显示的标签（可选）" spellcheck="false">
+              <button type="button" id="btn-apply-edge-label">应用</button>
+            </div>
+            <div class="connection-label-edit-hint" id="connection-label-edit-hint">新增时先填写标签；选择连接线后可修改</div>
+          </div>
         </div>
-        <div class="connection-list" id="connection-list"></div>
         <div class="connection-edge-section">
           <div class="connection-edge-title">当前连接</div>
           <div class="connection-edge-list" id="connection-edge-list"></div>
@@ -342,6 +372,6 @@
     </div>
   </div>
 
-    <script src="inc/visualwavedrom-app.js?v=20260711-toggle-wave-directory"></script>
+    <script src="inc/visualwavedrom-app.js?v=20260715-longest-wave-grid"></script>
 </body>
 </html>
