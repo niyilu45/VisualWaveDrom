@@ -2682,43 +2682,17 @@ ${lines.join('\n')}`;
     }
 
     function buildWaveColumnMap(drawGroup, wave, unitWidth) {
-      const step = unitWidth || WAVE_UNIT_WIDTH;
       const columnWidth = getWaveColumnWidth(unitWidth);
-      const uses = drawGroup ? getDrawUses(drawGroup) : [];
       const n = wave.length;
       if (n === 0) {
         return buildVirtualColumnMap(MIN_CONNECTION_PICK_BOUNDARIES, unitWidth);
       }
-
-      if (uses.length === 0) {
-        return [...wave].map((char, i) => ({
-          charIndex: i,
-          char,
-          x0: i * columnWidth,
-          x1: (i + 1) * columnWidth
-        }));
-      }
-
-      const alloc = allocateUsesToWaveChars(wave, uses.length);
-      const cols = [];
-      let useIdx = 0;
-
-      for (let i = 0; i < n; i++) {
-        const count = alloc[i];
-        let x0;
-        let x1;
-        if (count <= 0) {
-          x0 = cols.length ? cols[cols.length - 1].x1 : 0;
-          x1 = x0;
-        } else {
-          x0 = getUseTranslateX(uses[useIdx]);
-          const last = uses[useIdx + count - 1];
-          x1 = getUseTranslateX(last) + step;
-          useIdx += count;
-        }
-        cols.push({ charIndex: i, char: wave[i], x0, x1 });
-      }
-      return cols;
+      return [...wave].map((char, i) => ({
+        charIndex: i,
+        char,
+        x0: i * columnWidth,
+        x1: (i + 1) * columnWidth
+      }));
     }
 
     function clampPickColumnIndex(colIndex, wave, cols) {
