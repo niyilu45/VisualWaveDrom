@@ -4335,14 +4335,6 @@ ${lines.join('\n')}`;
       return used;
     }
 
-    function getSourceMapFromConnectionPoints(fromPoint, toPoint) {
-      const max = Math.max(fromPoint.rowIndex, toPoint.rowIndex);
-      const map = new Array(max + 1);
-      if (fromPoint.entry) map[fromPoint.rowIndex] = fromPoint.entry;
-      if (toPoint.entry) map[toPoint.rowIndex] = toPoint.entry;
-      return map;
-    }
-
     function prepareEdgeEndpointsFast(text, fromPoint, toPoint) {
       if (!fromPoint.entry || !toPoint.entry) return null;
       if (fromPoint.rowIndex === toPoint.rowIndex && fromPoint.colIndex === toPoint.colIndex) {
@@ -4949,14 +4941,42 @@ ${lines.join('\n')}`;
       }, 220);
     }
 
+    function getLaneCenterSvgY(svg, lane) {
+      if (!svg || !lane || !lane.getScreenCTM || !svg.getScreenCTM) return null;
+      let localY = null;
+      const hoverRect = lane.querySelector('rect.lane-hover-bg');
+      if (hoverRect) {
+        const y = parseFloat(hoverRect.getAttribute('y'));
+        const height = parseFloat(hoverRect.getAttribute('height'));
+        if (Number.isFinite(y) && Number.isFinite(height)) localY = y + height / 2;
+      }
+      if (!Number.isFinite(localY)) {
+        try {
+          const bbox = lane.getBBox();
+          localY = bbox.y + bbox.height / 2;
+        } catch (e) {
+          return null;
+        }
+      }
+      const lanePoint = svg.createSVGPoint();
+      lanePoint.x = 0;
+      lanePoint.y = localY;
+      const screenPoint = lanePoint.matrixTransform(lane.getScreenCTM());
+      return screenPoint.matrixTransform(svg.getScreenCTM().inverse()).y;
+    }
+
     function getOptimisticEdgePoint(point, sourceMap) {
       const svg = waveContainer.querySelector('svg');
       if (!svg || !point) return null;
-      if (Number.isFinite(point.svgX) && Number.isFinite(point.svgY)) {
-        return { x: point.svgX, y: point.svgY };
-      }
       const lane = getWaveLaneGroups(svg)[point.rowIndex];
       if (!lane) return null;
+      const laneCenterY = getLaneCenterSvgY(svg, lane);
+      if (Number.isFinite(point.svgX) && Number.isFinite(point.svgY)) {
+        return {
+          x: point.svgX,
+          y: Number.isFinite(laneCenterY) ? laneCenterY : point.svgY
+        };
+      }
       const drawGroup = lane.querySelector('[id^="wavelane_draw_"]');
       const coordinateGroup = drawGroup || lane;
       if (!coordinateGroup.getCTM) return null;
@@ -4977,7 +4997,11 @@ ${lines.join('\n')}`;
       const svgPoint = svg.createSVGPoint();
       svgPoint.x = x;
       svgPoint.y = y;
-      return svgPoint.matrixTransform(coordinateGroup.getCTM());
+      const resolved = svgPoint.matrixTransform(coordinateGroup.getCTM());
+      return {
+        x: resolved.x,
+        y: Number.isFinite(laneCenterY) ? laneCenterY : resolved.y
+      };
     }
 
     function buildOptimisticEdgePath(edgeStr, fromPt, toPt) {
@@ -5011,6 +5035,11 @@ ${lines.join('\n')}`;
       const fromSvg = getOptimisticEdgePoint(fromPoint, sourceMap);
       const toSvg = getOptimisticEdgePoint(toPoint, sourceMap);
       if (!fromSvg || !toSvg) return;
+      if (fromPoint.rowIndex === toPoint.rowIndex) {
+        const sharedY = (fromSvg.y + toSvg.y) / 2;
+        fromSvg.y = sharedY;
+        toSvg.y = sharedY;
+      }
 
       let arcGroup = svg.querySelector('#vwd-optimistic-edges');
       if (!arcGroup) {
@@ -5059,12 +5088,16 @@ ${lines.join('\n')}`;
 
         try {
           let text = editor.value;
-          const sourceMap = getSourceMapFromConnectionPoints(endpoints.from, endpoints.to);
-            const prepared = prepareEdgeEndpointsFast(text, endpoints.from, endpoints.to) || (() => {
+          const sourceMap = buildSignalSourceMap(text);
+          const currentFromPoint = Object.assign({}, endpoints.from, {
+            entry: sourceMap[endpoints.from.rowIndex]
+          });
+          const currentToPoint = Object.assign({}, endpoints.to, {
+            entry: sourceMap[endpoints.to.rowIndex]
+          });
+          const prepared = prepareEdgeEndpointsFast(text, currentFromPoint, currentToPoint) || (() => {
             let parsed;
             try { parsed = JSON.parse(text); } catch (e) { return { error: 'JSON parse failed' }; }
-            const fallbackMap = buildSignalSourceMap(text);
-            for (let i = 0; i < fallbackMap.length; i++) sourceMap[i] = sourceMap[i] || fallbackMap[i];
             return prepareEdgeEndpoints(parsed, endpoints.from, endpoints.to, sourceMap);
           })();
           if (prepared.error) {
@@ -7252,7 +7285,11 @@ ${lines.join('\n')}`;
                 clientPoint.x = screenPoint.x;
                 clientPoint.y = screenPoint.y;
                 const svgCoords = clientPoint.matrixTransform(svg.getScreenCTM().inverse());
-                svgPoint = { svgX: svgCoords.x, svgY: svgCoords.y };
+                const laneCenterY = getLaneCenterSvgY(svg, lane);
+                svgPoint = {
+                  svgX: svgCoords.x,
+                  svgY: Number.isFinite(laneCenterY) ? laneCenterY : svgCoords.y
+                };
               } catch (err) { /* fall back to lazy SVG measurement */ }
             }
             const pickResult = handleConnectionPointClick(idx, colIndex, Object.assign({}, svgPoint || {}, { entry }));
