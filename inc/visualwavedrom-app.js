@@ -538,10 +538,13 @@ ${lines.join('\n')}`;
           return;
         }
         if (!sig || typeof sig !== 'object') return;
-        if (sig.wave !== undefined && sig.name !== undefined) {
+        const hasChildren = Array.isArray(sig.children);
+        const hasSignalField = ['name', 'wave', 'node', 'data', 'period', 'phase']
+          .some((key) => Object.prototype.hasOwnProperty.call(sig, key));
+        if (!hasChildren || hasSignalField) {
           out.push(sig);
         }
-        if (Array.isArray(sig.children)) {
+        if (hasChildren) {
           flattenSignals(sig.children, out);
         }
       });
@@ -2047,6 +2050,17 @@ ${lines.join('\n')}`;
         normalized.node = padNodeToWaveLength(normalized.node, normalized.wave.length);
       }
       return JSON.stringify(normalized, null, 2)
+        .split('\n')
+        .map((line) => indent + line)
+        .join('\n');
+    }
+
+    function formatSignalObjectPreservingFields(sig, baseIndent) {
+      const indent = baseIndent || '    ';
+      if (!sig || Object.keys(sig).length === 0) {
+        return indent + '{}';
+      }
+      return JSON.stringify(sig, null, 2)
         .split('\n')
         .map((line) => indent + line)
         .join('\n');
@@ -4258,8 +4272,7 @@ ${lines.join('\n')}`;
     }
 
     function getNodeAtColumn(signal, colIndex) {
-      const wave = signal.wave || '';
-      const node = padNodeToWaveLength(signal.node || '', wave.length);
+      const node = signal && typeof signal.node === 'string' ? signal.node : '';
       if (colIndex >= 0 && colIndex < node.length && node[colIndex] !== '.') {
         return node[colIndex];
       }
@@ -4267,19 +4280,12 @@ ${lines.join('\n')}`;
     }
 
     function ensureNodeCharAtColumn(signal, colIndex, nodeChar) {
-      const safeCol = colIndex < 0 ? 0 : colIndex;
+      const safeCol = colIndex < 0 ? 0 : Math.floor(colIndex);
       const baseSignal = signal && typeof signal === 'object' ? signal : {};
-      let wave = baseSignal.wave || '';
-      if (wave.length <= safeCol) {
-        wave = wave.padEnd(safeCol + 1, '.');
-      }
-      let node = padNodeToWaveLength(baseSignal.node || '', wave.length);
+      let node = typeof baseSignal.node === 'string' ? baseSignal.node : '';
+      if (node.length <= safeCol) node = node.padEnd(safeCol + 1, '.');
       node = node.slice(0, safeCol) + nodeChar + node.slice(safeCol + 1);
-      return Object.assign({}, baseSignal, {
-        name: baseSignal.name === undefined ? '' : baseSignal.name,
-        wave,
-        node
-      });
+      return Object.assign({}, baseSignal, { node });
     }
 
     function collectUsedNodeIds(parsed) {
@@ -4388,7 +4394,11 @@ ${lines.join('\n')}`;
           const entry = map[rowIndex];
           if (!entry) return null;
           const indent = getIndentAt(text, entry.start);
-          return { start: entry.start, end: entry.end, value: formatSignalObject(signal, indent) };
+          return {
+            start: entry.start,
+            end: entry.end,
+            value: formatSignalObjectPreservingFields(signal, indent)
+          };
         })
         .filter(Boolean)
         .sort((a, b) => a.start - b.start);
@@ -5200,8 +5210,7 @@ ${lines.join('\n')}`;
       const updates = [];
       flattenSignals(parsed.signal || []).forEach((sig, rowIndex) => {
         if (!sig.node) return;
-        const waveLen = (sig.wave || '').length;
-        let node = padNodeToWaveLength(sig.node, waveLen);
+        let node = String(sig.node);
         let changed = false;
         node = node.split('').map((ch) => {
           if (ch !== '.' && !used.has(ch)) {
@@ -5211,7 +5220,11 @@ ${lines.join('\n')}`;
           return ch;
         }).join('');
         if (!changed) return;
-        updates.push({ rowIndex, signal: Object.assign({}, sig, { node }) });
+        node = node.replace(/\.+$/, '');
+        const updatedSignal = Object.assign({}, sig);
+        if (node) updatedSignal.node = node;
+        else delete updatedSignal.node;
+        updates.push({ rowIndex, signal: updatedSignal });
       });
       return updates;
     }
