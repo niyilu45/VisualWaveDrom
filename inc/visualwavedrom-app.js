@@ -3482,6 +3482,10 @@ ${lines.join('\n')}`;
         if (labelEl) labelEl.textContent = hasSelectedEdge ? '取消选择' : '选择连接线';
       }
       app.classList.toggle('connection-select-mode', connectionSelectActive);
+      app.classList.toggle(
+        'connection-add-mode',
+        connectionAddSessionActive && connectionPickActive
+      );
 
       const canEditArrow = connectionAddSessionActive || selectedEdgeIndex >= 0;
       const canChooseLine = areConnectionPresetsEnabledForInsert() || selectedEdgeIndex >= 0;
@@ -4343,8 +4347,6 @@ ${lines.join('\n')}`;
       const used = collectUsedNodeIdsFromTextFast(text, [fromPoint, toPoint]);
       let fromNode = getNodeAtColumn(fromPoint.entry.signal, fromPoint.colIndex);
       let toNode = getNodeAtColumn(toPoint.entry.signal, toPoint.colIndex);
-      if (fromNode) used.delete(fromNode);
-      if (toNode) used.delete(toNode);
       if (!fromNode) {
         fromNode = allocateNodeId(used);
         if (!fromNode) return { error: 'cannot allocate from-node id (a-zA-Z0-9 only)' };
@@ -4433,9 +4435,6 @@ ${lines.join('\n')}`;
       const used = collectUsedNodeIds(parsed);
       let fromNode = getNodeAtColumn(fromEntry.signal, fromPoint.colIndex);
       let toNode = getNodeAtColumn(toEntry.signal, toPoint.colIndex);
-
-      if (fromNode) used.delete(fromNode);
-      if (toNode) used.delete(toNode);
 
       if (!fromNode) {
         fromNode = allocateNodeId(used);

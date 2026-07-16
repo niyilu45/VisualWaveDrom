@@ -919,6 +919,12 @@
       cursor: pointer;
     }
 
+    .app.connection-add-mode .wave-edge-interactive,
+    .app.connection-add-mode .wave-edge-interactive *,
+    .app.connection-add-mode .wave-edge-hit-target {
+      pointer-events: none !important;
+    }
+
     .wave-edge-selected,
     .wave-edge-selected path,
     .wave-edge-selected line,
