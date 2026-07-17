@@ -8,8 +8,16 @@ const htmlName = `${path.basename(__filename, '.js')}.html`;
 const htmlPath = path.join(rootDir, htmlName);
 const waveDir = path.join(rootDir, 'Wave');
 const defaultLibraryName = `${path.basename(__filename, '.js')}-library.json`;
-const port = Number(process.env.PORT) || 4173;
+const appId = 'VisualWaveDrom';
+const defaultPort = 4173;
+const configuredPort = Number(process.env.PORT);
+const preferredPort = Number.isInteger(configuredPort) && configuredPort >= 1 && configuredPort <= 65535
+  ? configuredPort
+  : defaultPort;
+const noOpen = process.argv.includes('--no-open');
 let shutdownTimer = null;
+let requestedPort = preferredPort;
+let selectingFallbackPort = false;
 
 function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'));
@@ -76,6 +84,63 @@ function sendJson(res, status, payload) {
   res.end(JSON.stringify(payload));
 }
 
+function normalizedRoot(value) {
+  const resolved = path.resolve(String(value || ''));
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+function probeServerInfo(port) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    const request = http.get({
+      hostname: '127.0.0.1',
+      port,
+      path: '/api/server-info',
+      timeout: 800
+    }, (response) => {
+      let body = '';
+      response.setEncoding('utf8');
+      response.on('data', (part) => {
+        body += part;
+        if (body.length > 64 * 1024) {
+          request.destroy();
+          finish(null);
+        }
+      });
+      response.on('error', () => finish(null));
+      response.on('end', () => {
+        if (response.statusCode !== 200) { finish(null); return; }
+        try {
+          finish(JSON.parse(body));
+        } catch (_) {
+          finish(null);
+        }
+      });
+    });
+    request.on('timeout', () => {
+      request.destroy();
+      finish(null);
+    });
+    request.on('error', () => finish(null));
+  });
+}
+
+function pageAddress(port) {
+  return `http://127.0.0.1:${port}/${htmlName}`;
+}
+
+function openAddress(address) {
+  if (noOpen) return;
+  exec(`start "" "${address}"`, (error) => {
+    if (error) console.warn(`Could not open the browser automatically: ${error.message}`);
+  });
+}
+
 function serveStatic(req, res, pathname) {
   const relative = pathname === '/' ? htmlName : decodeURIComponent(pathname).replace(/^\/+/, '');
   const target = path.resolve(rootDir, relative);
@@ -88,6 +153,10 @@ function serveStatic(req, res, pathname) {
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`);
+  if (url.pathname === '/api/server-info' && req.method === 'GET') {
+    sendJson(res, 200, { app: appId, rootDir, htmlName });
+    return;
+  }
   if (url.pathname === '/api/client-connect' && req.method === 'POST') {
     clearTimeout(shutdownTimer);
     shutdownTimer = null;
@@ -139,8 +208,43 @@ const server = http.createServer((req, res) => {
 });
 
 ensureWaveDirectory();
-server.listen(port, '127.0.0.1', () => {
-  const address = `http://127.0.0.1:${port}/${htmlName}`;
+server.on('listening', () => {
+  const serverAddress = server.address();
+  const activePort = serverAddress && typeof serverAddress === 'object' ? serverAddress.port : requestedPort;
+  const address = pageAddress(activePort);
+  if (activePort !== preferredPort) {
+    console.log(`Port ${preferredPort} is in use; using available port ${activePort}.`);
+  }
   console.log(`VisualWaveDrom is running at ${address}`);
-  if (!process.argv.includes('--no-open')) exec(`start "" "${address}"`);
+  openAddress(address);
 });
+
+server.on('error', async (error) => {
+  if (error.code !== 'EADDRINUSE' || selectingFallbackPort) {
+    console.error(`VisualWaveDrom failed to start: ${error.message}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const occupiedPort = requestedPort;
+  const info = await probeServerInfo(occupiedPort);
+  const sameService = info
+    && info.app === appId
+    && info.htmlName === htmlName
+    && normalizedRoot(info.rootDir) === normalizedRoot(rootDir);
+
+  if (sameService) {
+    const address = pageAddress(occupiedPort);
+    console.log(`VisualWaveDrom is already running at ${address}`);
+    openAddress(address);
+    return;
+  }
+
+  selectingFallbackPort = true;
+  requestedPort = 0;
+  console.log(`Port ${occupiedPort} is already in use; selecting an available port.`);
+  server.listen(0, '127.0.0.1');
+});
+
+requestedPort = preferredPort;
+server.listen(requestedPort, '127.0.0.1');
