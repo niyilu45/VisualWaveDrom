@@ -190,6 +190,10 @@ function getDefaultJson() {
     let persistTimer = null;
     let lastSavedContent = getDefaultJson();
     let undoBurstCaptured = false;
+    let editorHistoryBaseline = lastSavedContent;
+    let directJsonEditDirty = false;
+    let directJsonEditMonitorTimer = null;
+    let historySequence = 0;
     let inlineEditActive = false;
     let activeInlineEditState = null;
     let pendingNameEditSignalIndex = -1;
@@ -494,6 +498,7 @@ ${lines.join('\n')}`;
     const LEGACY_SAVED_TAGS_KEY = 'vwd-saved-tags';
     const NAV_COPY_SEED_KEY = 'vwd-nav-copy-seed-2222-51515-v2';
     const PERSIST_DEBOUNCE_MS = 500;
+    const DIRECT_JSON_HISTORY_INTERVAL_MS = 5000;
     const DRAG_THRESHOLD = 5;
     let backBtnDrag = null;
     let waveEditMode = 'modify';
@@ -2458,7 +2463,7 @@ ${lines.join('\n')}`;
     function applyEditorChange(newText, selStart, selEnd, options) {
       const opts = options || {};
       editor.value = newText;
-      lastSavedContent = newText;
+      setEditorHistoryBaseline(newText);
       editor.selectionStart = selStart;
       editor.selectionEnd = selEnd ?? selStart;
       if (!opts.skipFocus) {
@@ -2512,7 +2517,7 @@ ${lines.join('\n')}`;
 
     function applyEdgeInsertTextFast(newText, selStart, selEnd, skipFocus) {
       editor.value = newText;
-      lastSavedContent = newText;
+      setEditorHistoryBaseline(newText);
       editor.selectionStart = selStart;
       editor.selectionEnd = selEnd ?? selStart;
       if (!skipFocus) editor.focus();
@@ -2625,35 +2630,89 @@ ${lines.join('\n')}`;
       saveTimer = null;
     }
 
-    function finalizeUndoBurst() {
-      if (isApplyingHistory) return;
-      lastSavedContent = editor.value;
+    function nextHistorySequence() {
+      historySequence += 1;
+      return historySequence;
+    }
+
+    function getHistorySequence(entry) {
+      return entry && Number.isFinite(entry.sequence) ? entry.sequence : 0;
+    }
+
+    function getEditorHistoryContent(entry) {
+      return entry && typeof entry === 'object' && typeof entry.content === 'string'
+        ? entry.content
+        : String(entry == null ? '' : entry);
+    }
+
+    function setEditorHistoryBaseline(text) {
+      const value = text == null ? '' : String(text);
+      editorHistoryBaseline = value;
+      lastSavedContent = value;
+      directJsonEditDirty = false;
       undoBurstCaptured = false;
     }
 
-    function captureUndoIfNeeded() {
+    function markDirectJsonEdit() {
       if (isApplyingHistory) return;
-      if (undoBurstCaptured || editor.value === lastSavedContent) return;
-      undoStack.push(lastSavedContent);
+      directJsonEditDirty = editor.value !== editorHistoryBaseline;
+      updateUndoRedoButtons();
+    }
+
+    function pushEditorUndoSnapshot(content, reason) {
+      undoStack.push({
+        content: String(content == null ? '' : content),
+        sequence: nextHistorySequence(),
+        reason: reason || 'editor-change'
+      });
       if (undoStack.length > 100) undoStack.shift();
       redoStack = [];
       waveLibraryRedoStack = [];
-      undoBurstCaptured = true;
+    }
+
+    function checkpointDirectJsonEdit(reason) {
+      if (isApplyingHistory) return false;
+      const current = editor.value;
+      if (current === editorHistoryBaseline) {
+        directJsonEditDirty = false;
+        return false;
+      }
+      const previous = editorHistoryBaseline;
+      pushEditorUndoSnapshot(previous, reason || 'direct-json-interval');
+      setEditorHistoryBaseline(current);
       updateUndoRedoButtons();
+      vwdDebugLog('history', {
+        phase: 'json-checkpoint',
+        reason: reason || 'direct-json-interval',
+        documentName: editingWaveDocumentName || '',
+        previousLength: previous.length,
+        currentLength: current.length,
+        undoDepth: undoStack.length
+      });
+      return true;
+    }
+
+    function startDirectJsonEditMonitor() {
+      if (directJsonEditMonitorTimer !== null) clearInterval(directJsonEditMonitorTimer);
+      directJsonEditMonitorTimer = setInterval(() => {
+        checkpointDirectJsonEdit('direct-json-interval');
+      }, DIRECT_JSON_HISTORY_INTERVAL_MS);
+    }
+
+    function finalizeUndoBurst() {
+      checkpointDirectJsonEdit('editor-blur');
+    }
+
+    function captureUndoIfNeeded() {
+      markDirectJsonEdit();
     }
 
     function pushUndoBeforeChange() {
       if (isApplyingHistory) return;
       flushUndoDebounce();
-      if (undoBurstCaptured) {
-        lastSavedContent = editor.value;
-        undoBurstCaptured = false;
-      }
-      undoStack.push(editor.value);
-      if (undoStack.length > 100) undoStack.shift();
-      redoStack = [];
-      waveLibraryRedoStack = [];
-      lastSavedContent = editor.value;
+      checkpointDirectJsonEdit('before-toolbar-change');
+      pushEditorUndoSnapshot(editor.value, 'toolbar-change');
+      setEditorHistoryBaseline(editor.value);
       updateUndoRedoButtons();
     }
 
@@ -7916,7 +7975,7 @@ ${lines.join('\n')}`;
         const preferred = savedTags.find((tag) => tag.name === preferredName) || savedTags[0];
         if (preferred) {
           editor.value = preferred.content;
-          lastSavedContent = editor.value;
+          setEditorHistoryBaseline(editor.value);
         }
         rebuildNavTreeStateFromJson(editor.value || getDefaultJson());
         if (preferred) openWaveDocumentForEditing(preferred.name);
@@ -8090,7 +8149,7 @@ ${lines.join('\n')}`;
       editingWaveDocumentName = snapshot.editingWaveDocumentName || null;
       activeTagName = snapshot.activeTagName || null;
       editor.value = snapshot.editorValue || getDefaultJson();
-      lastSavedContent = editor.value;
+      setEditorHistoryBaseline(editor.value);
       editor.selectionStart = Math.min(snapshot.selectionStart || 0, editor.value.length);
       editor.selectionEnd = Math.min(snapshot.selectionEnd || 0, editor.value.length);
       updateLineNumbers();
@@ -8105,9 +8164,11 @@ ${lines.join('\n')}`;
     }
 
     function pushWaveLibraryHistory(before, after) {
-      waveLibraryUndoStack.push({ before, after });
+      checkpointDirectJsonEdit('before-wave-library-change');
+      waveLibraryUndoStack.push({ before, after, sequence: nextHistorySequence() });
       if (waveLibraryUndoStack.length > 20) waveLibraryUndoStack.shift();
       waveLibraryRedoStack = [];
+      redoStack = [];
       updateUndoRedoButtons();
     }
 
@@ -8266,7 +8327,7 @@ ${lines.join('\n')}`;
       flushUndoDebounce();
 
       editor.value = tag.content;
-      lastSavedContent = tag.content;
+      setEditorHistoryBaseline(tag.content);
       editor.selectionStart = 0;
       editor.selectionEnd = 0;
       clearSelectedGroupState();
@@ -8675,15 +8736,17 @@ ${lines.join('\n')}`;
     }
 
     function debouncedSaveUndo() {
-      flushUndoDebounce();
-      saveTimer = setTimeout(finalizeUndoBurst, 400);
+      markDirectJsonEdit();
     }
 
     function updateUndoRedoButtons() {
       const btnUndo = document.getElementById('btn-undo');
       const btnRedo = document.getElementById('btn-redo');
-      btnUndo.disabled = undoStack.length === 0 && waveLibraryUndoStack.length === 0;
-      btnRedo.disabled = redoStack.length === 0 && waveLibraryRedoStack.length === 0;
+      btnUndo.disabled = !directJsonEditDirty
+        && undoStack.length === 0
+        && waveLibraryUndoStack.length === 0;
+      btnRedo.disabled = directJsonEditDirty
+        || (redoStack.length === 0 && waveLibraryRedoStack.length === 0);
     }
 
     function isModKey(e) {
@@ -8715,51 +8778,97 @@ ${lines.join('\n')}`;
       return false;
     }
 
+    function getLastHistorySequence(stack) {
+      if (!stack.length) return -1;
+      return getHistorySequence(stack[stack.length - 1]);
+    }
+
+    function getNextRedoSequence(stack) {
+      if (!stack.length) return Number.POSITIVE_INFINITY;
+      return getHistorySequence(stack[stack.length - 1]);
+    }
+
     function undo() {
-      if (waveLibraryUndoStack.length > 0) {
+      checkpointDirectJsonEdit('before-undo');
+      const editorSequence = getLastHistorySequence(undoStack);
+      const librarySequence = getLastHistorySequence(waveLibraryUndoStack);
+      if (librarySequence > editorSequence) {
         const entry = waveLibraryUndoStack.pop();
         waveLibraryRedoStack.push(entry);
-        restoreWaveLibrarySnapshot(entry.before);
+        isApplyingHistory = true;
+        try {
+          restoreWaveLibrarySnapshot(entry.before);
+        } finally {
+          isApplyingHistory = false;
+        }
         setStatus(true, '已撤销波形库操作');
-        vwdDebugLog('wave-library', { phase: 'undo-library-operation' });
+        vwdDebugLog('history', { phase: 'undo-library-operation', sequence: getHistorySequence(entry) });
         updateUndoRedoButtons();
         return;
       }
       if (undoStack.length === 0) return;
       flushUndoDebounce();
       undoBurstCaptured = false;
+      const entry = undoStack.pop();
       isApplyingHistory = true;
-      redoStack.push(editor.value);
-      editor.value = undoStack.pop();
-      lastSavedContent = editor.value;
-      updateLineNumbers();
-      renderWaveform(editor.value);
-      saveEditorJsonToStorage(editor.value);
-      isApplyingHistory = false;
+      try {
+        redoStack.push({
+          content: editor.value,
+          sequence: getHistorySequence(entry),
+          reason: entry && entry.reason ? entry.reason : 'editor-change'
+        });
+        editor.value = getEditorHistoryContent(entry);
+        setEditorHistoryBaseline(editor.value);
+        updateLineNumbers();
+        renderWaveform(editor.value);
+        saveEditorJsonToStorage(editor.value);
+      } finally {
+        isApplyingHistory = false;
+      }
+      setStatus(true, '已撤销 JSON 修改');
+      vwdDebugLog('history', { phase: 'undo-editor', sequence: getHistorySequence(entry), undoDepth: undoStack.length });
       updateUndoRedoButtons();
     }
 
     function redo() {
-      if (waveLibraryRedoStack.length > 0) {
+      checkpointDirectJsonEdit('before-redo');
+      const editorSequence = getNextRedoSequence(redoStack);
+      const librarySequence = getNextRedoSequence(waveLibraryRedoStack);
+      if (librarySequence < editorSequence) {
         const entry = waveLibraryRedoStack.pop();
         waveLibraryUndoStack.push(entry);
-        restoreWaveLibrarySnapshot(entry.after);
+        isApplyingHistory = true;
+        try {
+          restoreWaveLibrarySnapshot(entry.after);
+        } finally {
+          isApplyingHistory = false;
+        }
         setStatus(true, '已重做波形库操作');
-        vwdDebugLog('wave-library', { phase: 'redo-library-operation' });
+        vwdDebugLog('history', { phase: 'redo-library-operation', sequence: getHistorySequence(entry) });
         updateUndoRedoButtons();
         return;
       }
       if (redoStack.length === 0) return;
       flushUndoDebounce();
       undoBurstCaptured = false;
+      const entry = redoStack.pop();
       isApplyingHistory = true;
-      undoStack.push(editor.value);
-      editor.value = redoStack.pop();
-      lastSavedContent = editor.value;
-      updateLineNumbers();
-      renderWaveform(editor.value);
-      saveEditorJsonToStorage(editor.value);
-      isApplyingHistory = false;
+      try {
+        undoStack.push({
+          content: editor.value,
+          sequence: getHistorySequence(entry),
+          reason: entry && entry.reason ? entry.reason : 'editor-change'
+        });
+        editor.value = getEditorHistoryContent(entry);
+        setEditorHistoryBaseline(editor.value);
+        updateLineNumbers();
+        renderWaveform(editor.value);
+        saveEditorJsonToStorage(editor.value);
+      } finally {
+        isApplyingHistory = false;
+      }
+      setStatus(true, '已重做 JSON 修改');
+      vwdDebugLog('history', { phase: 'redo-editor', sequence: getHistorySequence(entry), redoDepth: redoStack.length });
       updateUndoRedoButtons();
     }
 
@@ -8768,12 +8877,12 @@ ${lines.join('\n')}`;
       editor.value = initialJson;
       undoStack = [];
       redoStack = [];
-      lastSavedContent = initialJson;
-      undoBurstCaptured = false;
+      setEditorHistoryBaseline(initialJson);
       flushUndoDebounce();
       updateLineNumbers();
       renderWaveform(initialJson);
       updateUndoRedoButtons();
+      startDirectJsonEditMonitor();
     }
 
     function renderLegendItem(item, index) {
@@ -8887,6 +8996,7 @@ ${lines.join('\n')}`;
         // A document description is rendered outside the SVG card, so avoid a
         // costly full WaveDrom redraw for large documents.
         editor.value = newText;
+        setEditorHistoryBaseline(newText);
         updateLineNumbers();
         debouncedPersistEditorJson();
         debouncedSaveUndo();
