@@ -208,6 +208,9 @@ function getDefaultJson() {
     let navRenderContext = null;
     let navSortToken = 0;
     let navTitleRefreshTimer = null;
+    let lastRenderedWaveText = null;
+    let lastRenderedWaveSource = null;
+    let pendingFormatRenderCallbacks = [];
     let groupPickActive = false;
     let groupPickStartIndex = -1;
     let wavePaintModeActive = false;
@@ -498,12 +501,23 @@ ${lines.join('\n')}`;
     const LEGACY_SAVED_TAGS_KEY = 'vwd-saved-tags';
     const NAV_COPY_SEED_KEY = 'vwd-nav-copy-seed-2222-51515-v2';
     const PERSIST_DEBOUNCE_MS = 500;
+    const SAVED_TAGS_PERSIST_DEBOUNCE_MS = 250;
     const DIRECT_JSON_HISTORY_INTERVAL_MS = 5000;
+    const WAVE_PREVIEW_ROOT_MARGIN = '700px 0px';
     const DRAG_THRESHOLD = 5;
     let backBtnDrag = null;
     let waveEditMode = 'modify';
     let isUpdatingHscaleFromJson = false;
     let savedTags = [];
+    let savedTagByName = new Map();
+    const waveDocumentMetaCache = new Map();
+    const navDocumentTitleCache = new Map();
+    const waveLibraryCardCache = new Map();
+    let waveLibraryCardSequence = 0;
+    let waveLibraryPreviewObserver = null;
+    let waveLibraryPreviewQueue = [];
+    let waveLibraryPreviewWorkHandle = null;
+    let savedTagsPersistTimer = null;
     let activeTagName = null;
     let editingWaveDocumentName = null;
     let pendingDuplicateTagName = null;
@@ -1103,7 +1117,7 @@ ${lines.join('\n')}`;
       if (target.kind === 'document') {
         selectedNavDocumentName = target.item;
         setSelectedNavNode(target.parent.id, { skipFilter: true, keepDocumentSelection: true });
-        const tag = savedTags.find((item) => item.name === target.item);
+        const tag = getSavedTagByName(target.item);
         displayName = tag ? getNavDocumentDisplayName(tag, target.parent) : target.item;
       } else {
         setSelectedNavNode(target.item.id, { skipFilter: true });
@@ -1144,13 +1158,15 @@ ${lines.join('\n')}`;
       rootList.className = 'nav-tree-list';
 
       function createDocumentRow(documentName, parentNode) {
-        const tag = savedTags.find((item) => item.name === documentName);
+        const tag = getSavedTagByName(documentName);
         if (!tag) return null;
         const item = document.createElement('li');
         item.className = 'nav-tree-document';
         const button = document.createElement('button');
         button.type = 'button';
         button.className = 'nav-tree-document-label';
+        button.dataset.documentName = tag.name;
+        navDocumentTitleCache.set(tag.name, getSavedTagTitle(tag));
         if (tag.name === selectedNavDocumentName) button.classList.add('active');
         button.title = '打开波形图: ' + getNavDocumentDisplayName(tag, parentNode);
         button.textContent = getNavDocumentDisplayName(tag, parentNode);
@@ -1428,7 +1444,7 @@ ${lines.join('\n')}`;
       const saved = saveNavCustomNodesFromTree();
       setSelectedNavNode(directory.id);
       pushWaveLibraryHistory(before, captureWaveLibrarySnapshot());
-      setStatus(true, '已收录波形图: ' + getSavedTagTitle(savedTags.find((tag) => tag.name === documentName) || { name: documentName }));
+      setStatus(true, '已收录波形图: ' + getSavedTagTitle(getSavedTagByName(documentName) || { name: documentName, content: '{}' }));
       vwdDebugLog('nav-tree', { phase: 'add-document', directoryId: directory.id, documentName: documentName, saved: saved });
     }
 
@@ -1707,7 +1723,8 @@ ${lines.join('\n')}`;
       }
     }
 
-    function formatEditorJson() {
+    function formatEditorJson(options) {
+      const opts = options || {};
       let formatted;
       try {
         formatted = JSON.stringify(JSON.parse(editor.value), null, 2);
@@ -1719,8 +1736,8 @@ ${lines.join('\n')}`;
         setStatus(true, 'JSON 已对齐');
         return true;
       }
-      pushUndoBeforeChange();
-      applyEditorChange(formatted, 0, 0, { skipFocus: false });
+      if (!opts.skipUndo) pushUndoBeforeChange();
+      applyEditorChange(formatted, 0, 0, { skipFocus: !!opts.skipFocus });
       setStatus(true, 'JSON 已格式化对齐');
       return true;
     }
@@ -1811,12 +1828,28 @@ ${lines.join('\n')}`;
     let formatAfterWaveChangeRaf = null;
 
     // Toolbar actions may update only a small JSON fragment. Normalize the full source
-    // once the action finishes, while coalescing rapid clicks into one format pass.
+    // once the action finishes, while coalescing formatting and rendering into one pass.
     function scheduleFormatAfterWaveChange() {
       if (formatAfterWaveChangeRaf !== null) return;
+      if (renderWaveformRaf !== null) {
+        cancelAnimationFrame(renderWaveformRaf);
+        renderWaveformRaf = null;
+        if (scheduledRenderCallbacks) {
+          pendingFormatRenderCallbacks.push(...scheduledRenderCallbacks);
+        }
+        scheduledRenderText = null;
+        scheduledRenderCallbacks = null;
+      }
       formatAfterWaveChangeRaf = requestAnimationFrame(() => {
         formatAfterWaveChangeRaf = null;
-        formatEditorJson();
+        formatEditorJson({ skipUndo: true, skipFocus: true });
+        const callbacks = pendingFormatRenderCallbacks;
+        pendingFormatRenderCallbacks = [];
+        scheduleRenderWaveform(editor.value, callbacks.length
+          ? (ok) => callbacks.forEach((callback) => {
+              try { callback(ok); } catch (_e) { /* ignore */ }
+            })
+          : null);
       });
     }
     function buildSignalSourceMap(jsonText) {
@@ -2479,7 +2512,7 @@ ${lines.join('\n')}`;
         renderConnectionEdgeList();
         scheduleRenderWaveform(newText, opts.onRenderComplete);
       } else {
-        renderWaveform(newText);
+        scheduleRenderWaveform(newText, opts.onRenderComplete);
       }
       if (opts.skipSyncPersist) {
         debouncedPersistEditorJson();
@@ -2558,8 +2591,9 @@ ${lines.join('\n')}`;
       }
     }
 
-    function getWaveUnitWidth(jsonText) {
-      return WAVE_UNIT_WIDTH * readHscaleFromJsonText(jsonText);
+    function getWaveUnitWidth(jsonText, parsedSource) {
+      const hscale = parsedSource ? readHscaleFromSource(parsedSource) : readHscaleFromJsonText(jsonText);
+      return WAVE_UNIT_WIDTH * hscale;
     }
 
     function updateHscaleInSource(text, newHscale) {
@@ -2597,9 +2631,9 @@ ${lines.join('\n')}`;
       return beforeClose + insertion + text.slice(rootClose);
     }
 
-    function syncHscaleInputFromJson(jsonText) {
+    function syncHscaleInputFromJson(jsonText, parsedSource) {
       if (!hscaleInput) return;
-      const h = readHscaleFromJsonText(jsonText);
+      const h = parsedSource ? readHscaleFromSource(parsedSource) : readHscaleFromJsonText(jsonText);
       const current = parseFloat(hscaleInput.value);
       if (Number.isFinite(current) && hscaleEqual(current, h)) return;
       isUpdatingHscaleFromJson = true;
@@ -5696,14 +5730,14 @@ ${lines.join('\n')}`;
       vwdDebugLog('connection', { phase: 'edge-deleted', index, edge: removed });
     }
 
-    function renderConnectionEdgeList() {
+    function renderConnectionEdgeList(parsedSource) {
       const list = document.getElementById('connection-edge-list');
       if (!list) return;
       list.innerHTML = '';
 
-      let parsed;
+      let parsed = parsedSource;
       try {
-        parsed = JSON.parse(editor.value);
+        if (!parsed) parsed = JSON.parse(editor.value);
       } catch (e) {
         const empty = document.createElement('div');
         empty.className = 'connection-edge-empty';
@@ -5819,13 +5853,13 @@ ${lines.join('\n')}`;
       edgeElement.parentNode.insertBefore(hit, edgeElement.nextSibling);
     }
 
-    function attachEdgeInteractivity(jsonText) {
+    function attachEdgeInteractivity(jsonText, parsedSource) {
       const svg = waveContainer.querySelector('svg');
       if (!svg) return;
 
-      let parsed;
+      let parsed = parsedSource;
       try {
-        parsed = JSON.parse(jsonText);
+        if (!parsed) parsed = JSON.parse(jsonText);
       } catch (e) {
         return;
       }
@@ -7356,13 +7390,13 @@ ${lines.join('\n')}`;
       });
     }
 
-    function attachHeadFootInteractivity(jsonText) {
+    function attachHeadFootInteractivity(jsonText, parsedSource) {
       const svg = waveContainer.querySelector('svg');
       if (!svg) return;
 
-      let parsed;
+      let parsed = parsedSource;
       try {
-        parsed = JSON.parse(jsonText);
+        if (!parsed) parsed = JSON.parse(jsonText);
       } catch (e) {
         return;
       }
@@ -7499,7 +7533,7 @@ ${lines.join('\n')}`;
       });
     }
 
-    function attachGlobalDescribeInteractivity(jsonText) {
+    function attachGlobalDescribeInteractivity(jsonText, parsedSource) {
       const svg = waveContainer.querySelector('svg');
       if (!svg) return;
 
@@ -7507,9 +7541,9 @@ ${lines.join('\n')}`;
       // never overlaps WaveDrom's foot area.
       if (waveContainer.closest('.wave-document-card')) return;
 
-      let parsed;
+      let parsed = parsedSource;
       try {
-        parsed = JSON.parse(jsonText);
+        if (!parsed) parsed = JSON.parse(jsonText);
       } catch (e) {
         return;
       }
@@ -7537,13 +7571,13 @@ ${lines.join('\n')}`;
       svg.appendChild(textEl);
     }
 
-    function attachWaveInteractivity(jsonText) {
+    function attachWaveInteractivity(jsonText, parsedSource) {
       const svg = waveContainer.querySelector('svg');
       if (!svg) return;
 
       const sourceMap = buildSignalSourceMap(jsonText);
       const lanes = getWaveLaneGroups(svg);
-      const unitWidth = getWaveUnitWidth(jsonText);
+      const unitWidth = getWaveUnitWidth(jsonText, parsedSource);
       const maxBoundaryIndex = getConnectionPickBoundaryIndex(sourceMap);
       const maxWaveColumnCount = Math.max(1, getMaxWaveBoundaryIndex(sourceMap));
       const visibleSet = getNavVisibleRowSet();
@@ -7674,9 +7708,9 @@ ${lines.join('\n')}`;
 
       restoreWaveSelection(lanes, sourceMap);
       attachGroupInteractivity(jsonText);
-      attachEdgeInteractivity(jsonText);
-      attachHeadFootInteractivity(jsonText);
-      attachGlobalDescribeInteractivity(jsonText);
+      attachEdgeInteractivity(jsonText, parsedSource);
+      attachHeadFootInteractivity(jsonText, parsedSource);
+      attachGlobalDescribeInteractivity(jsonText, parsedSource);
 
       if (pendingNameEditSignalIndex >= 0
           && pendingNameEditSignalIndex < lanes.length
@@ -7823,6 +7857,50 @@ ${lines.join('\n')}`;
       };
     }
 
+    function rebuildSavedTagIndex() {
+      savedTagByName = new Map();
+      savedTags.forEach((tag) => savedTagByName.set(tag.name, tag));
+      const validNames = new Set(savedTagByName.keys());
+      waveDocumentMetaCache.forEach((_value, key) => {
+        const separator = key.indexOf(':');
+        const name = separator >= 0 ? key.slice(separator + 1) : key;
+        if (key !== 'adhoc' && !validNames.has(name)) waveDocumentMetaCache.delete(key);
+      });
+    }
+
+    function getSavedTagByName(name) {
+      return savedTagByName.get(String(name || '')) || null;
+    }
+
+    function getWaveDocumentMeta(tag, preferEditor) {
+      if (!tag) return { content: '', source: null, renderSource: null, title: '', description: '', error: null };
+      const useEditor = preferEditor !== false && tag.name === editingWaveDocumentName;
+      const content = useEditor ? (editor.value || '') : (tag.content || '');
+      const cacheKey = (useEditor ? 'editor:' : 'saved:') + tag.name;
+      const cached = waveDocumentMetaCache.get(cacheKey);
+      if (cached && cached.content === content) return cached;
+
+      let source = null;
+      let error = null;
+      try {
+        source = JSON.parse(content);
+      } catch (parseError) {
+        error = parseError;
+      }
+      const title = source && typeof source.title === 'string' ? source.title.trim() : '';
+      const head = source && source.head && typeof source.head.text === 'string' ? source.head.text.trim() : '';
+      const meta = {
+        content,
+        source,
+        renderSource: source ? getWaveRenderSource(source) : null,
+        title: title || head,
+        description: source ? getGlobalDescribeOldValue(source) : '',
+        error
+      };
+      waveDocumentMetaCache.set(cacheKey, meta);
+      return meta;
+    }
+
     function getWaveTitleFromJson(text) {
       try {
         const parsed = JSON.parse(text);
@@ -7846,27 +7924,38 @@ ${lines.join('\n')}`;
 
     function getSavedTagTitle(tag) {
       if (!tag) return '';
-      if (tag.name === editingWaveDocumentName) {
-        const pendingTitle = getWaveTitleFromJson(editor.value || '');
-        if (pendingTitle) return pendingTitle;
-      }
-      return getWaveTitleFromJson(tag.content) || tag.name || '未命名波形图';
+      return getWaveDocumentMeta(tag, true).title || tag.name || '未命名波形图';
     }
 
     function getWaveDocumentDescription(tag) {
       if (!tag || !tag.content) return '';
-      if (tag.name === editingWaveDocumentName) {
-        try {
-          return getGlobalDescribeOldValue(JSON.parse(editor.value || ''));
-        } catch (_e) {
-          // Fall back to the last saved document below.
-        }
+      const meta = getWaveDocumentMeta(tag, true);
+      if (!meta.error) return meta.description;
+      return getWaveDocumentMeta(tag, false).description;
+    }
+
+    function refreshWaveDocumentTitle(documentName, force) {
+      if (!documentName || !navTreeState) return false;
+      const tag = getSavedTagByName(documentName);
+      if (!tag) return false;
+      const meta = getWaveDocumentMeta(tag, true);
+      if (meta.error) return false;
+      const title = meta.title || tag.name || '未命名波形图';
+      if (!force && navDocumentTitleCache.get(documentName) === title) return false;
+      navDocumentTitleCache.set(documentName, title);
+      const parent = findNavDocumentParent(navTreeState, documentName);
+      const displayName = getNavDocumentDisplayName(tag, parent);
+      if (navTreeEl) {
+        navTreeEl.querySelectorAll('.nav-tree-document-label').forEach((button) => {
+          if (button.dataset.documentName !== documentName) return;
+          button.textContent = displayName;
+          button.title = '打开波形图: ' + displayName;
+        });
       }
-      try {
-        return getGlobalDescribeOldValue(JSON.parse(tag.content));
-      } catch (_e) {
-        return '';
-      }
+      const cardEntry = waveLibraryCardCache.get(documentName);
+      if (cardEntry) cardEntry.title.textContent = displayName;
+      vwdDebugLog('performance', { phase: 'title-refresh-local', documentName, title });
+      return true;
     }
 
     function scheduleNavTitleRefresh() {
@@ -7874,12 +7963,13 @@ ${lines.join('\n')}`;
       if (navTitleRefreshTimer !== null) clearTimeout(navTitleRefreshTimer);
       navTitleRefreshTimer = setTimeout(() => {
         navTitleRefreshTimer = null;
-        renderNavTree();
-        vwdDebugLog('wave-library', { phase: 'refresh-title', documentName: editingWaveDocumentName, title: getCurrentWaveTitle() });
-      }, 180);
+        refreshWaveDocumentTitle(editingWaveDocumentName, false);
+      }, 350);
     }
 
     function getCurrentWaveTitle() {
+      const tag = getSavedTagByName(editingWaveDocumentName);
+      if (tag) return getWaveDocumentMeta(tag, true).title || activeTagName || '';
       return getWaveTitleFromJson(editor.value || '') || activeTagName || '';
     }
 
@@ -7905,12 +7995,23 @@ ${lines.join('\n')}`;
       }
     }
 
-    function persistSavedTags() {
+    function flushPersistSavedTags() {
+      clearTimeout(savedTagsPersistTimer);
+      savedTagsPersistTimer = null;
       try {
         localStorage.setItem(WAVE_DOCUMENTS_KEY, JSON.stringify(savedTags));
       } catch (e) { /* quota / private mode */ }
       scheduleWaveLibraryServerSave();
-      scheduleWaveLibraryServerSave();
+    }
+
+    function persistSavedTags(options) {
+      const opts = options || {};
+      clearTimeout(savedTagsPersistTimer);
+      if (opts.immediate) {
+        flushPersistSavedTags();
+        return;
+      }
+      savedTagsPersistTimer = setTimeout(flushPersistSavedTags, SAVED_TAGS_PERSIST_DEBOUNCE_MS);
     }
 
     function getWaveLibraryBundle() {
@@ -7962,6 +8063,7 @@ ${lines.join('\n')}`;
       applyingWaveLibraryBundle = true;
       try {
         savedTags = bundle.documents.map(normalizeSavedTag).filter(Boolean);
+        rebuildSavedTagIndex();
         persistSavedTags();
         saveNavCustomTreeToStorage(
           Array.isArray(bundle.directories) ? bundle.directories : [],
@@ -7972,7 +8074,7 @@ ${lines.join('\n')}`;
         editingWaveDocumentName = null;
         activeTagName = null;
         const preferredName = bundle.activeDocumentName || (savedTags[0] && savedTags[0].name);
-        const preferred = savedTags.find((tag) => tag.name === preferredName) || savedTags[0];
+        const preferred = getSavedTagByName(preferredName) || savedTags[0];
         if (preferred) {
           editor.value = preferred.content;
           setEditorHistoryBaseline(editor.value);
@@ -8103,7 +8205,8 @@ ${lines.join('\n')}`;
       return savedTags.findIndex(t => t.name === trimmed);
     }
 
-    function upsertSavedTag(name, snapshot) {
+    function upsertSavedTag(name, snapshot, options) {
+      const opts = options || {};
       const trimmed = String(name || '').trim();
       if (!trimmed) return false;
       const entry = Object.assign({ name: trimmed }, snapshot);
@@ -8111,9 +8214,10 @@ ${lines.join('\n')}`;
       if (idx >= 0) savedTags[idx] = entry;
       else savedTags.push(entry);
       savedTags.sort((a, b) => new Date(b.savedAt) - new Date(a.savedAt));
+      rebuildSavedTagIndex();
       persistSavedTags();
       activeTagName = trimmed;
-      renderSavedTagsList();
+      if (!opts.skipListRefresh) renderSavedTagsList();
       return true;
     }
 
@@ -8141,6 +8245,7 @@ ${lines.join('\n')}`;
     function restoreWaveLibrarySnapshot(snapshot) {
       if (!snapshot) return false;
       savedTags = (snapshot.savedTags || []).map(normalizeSavedTag).filter(Boolean);
+      rebuildSavedTagIndex();
       persistSavedTags();
       saveNavCustomTreeToStorage(snapshot.customNodes || [], snapshot.rootDocuments || []);
 
@@ -8177,6 +8282,7 @@ ${lines.join('\n')}`;
       const idx = findSavedTagIndex(name);
       if (idx < 0) return false;
       savedTags.splice(idx, 1);
+      rebuildSavedTagIndex();
       persistSavedTags();
       if (activeTagName === name) activeTagName = null;
       if (editingWaveDocumentName === name) editingWaveDocumentName = null;
@@ -8241,7 +8347,7 @@ ${lines.join('\n')}`;
     }
 
     function requestLoadTag(name) {
-      const tag = savedTags.find(t => t.name === name);
+      const tag = getSavedTagByName(name);
       if (!tag) return;
       openWaveDocumentForEditing(name);
     }
@@ -8267,7 +8373,7 @@ ${lines.join('\n')}`;
 
     function clearActiveTagIfModified() {
       if (!activeTagName) return;
-      const tag = savedTags.find(t => t.name === activeTagName);
+      const tag = getSavedTagByName(activeTagName);
       if (tag && !currentStateMatchesTag(tag)) {
         activeTagName = null;
         renderSavedTagsList();
@@ -8277,12 +8383,10 @@ ${lines.join('\n')}`;
     function saveCurrentWaveDocumentBeforeSwitch() {
       const name = editingWaveDocumentName;
       if (!name) return true;
-      const documentEntry = savedTags.find((item) => item.name === name);
+      const documentEntry = getSavedTagByName(name);
       if (!documentEntry || currentStateMatchesTag(documentEntry)) return true;
-      const saved = upsertSavedTag(name, getCurrentStateSnapshot());
+      const saved = upsertSavedTag(name, getCurrentStateSnapshot(), { skipListRefresh: true });
       if (saved) {
-        renderNavTree();
-        renderWaveLibrary();
         vwdDebugLog('wave-library', { phase: 'auto-save-before-switch', documentName: name });
       }
       return saved;
@@ -8290,9 +8394,9 @@ ${lines.join('\n')}`;
 
     function persistEditingWaveDocumentOnExit() {
       const name = editingWaveDocumentName;
-      const documentEntry = name && savedTags.find((item) => item.name === name);
+      const documentEntry = name && getSavedTagByName(name);
       if (!documentEntry || currentStateMatchesTag(documentEntry)) return;
-      upsertSavedTag(name, getCurrentStateSnapshot());
+      upsertSavedTag(name, getCurrentStateSnapshot(), { skipListRefresh: true });
       vwdDebugLog('wave-library', { phase: 'auto-save-on-exit', documentName: name });
     }
 
@@ -8313,12 +8417,12 @@ ${lines.join('\n')}`;
       selectNavDocumentInTree(name);
       loadSavedTag(name);
       focusWaveDocument(name);
-      setStatus(true, '正在编辑波形图: ' + getSavedTagTitle(savedTags.find((item) => item.name === name) || { name: name }));
+      setStatus(true, '正在编辑波形图: ' + getSavedTagTitle(getSavedTagByName(name) || { name: name, content: '{}' }));
       vwdDebugLog('wave-library', { phase: 'open-for-edit', documentName: name });
     }
 
     function loadSavedTag(name) {
-      const tag = savedTags.find(t => t.name === name);
+      const tag = getSavedTagByName(name);
       if (!tag) return;
 
       undoStack = [];
@@ -8342,7 +8446,8 @@ ${lines.join('\n')}`;
 
       activeTagName = name;
       renderSavedTagsList();
-      renderWaveLibrary();
+      refreshWaveDocumentCard(name);
+      refreshWaveDocumentTitle(name, true);
       updateUndoRedoButtons();
       setStatus(true, '已打开波形图: ' + getSavedTagTitle(tag));
     }
@@ -8429,7 +8534,7 @@ ${lines.join('\n')}`;
       activeTagName = name;
       if (navTreeState) rebuildNavTreeStateFromJson(editor.value || '');
       closeSaveTagDialog();
-      const savedDocument = savedTags.find((item) => item.name === name);
+      const savedDocument = getSavedTagByName(name);
       setStatus(true, '已保存波形图: ' + getSavedTagTitle(savedDocument || { name: name }));
       return true;
     }
@@ -8488,6 +8593,7 @@ ${lines.join('\n')}`;
 
     function initSavedTags() {
       savedTags = loadSavedTagsFromStorage();
+      rebuildSavedTagIndex();
       renderSavedTagsList();
     }
 
@@ -8654,6 +8760,13 @@ ${lines.join('\n')}`;
         pendingRenderText = jsonText;
         return false;
       }
+      if (lastRenderedWaveText === jsonText && waveContainer.querySelector('svg')) {
+        syncHscaleInputFromJson(jsonText, lastRenderedWaveSource);
+        applyNavVisibilityToWave();
+        renderConnectionEdgeList(lastRenderedWaveSource);
+        vwdDebugLog('performance', { phase: 'active-render-cache-hit', textLength: jsonText.length });
+        return true;
+      }
       isRenderingWaveform = true;
       vwdMark('renderWaveform:start');
 
@@ -8703,11 +8816,13 @@ ${lines.join('\n')}`;
             setStatus(false, '渲染错误');
             return false;
           }
-          syncHscaleInputFromJson(jsonText);
-          attachWaveInteractivity(jsonText);
+          syncHscaleInputFromJson(jsonText, source);
+          attachWaveInteractivity(jsonText, source);
           applyNavVisibilityToWave();
-          renderConnectionEdgeList();
+          renderConnectionEdgeList(source);
           fitWaveSvgToContent();
+          lastRenderedWaveText = jsonText;
+          lastRenderedWaveSource = source;
           vwdMark('renderWaveform:done');
           if (!isInsertingEdge && !waveformRenderingBusy) {
             setStatus(true, '波形已更新');
@@ -8731,7 +8846,8 @@ ${lines.join('\n')}`;
     function debouncedRender() {
       clearTimeout(renderTimer);
       renderTimer = setTimeout(() => {
-        renderWaveform(editor.value);
+        renderTimer = null;
+        scheduleRenderWaveform(editor.value);
       }, 300);
     }
 
@@ -9037,104 +9153,286 @@ ${lines.join('\n')}`;
       vwdDebugLog('wave-library', { phase: 'open-description-editor', documentName: tag.name });
     }
 
-    function renderWaveLibrary() {
-      if (!waveLibraryContainer) return;
-      waveLibraryContainer.innerHTML = '';
-      if (!isWaveDromReady() || !navTreeState) return;
+    function createWaveDocumentCard(documentName) {
+      const sequence = ++waveLibraryCardSequence;
+      const card = document.createElement('article');
+      card.className = 'wave-document-card';
+      card.dataset.documentName = documentName;
 
-      const selected = getNavNodeById(navTreeState, selectedNavNodeId) || navTreeState;
-      const documentNames = collectNavDocuments(selected, []);
-      documentNames.forEach((documentName, index) => {
-        try {
-          const tag = savedTags.find((item) => item.name === documentName);
-          if (!tag) return;
-        const card = document.createElement('article');
-        card.className = 'wave-document-card';
-        card.dataset.documentName = tag.name;
-        if (tag.name === editingWaveDocumentName) card.classList.add('focused');
-
-        const header = document.createElement('div');
-        header.className = 'wave-document-card-header';
-        const title = document.createElement('h2');
-        title.textContent = getNavDocumentDisplayName(tag, findNavDocumentParent(navTreeState, tag.name));
-        const openButton = document.createElement('button');
-        openButton.type = 'button';
-        openButton.className = 'wave-document-open';
-        openButton.title = '打开此波形图进行编辑';
-        openButton.textContent = '打开';
-        openButton.addEventListener('click', () => openWaveDocumentForEditing(tag.name));
-        const deleteButton = document.createElement('button');
-        deleteButton.type = 'button';
-        deleteButton.className = 'wave-document-delete';
-        deleteButton.title = '删除波形图';
-        deleteButton.textContent = '×';
-        deleteButton.addEventListener('click', () => {
-          if (deleteSavedTag(tag.name)) {
-            setStatus(true, '已删除波形图: ' + getSavedTagTitle(tag));
-            vwdDebugLog('wave-library', { phase: 'delete-document', documentName: tag.name });
-          }
-        });
-        header.appendChild(title);
-        header.appendChild(openButton);
-        header.appendChild(deleteButton);
-
-        const canvas = document.createElement('div');
-        canvas.className = 'wave-document-canvas';
-        const prefix = 'wave-library-display-' + index + '-';
-        const display = document.createElement('div');
-        display.id = prefix + '0';
-        canvas.appendChild(display);
-        card.appendChild(header);
-        card.appendChild(canvas);
-        waveLibraryContainer.appendChild(card);
-
-        const description = document.createElement('div');
-        const descriptionText = getWaveDocumentDescription(tag);
-        const isEditingDocument = tag.name === editingWaveDocumentName;
-        if (!isEditingDocument) {
-          canvas.addEventListener('pointerdown', () => exitWavePaintMode('other-wave-document'));
-        }
-        description.className = 'wave-document-description'
-          + (descriptionText ? '' : ' empty')
-          + (isEditingDocument ? ' editable' : '');
-        description.textContent = descriptionText || '暂无波形图说明';
-        if (isEditingDocument) {
-          description.title = '点击编辑波形图说明';
-          description.addEventListener('click', () => startWaveDocumentDescriptionEdit(tag, description));
-        }
-
-        if (isEditingDocument) {
-          canvas.innerHTML = '';
-          canvas.appendChild(waveContainer);
-          canvas.appendChild(description);
-          vwdDebugLog('wave-library', { phase: 'mount-editor', documentName: tag.name });
-          return;
-        }
-        canvas.appendChild(description);
-
-          try {
-            WaveDrom.RenderWaveForm(0, getWaveRenderSource(JSON.parse(tag.content)), prefix, false);
-          } catch (error) {
-            showWaveError(canvas, '波形图渲染失败: ' + (error && error.message ? error.message : '无效 JSON'));
-            vwdDebugLog('wave-library', { phase: 'document-render-error', documentName: tag.name, message: error && error.message ? error.message : String(error) });
-          }
-        } catch (error) {
-          const failedCard = document.createElement('article');
-          failedCard.className = 'wave-document-card wave-document-card-error';
-          const failedTitle = document.createElement('h2');
-          failedTitle.textContent = documentName || '未命名波形图';
-          const failedMessage = document.createElement('div');
-          failedMessage.className = 'wave-error';
-          failedMessage.textContent = '波形图加载失败: ' + (error && error.message ? error.message : '未知错误');
-          failedCard.appendChild(failedTitle);
-          failedCard.appendChild(failedMessage);
-          waveLibraryContainer.appendChild(failedCard);
-          vwdDebugLog('wave-library', { phase: 'document-card-error', documentName, message: error && error.message ? error.message : String(error) });
+      const header = document.createElement('div');
+      header.className = 'wave-document-card-header';
+      const title = document.createElement('h2');
+      const openButton = document.createElement('button');
+      openButton.type = 'button';
+      openButton.className = 'wave-document-open';
+      openButton.title = '打开此波形图进行编辑';
+      openButton.textContent = '打开';
+      openButton.addEventListener('click', () => openWaveDocumentForEditing(documentName));
+      const deleteButton = document.createElement('button');
+      deleteButton.type = 'button';
+      deleteButton.className = 'wave-document-delete';
+      deleteButton.title = '删除波形图';
+      deleteButton.textContent = '×';
+      deleteButton.addEventListener('click', () => {
+        const tag = getSavedTagByName(documentName);
+        const titleText = getSavedTagTitle(tag || { name: documentName, content: '{}' });
+        if (deleteSavedTag(documentName)) {
+          setStatus(true, '已删除波形图: ' + titleText);
+          vwdDebugLog('wave-library', { phase: 'delete-document', documentName });
         }
       });
+      header.appendChild(title);
+      header.appendChild(openButton);
+      header.appendChild(deleteButton);
+
+      const canvas = document.createElement('div');
+      canvas.className = 'wave-document-canvas';
+      canvas.addEventListener('pointerdown', () => {
+        if (documentName !== editingWaveDocumentName) exitWavePaintMode('other-wave-document');
+      });
+      const previewHost = document.createElement('div');
+      previewHost.className = 'wave-document-preview';
+      const previewDisplay = document.createElement('div');
+      const prefix = 'wave-library-display-' + sequence + '-';
+      previewDisplay.id = prefix + '0';
+      previewHost.appendChild(previewDisplay);
+
+      const description = document.createElement('div');
+      description.className = 'wave-document-description';
+      description.addEventListener('click', () => {
+        if (documentName !== editingWaveDocumentName) return;
+        const tag = getSavedTagByName(documentName);
+        if (tag) startWaveDocumentDescriptionEdit(tag, description);
+      });
+
+      canvas.appendChild(previewHost);
+      canvas.appendChild(description);
+      card.appendChild(header);
+      card.appendChild(canvas);
+
+      return {
+        documentName,
+        card,
+        title,
+        canvas,
+        previewHost,
+        previewDisplay,
+        description,
+        prefix,
+        renderedContent: null,
+        queuedContent: null,
+        previewQueued: false
+      };
+    }
+
+    function ensureWavePreviewDisplay(entry) {
+      if (entry.previewDisplay.parentNode !== entry.previewHost) {
+        entry.previewHost.replaceChildren(entry.previewDisplay);
+      }
+      if (entry.previewDisplay.id !== entry.prefix + '0') {
+        entry.previewDisplay.id = entry.prefix + '0';
+      }
+      return entry.previewDisplay;
+    }
+
+    function renderWaveDocumentPreview(entry, tag) {
+      if (!entry || !tag || tag.name === editingWaveDocumentName || !entry.card.isConnected) return false;
+      const display = ensureWavePreviewDisplay(entry);
+      if (entry.renderedContent === tag.content
+          && (display.querySelector('svg') || display.querySelector('.wave-error'))) {
+        return true;
+      }
+
+      display.innerHTML = '';
+      const meta = getWaveDocumentMeta(tag, false);
+      if (meta.error || !meta.renderSource) {
+        showWaveError(display, '波形图渲染失败: ' + (meta.error && meta.error.message ? meta.error.message : '无效 JSON'));
+        entry.renderedContent = tag.content;
+        return false;
+      }
+      try {
+        WaveDrom.RenderWaveForm(0, meta.renderSource, entry.prefix, false);
+        if (!display.querySelector('svg')) throw new Error('未生成 SVG');
+        entry.renderedContent = tag.content;
+        vwdDebugLog('performance', { phase: 'preview-render', documentName: tag.name, textLength: tag.content.length });
+        return true;
+      } catch (error) {
+        showWaveError(display, '波形图渲染失败: ' + (error && error.message ? error.message : '无效 JSON'));
+        entry.renderedContent = tag.content;
+        vwdDebugLog('wave-library', { phase: 'document-render-error', documentName: tag.name, message: error && error.message ? error.message : String(error) });
+        return false;
+      }
+    }
+
+    function runWaveLibraryPreviewQueue(deadline) {
+      waveLibraryPreviewWorkHandle = null;
+      let processed = 0;
+      while (waveLibraryPreviewQueue.length > 0) {
+        if (processed > 0 && deadline && typeof deadline.timeRemaining === 'function' && deadline.timeRemaining() < 4) break;
+        const entry = waveLibraryPreviewQueue.shift();
+        entry.previewQueued = false;
+        const tag = getSavedTagByName(entry.documentName);
+        if (tag && entry.queuedContent === tag.content) renderWaveDocumentPreview(entry, tag);
+        processed += 1;
+        if (!deadline && processed >= 1) break;
+      }
+      if (waveLibraryPreviewQueue.length > 0) scheduleWaveLibraryPreviewWork();
+    }
+
+    function scheduleWaveLibraryPreviewWork() {
+      if (waveLibraryPreviewWorkHandle !== null || waveLibraryPreviewQueue.length === 0) return;
+      if (typeof window.requestIdleCallback === 'function') {
+        const id = window.requestIdleCallback(runWaveLibraryPreviewQueue, { timeout: 250 });
+        waveLibraryPreviewWorkHandle = { kind: 'idle', id };
+      } else {
+        const id = setTimeout(() => runWaveLibraryPreviewQueue(null), 16);
+        waveLibraryPreviewWorkHandle = { kind: 'timeout', id };
+      }
+    }
+
+    function queueWaveLibraryPreview(entry, tag, priority) {
+      if (!entry || !tag || tag.name === editingWaveDocumentName) return;
+      entry.queuedContent = tag.content;
+      if (!entry.previewQueued) {
+        entry.previewQueued = true;
+        if (priority) waveLibraryPreviewQueue.unshift(entry);
+        else waveLibraryPreviewQueue.push(entry);
+      }
+      scheduleWaveLibraryPreviewWork();
+    }
+
+    function ensureWaveLibraryPreviewObserver() {
+      if (waveLibraryPreviewObserver || typeof window.IntersectionObserver !== 'function') {
+        return waveLibraryPreviewObserver;
+      }
+      waveLibraryPreviewObserver = new IntersectionObserver((items) => {
+        items.forEach((item) => {
+          if (!item.isIntersecting) return;
+          const entry = waveLibraryCardCache.get(item.target.dataset.documentName || '');
+          const tag = entry && getSavedTagByName(entry.documentName);
+          if (entry && tag) queueWaveLibraryPreview(entry, tag, true);
+        });
+      }, { root: null, rootMargin: WAVE_PREVIEW_ROOT_MARGIN, threshold: 0 });
+      return waveLibraryPreviewObserver;
+    }
+
+    function snapshotActiveWavePreview(nextActiveName) {
+      const currentCard = waveContainer.closest('.wave-document-card');
+      const currentName = currentCard && currentCard.dataset.documentName;
+      if (!currentName || currentName === nextActiveName) return;
+      const entry = waveLibraryCardCache.get(currentName);
+      const tag = getSavedTagByName(currentName);
+      if (!entry) return;
+
+      const activeDisplay = waveContainer.querySelector('#wave-display-0');
+      const canClone = tag && activeDisplay && lastRenderedWaveText === tag.content;
+      const clones = canClone
+        ? Array.from(activeDisplay.childNodes).map((node) => node.cloneNode(true))
+        : [];
+      const display = ensureWavePreviewDisplay(entry);
+      display.replaceChildren(...clones);
+      entry.renderedContent = canClone ? tag.content : null;
+      if (!canClone && tag) queueWaveLibraryPreview(entry, tag, true);
+    }
+
+    function mountWaveContainerOutsideLibrary() {
+      if (!wavePanel || waveContainer.parentNode === wavePanel) return;
+      wavePanel.insertBefore(waveContainer, waveLibraryContainer);
+    }
+
+    function updateWaveDocumentCard(entry, tag, isEditingDocument) {
+      const parent = findNavDocumentParent(navTreeState, tag.name);
+      entry.title.textContent = getNavDocumentDisplayName(tag, parent);
+      entry.card.classList.toggle('focused', isEditingDocument);
+
+      const descriptionText = getWaveDocumentDescription(tag);
+      if (!entry.description.querySelector('textarea')) {
+        entry.description.textContent = descriptionText || '暂无波形图说明';
+      }
+      entry.description.classList.toggle('empty', !descriptionText);
+      entry.description.classList.toggle('editable', isEditingDocument);
+      entry.description.title = isEditingDocument ? '点击编辑波形图说明' : '';
+
+      const observer = ensureWaveLibraryPreviewObserver();
+      if (isEditingDocument) {
+        if (observer) observer.unobserve(entry.card);
+        entry.previewQueued = false;
+        entry.previewHost.replaceChildren(waveContainer);
+        return;
+      }
+
+      ensureWavePreviewDisplay(entry);
+      const contentChanged = entry.renderedContent !== tag.content;
+      if (contentChanged) {
+        entry.previewDisplay.innerHTML = '';
+        entry.renderedContent = null;
+      }
+      if (observer) {
+        if (contentChanged) observer.unobserve(entry.card);
+        observer.observe(entry.card);
+      }
+      else queueWaveLibraryPreview(entry, tag, false);
+    }
+
+    function refreshWaveDocumentCard(documentName) {
+      const entry = waveLibraryCardCache.get(documentName);
+      const tag = getSavedTagByName(documentName);
+      if (!entry || !tag || !entry.card.isConnected) return false;
+      updateWaveDocumentCard(entry, tag, documentName === editingWaveDocumentName);
+      return true;
+    }
+
+    function pruneWaveLibraryCardCache() {
+      waveLibraryCardCache.forEach((entry, name) => {
+        if (savedTagByName.has(name)) return;
+        if (waveLibraryPreviewObserver) waveLibraryPreviewObserver.unobserve(entry.card);
+        entry.card.remove();
+        waveLibraryCardCache.delete(name);
+      });
+      waveLibraryPreviewQueue = waveLibraryPreviewQueue.filter((entry) => savedTagByName.has(entry.documentName));
+    }
+
+    function renderWaveLibrary() {
+      if (!waveLibraryContainer) return;
+      if (!isWaveDromReady() || !navTreeState) {
+        waveLibraryContainer.hidden = true;
+        return;
+      }
+
+      const selected = getNavNodeById(navTreeState, selectedNavNodeId) || navTreeState;
+      const documentNames = collectNavDocuments(selected, []).filter((name) => savedTagByName.has(name));
+      const activeName = documentNames.includes(editingWaveDocumentName) ? editingWaveDocumentName : null;
+      snapshotActiveWavePreview(activeName);
+      if (!activeName) mountWaveContainerOutsideLibrary();
+
+      const entries = documentNames.map((documentName) => {
+        let entry = waveLibraryCardCache.get(documentName);
+        if (!entry) {
+          entry = createWaveDocumentCard(documentName);
+          waveLibraryCardCache.set(documentName, entry);
+        }
+        updateWaveDocumentCard(entry, getSavedTagByName(documentName), documentName === activeName);
+        return entry;
+      });
+
+      entries.forEach((entry, index) => {
+        const current = waveLibraryContainer.children[index];
+        if (current !== entry.card) waveLibraryContainer.insertBefore(entry.card, current || null);
+      });
+      while (waveLibraryContainer.children.length > entries.length) {
+        const extra = waveLibraryContainer.lastElementChild;
+        if (waveLibraryPreviewObserver) waveLibraryPreviewObserver.unobserve(extra);
+        extra.remove();
+      }
+      pruneWaveLibraryCardCache();
 
       waveLibraryContainer.hidden = documentNames.length === 0;
-      vwdDebugLog('wave-library', { phase: 'render', selectedId: selected.id, documentCount: documentNames.length });
+      vwdDebugLog('performance', {
+        phase: 'library-reconcile',
+        selectedId: selected.id,
+        documentCount: documentNames.length,
+        cachedCardCount: waveLibraryCardCache.size
+      });
     }
 
     function renderLegends() {
@@ -9228,6 +9526,7 @@ ${lines.join('\n')}`;
 
     window.addEventListener('beforeunload', () => {
       persistEditingWaveDocumentOnExit();
+      flushPersistSavedTags();
       flushPersistEditorJson();
     });
 

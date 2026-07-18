@@ -1020,6 +1020,8 @@
       background: #fff;
       overflow: hidden;
       scroll-margin-top: 16px;
+      content-visibility: auto;
+      contain-intrinsic-size: auto 260px;
     }
 
     .wave-document-card.focused {
@@ -1087,6 +1089,10 @@
       min-height: 70px;
       padding: 12px;
       overflow: auto;
+    }
+
+    .wave-document-preview {
+      min-height: 44px;
     }
 
     .wave-document-description {
