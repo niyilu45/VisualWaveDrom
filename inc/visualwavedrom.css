@@ -431,6 +431,7 @@
 
     .wave-add-delete-row,
     .wave-copy-row,
+    .wave-selection-clipboard-row,
     .wave-move-row,
     .wave-group-row,
     .wave-mode-delete-row {
@@ -446,10 +447,12 @@
     .wave-add-delete-row .legend-add-btn,
     .wave-add-delete-row .wave-delete-signal-btn,
     .wave-copy-row .wave-copy-signal-btn,
+    .wave-selection-clipboard-row .wave-selection-clipboard-btn,
     .wave-move-row .wave-move-signal-btn,
     .wave-group-row .wave-group-signal-btn,
     .wave-mode-delete-row .wave-edit-mode-btn,
     .wave-mode-delete-row .wave-paint-mode-btn,
+    .wave-mode-delete-row .wave-text-edit-mode-btn,
     .wave-mode-delete-row .wave-delete-col-btn {
       flex: 1 1 0;
       min-width: 0;
@@ -463,6 +466,7 @@
     .wave-add-delete-row .legend-add-btn svg,
     .wave-add-delete-row .wave-delete-signal-btn svg,
     .wave-copy-row .wave-copy-signal-btn svg,
+    .wave-selection-clipboard-row .wave-selection-clipboard-btn svg,
     .wave-move-row .wave-move-signal-btn svg,
     .wave-group-row .wave-group-signal-btn svg {
       width: 16px;
@@ -470,6 +474,7 @@
     }
 
     .wave-copy-row .wave-copy-signal-btn,
+    .wave-selection-clipboard-row .wave-selection-clipboard-btn,
     .wave-move-row .wave-move-signal-btn,
     .wave-group-row .wave-group-signal-btn {
       border-radius: 8px;
@@ -479,6 +484,7 @@
     }
 
     .wave-copy-row .wave-copy-signal-btn:not(:disabled):hover,
+    .wave-selection-clipboard-row .wave-selection-clipboard-btn:not(:disabled):hover,
     .wave-move-row .wave-move-signal-btn:not(:disabled):hover,
     .wave-group-row .wave-group-signal-btn:not(:disabled):hover {
       border-color: var(--accent);
@@ -493,7 +499,8 @@
     }
 
     .wave-edit-mode-btn,
-    .wave-paint-mode-btn {
+    .wave-paint-mode-btn,
+    .wave-text-edit-mode-btn {
       border-radius: 8px;
       justify-content: center;
       font-weight: 600;
@@ -506,12 +513,14 @@
       flex-basis: calc(50% - 3px);
     }
 
+    .wave-mode-delete-row .wave-text-edit-mode-btn,
     .wave-mode-delete-row .wave-delete-col-btn {
       flex-basis: 100%;
     }
 
     .wave-edit-mode-btn svg,
-    .wave-paint-mode-btn svg {
+    .wave-paint-mode-btn svg,
+    .wave-text-edit-mode-btn svg {
       width: 16px;
       height: 16px;
       flex-shrink: 0;
@@ -546,6 +555,22 @@
     }
 
     .wave-paint-mode-btn:hover {
+      filter: brightness(1.1);
+    }
+
+    .wave-text-edit-mode-btn {
+      background: var(--surface-2);
+      border-color: var(--border);
+      color: var(--text-muted);
+    }
+
+    .wave-text-edit-mode-btn.active {
+      background: #0f766e;
+      border-color: #14b8a6;
+      color: #fff;
+    }
+
+    .wave-text-edit-mode-btn:not(:disabled):hover {
       filter: brightness(1.1);
     }
 
@@ -923,11 +948,13 @@
 
     .wave-edge-interactive {
       cursor: default;
+      pointer-events: none !important;
     }
 
     .app.connection-select-mode .wave-edge-interactive,
     .app.connection-select-mode .wave-edge-hit-target {
       cursor: pointer;
+      pointer-events: stroke !important;
     }
 
     .app.connection-add-mode .wave-edge-interactive,
@@ -948,7 +975,7 @@
       fill: none;
       stroke: transparent;
       stroke-width: 12;
-      pointer-events: stroke;
+      pointer-events: none !important;
     }
 
     @keyframes waveEdgeLabelBlink {
@@ -1116,7 +1143,7 @@
       font-style: italic;
     }
 
-    .wave-document-description.editable:hover {
+    .app.text-edit-mode .wave-document-description.editable:hover {
       border-color: #60a5fa;
       background: #f1f7ff;
       cursor: text;
@@ -1291,6 +1318,11 @@
       display: flex;
       flex-direction: column;
       gap: 12px;
+    }
+
+    .modal-field-label {
+      font-size: 0.8125rem;
+      color: var(--text);
     }
 
     .modal-radio {
@@ -1855,15 +1887,26 @@
       border-top: 0;
     }
 
-    .wave-lane-interactive text.info,
-    .wave-lane-interactive .wave-name-click-zone,
-    .wave-lane-interactive .wave-data-text,
-    .wave-lane-interactive .wave-data-click-zone,
-    .wave-lane-interactive .wave-describe-text,
-    .wave-group-label-hit,
-    .wave-global-describe-text,
-    .wave-headfoot-text {
+    .app.text-edit-mode .wave-lane-interactive text.info,
+    .app.text-edit-mode .wave-lane-interactive .wave-name-click-zone,
+    .app.text-edit-mode .wave-lane-interactive .wave-data-text,
+    .app.text-edit-mode .wave-lane-interactive .wave-data-click-zone,
+    .app.text-edit-mode .wave-lane-interactive .wave-describe-text,
+    .app.text-edit-mode .wave-group-label-hit,
+    .app.text-edit-mode .wave-global-describe-text,
+    .app.text-edit-mode .wave-headfoot-text,
+    .app.text-edit-mode .wave-edge-label-text {
       cursor: text;
+    }
+
+    .app.text-edit-mode .wave-edge-interactive,
+    .app.text-edit-mode .wave-edge-interactive *,
+    .app.text-edit-mode .wave-edge-hit-target {
+      pointer-events: none !important;
+    }
+
+    .app.text-edit-mode .wave-edge-label-text {
+      pointer-events: all;
     }
 
     .wave-group-label-hit {
@@ -1969,16 +2012,19 @@
       .menu-btn .shortcut { display: none; }
       .wave-add-delete-row,
       .wave-copy-row,
+      .wave-selection-clipboard-row,
       .wave-move-row,
       .wave-group-row,
       .wave-mode-delete-row { gap: 4px; }
       .wave-add-delete-row .legend-add-btn,
       .wave-add-delete-row .wave-delete-signal-btn,
       .wave-copy-row .wave-copy-signal-btn,
+      .wave-selection-clipboard-row .wave-selection-clipboard-btn,
       .wave-move-row .wave-move-signal-btn,
       .wave-group-row .wave-group-signal-btn,
       .wave-mode-delete-row .wave-edit-mode-btn,
       .wave-mode-delete-row .wave-paint-mode-btn,
+      .wave-mode-delete-row .wave-text-edit-mode-btn,
       .wave-mode-delete-row .wave-delete-col-btn {
         padding: 7px 4px;
         font-size: 0.6875rem;
@@ -1987,10 +2033,12 @@
       .wave-add-delete-row .legend-add-btn svg,
       .wave-add-delete-row .wave-delete-signal-btn svg,
       .wave-copy-row .wave-copy-signal-btn svg,
+      .wave-selection-clipboard-row .wave-selection-clipboard-btn svg,
       .wave-move-row .wave-move-signal-btn svg,
       .wave-group-row .wave-group-signal-btn svg,
       .wave-mode-delete-row .wave-edit-mode-btn svg,
       .wave-mode-delete-row .wave-paint-mode-btn svg,
+      .wave-mode-delete-row .wave-text-edit-mode-btn svg,
       .wave-mode-delete-row .wave-delete-col-btn svg {
         width: 14px;
         height: 14px;

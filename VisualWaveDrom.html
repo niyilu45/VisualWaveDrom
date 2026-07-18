@@ -6,7 +6,7 @@
   <title>VisualWaveDrom</title>
   <script src="inc/skins/default.js?v=20260712"></script>
   <script src="inc/wavedrom.min.js?v=20260712"></script>
-  <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260718-multi-wave-performance">
+  <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260719-json-toolbar-v21">
 </head>
 <body>
   <div class="app" id="app">
@@ -24,10 +24,10 @@
             <span>新增波形图</span>
           </button>
           <div class="nav-order-row">
-            <button class="menu-btn nav-btn" id="btn-nav-move-up" type="button" title="在当前标题下上移选中项" disabled>
+            <button class="menu-btn nav-btn" id="btn-nav-move-up" type="button" title="输入数量后，在当前标题下上移选中项" disabled>
               <span>上移</span>
             </button>
-            <button class="menu-btn nav-btn" id="btn-nav-move-down" type="button" title="在当前标题下下移选中项" disabled>
+            <button class="menu-btn nav-btn" id="btn-nav-move-down" type="button" title="输入数量后，在当前标题下下移选中项" disabled>
               <span>下移</span>
             </button>
           </div>
@@ -70,9 +70,6 @@
         </button>
         <button class="menu-btn" id="btn-save-wave-library" type="button" title="保存完整波形库 JSON 文件">
           <span id="save-wave-library-label">保存波形库</span>
-        </button>
-        <button class="menu-btn" id="btn-change-wave-library" type="button" title="更换当前波形库文件" hidden>
-          <span>更换波形库</span>
         </button>
         <input type="file" id="wave-library-import-input" accept="application/json,.json" hidden>
         <button class="menu-btn" id="btn-reading-mode" title="阅读模式">
@@ -136,11 +133,21 @@
             复制行
           </button>
         </div>
-        <div class="menu-control-row wave-move-count-row">
-          <label class="menu-control-label" for="input-signal-move-count">行移动数</label>
-          <input type="number" id="input-signal-move-count" class="menu-control-input"
-            min="1" step="1" value="1" inputmode="numeric"
-            title="设置每次行上移或行下移的行数，默认为 1">
+        <div class="wave-selection-clipboard-row">
+          <button class="menu-btn wave-selection-clipboard-btn" id="btn-copy-wave-selection" type="button" disabled aria-keyshortcuts="Control+C Meta+C" title="请先点击或拖动选择波形格 (Ctrl+C)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <rect x="9" y="9" width="12" height="12" rx="2"/>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+            </svg>
+            复制波形
+          </button>
+          <button class="menu-btn wave-selection-clipboard-btn" id="btn-paste-wave-selection" type="button" disabled aria-keyshortcuts="Control+V Meta+V" title="请先复制波形 (Ctrl+C)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path d="M9 5h6M9 3h6a2 2 0 0 1 2 2v2H7V5a2 2 0 0 1 2-2z"/>
+              <path d="M7 6H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-2"/>
+            </svg>
+            粘贴波形
+          </button>
         </div>
         <div class="wave-move-row">
           <button class="menu-btn wave-move-signal-btn" id="btn-move-signal-up" type="button" disabled title="请先在波形区点击选中一行">
@@ -180,7 +187,15 @@
             </svg>
             <span class="wave-paint-mode-label">&#30011;&#31508;&#27169;&#24335;</span>
           </button>
-          <button class="menu-btn wave-delete-col-btn" id="btn-delete-wave-col" type="button" disabled title="请先在波形区点击选中一行">
+          <button type="button" class="menu-btn wave-text-edit-mode-btn" id="btn-wave-text-edit-mode" aria-pressed="false" aria-label="&#25991;&#26412;&#32534;&#36753;&#27169;&#24335;" title="&#24320;&#21551;&#21518;&#65292;&#21333;&#20987;&#27874;&#24418;&#20013;&#30340;&#25991;&#26412;&#36827;&#34892;&#32534;&#36753;">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path d="M4 7V4h16v3"/>
+              <path d="M9 20h6"/>
+              <path d="M12 4v16"/>
+            </svg>
+            <span class="wave-text-edit-mode-label">&#25991;&#26412;&#32534;&#36753;</span>
+          </button>
+          <button class="menu-btn wave-delete-col-btn" id="btn-delete-wave-col" type="button" disabled aria-keyshortcuts="Delete" title="请先在波形区点击选中一行">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
               <polyline points="3 6 5 6 21 6"/>
               <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
@@ -239,10 +254,6 @@
             <div class="connection-label-edit-hint" id="connection-label-edit-hint">新增时先填写标签；选择连接线后可修改</div>
           </div>
         </div>
-        <div class="connection-edge-section">
-          <div class="connection-edge-title">当前连接</div>
-          <div class="connection-edge-list" id="connection-edge-list"></div>
-        </div>
       </div>
 
     </aside>
@@ -264,14 +275,6 @@
         <div class="editor-header">
           <span>WaveDrom JSON</span>
           <div class="editor-header-actions">
-            <button type="button" class="editor-copy-btn" id="btn-save-tag" title="保存当前波形图">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
-                <polyline points="17 21 17 13 7 13 7 21"/>
-                <polyline points="7 3 7 8 15 8"/>
-              </svg>
-              <span>保存波形</span>
-            </button>
             <button type="button" class="editor-copy-btn" id="btn-format-json" title="格式化并对齐当前 JSON">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                 <line x1="8" y1="6" x2="21" y2="6"/>
@@ -286,27 +289,11 @@
             <button type="button" class="editor-copy-btn" id="btn-export-json" title="导出当前波形 JSON 文件">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                <polyline points="7 10 12 15 17 10"/>
-                <line x1="12" y1="15" x2="12" y2="3"/>
-              </svg>
-              <span>导出</span>
-            </button>
-            <button type="button" class="editor-copy-btn" id="btn-import-json" title="导入本地波形 JSON 文件">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
                 <polyline points="17 8 12 3 7 8"/>
                 <line x1="12" y1="3" x2="12" y2="15"/>
               </svg>
-              <span>导入</span>
+              <span>导出</span>
             </button>
-            <button type="button" class="editor-copy-btn" id="btn-copy-json" title="复制全部 JSON 到剪贴板">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
-                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-              </svg>
-              <span class="btn-copy-label">复制 JSON</span>
-            </button>
-            <input type="file" id="json-import-input" accept="application/json,.json" hidden>
             <div class="editor-status">
               <span class="status-dot" id="status-dot"></span>
               <span id="status-text">就绪</span>
@@ -319,42 +306,6 @@
         </div>
       </div>
     </main>
-  </div>
-
-  <!-- Save tag modal -->
-  <div class="modal-overlay" id="tag-save-modal" hidden>
-    <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="tag-save-modal-title">
-      <div class="modal-header" id="tag-save-modal-title">保存波形图</div>
-      <div class="modal-body" id="tag-save-form">
-        <label class="modal-radio">
-          <div class="modal-radio-row">
-            <input type="radio" name="tag-save-mode" id="tag-mode-overwrite" value="overwrite">
-            <span>覆盖已有波形图</span>
-          </div>
-          <select class="modal-select modal-radio-control" id="tag-overwrite-select" disabled></select>
-        </label>
-        <label class="modal-radio">
-          <div class="modal-radio-row">
-            <input type="radio" name="tag-save-mode" id="tag-mode-new" value="new" checked>
-            <span>新增波形图</span>
-          </div>
-          <input type="text" class="modal-input modal-radio-control" id="tag-new-name-input"
-            placeholder="输入波形图名称" spellcheck="false" autocomplete="off">
-        </label>
-        <div class="modal-hint" id="tag-save-hint"></div>
-      </div>
-      <div class="modal-body modal-duplicate-confirm" id="tag-save-duplicate" hidden>
-        <p id="tag-save-duplicate-msg">波形图名称已存在，是否覆盖？</p>
-      </div>
-      <div class="modal-footer" id="tag-save-footer">
-        <button type="button" class="modal-btn" id="tag-save-cancel">取消</button>
-        <button type="button" class="modal-btn modal-btn-primary" id="tag-save-confirm">保存</button>
-      </div>
-      <div class="modal-footer" id="tag-duplicate-footer" hidden>
-        <button type="button" class="modal-btn" id="tag-duplicate-no">否</button>
-        <button type="button" class="modal-btn modal-btn-primary" id="tag-duplicate-yes">是</button>
-      </div>
-    </div>
   </div>
 
   <!-- Load tag confirm modal -->
@@ -383,6 +334,21 @@
     </div>
   </div>
 
+  <div class="modal-overlay" id="move-distance-modal" hidden>
+    <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="move-distance-modal-title">
+      <div class="modal-header" id="move-distance-modal-title">移动数量</div>
+      <div class="modal-body">
+        <label class="modal-field-label" id="move-distance-label" for="move-distance-input">请输入移动数量</label>
+        <input type="number" class="modal-input" id="move-distance-input" min="1" step="1" value="1" inputmode="numeric">
+        <div class="modal-hint" id="move-distance-hint" aria-live="polite"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="modal-btn" id="move-distance-cancel">取消</button>
+        <button type="button" class="modal-btn modal-btn-primary" id="move-distance-confirm">确定</button>
+      </div>
+    </div>
+  </div>
+
   <div class="modal-overlay" id="wave-library-picker-modal" hidden>
     <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="wave-library-picker-title">
       <div class="modal-header" id="wave-library-picker-title">选择波形库</div>
@@ -395,6 +361,6 @@
     </div>
   </div>
 
-    <script src="inc/visualwavedrom-app.js?v=20260718-multi-wave-performance"></script>
+    <script src="inc/visualwavedrom-app.js?v=20260719-json-toolbar-v21"></script>
 </body>
 </html>
