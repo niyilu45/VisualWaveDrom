@@ -3416,6 +3416,14 @@ ${lines.join('\n')}`;
         deleteSignalBtn.textContent = hasGroup ? '删除分组' : '删除行';
       }
 
+      const copySignalBtn = document.getElementById('btn-copy-signal');
+      if (copySignalBtn) {
+        copySignalBtn.disabled = !hasRow;
+        copySignalBtn.title = hasRow
+          ? '复制当前选中行到其下方（不复制 node 字段）'
+          : '请先在波形区点击选中一行';
+      }
+
       const groupSignalBtn = document.getElementById('btn-group-signal');
       if (groupSignalBtn) {
         groupSignalBtn.disabled = signalCount === 0;
@@ -3883,6 +3891,55 @@ ${lines.join('\n')}`;
       return true;
     }
 
+    function copySelectedSignalRow() {
+      const text = editor.value;
+      const sourceMap = buildSignalSourceMap(text);
+      const sourceEntry = sourceMap[selectedSignalIndex];
+      if (!sourceEntry) {
+        setStatus(false, '请先在波形区点击选中一行');
+        updateLegendAvailability();
+        return false;
+      }
+
+      let parsed;
+      try {
+        parsed = JSON.parse(text);
+      } catch (e) {
+        setStatus(false, 'JSON 错误，复制行失败');
+        return false;
+      }
+      if (!parsed || !Array.isArray(parsed.signal)) {
+        setStatus(false, 'JSON 错误，复制行失败');
+        return false;
+      }
+
+      const copiedSignal = JSON.parse(JSON.stringify(sourceEntry.signal || {}));
+      delete copiedSignal.node;
+      const sourceIndex = selectedSignalIndex;
+      const selectedColumn = selectedWaveColumnIndex;
+      if (!insertSignalAfterFlatIndex(parsed.signal, sourceIndex, copiedSignal)) {
+        setStatus(false, '未找到要复制的信号行');
+        return false;
+      }
+
+      pushUndoBeforeChange();
+      const newText = JSON.stringify(parsed, null, 2);
+      const newIndex = sourceIndex + 1;
+      const newMap = buildSignalSourceMap(newText);
+      const insertedEntry = newMap[newIndex];
+      adjustConnectionPointAfterRowInsert(newIndex);
+      adjustPendingNameEditAfterRowInsert(newIndex);
+      setSelectedSignal(newIndex, selectedColumn >= 0 ? selectedColumn : 0);
+      applyEditorChange(
+        newText,
+        insertedEntry ? insertedEntry.start : editor.selectionStart,
+        insertedEntry ? insertedEntry.end : editor.selectionEnd
+      );
+      scheduleFormatAfterWaveChange();
+      setStatus(true, '已复制信号行: ' + (copiedSignal.name || ('第 ' + (sourceIndex + 1) + ' 行')) + '（未复制 node）');
+      return true;
+    }
+
     function removeSignalFromText(text, index) {
       const sourceMap = buildSignalSourceMap(text);
       if (index < 0 || index >= sourceMap.length) return text;
@@ -3908,19 +3965,36 @@ ${lines.join('\n')}`;
       return text.slice(0, start) + text.slice(end);
     }
 
-    function swapAdjacentSignalsInText(text, indexA, indexB) {
-      const sourceMap = buildSignalSourceMap(text);
-      const low = Math.min(indexA, indexB);
-      const high = Math.max(indexA, indexB);
-      if (low < 0 || high >= sourceMap.length || high - low !== 1) return text;
+    function collectSignalLocations(signals, locations) {
+      const result = locations || [];
+      if (!Array.isArray(signals)) return result;
+      const startIndex = typeof signals[0] === 'string' ? 1 : 0;
+      for (let i = startIndex; i < signals.length; i++) {
+        const item = signals[i];
+        if (Array.isArray(item)) {
+          collectSignalLocations(item, result);
+        } else if (item && typeof item === 'object') {
+          result.push({ signal: item, parent: signals, index: i });
+        }
+      }
+      return result;
+    }
 
-      const entryLow = sourceMap[low];
-      const entryHigh = sourceMap[high];
-      const sliceLow = text.slice(entryLow.start, entryLow.end);
-      const sliceHigh = text.slice(entryHigh.start, entryHigh.end);
-      const middle = text.slice(entryLow.end, entryHigh.start);
-      const newBlock = sliceHigh + middle + sliceLow;
-      return text.slice(0, entryLow.start) + newBlock + text.slice(entryHigh.end);
+    function moveSignalToFlatIndex(signals, fromIndex, toIndex) {
+      const locations = collectSignalLocations(signals);
+      const source = locations[fromIndex];
+      const target = locations[toIndex];
+      if (!source || !target || fromIndex === toIndex) return false;
+
+      source.parent.splice(source.index, 1);
+      const liveTargetIndex = target.parent.indexOf(target.signal);
+      if (liveTargetIndex < 0) {
+        source.parent.splice(source.index, 0, source.signal);
+        return false;
+      }
+      const insertIndex = toIndex < fromIndex ? liveTargetIndex : liveTargetIndex + 1;
+      target.parent.splice(insertIndex, 0, source.signal);
+      return true;
     }
 
     function adjustConnectionPointAfterRowDelete(deletedIndex) {
@@ -3935,12 +4009,27 @@ ${lines.join('\n')}`;
       updateConnectionPointStatusUI();
     }
 
-    function adjustConnectionPointAfterRowSwap(fromIndex, toIndex) {
+    function adjustConnectionPointAfterRowInsert(insertedIndex) {
+      function adjust(pt) {
+        if (!pt || pt.rowIndex < insertedIndex) return pt;
+        return Object.assign({}, pt, { rowIndex: pt.rowIndex + 1 });
+      }
+      connectionFromPoint = adjust(connectionFromPoint);
+      connectionToPoint = adjust(connectionToPoint);
+      updateConnectionPointStatusUI();
+    }
+
+    function mapRowIndexAfterMove(rowIndex, fromIndex, toIndex) {
+      if (rowIndex === fromIndex) return toIndex;
+      if (fromIndex < toIndex && rowIndex > fromIndex && rowIndex <= toIndex) return rowIndex - 1;
+      if (toIndex < fromIndex && rowIndex >= toIndex && rowIndex < fromIndex) return rowIndex + 1;
+      return rowIndex;
+    }
+
+    function adjustConnectionPointAfterRowMove(fromIndex, toIndex) {
       function adjust(pt) {
         if (!pt) return null;
-        if (pt.rowIndex === fromIndex) return { rowIndex: toIndex, colIndex: pt.colIndex };
-        if (pt.rowIndex === toIndex) return { rowIndex: fromIndex, colIndex: pt.colIndex };
-        return pt;
+        return Object.assign({}, pt, { rowIndex: mapRowIndexAfterMove(pt.rowIndex, fromIndex, toIndex) });
       }
       connectionFromPoint = adjust(connectionFromPoint);
       connectionToPoint = adjust(connectionToPoint);
@@ -3956,13 +4045,13 @@ ${lines.join('\n')}`;
       }
     }
 
-    function adjustPendingNameEditAfterRowSwap(fromIndex, toIndex) {
+    function adjustPendingNameEditAfterRowInsert(insertedIndex) {
+      if (pendingNameEditSignalIndex >= insertedIndex) pendingNameEditSignalIndex++;
+    }
+
+    function adjustPendingNameEditAfterRowMove(fromIndex, toIndex) {
       if (pendingNameEditSignalIndex < 0) return;
-      if (pendingNameEditSignalIndex === fromIndex) {
-        pendingNameEditSignalIndex = toIndex;
-      } else if (pendingNameEditSignalIndex === toIndex) {
-        pendingNameEditSignalIndex = fromIndex;
-      }
+      pendingNameEditSignalIndex = mapRowIndexAfterMove(pendingNameEditSignalIndex, fromIndex, toIndex);
     }
 
     function indentJsonBlock(block, fromIndent, toIndent) {
@@ -4169,17 +4258,28 @@ ${lines.join('\n')}`;
       setStatus(true, '已删除分组：' + (group.label || '分组'));
     }
 
+    function getSignalMoveCount() {
+      const input = document.getElementById('input-signal-move-count');
+      const raw = input ? Number(input.value) : 1;
+      const count = raw === Infinity
+        ? Number.MAX_SAFE_INTEGER
+        : (Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : 1);
+      if (input) input.value = String(count);
+      return count;
+    }
+
     function moveSelectedSignalRow(delta) {
       if (selectedSignalIndex < 0) {
-        setStatus(false, 'JSON 错误，无法修改连接');
+        setStatus(false, '请先在波形区点击选中一行');
         return;
       }
       if (delta !== -1 && delta !== 1) return;
 
+      let parsed;
       try {
-        JSON.parse(editor.value);
+        parsed = JSON.parse(editor.value);
       } catch (e) {
-        setStatus(false, 'JSON 错误，无法修改连接');
+        setStatus(false, 'JSON 错误，移动行失败');
         return;
       }
 
@@ -4187,29 +4287,41 @@ ${lines.join('\n')}`;
       const fromIndex = selectedSignalIndex;
       if (!sourceMap[fromIndex]) {
         setSelectedSignal(-1, -1);
-        setStatus(false, 'JSON 错误，无法修改连接');
+        setStatus(false, '未找到要移动的信号行');
         return;
       }
-      const toIndex = fromIndex + delta;
-      if (toIndex < 0 || toIndex >= sourceMap.length) return;
+      const moveCount = getSignalMoveCount();
+      const toIndex = delta < 0
+        ? Math.max(0, fromIndex - moveCount)
+        : Math.min(sourceMap.length - 1, fromIndex + moveCount);
+      if (toIndex === fromIndex) return;
 
       const entry = sourceMap[fromIndex];
       const signalName = entry ? (entry.signal.name || ('row' + fromIndex)) : ('row' + fromIndex);
+      const selectedColumn = selectedWaveColumnIndex;
 
-      pushUndoBeforeChange();
-      const text = editor.value;
-      const newText = swapAdjacentSignalsInText(text, fromIndex, toIndex);
-      if (newText === text) {
-        setStatus(false, 'JSON 错误，无法修改连接');
+      if (!parsed || !Array.isArray(parsed.signal)
+          || !moveSignalToFlatIndex(parsed.signal, fromIndex, toIndex)) {
+        setStatus(false, '移动信号行失败');
         return;
       }
 
-      adjustConnectionPointAfterRowSwap(fromIndex, toIndex);
-      adjustPendingNameEditAfterRowSwap(fromIndex, toIndex);
-      setSelectedSignal(toIndex, selectedWaveColumnIndex >= 0 ? selectedWaveColumnIndex : 0);
-      applyEditorChange(newText, editor.selectionStart, editor.selectionEnd);
+      pushUndoBeforeChange();
+      const newText = JSON.stringify(parsed, null, 2);
+      const movedEntry = buildSignalSourceMap(newText)[toIndex];
+      adjustConnectionPointAfterRowMove(fromIndex, toIndex);
+      adjustPendingNameEditAfterRowMove(fromIndex, toIndex);
+      setSelectedSignal(toIndex, selectedColumn >= 0 ? selectedColumn : 0);
+      applyEditorChange(
+        newText,
+        movedEntry ? movedEntry.start : editor.selectionStart,
+        movedEntry ? movedEntry.end : editor.selectionEnd
+      );
       scheduleFormatAfterWaveChange();
-      setStatus(true, (delta < 0 ? '已上移信号行: ' : '已下移信号行: ') + signalName);
+      setStatus(
+        true,
+        (delta < 0 ? '已上移 ' : '已下移 ') + Math.abs(toIndex - fromIndex) + ' 行: ' + signalName
+      );
     }
 
     function deleteSelectedSignalRow() {
@@ -9071,10 +9183,23 @@ ${lines.join('\n')}`;
       }
     });
     document.getElementById('btn-add-signal').addEventListener('click', () => insertNewSignalRow());
+    document.getElementById('btn-copy-signal').addEventListener('click', () => copySelectedSignalRow());
     document.getElementById('btn-delete-signal').addEventListener('click', () => deleteSelectedSignalRow());
     document.getElementById('btn-group-signal').addEventListener('click', () => groupSelectedSignalRow());
     document.getElementById('btn-move-signal-up').addEventListener('click', () => moveSelectedSignalRow(-1));
     document.getElementById('btn-move-signal-down').addEventListener('click', () => moveSelectedSignalRow(1));
+    const signalMoveCountInput = document.getElementById('input-signal-move-count');
+    if (signalMoveCountInput) {
+      signalMoveCountInput.addEventListener('change', getSignalMoveCount);
+      signalMoveCountInput.addEventListener('blur', getSignalMoveCount);
+      signalMoveCountInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          getSignalMoveCount();
+          signalMoveCountInput.blur();
+        }
+      });
+    }
     document.getElementById('btn-add-connection').addEventListener('click', () => {
       beginEdgeAddSession();
     });

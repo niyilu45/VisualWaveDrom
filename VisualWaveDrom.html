@@ -127,6 +127,21 @@
             删除行
           </button>
         </div>
+        <div class="wave-copy-row">
+          <button class="menu-btn wave-copy-signal-btn" id="btn-copy-signal" type="button" disabled title="请先在波形区点击选中一行">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <rect x="9" y="9" width="12" height="12" rx="2"/>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+            </svg>
+            复制行
+          </button>
+        </div>
+        <div class="menu-control-row wave-move-count-row">
+          <label class="menu-control-label" for="input-signal-move-count">行移动数</label>
+          <input type="number" id="input-signal-move-count" class="menu-control-input"
+            min="1" step="1" value="1" inputmode="numeric"
+            title="设置每次行上移或行下移的行数，默认为 1">
+        </div>
         <div class="wave-move-row">
           <button class="menu-btn wave-move-signal-btn" id="btn-move-signal-up" type="button" disabled title="请先在波形区点击选中一行">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
@@ -380,6 +395,6 @@
     </div>
   </div>
 
-    <script src="inc/visualwavedrom-app.js?v=20260718-data-dblclick"></script>
+    <script src="inc/visualwavedrom-app.js?v=20260718-row-tools"></script>
 </body>
 </html>

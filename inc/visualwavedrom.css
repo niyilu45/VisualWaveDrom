@@ -430,6 +430,7 @@
     }
 
     .wave-add-delete-row,
+    .wave-copy-row,
     .wave-move-row,
     .wave-group-row,
     .wave-mode-delete-row {
@@ -444,6 +445,7 @@
 
     .wave-add-delete-row .legend-add-btn,
     .wave-add-delete-row .wave-delete-signal-btn,
+    .wave-copy-row .wave-copy-signal-btn,
     .wave-move-row .wave-move-signal-btn,
     .wave-group-row .wave-group-signal-btn,
     .wave-mode-delete-row .wave-edit-mode-btn,
@@ -460,12 +462,14 @@
 
     .wave-add-delete-row .legend-add-btn svg,
     .wave-add-delete-row .wave-delete-signal-btn svg,
+    .wave-copy-row .wave-copy-signal-btn svg,
     .wave-move-row .wave-move-signal-btn svg,
     .wave-group-row .wave-group-signal-btn svg {
       width: 16px;
       height: 16px;
     }
 
+    .wave-copy-row .wave-copy-signal-btn,
     .wave-move-row .wave-move-signal-btn,
     .wave-group-row .wave-group-signal-btn {
       border-radius: 8px;
@@ -474,6 +478,7 @@
       color: var(--text-muted);
     }
 
+    .wave-copy-row .wave-copy-signal-btn:not(:disabled):hover,
     .wave-move-row .wave-move-signal-btn:not(:disabled):hover,
     .wave-group-row .wave-group-signal-btn:not(:disabled):hover {
       border-color: var(--accent);
@@ -1957,11 +1962,13 @@
       .nav-resize-handle { display: none; }
       .menu-btn .shortcut { display: none; }
       .wave-add-delete-row,
+      .wave-copy-row,
       .wave-move-row,
       .wave-group-row,
       .wave-mode-delete-row { gap: 4px; }
       .wave-add-delete-row .legend-add-btn,
       .wave-add-delete-row .wave-delete-signal-btn,
+      .wave-copy-row .wave-copy-signal-btn,
       .wave-move-row .wave-move-signal-btn,
       .wave-group-row .wave-group-signal-btn,
       .wave-mode-delete-row .wave-edit-mode-btn,
@@ -1973,6 +1980,7 @@
       }
       .wave-add-delete-row .legend-add-btn svg,
       .wave-add-delete-row .wave-delete-signal-btn svg,
+      .wave-copy-row .wave-copy-signal-btn svg,
       .wave-move-row .wave-move-signal-btn svg,
       .wave-group-row .wave-group-signal-btn svg,
       .wave-mode-delete-row .wave-edit-mode-btn svg,
