@@ -5861,10 +5861,10 @@ ${lines.join('\n')}`;
       return getWaveDataSlots(value).find((slot) => slot.col === slotCol) || null;
     }
 
-    function attachEmptyDataLabelClickHandler(drawGroup, entry, svg, handleLanePointSelect) {
-      if (drawGroup.dataset.vwdEmptyDataBound === '1') return;
-      drawGroup.dataset.vwdEmptyDataBound = '1';
-      drawGroup.addEventListener('click', (e) => {
+    function attachDataLabelDoubleClickHandler(drawGroup, entry, svg) {
+      if (drawGroup.dataset.vwdDataDoubleClickBound === '1') return;
+      drawGroup.dataset.vwdDataDoubleClickBound = '1';
+      drawGroup.addEventListener('dblclick', (e) => {
         if (wavePaintModeActive) return;
         if (isConnectionPickFlow() || groupPickActive) return;
         const wave = entry.signal.wave || '';
@@ -5873,7 +5873,7 @@ ${lines.join('\n')}`;
         const data = Array.isArray(entry.signal.data) ? entry.signal.data : [];
         const isEmpty = !!slot && (data[slot.dataIdx] === undefined || data[slot.dataIdx] === '');
         vwdDebugLog('data-label', {
-          phase: 'draw-click',
+          phase: 'draw-dblclick',
           signal: entry.signal.name || '',
           col,
           waveChar: wave[col] || '',
@@ -5882,11 +5882,15 @@ ${lines.join('\n')}`;
           isEmpty,
           target: (e.target && e.target.tagName) || ''
         });
-        if (!isEmpty) return;
+        if (!slot) return;
         e.stopPropagation();
         e.preventDefault();
+        const targetText = e.target && typeof e.target.closest === 'function'
+          ? e.target.closest('text')
+          : null;
+        const anchor = targetText || e.target || drawGroup;
         vwdDebugLog('data-label', { phase: 'open-editor', dataIdx: slot.dataIdx, col });
-        startInlineEdit(e.target || drawGroup, entry, 'data', slot.dataIdx, e.target || drawGroup);
+        startInlineEdit(anchor, entry, 'data', slot.dataIdx, anchor);
       }, true);
     }
 
@@ -7489,14 +7493,11 @@ ${lines.join('\n')}`;
             textEl.classList.add('wave-data-text');
             textEl.addEventListener('click', (e) => {
               e.stopPropagation();
-              if (wavePaintModeActive || isConnectionPickFlow() || groupPickActive) {
-                handleLanePointSelect(e);
-                return;
-              }
-              startInlineEdit(textEl, entry, 'data', dataIdx);
+              e.preventDefault();
+              handleLanePointSelect(e);
             });
           });
-          attachEmptyDataLabelClickHandler(drawGroup, entry, svg, handleLanePointSelect);
+          attachDataLabelDoubleClickHandler(drawGroup, entry, svg);
         }
       });
 
