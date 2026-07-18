@@ -645,6 +645,13 @@ ${lines.join('\n')}`;
       return 1 + children.reduce((sum, child) => sum + getAllNavNodeCount(child), 0);
     }
 
+    function getNavDocumentCount(node) {
+      if (!node) return 0;
+      const directCount = Array.isArray(node.documents) ? node.documents.length : 0;
+      const children = Array.isArray(node.children) ? node.children : [];
+      return directCount + children.reduce((sum, child) => sum + getNavDocumentCount(child), 0);
+    }
+
     function getNavDirectoryNumber(targetNode) {
       let result = '';
       function walk(nodes, prefix) {
@@ -1059,7 +1066,7 @@ ${lines.join('\n')}`;
 
         const count = document.createElement('span');
         count.className = 'count';
-        count.textContent = '(' + ((node.documents || []).length) + ')';
+        count.textContent = '(' + getNavDocumentCount(node) + ')';
 
         const actions = document.createElement('span');
         actions.className = 'nav-tree-actions';
@@ -1153,7 +1160,7 @@ ${lines.join('\n')}`;
 
       const rootCount = document.createElement('span');
       rootCount.className = 'count';
-        rootCount.textContent = '(' + ((rootNode.documents || []).length) + ')';
+        rootCount.textContent = '(' + getNavDocumentCount(rootNode) + ')';
 
       const rootActions = document.createElement('span');
       rootActions.className = 'nav-tree-actions';
@@ -1199,6 +1206,7 @@ ${lines.join('\n')}`;
         selectedId: selectedNavNodeId,
         rootExpanded: !!rootNode.expanded,
         nodeCount: getAllNavNodeCount(rootNode),
+        documentCount: getNavDocumentCount(rootNode),
         renderedNodeCount: navTreeEl.querySelectorAll('.nav-tree-node').length,
         renderedDocumentCount: navTreeEl.querySelectorAll('.nav-tree-document').length,
         expandedNodeCount: navTreeEl.querySelectorAll('.nav-tree-node.expanded').length
