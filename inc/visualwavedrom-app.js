@@ -660,6 +660,20 @@ ${lines.join('\n')}`;
       return 1 + children.reduce((sum, child) => sum + getAllNavNodeCount(child), 0);
     }
 
+    function collectNavExpandedState(node, state) {
+      const result = state || new Map();
+      if (!node) return result;
+      if (node.id) result.set(node.id, !!node.expanded);
+      (node.children || []).forEach((child) => collectNavExpandedState(child, result));
+      return result;
+    }
+
+    function restoreNavExpandedState(node, state) {
+      if (!node || !state) return;
+      if (node.id && state.has(node.id)) node.expanded = state.get(node.id);
+      (node.children || []).forEach((child) => restoreNavExpandedState(child, state));
+    }
+
     function getNavDocumentCount(node) {
       if (!node) return 0;
       const directCount = Array.isArray(node.documents) ? node.documents.length : 0;
@@ -996,6 +1010,7 @@ ${lines.join('\n')}`;
     function rebuildNavTreeStateFromJson(jsonText) {
       const oldId = selectedNavNodeId || 'nav-root';
       const oldDocumentName = selectedNavDocumentName;
+      const expandedState = collectNavExpandedState(navTreeState);
       navTreeState = buildNavStateFromJson(jsonText);
       navTreeSignalCount = Array.isArray(navTreeState && navTreeState.rows) ? navTreeState.rows.length : 0;
       if (!navTreeState) {
@@ -1006,7 +1021,7 @@ ${lines.join('\n')}`;
       if (!navTreeState.id) navTreeState.id = 'nav-root';
 
       const selected = getNavNodeById(navTreeState, oldId) || navTreeState;
-      navTreeState.expanded = true;
+      restoreNavExpandedState(navTreeState, expandedState);
       const documentParent = oldDocumentName && findNavDocumentParent(navTreeState, oldDocumentName);
       if (documentParent) {
         selectedNavDocumentName = oldDocumentName;
@@ -8107,10 +8122,9 @@ ${lines.join('\n')}`;
         return;
       }
       editingWaveDocumentName = name;
-      loadSavedTag(name);
       activeTagName = name;
       selectNavDocumentInTree(name);
-      renderWaveLibrary();
+      loadSavedTag(name);
       focusWaveDocument(name);
       setStatus(true, '正在编辑波形图: ' + getSavedTagTitle(savedTags.find((item) => item.name === name) || { name: name }));
       vwdDebugLog('wave-library', { phase: 'open-for-edit', documentName: name });
@@ -8477,7 +8491,7 @@ ${lines.join('\n')}`;
           source = JSON.parse(jsonText);
           source = getWaveRenderSource(source);
           setJsonErrorLine(-1);
-          rebuildNavTreeStateFromJson(jsonText);
+          if (!navTreeState) rebuildNavTreeStateFromJson(jsonText);
         } catch (e) {
           setJsonErrorLine(getJsonErrorLine(jsonText, e));
           showWaveError(waveContainer, '波形渲染错误: ' + e.message);
@@ -8490,6 +8504,12 @@ ${lines.join('\n')}`;
         waveContainer.appendChild(displayDiv);
 
         try {
+          if (!displayDiv.isConnected && editingWaveDocumentName) {
+            renderWaveLibrary();
+          }
+          if (!displayDiv.isConnected) {
+            throw new Error('波形渲染容器未挂载到页面');
+          }
           WaveDrom.RenderWaveForm(0, source, 'wave-display-', false);
           if (!displayDiv.querySelector('svg')) {
             showWaveError(waveContainer, '波形渲染失败: 未生成 SVG');
