@@ -6,7 +6,7 @@
   <title>VisualWaveDrom</title>
   <script src="inc/skins/default.js?v=20260712"></script>
   <script src="inc/wavedrom.min.js?v=20260712"></script>
-  <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260716-overlapping-edge-endpoints">
+  <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260718-nav-order">
 </head>
 <body>
   <div class="app" id="app">
@@ -23,6 +23,14 @@
           <button class="menu-btn nav-btn" id="btn-nav-add-wave-document" type="button" title="在当前标题下新建空波形图">
             <span>新增波形图</span>
           </button>
+          <div class="nav-order-row">
+            <button class="menu-btn nav-btn" id="btn-nav-move-up" type="button" title="在当前标题下上移选中项" disabled>
+              <span>上移</span>
+            </button>
+            <button class="menu-btn nav-btn" id="btn-nav-move-down" type="button" title="在当前标题下下移选中项" disabled>
+              <span>下移</span>
+            </button>
+          </div>
         </div>
         <div class="nav-tree" id="nav-tree"></div>
       </div>
@@ -372,6 +380,6 @@
     </div>
   </div>
 
-    <script src="inc/visualwavedrom-app.js?v=20260716-overlapping-edge-endpoints"></script>
+    <script src="inc/visualwavedrom-app.js?v=20260718-nav-order"></script>
 </body>
 </html>

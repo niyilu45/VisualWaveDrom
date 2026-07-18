@@ -168,6 +168,8 @@ function getDefaultJson() {
     const hscaleInput = document.getElementById('input-hscale');
     const navSidebar = document.getElementById('nav-sidebar');
     const navTreeEl = document.getElementById('nav-tree');
+    const navMoveUpBtn = document.getElementById('btn-nav-move-up');
+    const navMoveDownBtn = document.getElementById('btn-nav-move-down');
     const navResizeHandle = document.getElementById('nav-resize-handle');
     const toggleNavSidebarBtn = document.getElementById('btn-toggle-nav-sidebar');
     const toggleNavSidebarLabel = document.getElementById('toggle-nav-sidebar-label');
@@ -195,6 +197,7 @@ function getDefaultJson() {
     let selectedWaveColumnIndex = -1;
     let selectedGroupIndex = -1;
     let selectedNavNodeId = 'nav-root';
+    let selectedNavDocumentName = null;
     let navTreeState = null;
     let navTreeSignalCount = 0;
     let navVisibleRows = [];
@@ -623,7 +626,19 @@ ${lines.join('\n')}`;
           collectAssigned(node.children || []);
         });
       })(root.children);
-      root.documents = savedTags.filter((tag) => !assigned.has(tag.name)).map((tag) => tag.name);
+      const unassignedDocuments = savedTags.filter((tag) => !assigned.has(tag.name)).map((tag) => tag.name);
+      const availableDocuments = new Set(unassignedDocuments);
+      const orderedDocuments = [];
+      const savedRootOrder = customMeta && Array.isArray(customMeta.rootDocuments)
+        ? customMeta.rootDocuments
+        : [];
+      savedRootOrder.forEach((name) => {
+        if (availableDocuments.has(name) && !orderedDocuments.includes(name)) orderedDocuments.push(name);
+      });
+      unassignedDocuments.forEach((name) => {
+        if (!orderedDocuments.includes(name)) orderedDocuments.push(name);
+      });
+      root.documents = orderedDocuments;
       ensureNavCustomMetaPaths(root, ['nav-root'], 'nav-root');
       return root;
     }
@@ -880,9 +895,15 @@ ${lines.join('\n')}`;
       return result;
     }
 
-    function saveNavCustomTreeToStorage(nodes) {
+    function saveNavCustomTreeToStorage(nodes, rootDocuments) {
       try {
-        localStorage.setItem(NAV_TREE_KEY, JSON.stringify({ version: 2, kind: 'wave-directory', nodes: nodes || [], updatedAt: new Date().toISOString() }));
+        localStorage.setItem(NAV_TREE_KEY, JSON.stringify({
+          version: 3,
+          kind: 'wave-directory',
+          nodes: nodes || [],
+          rootDocuments: Array.isArray(rootDocuments) ? rootDocuments.slice() : [],
+          updatedAt: new Date().toISOString()
+        }));
         vwdDebugLog('nav-tree', { phase: 'storage-save', ok: true, nodeCount: Array.isArray(nodes) ? nodes.length : 0 });
         scheduleWaveLibraryServerSave();
         return true;
@@ -950,6 +971,7 @@ ${lines.join('\n')}`;
       const found = getNavNodeById(navTreeState, targetId);
       const target = found || navTreeState;
       selectedNavNodeId = target.id || 'nav-root';
+      if (!opt.keepDocumentSelection) selectedNavDocumentName = null;
       navVisibleRows = [];
       navRenderContext = {
         selectedNodeId: selectedNavNodeId,
@@ -973,6 +995,7 @@ ${lines.join('\n')}`;
 
     function rebuildNavTreeStateFromJson(jsonText) {
       const oldId = selectedNavNodeId || 'nav-root';
+      const oldDocumentName = selectedNavDocumentName;
       navTreeState = buildNavStateFromJson(jsonText);
       navTreeSignalCount = Array.isArray(navTreeState && navTreeState.rows) ? navTreeState.rows.length : 0;
       if (!navTreeState) {
@@ -984,23 +1007,115 @@ ${lines.join('\n')}`;
 
       const selected = getNavNodeById(navTreeState, oldId) || navTreeState;
       navTreeState.expanded = true;
-      setSelectedNavNode(selected.id, { skipFilter: true });
+      const documentParent = oldDocumentName && findNavDocumentParent(navTreeState, oldDocumentName);
+      if (documentParent) {
+        selectedNavDocumentName = oldDocumentName;
+        setSelectedNavNode(documentParent.id, { skipFilter: true, keepDocumentSelection: true });
+      } else {
+        setSelectedNavNode(selected.id, { skipFilter: true });
+      }
       return navTreeState;
     }
 
     function saveNavCustomNodesFromTree() {
       const nodes = collectCustomNavNodes(navTreeState || { children: [] });
-      return saveNavCustomTreeToStorage(nodes);
+      const rootDocuments = navTreeState && Array.isArray(navTreeState.documents)
+        ? navTreeState.documents
+        : [];
+      return saveNavCustomTreeToStorage(nodes, rootDocuments);
+    }
+
+    function getSelectedNavOrderTarget() {
+      if (!navTreeState) return null;
+      if (selectedNavDocumentName) {
+        const parent = findNavDocumentParent(navTreeState, selectedNavDocumentName);
+        const items = parent && Array.isArray(parent.documents) ? parent.documents : [];
+        const index = items.indexOf(selectedNavDocumentName);
+        return index >= 0
+          ? { kind: 'document', item: selectedNavDocumentName, parent, items, index }
+          : null;
+      }
+
+      const node = getNavNodeById(navTreeState, selectedNavNodeId);
+      if (!node || node.id === 'nav-root' || !node.isCustom) return null;
+      const parent = findNavNodeParent(navTreeState, node.id);
+      const items = parent && Array.isArray(parent.children) ? parent.children : [];
+      const index = items.findIndex((item) => item && item.id === node.id);
+      return index >= 0 ? { kind: 'directory', item: node, parent, items, index } : null;
+    }
+
+    function updateNavOrderButtons() {
+      const target = getSelectedNavOrderTarget();
+      if (navMoveUpBtn) navMoveUpBtn.disabled = !target || target.index <= 0;
+      if (navMoveDownBtn) navMoveDownBtn.disabled = !target || target.index >= target.items.length - 1;
+    }
+
+    function selectNavDocumentInTree(documentName) {
+      const parent = navTreeState && findNavDocumentParent(navTreeState, documentName);
+      if (!parent) return null;
+      selectedNavDocumentName = documentName;
+      return setSelectedNavNode(parent.id, { skipFilter: true, keepDocumentSelection: true });
+    }
+
+    function moveSelectedNavItem(direction) {
+      const delta = direction === 'up' ? -1 : 1;
+      const target = getSelectedNavOrderTarget();
+      if (!target) {
+        setStatus(false, '请先选择需要移动的波形图或标题');
+        updateNavOrderButtons();
+        return false;
+      }
+
+      const nextIndex = target.index + delta;
+      if (nextIndex < 0 || nextIndex >= target.items.length) {
+        setStatus(false, direction === 'up' ? '选中项已在最上方' : '选中项已在最下方');
+        updateNavOrderButtons();
+        return false;
+      }
+
+      const before = captureWaveLibrarySnapshot();
+      const displacedItem = target.items[nextIndex];
+      target.items[target.index] = displacedItem;
+      target.items[nextIndex] = target.item;
+      const saved = saveNavCustomNodesFromTree();
+
+      let displayName = '';
+      if (target.kind === 'document') {
+        selectedNavDocumentName = target.item;
+        setSelectedNavNode(target.parent.id, { skipFilter: true, keepDocumentSelection: true });
+        const tag = savedTags.find((item) => item.name === target.item);
+        displayName = tag ? getNavDocumentDisplayName(tag, target.parent) : target.item;
+      } else {
+        setSelectedNavNode(target.item.id, { skipFilter: true });
+        displayName = getNavDirectoryDisplayName(target.item) || target.item.label;
+      }
+
+      pushWaveLibraryHistory(before, captureWaveLibrarySnapshot());
+      setStatus(true, (direction === 'up' ? '已上移：' : '已下移：') + displayName);
+      vwdDebugLog('nav-tree', {
+        phase: 'reorder',
+        kind: target.kind,
+        direction,
+        parentId: target.parent && target.parent.id,
+        fromIndex: target.index,
+        toIndex: nextIndex,
+        item: target.kind === 'document' ? target.item : target.item.id,
+        displacedItem: target.kind === 'document' ? displacedItem : (displacedItem && displacedItem.id),
+        saved
+      });
+      return true;
     }
 
     function renderNavTree() {
       if (!navTreeEl) {
         vwdDebugLog('nav-tree', { phase: 'render', ok: false, reason: 'missing-container' });
+        updateNavOrderButtons();
         return;
       }
       navTreeEl.innerHTML = '';
       if (!navTreeState) {
         vwdDebugLog('nav-tree', { phase: 'render', ok: false, reason: 'missing-state' });
+        updateNavOrderButtons();
         return;
       }
 
@@ -1016,11 +1131,10 @@ ${lines.join('\n')}`;
         const button = document.createElement('button');
         button.type = 'button';
         button.className = 'nav-tree-document-label';
-        if (tag.name === activeTagName) button.classList.add('active');
+        if (tag.name === selectedNavDocumentName) button.classList.add('active');
         button.title = '打开波形图: ' + getNavDocumentDisplayName(tag, parentNode);
         button.textContent = getNavDocumentDisplayName(tag, parentNode);
         button.addEventListener('click', () => {
-          setSelectedNavNode(parentNode.id, { skipFilter: true });
           openWaveDocumentForEditing(tag.name);
         });
         const moveBtn = document.createElement('button');
@@ -1045,7 +1159,7 @@ ${lines.join('\n')}`;
         const labelBtn = document.createElement('button');
         labelBtn.type = 'button';
         labelBtn.className = 'nav-tree-node-label';
-        if (node.id === selectedNavNodeId) labelBtn.classList.add('active');
+        if (!selectedNavDocumentName && node.id === selectedNavNodeId) labelBtn.classList.add('active');
         if (node.isCustom) labelBtn.classList.add('nav-tree-node-custom');
 
         const toggle = document.createElement('span');
@@ -1143,7 +1257,7 @@ ${lines.join('\n')}`;
       const rootLabel = document.createElement('button');
       rootLabel.type = 'button';
       rootLabel.className = 'nav-tree-node-label';
-      if (selectedNavNodeId === 'nav-root') rootLabel.classList.add('active');
+      if (!selectedNavDocumentName && selectedNavNodeId === 'nav-root') rootLabel.classList.add('active');
 
       const rootToggle = document.createElement('span');
       rootToggle.className = 'toggle';
@@ -1204,6 +1318,7 @@ ${lines.join('\n')}`;
         phase: 'render',
         ok: true,
         selectedId: selectedNavNodeId,
+        selectedDocumentName: selectedNavDocumentName,
         rootExpanded: !!rootNode.expanded,
         nodeCount: getAllNavNodeCount(rootNode),
         documentCount: getNavDocumentCount(rootNode),
@@ -1211,6 +1326,7 @@ ${lines.join('\n')}`;
         renderedDocumentCount: navTreeEl.querySelectorAll('.nav-tree-document').length,
         expandedNodeCount: navTreeEl.querySelectorAll('.nav-tree-node.expanded').length
       });
+      updateNavOrderButtons();
       return;
     }
 
@@ -1320,7 +1436,7 @@ ${lines.join('\n')}`;
         return;
       }
       target.documents = Array.isArray(target.documents) ? target.documents : [];
-      if (target.id !== 'nav-root' && !target.documents.includes(documentName)) target.documents.push(documentName);
+      if (!target.documents.includes(documentName)) target.documents.push(documentName);
       target.expanded = true;
       saveNavCustomNodesFromTree();
       rebuildNavTreeStateFromJson(editor.value || '');
@@ -1406,7 +1522,8 @@ ${lines.join('\n')}`;
       if (!target.documents.includes(documentName)) target.documents.push(documentName);
       target.expanded = true;
       const saved = saveNavCustomNodesFromTree();
-      setSelectedNavNode(target.id);
+      selectedNavDocumentName = documentName;
+      setSelectedNavNode(target.id, { skipFilter: true, keepDocumentSelection: true });
       pushWaveLibraryHistory(before, captureWaveLibrarySnapshot());
       setStatus(true, '已移动波形图到：' + (targetLabel || getNavDirectoryDisplayName(target)));
       vwdDebugLog('nav-tree', { phase: 'move-document', documentName: documentName, fromId: fromNode.id, toId: target.id, saved: saved });
@@ -1452,7 +1569,7 @@ ${lines.join('\n')}`;
       const navAddRowsBtn = document.getElementById('btn-nav-add-rows');
       const navAddDocumentBtn = document.getElementById('btn-nav-add-document');
       const navAddWaveDocumentBtn = document.getElementById('btn-nav-add-wave-document');
-      if (!navAddRootBtn && !navAddRowsBtn && !navAddDocumentBtn && !navAddWaveDocumentBtn) {
+      if (!navAddRootBtn && !navAddRowsBtn && !navAddDocumentBtn && !navAddWaveDocumentBtn && !navMoveUpBtn && !navMoveDownBtn) {
         vwdDebugLog('nav-tree', { phase: 'buttons-bound', ok: false, reason: 'buttons-not-found' });
         return;
       }
@@ -1501,8 +1618,20 @@ ${lines.join('\n')}`;
           }
         });
       }
+      if (navMoveUpBtn) navMoveUpBtn.addEventListener('click', () => moveSelectedNavItem('up'));
+      if (navMoveDownBtn) navMoveDownBtn.addEventListener('click', () => moveSelectedNavItem('down'));
       navControlButtonsBound = true;
-      vwdDebugLog('nav-tree', { phase: 'buttons-bound', ok: true, addRoot: !!navAddRootBtn, addChild: !!navAddRowsBtn, addDocument: !!navAddDocumentBtn, addWaveDocument: !!navAddWaveDocumentBtn });
+      updateNavOrderButtons();
+      vwdDebugLog('nav-tree', {
+        phase: 'buttons-bound',
+        ok: true,
+        addRoot: !!navAddRootBtn,
+        addChild: !!navAddRowsBtn,
+        addDocument: !!navAddDocumentBtn,
+        addWaveDocument: !!navAddWaveDocumentBtn,
+        moveUp: !!navMoveUpBtn,
+        moveDown: !!navMoveDownBtn
+      });
     }
 
     // Bind navigation controls before the rest of the page initialization so an
@@ -7594,6 +7723,9 @@ ${lines.join('\n')}`;
         updatedAt: new Date().toISOString(),
         documents,
         directories: collectCustomNavNodes(navTreeState || { children: [] }),
+        rootDocuments: navTreeState && Array.isArray(navTreeState.documents)
+          ? navTreeState.documents.slice()
+          : [],
         activeDocumentName: editingWaveDocumentName || '',
         selectedDirectoryId: selectedNavNodeId || 'nav-root'
       };
@@ -7631,8 +7763,12 @@ ${lines.join('\n')}`;
       try {
         savedTags = bundle.documents.map(normalizeSavedTag).filter(Boolean);
         persistSavedTags();
-        saveNavCustomTreeToStorage(Array.isArray(bundle.directories) ? bundle.directories : []);
+        saveNavCustomTreeToStorage(
+          Array.isArray(bundle.directories) ? bundle.directories : [],
+          Array.isArray(bundle.rootDocuments) ? bundle.rootDocuments : []
+        );
         selectedNavNodeId = bundle.selectedDirectoryId || 'nav-root';
+        selectedNavDocumentName = null;
         editingWaveDocumentName = null;
         activeTagName = null;
         const preferredName = bundle.activeDocumentName || (savedTags[0] && savedTags[0].name);
@@ -7789,7 +7925,11 @@ ${lines.join('\n')}`;
       return {
         savedTags: cloneWaveLibrarySnapshotValue(savedTags),
         customNodes: cloneWaveLibrarySnapshotValue(collectCustomNavNodes(navTreeState || { children: [] })),
+        rootDocuments: cloneWaveLibrarySnapshotValue(
+          navTreeState && Array.isArray(navTreeState.documents) ? navTreeState.documents : []
+        ),
         selectedNavNodeId,
+        selectedNavDocumentName,
         editingWaveDocumentName,
         activeTagName,
         editorValue: editor.value,
@@ -7802,9 +7942,10 @@ ${lines.join('\n')}`;
       if (!snapshot) return false;
       savedTags = (snapshot.savedTags || []).map(normalizeSavedTag).filter(Boolean);
       persistSavedTags();
-      saveNavCustomTreeToStorage(snapshot.customNodes || []);
+      saveNavCustomTreeToStorage(snapshot.customNodes || [], snapshot.rootDocuments || []);
 
       selectedNavNodeId = snapshot.selectedNavNodeId || 'nav-root';
+      selectedNavDocumentName = snapshot.selectedNavDocumentName || null;
       editingWaveDocumentName = snapshot.editingWaveDocumentName || null;
       activeTagName = snapshot.activeTagName || null;
       editor.value = snapshot.editorValue || getDefaultJson();
@@ -7837,6 +7978,7 @@ ${lines.join('\n')}`;
       persistSavedTags();
       if (activeTagName === name) activeTagName = null;
       if (editingWaveDocumentName === name) editingWaveDocumentName = null;
+      if (selectedNavDocumentName === name) selectedNavDocumentName = null;
       renderSavedTagsList();
       if (navTreeState) {
         (function removeDocumentReference(node) {
@@ -7956,6 +8098,7 @@ ${lines.join('\n')}`;
       if (!name) return;
       exitWavePaintMode('switch-wave-document');
       if (editingWaveDocumentName === name) {
+        selectNavDocumentInTree(name);
         focusWaveDocument(name);
         return;
       }
@@ -7966,6 +8109,7 @@ ${lines.join('\n')}`;
       editingWaveDocumentName = name;
       loadSavedTag(name);
       activeTagName = name;
+      selectNavDocumentInTree(name);
       renderWaveLibrary();
       focusWaveDocument(name);
       setStatus(true, '正在编辑波形图: ' + getSavedTagTitle(savedTags.find((item) => item.name === name) || { name: name }));
@@ -8430,8 +8574,8 @@ ${lines.join('\n')}`;
         const entry = waveLibraryUndoStack.pop();
         waveLibraryRedoStack.push(entry);
         restoreWaveLibrarySnapshot(entry.before);
-        setStatus(true, '已撤销删除波形图');
-        vwdDebugLog('wave-library', { phase: 'undo-delete-document' });
+        setStatus(true, '已撤销波形库操作');
+        vwdDebugLog('wave-library', { phase: 'undo-library-operation' });
         updateUndoRedoButtons();
         return;
       }
@@ -8454,8 +8598,8 @@ ${lines.join('\n')}`;
         const entry = waveLibraryRedoStack.pop();
         waveLibraryUndoStack.push(entry);
         restoreWaveLibrarySnapshot(entry.after);
-        setStatus(true, '已重做删除波形图');
-        vwdDebugLog('wave-library', { phase: 'redo-delete-document' });
+        setStatus(true, '已重做波形库操作');
+        vwdDebugLog('wave-library', { phase: 'redo-library-operation' });
         updateUndoRedoButtons();
         return;
       }

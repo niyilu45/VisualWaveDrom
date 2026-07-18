@@ -98,6 +98,12 @@
       border-radius: 6px;
     }
 
+    .nav-order-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 6px;
+    }
+
     .nav-tree {
       min-height: 0;
       flex: 1;
