@@ -3830,6 +3830,26 @@ ${lines.join('\n')}`;
       }
     }
 
+    function insertSignalAfterFlatIndex(signals, targetIndex, newSignal, state) {
+      if (!Array.isArray(signals) || targetIndex < 0) return false;
+      const cursor = state || { index: 0 };
+      const startIndex = typeof signals[0] === 'string' ? 1 : 0;
+      for (let i = startIndex; i < signals.length; i++) {
+        const item = signals[i];
+        if (Array.isArray(item)) {
+          if (insertSignalAfterFlatIndex(item, targetIndex, newSignal, cursor)) return true;
+          continue;
+        }
+        if (!item || typeof item !== 'object') continue;
+        if (cursor.index === targetIndex) {
+          signals.splice(i + 1, 0, newSignal);
+          return true;
+        }
+        cursor.index += 1;
+      }
+      return false;
+    }
+
     function insertNewSignalRow(template) {
       const tpl = Object.assign({}, template || DEFAULT_NEW_SIGNAL_TEMPLATE);
 
@@ -3837,34 +3857,27 @@ ${lines.join('\n')}`;
       try {
         parsed = JSON.parse(editor.value);
       } catch (e) {
-        setStatus(false, 'JSON 错误，删除失败');
+        setStatus(false, 'JSON 错误，新增行失败');
         return false;
       }
-      if (!parsed.signal) parsed.signal = [];
-
-      const text = editor.value;
-      const bounds = findSignalArrayBounds(text);
-      if (!bounds) {
-        setStatus(false, 'JSON 错误，删除失败');
-        return false;
-      }
+      if (!Array.isArray(parsed.signal)) parsed.signal = [];
 
       pushUndoBeforeChange();
-      const indent = getIndentAt(text, bounds.arrStart) || '  ';
-      const sigIndent = indent + '  ';
-      const newObjStr = formatSignalObject(tpl, sigIndent);
-      const beforeClose = text.slice(0, bounds.insertBefore).replace(/\s*$/, '');
-      const afterClose = text.slice(bounds.insertBefore);
-      const needsComma = /\S/.test(beforeClose.slice(bounds.arrStart));
-      const insertion = (needsComma ? ',\n' : '\n') + newObjStr + '\n' + indent;
-      const insertPos = bounds.insertBefore;
-      const newText = beforeClose + insertion + afterClose;
-      const selStart = insertPos + insertion.indexOf(newObjStr);
+      const oldMap = buildSignalSourceMap(editor.value);
+      const hasSelectedRow = selectedSignalIndex >= 0 && selectedSignalIndex < oldMap.length;
+      const insertedAfterSelection = hasSelectedRow
+        && insertSignalAfterFlatIndex(parsed.signal, selectedSignalIndex, tpl);
+      if (!insertedAfterSelection) parsed.signal.push(tpl);
+
+      const newText = JSON.stringify(parsed, null, 2);
       const newMap = buildSignalSourceMap(newText);
-      const newIndex = newMap.length - 1;
+      const newIndex = insertedAfterSelection ? selectedSignalIndex + 1 : newMap.length - 1;
+      const insertedEntry = newMap[newIndex];
+      const selStart = insertedEntry ? insertedEntry.start : newText.length;
+      const selEnd = insertedEntry ? insertedEntry.end : selStart;
       if (!tpl.name) pendingNameEditSignalIndex = newIndex;
       setSelectedSignal(newIndex, 0);
-      applyEditorChange(newText, selStart, selStart + newObjStr.length);
+      applyEditorChange(newText, selStart, selEnd);
       scheduleFormatAfterWaveChange();
       setStatus(true, tpl.name ? ('已插入信号: ' + tpl.name) : '已插入空白信号行');
       return true;
