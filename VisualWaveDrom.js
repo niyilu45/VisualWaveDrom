@@ -3,8 +3,21 @@ const http = require('http');
 const path = require('path');
 const { exec } = require('child_process');
 
+function commandLineOption(name) {
+  const index = process.argv.indexOf(name);
+  if (index < 0) return null;
+  const value = process.argv[index + 1];
+  if (!value || value.startsWith('--')) throw new Error(`Missing value for ${name}`);
+  return value;
+}
+
 const rootDir = __dirname;
-const htmlName = `${path.basename(__filename, '.js')}.html`;
+const defaultHtmlName = `${path.basename(__filename, '.js')}.html`;
+const configuredHtmlName = commandLineOption('--html') || defaultHtmlName;
+const htmlName = path.basename(configuredHtmlName);
+if (htmlName !== configuredHtmlName || !/\.html?$/i.test(htmlName)) {
+  throw new Error(`Invalid HTML file name: ${configuredHtmlName}`);
+}
 const htmlPath = path.join(rootDir, htmlName);
 const waveDir = path.join(rootDir, 'Wave');
 const defaultLibraryName = `${path.basename(__filename, '.js')}-library.json`;
@@ -208,6 +221,10 @@ const server = http.createServer((req, res) => {
 });
 
 ensureWaveDirectory();
+if (!fs.existsSync(htmlPath) || !fs.statSync(htmlPath).isFile()) {
+  console.error(`HTML file not found: ${htmlPath}`);
+  process.exit(1);
+}
 server.on('listening', () => {
   const serverAddress = server.address();
   const activePort = serverAddress && typeof serverAddress === 'object' ? serverAddress.port : requestedPort;
