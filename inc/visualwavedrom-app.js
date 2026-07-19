@@ -178,6 +178,19 @@ function getDefaultJson() {
     const saveWaveLibraryBtn = document.getElementById('btn-save-wave-library');
     const saveWaveLibraryLabel = document.getElementById('save-wave-library-label');
     const waveLibraryImportInput = document.getElementById('wave-library-import-input');
+    const vimModeBtn = document.getElementById('btn-vim-mode');
+    const vimHelpBtn = document.getElementById('btn-vim-help');
+    const vimModeButtonState = document.getElementById('vim-mode-button-state');
+    const vimStatusBar = document.getElementById('vim-status-bar');
+    const vimStatusMode = document.getElementById('vim-status-mode');
+    const vimStatusScope = document.getElementById('vim-status-scope');
+    const vimStatusPending = document.getElementById('vim-status-pending');
+    const vimCommandBar = document.getElementById('vim-command-bar');
+    const vimCommandInput = document.getElementById('vim-command-input');
+    const vimHelpModal = document.getElementById('vim-help-modal');
+    const vimHelpClose = document.getElementById('vim-help-close');
+    const editorWrapper = document.querySelector('.editor-wrapper');
+    const connectionMenuSection = document.querySelector('.connection-menu-section');
 
     let undoStack = [];
     let redoStack = [];
@@ -201,6 +214,19 @@ function getDefaultJson() {
     let selectedWaveRangeRowIndex = -1;
     let selectedWaveRangeStart = -1;
     let selectedWaveRangeEnd = -1;
+    let vimVisualCellAnchor = -1;
+    let vimVisualCellHead = -1;
+    let vimVisualRowAnchor = -1;
+    let vimVisualRowHead = -1;
+    let vimRegister = null;
+    let vimController = null;
+    let vimHelpReturnFocus = null;
+    let vimWaveAreaActive = false;
+    let vimDirectInlineEditActive = false;
+    let vimWaveInsertModeActive = false;
+    let codeMirrorEditor = null;
+    let syncingCodeMirror = false;
+    let codeMirrorVimMode = 'normal';
     let copiedWaveSelection = '';
     let waveSelectionDrag = null;
     let waveClipboardShortcutActive = false;
@@ -254,6 +280,7 @@ function getDefaultJson() {
 
     const VWD_DEBUG_FLAG_KEY = 'vwd-debug';
     const VWD_DEBUG_QUERY = 'vwdDebug';
+    const VIM_MODE_FLAG_KEY = 'vwd-vim-mode';
     // Kept separate from the legacy signal/tag navigation tree. This tree only
     // stores wave directories and wave-document references.
     const NAV_TREE_KEY = 'vwd-wave-directory-v2';
@@ -859,13 +886,18 @@ ${lines.join('\n')}`;
       return null;
     }
 
-    function getNavDocumentDisplayName(tag, parentNode) {
+    function getNavDocumentNumber(tag, parentNode) {
       if (!tag) return '';
       const parent = parentNode || findNavDocumentParent(navTreeState, tag.name);
       const documentIndex = parent ? (parent.documents || []).indexOf(tag.name) + 1 : 0;
-      const prefix = parent && parent.id !== 'nav-root'
+      return parent && parent.id !== 'nav-root'
         ? (getNavDirectoryNumber(parent).replace(/\.$/, '') + '.' + documentIndex)
         : (documentIndex ? (documentIndex + '.') : '');
+    }
+
+    function getNavDocumentDisplayName(tag, parentNode) {
+      if (!tag) return '';
+      const prefix = getNavDocumentNumber(tag, parentNode);
       const title = getSavedTagTitle(tag);
       return prefix ? (prefix + ' ' + title) : title;
     }
@@ -1255,7 +1287,7 @@ ${lines.join('\n')}`;
       return parent;
     }
 
-    async function moveSelectedNavItem(direction) {
+    async function moveSelectedNavItem(direction, explicitCount) {
       const delta = direction === 'up' ? -1 : 1;
       const target = getSelectedNavOrderTarget();
       if (!target) {
@@ -1271,7 +1303,9 @@ ${lines.join('\n')}`;
         return false;
       }
 
-      const moveCount = await requestMoveDistance(direction, '项');
+      const moveCount = Number.isFinite(explicitCount)
+        ? Math.max(1, Math.floor(explicitCount))
+        : await requestMoveDistance(direction, '项');
       if (moveCount === null) return false;
       const nextIndex = delta < 0
         ? Math.max(0, target.index - moveCount)
@@ -2580,13 +2614,11 @@ ${lines.join('\n')}`;
       if (app.classList.contains('reading-mode')) return;
       const block = findTopLevelKeyBlock(editor.value, field);
       if (!block) return;
-      editor.focus();
-      editor.selectionStart = block.start;
-      editor.selectionEnd = block.end;
+      setEditorSelection(block.start, block.end, true);
       const before = editor.value.slice(0, block.start);
       const line = before.split('\n').length;
       const lineHeight = 13 * 1.6;
-      editor.scrollTop = Math.max(0, (line - 3) * lineHeight);
+      setEditorScrollTop((line - 3) * lineHeight);
       syncLineNumberScroll();
     }
 
@@ -2670,15 +2702,60 @@ ${lines.join('\n')}`;
       } catch (e) { /* ignore */ }
     }
 
-    function applyEditorChange(newText, selStart, selEnd, options) {
+    function setEditorValue(value, options) {
+      const text = value == null ? '' : String(value);
       const opts = options || {};
-      editor.value = newText;
-      setEditorHistoryBaseline(newText);
-      editor.selectionStart = selStart;
-      editor.selectionEnd = selEnd ?? selStart;
-      if (!opts.skipFocus) {
+      editor.value = text;
+      if (codeMirrorEditor && codeMirrorEditor.getValue() !== text) {
+        syncingCodeMirror = true;
+        const cursor = codeMirrorEditor.getCursor();
+        codeMirrorEditor.setValue(text);
+        if (opts.preserveCursor) {
+          codeMirrorEditor.setCursor({
+            line: Math.min(cursor.line, Math.max(0, codeMirrorEditor.lineCount() - 1)),
+            ch: cursor.ch
+          });
+        }
+        syncingCodeMirror = false;
+      }
+      if (codeMirrorEditor && opts.clearCodeMirrorHistory) codeMirrorEditor.clearHistory();
+    }
+
+    function setEditorSelection(start, end, shouldFocus) {
+      const length = editor.value.length;
+      const safeStart = Math.max(0, Math.min(length, Number.isFinite(start) ? start : 0));
+      const safeEnd = Math.max(0, Math.min(length, Number.isFinite(end) ? end : safeStart));
+      editor.selectionStart = safeStart;
+      editor.selectionEnd = safeEnd;
+      if (codeMirrorEditor) {
+        codeMirrorEditor.setSelection(
+          codeMirrorEditor.posFromIndex(safeStart),
+          codeMirrorEditor.posFromIndex(safeEnd)
+        );
+        if (shouldFocus) codeMirrorEditor.focus();
+      } else if (shouldFocus) {
         editor.focus();
       }
+    }
+
+    function focusEditor() {
+      if (codeMirrorEditor) codeMirrorEditor.focus();
+      else editor.focus();
+    }
+
+    function setEditorScrollTop(top) {
+      const safeTop = Math.max(0, Number(top) || 0);
+      editor.scrollTop = safeTop;
+      if (codeMirrorEditor) codeMirrorEditor.scrollTo(null, safeTop);
+    }
+
+    function applyEditorChange(newText, selStart, selEnd, options) {
+      const opts = options || {};
+      const vimState = vimController && vimController.getState();
+      const preserveNonJsonFocus = !!(vimState && vimState.enabled && vimState.scope !== 'json');
+      setEditorValue(newText);
+      setEditorHistoryBaseline(newText);
+      setEditorSelection(selStart, selEnd ?? selStart, !opts.skipFocus && !preserveNonJsonFocus);
       updateLineNumbers();
       syncLineNumberScroll();
       if (opts.skipRender) {
@@ -2726,11 +2803,9 @@ ${lines.join('\n')}`;
     }
 
     function applyEdgeInsertTextFast(newText, selStart, selEnd, skipFocus) {
-      editor.value = newText;
+      setEditorValue(newText);
       setEditorHistoryBaseline(newText);
-      editor.selectionStart = selStart;
-      editor.selectionEnd = selEnd ?? selStart;
-      if (!skipFocus) editor.focus();
+      setEditorSelection(selStart, selEnd ?? selStart, !skipFocus);
       syncHscaleInputFromJson(newText);
       scheduleKnownValidPersist(newText);
       scheduleEditorUiRefresh();
@@ -3339,6 +3414,30 @@ ${lines.join('\n')}`;
       return wave.slice(0, pos) + char + wave.slice(pos);
     }
 
+    function preserveWaveDataLabelsAfterInsert(signal, originalWave, insertCol, insertion) {
+      if (!signal || signal.data === undefined || signal.data === null) return signal;
+      const insertedDataCount = (String(insertion || '').match(/[2-9=]/g) || []).length;
+      if (!insertedDataCount) return signal;
+
+      const data = Array.isArray(signal.data)
+        ? signal.data.slice()
+        : String(signal.data).trim().split(/\s+/).filter(Boolean);
+      if (!data.length) return signal;
+
+      const safeCol = Math.max(0, Math.min(Math.floor(insertCol), String(originalWave || '').length));
+      const dataIndex = (String(originalWave || '').slice(0, safeCol).match(/[2-9=]/g) || []).length;
+      if (dataIndex >= data.length) return signal;
+
+      data.splice(dataIndex, 0, ...Array(insertedDataCount).fill('.'));
+      vwdDebugLog('wave-edit', {
+        phase: 'insert-data-placeholder',
+        columnIndex: safeCol,
+        dataIndex,
+        count: insertedDataCount
+      });
+      return Object.assign({}, signal, { data });
+    }
+
     function deleteWaveCharAt(wave, colIndex) {
       if (colIndex < 0 || colIndex >= wave.length) return wave;
       return wave.slice(0, colIndex) + wave.slice(colIndex + 1);
@@ -3495,7 +3594,8 @@ ${lines.join('\n')}`;
       if (newWave === wave) return false;
 
       pushUndoBeforeChange();
-      const updatedSignal = Object.assign({}, entry.signal, { wave: newWave });
+      let updatedSignal = Object.assign({}, entry.signal, { wave: newWave });
+      updatedSignal = preserveWaveDataLabelsAfterInsert(updatedSignal, wave, insertCol, char);
       const indent = getIndentAt(text, entry.start);
       const newObjStr = formatSignalObject(updatedSignal, indent);
       const newText = text.slice(0, entry.start) + newObjStr + text.slice(entry.end);
@@ -4520,7 +4620,11 @@ ${lines.join('\n')}`;
     }
 
     function restoreWaveSelection(lanes, sourceMap) {
-      if (selectedSignalIndex < 0 && selectedGroupIndex < 0 && !connectionFromPoint && !connectionToPoint) return;
+      if (selectedSignalIndex < 0
+          && selectedGroupIndex < 0
+          && vimVisualRowAnchor < 0
+          && !connectionFromPoint
+          && !connectionToPoint) return;
       const visibleSet = getNavVisibleRowSet();
       const hasFilter = isNavFilteringActive();
       if (selectedSignalIndex >= lanes.length || (selectedSignalIndex >= 0 && !sourceMap[selectedSignalIndex])) {
@@ -4529,8 +4633,15 @@ ${lines.join('\n')}`;
         setSelectedSignal(-1, -1);
       }
 
+      const vimRowStart = vimVisualRowAnchor >= 0 && vimVisualRowHead >= 0
+        ? Math.min(vimVisualRowAnchor, vimVisualRowHead)
+        : -1;
+      const vimRowEnd = vimVisualRowAnchor >= 0 && vimVisualRowHead >= 0
+        ? Math.max(vimVisualRowAnchor, vimVisualRowHead)
+        : -1;
       lanes.forEach((lane, idx) => {
         lane.classList.toggle('wave-lane-selected', idx === selectedSignalIndex);
+        lane.classList.toggle('vim-row-range-selected', vimRowStart >= 0 && idx >= vimRowStart && idx <= vimRowEnd);
       });
 
       updateConnectionPointHighlights(lanes, sourceMap);
@@ -5017,7 +5128,7 @@ ${lines.join('\n')}`;
       setStatus(true, '已删除分组：' + (group.label || '分组'));
     }
 
-    async function moveSelectedSignalRow(delta) {
+    async function moveSelectedSignalRow(delta, explicitCount) {
       if (selectedSignalIndex < 0) {
         setStatus(false, '请先在波形区点击选中一行');
         return;
@@ -5039,7 +5150,9 @@ ${lines.join('\n')}`;
         setStatus(false, '未找到要移动的信号行');
         return;
       }
-      const moveCount = await requestMoveDistance(delta < 0 ? 'up' : 'down', '行');
+      const moveCount = Number.isFinite(explicitCount)
+        ? Math.max(1, Math.floor(explicitCount))
+        : await requestMoveDistance(delta < 0 ? 'up' : 'down', '行');
       if (moveCount === null) return;
       const toIndex = delta < 0
         ? Math.max(0, fromIndex - moveCount)
@@ -5944,13 +6057,11 @@ ${lines.join('\n')}`;
       const edgeJson = JSON.stringify(edgeStr);
       const idx = text.indexOf(edgeJson);
       if (idx < 0) return;
-      editor.focus();
-      editor.selectionStart = idx;
-      editor.selectionEnd = idx + edgeJson.length;
+      setEditorSelection(idx, idx + edgeJson.length, true);
       const before = text.slice(0, idx);
       const line = before.split('\n').length;
       const lineHeight = 13 * 1.6;
-      editor.scrollTop = Math.max(0, (line - 3) * lineHeight);
+      setEditorScrollTop((line - 3) * lineHeight);
       syncLineNumberScroll();
     }
 
@@ -6648,13 +6759,11 @@ ${lines.join('\n')}`;
     function scrollEditorToSignal(entry) {
       if (app.classList.contains('reading-mode')) return;
       const text = editor.value;
-      editor.focus();
-      editor.selectionStart = entry.start;
-      editor.selectionEnd = entry.end;
+      setEditorSelection(entry.start, entry.end, true);
       const before = text.slice(0, entry.start);
       const line = before.split('\n').length;
       const lineHeight = 13 * 1.6;
-      editor.scrollTop = Math.max(0, (line - 3) * lineHeight);
+      setEditorScrollTop((line - 3) * lineHeight);
       syncLineNumberScroll();
       setStatus(true, '已定位: ' + entry.signal.name);
     }
@@ -6662,13 +6771,11 @@ ${lines.join('\n')}`;
     function scrollEditorToGroup(entry) {
       if (app.classList.contains('reading-mode')) return;
       const text = editor.value;
-      editor.focus();
-      editor.selectionStart = entry.start;
-      editor.selectionEnd = entry.end;
+      setEditorSelection(entry.start, entry.end, true);
       const before = text.slice(0, entry.start);
       const line = before.split('\n').length;
       const lineHeight = 13 * 1.6;
-      editor.scrollTop = Math.max(0, (line - 3) * lineHeight);
+      setEditorScrollTop((line - 3) * lineHeight);
       syncLineNumberScroll();
       setStatus(true, '已定位分组: ' + (entry.label || '分组'));
     }
@@ -7578,7 +7685,7 @@ ${lines.join('\n')}`;
             const before = sourceText.slice(0, groupForHint.start);
             const line = before.split('\n').length;
             const lineHeight = 13 * 1.6;
-            editor.scrollTop = Math.max(0, (line - 3) * lineHeight);
+            setEditorScrollTop((line - 3) * lineHeight);
             syncLineNumberScroll();
           });
         }
@@ -8006,6 +8113,23 @@ ${lines.join('\n')}`;
       }
 
       let committed = false;
+      const finishVimDirectEdit = () => {
+        if (!vimDirectInlineEditActive) return;
+        vimDirectInlineEditActive = false;
+        if (textEditModeActive) {
+          textEditModeActive = false;
+          updateTextEditModeUI();
+        }
+        if (vimController && vimController.getState().enabled
+            && vimController.getState().mode === 'insert') {
+          vimController.setMode('normal');
+        }
+        if (vimWaveAreaActive && wavePanel) {
+          requestAnimationFrame(() => {
+            try { wavePanel.focus({ preventScroll: true }); } catch (_e) { wavePanel.focus(); }
+          });
+        }
+      };
       const commit = () => {
         if (committed) return;
         committed = true;
@@ -8020,6 +8144,7 @@ ${lines.join('\n')}`;
         overlay.remove();
         inlineEditActive = false;
         setActiveInlineEditState(null);
+        finishVimDirectEdit();
         if (newVal !== oldValue) {
           const currentText = editor.value || '';
           if (currentText.length <= 500000) pushUndoBeforeChange();
@@ -8070,6 +8195,7 @@ ${lines.join('\n')}`;
           overlay.remove();
           inlineEditActive = false;
           setActiveInlineEditState(null);
+          finishVimDirectEdit();
         }
       });
     }
@@ -8668,7 +8794,69 @@ ${lines.join('\n')}`;
       });
     }
 
+    function syncNativeSelectionFromCodeMirror() {
+      if (!codeMirrorEditor) return;
+      const anchor = codeMirrorEditor.indexFromPos(codeMirrorEditor.getCursor('anchor'));
+      const head = codeMirrorEditor.indexFromPos(codeMirrorEditor.getCursor('head'));
+      editor.selectionStart = Math.min(anchor, head);
+      editor.selectionEnd = Math.max(anchor, head);
+    }
+
+    function updateCodeMirrorErrorMarker() {
+      if (!codeMirrorEditor) return;
+      codeMirrorEditor.clearGutter('vwd-json-error-gutter');
+      if (jsonErrorLine < 1 || jsonErrorLine > codeMirrorEditor.lineCount()) return;
+      const marker = document.createElement('span');
+      marker.className = 'vwd-json-error-marker';
+      marker.textContent = '×';
+      marker.title = 'JSON 解析错误';
+      codeMirrorEditor.setGutterMarker(jsonErrorLine - 1, 'vwd-json-error-gutter', marker);
+    }
+
+    function setCodeMirrorVimEnabled() {
+      if (!codeMirrorEditor) return;
+      codeMirrorEditor.setOption('keyMap', 'default');
+      codeMirrorVimMode = 'normal';
+      codeMirrorEditor.refresh();
+    }
+
+    function initCodeMirrorEditor() {
+      if (codeMirrorEditor || !window.CodeMirror || !editor) return false;
+      codeMirrorEditor = CodeMirror.fromTextArea(editor, {
+        mode: { name: 'javascript', json: true },
+        keyMap: 'default',
+        lineNumbers: true,
+        gutters: ['vwd-json-error-gutter', 'CodeMirror-linenumbers'],
+        lineWrapping: false,
+        indentUnit: 2,
+        tabSize: 2,
+        indentWithTabs: false,
+        viewportMargin: 20
+      });
+      if (editorWrapper) editorWrapper.classList.add('codemirror-active');
+
+      codeMirrorEditor.on('change', (cm) => {
+        if (syncingCodeMirror) return;
+        cm.save();
+        syncNativeSelectionFromCodeMirror();
+        editor.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      codeMirrorEditor.on('cursorActivity', syncNativeSelectionFromCodeMirror);
+      codeMirrorEditor.on('focus', () => {
+        setVimWaveAreaActive(false, 'json-focus');
+      });
+      codeMirrorEditor.on('blur', () => {
+        checkpointDirectJsonEdit('editor-blur');
+      });
+      updateCodeMirrorErrorMarker();
+      return true;
+    }
+
     function updateLineNumbers() {
+      if (codeMirrorEditor) {
+        updateCodeMirrorErrorMarker();
+        return;
+      }
       const lines = editor.value.split('\n');
       const count = Math.max(lines.length, 1);
       lineNumbersEl.innerHTML = Array.from({ length: count }, (_, i) =>
@@ -8678,24 +8866,46 @@ ${lines.join('\n')}`;
 
     function getJsonErrorLine(text, error) {
       const message = error && error.message ? String(error.message) : '';
-      const match = message.match(/position\s+(\d+)/i);
-      if (!match) return -1;
-      const pos = Math.max(0, Math.min(Number(match[1]) || 0, text.length));
-      let line = 1;
-      for (let i = 0; i < pos; i++) {
-        if (text.charCodeAt(i) === 10) line++;
+      const explicitLine = message.match(/\bline\s+(\d+)/i);
+      if (explicitLine) return Math.max(1, Number(explicitLine[1]) || 1);
+
+      const position = message.match(/\bposition\s+(\d+)/i);
+      if (position) {
+        const pos = Math.max(0, Math.min(Number(position[1]) || 0, text.length));
+        let line = 1;
+        for (let i = 0; i < pos; i++) {
+          if (text.charCodeAt(i) === 10) line++;
+        }
+        return line;
       }
-      return line;
+
+      if (codeMirrorEditor && typeof codeMirrorEditor.getLineTokens === 'function') {
+        for (let lineIndex = 0; lineIndex < codeMirrorEditor.lineCount(); lineIndex++) {
+          const tokens = codeMirrorEditor.getLineTokens(lineIndex) || [];
+          if (tokens.some((token) => String(token.type || '').split(/\s+/).includes('error'))) {
+            return lineIndex + 1;
+          }
+        }
+      }
+
+      if (/unexpected end|end of (?:json )?input/i.test(message)) {
+        return Math.max(1, String(text || '').split('\n').length);
+      }
+      return 1;
     }
 
     function setJsonErrorLine(line) {
       const nextLine = Number.isFinite(line) ? line : -1;
-      if (jsonErrorLine === nextLine) return;
+      if (jsonErrorLine === nextLine) {
+        updateCodeMirrorErrorMarker();
+        return;
+      }
       jsonErrorLine = nextLine;
       updateLineNumbers();
     }
 
     function syncLineNumberScroll() {
+      if (codeMirrorEditor) return;
       lineNumbersEl.scrollTop = editor.scrollTop;
     }
 
@@ -8936,7 +9146,7 @@ ${lines.join('\n')}`;
         const preferredName = bundle.activeDocumentName || (savedTags[0] && savedTags[0].name);
         const preferred = getSavedTagByName(preferredName) || savedTags[0];
         if (preferred) {
-          editor.value = preferred.content;
+          setEditorValue(preferred.content, { clearCodeMirrorHistory: true });
           setEditorHistoryBaseline(editor.value);
         }
         rebuildNavTreeStateFromJson(editor.value || getDefaultJson());
@@ -9115,10 +9325,13 @@ ${lines.join('\n')}`;
       selectedNavDocumentName = snapshot.selectedNavDocumentName || null;
       editingWaveDocumentName = snapshot.editingWaveDocumentName || null;
       activeTagName = snapshot.activeTagName || null;
-      editor.value = snapshot.editorValue || getDefaultJson();
+      setEditorValue(snapshot.editorValue || getDefaultJson(), { clearCodeMirrorHistory: true });
       setEditorHistoryBaseline(editor.value);
-      editor.selectionStart = Math.min(snapshot.selectionStart || 0, editor.value.length);
-      editor.selectionEnd = Math.min(snapshot.selectionEnd || 0, editor.value.length);
+      setEditorSelection(
+        Math.min(snapshot.selectionStart || 0, editor.value.length),
+        Math.min(snapshot.selectionEnd || 0, editor.value.length),
+        false
+      );
       updateLineNumbers();
       syncLineNumberScroll();
       saveEditorJsonToStorage(editor.value);
@@ -9355,10 +9568,9 @@ ${lines.join('\n')}`;
       undoBurstCaptured = false;
       flushUndoDebounce();
 
-      editor.value = tag.content;
+      setEditorValue(tag.content, { clearCodeMirrorHistory: true });
       setEditorHistoryBaseline(tag.content);
-      editor.selectionStart = 0;
-      editor.selectionEnd = 0;
+      setEditorSelection(0, 0, false);
       clearSelectedGroupState();
       updateLineNumbers();
       syncLineNumberScroll();
@@ -9663,7 +9875,7 @@ ${lines.join('\n')}`;
           sequence: getHistorySequence(entry),
           reason: entry && entry.reason ? entry.reason : 'editor-change'
         });
-        editor.value = getEditorHistoryContent(entry);
+        setEditorValue(getEditorHistoryContent(entry), { clearCodeMirrorHistory: true });
         setEditorHistoryBaseline(editor.value);
         updateLineNumbers();
         renderWaveform(editor.value);
@@ -9705,7 +9917,7 @@ ${lines.join('\n')}`;
           sequence: getHistorySequence(entry),
           reason: entry && entry.reason ? entry.reason : 'editor-change'
         });
-        editor.value = getEditorHistoryContent(entry);
+        setEditorValue(getEditorHistoryContent(entry), { clearCodeMirrorHistory: true });
         setEditorHistoryBaseline(editor.value);
         updateLineNumbers();
         renderWaveform(editor.value);
@@ -9720,7 +9932,7 @@ ${lines.join('\n')}`;
 
     function initEditor() {
       const initialJson = formatJsonForDisplay(loadEditorJsonFromStorage());
-      editor.value = initialJson;
+      setEditorValue(initialJson, { clearCodeMirrorHistory: true });
       undoStack = [];
       redoStack = [];
       setEditorHistoryBaseline(initialJson);
@@ -9845,7 +10057,7 @@ ${lines.join('\n')}`;
         pushUndoBeforeChange();
         // A document description is rendered outside the SVG card, so avoid a
         // costly full WaveDrom redraw for large documents.
-        editor.value = newText;
+        setEditorValue(newText);
         setEditorHistoryBaseline(newText);
         updateLineNumbers();
         debouncedPersistEditorJson();
@@ -10224,6 +10436,1079 @@ ${lines.join('\n')}`;
       app.classList.remove('reading-mode');
     }
 
+    function loadVimModePreference() {
+      try {
+        return normalizeBool(localStorage.getItem(VIM_MODE_FLAG_KEY));
+      } catch (_e) {
+        return false;
+      }
+    }
+
+    function saveVimModePreference(enabled) {
+      try {
+        localStorage.setItem(VIM_MODE_FLAG_KEY, enabled ? '1' : '0');
+      } catch (_e) { /* ignore */ }
+    }
+
+    function setVimWaveAreaActive(active, reason) {
+      const controllerState = vimController && vimController.getState();
+      const next = !!(controllerState && controllerState.enabled && active);
+      const changed = next !== vimWaveAreaActive;
+      vimWaveAreaActive = next;
+      if (next && controllerState.scope !== 'wave') vimController.setScope('wave');
+      if (changed) {
+        updateVimModeUI(vimController ? vimController.getState() : null, reason || 'wave-focus');
+        vwdDebugLog('vim', {
+          phase: 'wave-area-focus',
+          active: next,
+          reason: reason || ''
+        });
+      }
+      return changed;
+    }
+
+    function updateVimModeUI(state, reason) {
+      const current = state || (vimController && vimController.getState()) || {
+        enabled: false,
+        mode: 'normal',
+        scope: 'wave',
+        count: '',
+        pending: ''
+      };
+      if (vimModeBtn) {
+        vimModeBtn.classList.toggle('active', !!current.enabled);
+        vimModeBtn.setAttribute('aria-pressed', String(!!current.enabled));
+        vimModeBtn.title = current.enabled ? '关闭 Vim 模式' : '开启 Vim 模式';
+      }
+      if (vimModeButtonState) vimModeButtonState.textContent = current.enabled ? 'On' : 'Off';
+      if (vimStatusBar) vimStatusBar.hidden = !current.enabled;
+      if (vimStatusMode) vimStatusMode.textContent = String(current.mode || 'normal').toUpperCase();
+      if (vimStatusScope) vimStatusScope.textContent = vimWaveAreaActive ? 'WAVE' : 'WAVE · 未聚焦';
+      if (vimStatusPending) {
+        const pendingLabel = current.pending === 'leader' ? '<Space>' : (current.pending || '');
+        vimStatusPending.textContent = (current.count || '') + pendingLabel;
+      }
+      app.classList.toggle('vim-scope-wave', !!current.enabled && vimWaveAreaActive);
+      ['nav', 'edge', 'json'].forEach((scope) => app.classList.remove('vim-scope-' + scope));
+      if (reason && reason !== 'count') {
+        vwdDebugLog('vim', {
+          phase: 'state',
+          reason,
+          enabled: current.enabled,
+          mode: current.mode,
+          scope: 'wave',
+          waveAreaActive: vimWaveAreaActive,
+          count: current.count,
+          pending: current.pending
+        });
+      }
+    }
+
+    function closeVimHelp() {
+      const wasOpen = !!(vimHelpModal && !vimHelpModal.hidden);
+      if (vimHelpModal) vimHelpModal.hidden = true;
+      const returnTarget = vimHelpReturnFocus;
+      vimHelpReturnFocus = null;
+      if (wasOpen && returnTarget && returnTarget.isConnected && typeof returnTarget.focus === 'function') {
+        requestAnimationFrame(() => {
+          try { returnTarget.focus({ preventScroll: true }); } catch (_e) { returnTarget.focus(); }
+        });
+      }
+    }
+
+    function showVimHelp() {
+      if (!vimHelpModal) return;
+      vimHelpReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      vimHelpModal.hidden = false;
+      requestAnimationFrame(() => {
+        if (!vimHelpClose) return;
+        try { vimHelpClose.focus({ preventScroll: true }); } catch (_e) { vimHelpClose.focus(); }
+      });
+    }
+
+    function closeVimCommandBar() {
+      if (vimCommandBar) vimCommandBar.hidden = true;
+      if (vimCommandInput) vimCommandInput.value = '';
+      if (vimController && vimController.getState().enabled) vimController.setMode('normal');
+    }
+
+    function openVimCommandBar() {
+      if (!vimCommandBar || !vimCommandInput) return false;
+      vimCommandBar.hidden = false;
+      vimCommandInput.value = '';
+      requestAnimationFrame(() => vimCommandInput.focus());
+      return true;
+    }
+
+    function isVisibleModalOpen() {
+      return !!document.querySelector('.modal-overlay:not([hidden])');
+    }
+
+    function shouldIgnoreVimKeyEvent(event) {
+      if (!vimWaveAreaActive) return true;
+      const target = event.target;
+      if (!target || !target.closest) return false;
+      if (target === vimCommandInput) return true;
+      if (target.closest('.CodeMirror')) return true;
+      if (target.closest('.modal-overlay:not([hidden])')) return true;
+      if (target.closest('input, textarea, select, [contenteditable="true"]')) return true;
+      if (inlineEditActive || isVisibleModalOpen()) return true;
+      return app.classList.contains('reading-mode');
+    }
+
+    function getVimContext() {
+      const state = vimController ? vimController.getState() : { scope: 'wave', mode: 'normal', visualKind: '' };
+      return {
+        scope: 'wave',
+        mode: state.mode,
+        visualKind: state.visualKind,
+        hasGroup: selectedGroupIndex >= 0,
+        hasEdge: selectedEdgeIndex >= 0,
+        hasWave: selectedSignalIndex >= 0,
+        hasNavDocument: !!selectedNavDocumentName
+      };
+    }
+
+    function setVimModeEnabled(enabled) {
+      if (!vimController) return false;
+      const next = !!enabled;
+      if (!next) {
+        setVimWaveAreaActive(false, 'vim-disabled');
+        closeVimCommandBar();
+        closeVimHelp();
+        vimVisualCellAnchor = -1;
+        vimVisualCellHead = -1;
+        vimVisualRowAnchor = -1;
+        vimVisualRowHead = -1;
+        setTextEditMode(false);
+        if (vimWaveInsertModeActive) {
+          vimWaveInsertModeActive = false;
+          setWaveEditMode('modify');
+        }
+        exitWavePaintMode('vim-disabled');
+        refreshVimWaveSelection();
+      }
+      vimController.setEnabled(next);
+      saveVimModePreference(next);
+      setCodeMirrorVimEnabled(false);
+      if (next) {
+        vimController.setScope('wave');
+        setVimWaveAreaActive(true, 'vim-enabled');
+        ensureVimWaveCursor();
+        requestAnimationFrame(() => {
+          if (!vimWaveAreaActive || !wavePanel) return;
+          try { wavePanel.focus({ preventScroll: true }); } catch (_e) { wavePanel.focus(); }
+        });
+      }
+      updateVimModeUI(vimController.getState(), 'toggle');
+      setStatus(true, next ? 'Vim 模式已开启' : 'Vim 模式已关闭');
+      return true;
+    }
+
+    function refreshVimWaveSelection() {
+      const svg = waveContainer.querySelector('svg');
+      if (!svg) return;
+      let sourceMap = [];
+      try { sourceMap = buildSignalSourceMap(editor.value); } catch (_e) { return; }
+      const lanes = getWaveLaneGroups(svg);
+      restoreWaveSelection(lanes, sourceMap);
+    }
+
+    function ensureVimWaveCursor() {
+      let sourceMap = [];
+      try { sourceMap = buildSignalSourceMap(editor.value); } catch (_e) { return false; }
+      if (!sourceMap.length) {
+        setStatus(false, '当前波形图没有信号行');
+        return false;
+      }
+      const row = selectedSignalIndex >= 0 && selectedSignalIndex < sourceMap.length ? selectedSignalIndex : 0;
+      const maxColumn = Math.max(0, Math.max(1, getMaxWaveBoundaryIndex(sourceMap)) - 1);
+      const col = selectedWaveColumnIndex >= 0 ? Math.min(selectedWaveColumnIndex, maxColumn) : 0;
+      setSelectedSignal(row, col);
+      refreshVimWaveSelection();
+      return true;
+    }
+
+    function getVimVisualRowRange() {
+      if (vimVisualRowAnchor < 0 || vimVisualRowHead < 0) return null;
+      return {
+        start: Math.min(vimVisualRowAnchor, vimVisualRowHead),
+        end: Math.max(vimVisualRowAnchor, vimVisualRowHead)
+      };
+    }
+
+    function clearVimVisualSelection() {
+      const rowHead = vimVisualRowHead;
+      const cellHead = vimVisualCellHead;
+      vimVisualCellAnchor = -1;
+      vimVisualCellHead = -1;
+      vimVisualRowAnchor = -1;
+      vimVisualRowHead = -1;
+      if (rowHead >= 0) setSelectedSignal(rowHead, Math.max(0, selectedWaveColumnIndex));
+      else if (cellHead >= 0 && selectedSignalIndex >= 0) setSelectedSignal(selectedSignalIndex, cellHead);
+      refreshVimWaveSelection();
+    }
+
+    function startVimVisualSelection(kind) {
+      if (!ensureVimWaveCursor()) return false;
+      if (kind === 'row') {
+        vimVisualRowAnchor = selectedSignalIndex;
+        vimVisualRowHead = selectedSignalIndex;
+        vimVisualCellAnchor = -1;
+        vimVisualCellHead = -1;
+      } else {
+        vimVisualCellAnchor = selectedWaveColumnIndex;
+        vimVisualCellHead = selectedWaveColumnIndex;
+        vimVisualRowAnchor = -1;
+        vimVisualRowHead = -1;
+        setSelectedWaveRange(selectedSignalIndex, vimVisualCellAnchor, vimVisualCellHead);
+      }
+      refreshVimWaveSelection();
+      return true;
+    }
+
+    function swapVimVisualSelection() {
+      if (vimVisualRowAnchor >= 0) {
+        const oldAnchor = vimVisualRowAnchor;
+        vimVisualRowAnchor = vimVisualRowHead;
+        vimVisualRowHead = oldAnchor;
+        setSelectedSignal(vimVisualRowHead, Math.max(0, selectedWaveColumnIndex));
+      } else if (vimVisualCellAnchor >= 0) {
+        const oldAnchor = vimVisualCellAnchor;
+        vimVisualCellAnchor = vimVisualCellHead;
+        vimVisualCellHead = oldAnchor;
+        setSelectedWaveRange(selectedSignalIndex, vimVisualCellAnchor, vimVisualCellHead);
+      }
+      refreshVimWaveSelection();
+      return true;
+    }
+
+    function findVimWaveChangeColumn(wave, fromColumn, direction, count, maxColumn) {
+      let current = fromColumn;
+      for (let step = 0; step < count; step++) {
+        let found = -1;
+        if (direction > 0) {
+          for (let i = current + 1; i <= maxColumn; i++) {
+            if (i < wave.length && wave[i] !== '.') { found = i; break; }
+          }
+          current = found >= 0 ? found : maxColumn;
+        } else {
+          for (let i = current - 1; i >= 0; i--) {
+            if (i < wave.length && wave[i] !== '.') { found = i; break; }
+          }
+          current = found >= 0 ? found : 0;
+        }
+      }
+      return current;
+    }
+
+    function moveVimWaveCursor(direction, count, extend) {
+      let sourceMap = [];
+      try { sourceMap = buildSignalSourceMap(editor.value); } catch (_e) { return false; }
+      if (!sourceMap.length) return false;
+      const steps = Math.max(1, Math.floor(count || 1));
+      let row = selectedSignalIndex >= 0 ? selectedSignalIndex : 0;
+      let col = vimVisualCellHead >= 0 ? vimVisualCellHead : Math.max(0, selectedWaveColumnIndex);
+      const maxColumn = Math.max(0, Math.max(1, getMaxWaveBoundaryIndex(sourceMap)) - 1);
+
+      if (direction === 'up') row = Math.max(0, row - steps);
+      else if (direction === 'down') row = Math.min(sourceMap.length - 1, row + steps);
+      else if (direction === 'left') col = Math.max(0, col - steps);
+      else if (direction === 'right') col = Math.min(maxColumn, col + steps);
+      else if (direction === 'next-change') {
+        col = findVimWaveChangeColumn(sourceMap[row].signal.wave || '', col, 1, steps, maxColumn);
+      } else if (direction === 'previous-change') {
+        col = findVimWaveChangeColumn(sourceMap[row].signal.wave || '', col, -1, steps, maxColumn);
+      }
+
+      const state = vimController ? vimController.getState() : null;
+      if (extend && state && state.visualKind === 'row') {
+        vimVisualRowHead = row;
+        setSelectedSignal(row, col);
+      } else if (extend && state && state.visualKind === 'cell') {
+        if (direction === 'up' || direction === 'down') {
+          vimVisualCellAnchor = col;
+          vimVisualCellHead = col;
+        } else {
+          vimVisualCellHead = col;
+        }
+        setSelectedWaveRange(row, vimVisualCellAnchor, vimVisualCellHead);
+      } else {
+        setSelectedSignal(row, col);
+      }
+      refreshVimWaveSelection();
+      return true;
+    }
+
+    function moveVimWaveBoundary(which, extend) {
+      let sourceMap = [];
+      try { sourceMap = buildSignalSourceMap(editor.value); } catch (_e) { return false; }
+      if (!sourceMap.length) return false;
+      const state = vimController ? vimController.getState() : null;
+      let row = selectedSignalIndex >= 0 ? selectedSignalIndex : 0;
+      let col = Math.max(0, selectedWaveColumnIndex);
+      if (which === 'first-row') row = 0;
+      else if (which === 'last-row') row = sourceMap.length - 1;
+      else if (which === 'line-start') col = 0;
+      else if (which === 'line-end') col = Math.max(0, Math.max(1, getMaxWaveBoundaryIndex(sourceMap)) - 1);
+
+      if (extend && state && state.visualKind === 'row') {
+        vimVisualRowHead = row;
+        setSelectedSignal(row, col);
+      } else if (extend && state && state.visualKind === 'cell') {
+        vimVisualCellHead = col;
+        setSelectedWaveRange(row, vimVisualCellAnchor, vimVisualCellHead);
+      } else {
+        setSelectedSignal(row, col);
+      }
+      refreshVimWaveSelection();
+      return true;
+    }
+
+    function replaceVimWave(char, count) {
+      if (!LEGEND_ITEMS.some((item) => item.char === char)) {
+        setStatus(false, '不支持的波形字符: ' + String(char));
+        return false;
+      }
+      if (!ensureVimWaveCursor()) return false;
+      const state = vimController ? vimController.getState() : { mode: 'normal', visualKind: '' };
+      let start = selectedWaveColumnIndex;
+      let length = Math.max(1, Math.floor(count || 1));
+      if (state.mode === 'visual' && state.visualKind === 'cell') {
+        const range = getSelectedWaveRange();
+        if (range) {
+          start = range.start;
+          length = range.end - range.start + 1;
+        }
+      }
+      const changed = applyWaveRangeReplacement(
+        selectedSignalIndex,
+        start,
+        String(char).repeat(length),
+        state.mode === 'replace' ? 'Vim 连续替换' : 'Vim 替换'
+      );
+      if (!changed) {
+        if (state.mode !== 'replace') return false;
+        selectWavePaintChar(char);
+        setSelectedSignal(selectedSignalIndex, start + length);
+        refreshVimWaveSelection();
+        setStatus(true, 'REPLACE：波形未变化，光标已前进');
+        return true;
+      }
+      if (state.mode === 'replace') {
+        selectWavePaintChar(char);
+        setSelectedSignal(selectedSignalIndex, start + length);
+      } else {
+        setSelectedSignal(selectedSignalIndex, start);
+      }
+      refreshVimWaveSelection();
+      return true;
+    }
+
+    function insertVimWave(char, count) {
+      if (!LEGEND_ITEMS.some((item) => item.char === char)) {
+        setStatus(false, '不支持的波形字符: ' + String(char));
+        return false;
+      }
+      if (!ensureVimWaveCursor()) return false;
+
+      let sourceMap = [];
+      try { sourceMap = buildSignalSourceMap(editor.value); } catch (_e) { return false; }
+      const entry = sourceMap[selectedSignalIndex];
+      if (!entry) return false;
+
+      const text = editor.value;
+      const wave = entry.signal.wave || '';
+      const insertCol = Math.max(0, Math.floor(selectedWaveColumnIndex));
+      const length = Math.max(1, Math.floor(count || 1));
+      const insertion = String(char).repeat(length);
+      const paddedWave = insertCol > wave.length
+        ? wave.padEnd(insertCol, EMPTY_WAVE_FILL_CHAR)
+        : wave;
+      const newWave = paddedWave.slice(0, insertCol) + insertion + paddedWave.slice(insertCol);
+
+      pushUndoBeforeChange();
+      let updatedSignal = Object.assign({}, entry.signal, { wave: newWave });
+      updatedSignal = preserveWaveDataLabelsAfterInsert(updatedSignal, wave, insertCol, insertion);
+      const indent = getIndentAt(text, entry.start);
+      const newObjStr = formatSignalObject(updatedSignal, indent);
+      const newText = text.slice(0, entry.start) + newObjStr + text.slice(entry.end);
+      applyEditorChange(newText, entry.start, entry.start + newObjStr.length);
+      scheduleFormatAfterWaveChange();
+      setSelectedSignal(selectedSignalIndex, insertCol + length);
+      refreshVimWaveSelection();
+      vwdDebugLog('vim', {
+        phase: 'insert-wave',
+        rowIndex: selectedSignalIndex,
+        columnIndex: insertCol,
+        count: length,
+        char
+      });
+      setStatus(true, 'INSERT：已插入 ' + length + ' 个波形，光标已前进');
+      return true;
+    }
+
+    function cloneSignalForVimRegister(signal) {
+      const copy = JSON.parse(JSON.stringify(signal || {}));
+      delete copy.node;
+      return copy;
+    }
+
+    function yankVimSelection() {
+      const rowRange = getVimVisualRowRange();
+      if (rowRange) {
+        const sourceMap = buildSignalSourceMap(editor.value);
+        const rows = sourceMap
+          .slice(rowRange.start, rowRange.end + 1)
+          .map((entry) => cloneSignalForVimRegister(entry.signal));
+        if (!rows.length) return false;
+        vimRegister = { type: 'row', rows };
+        setStatus(true, '已复制 ' + rows.length + ' 行到 Vim 寄存器（未复制 node）');
+        clearVimVisualSelection();
+        return true;
+      }
+
+      if (!copySelectedWaveRange()) return false;
+      vimRegister = { type: 'wave', text: copiedWaveSelection };
+      clearVimVisualSelection();
+      return true;
+    }
+
+    function yankVimCurrentRow() {
+      const sourceMap = buildSignalSourceMap(editor.value);
+      const entry = sourceMap[selectedSignalIndex];
+      if (!entry) {
+        setStatus(false, '请先选择信号行');
+        return false;
+      }
+      vimRegister = { type: 'row', rows: [cloneSignalForVimRegister(entry.signal)] };
+      setStatus(true, '已复制当前行到 Vim 寄存器（未复制 node）');
+      return true;
+    }
+
+    function pasteVimRows(before, count) {
+      if (!vimRegister || vimRegister.type !== 'row' || !vimRegister.rows.length) return false;
+      let parsed;
+      try { parsed = JSON.parse(editor.value); } catch (_e) {
+        setStatus(false, 'JSON 错误，无法粘贴信号行');
+        return false;
+      }
+      if (!Array.isArray(parsed.signal)) parsed.signal = [];
+      const repeat = Math.max(1, Math.floor(count || 1));
+      const rows = [];
+      for (let i = 0; i < repeat; i++) {
+        vimRegister.rows.forEach((row) => rows.push(cloneSignalForVimRegister(row)));
+      }
+
+      const locations = collectSignalLocations(parsed.signal);
+      const target = locations[selectedSignalIndex];
+      let insertedFlatIndex = 0;
+      if (target) {
+        const insertionIndex = target.index + (before ? 0 : 1);
+        target.parent.splice(insertionIndex, 0, ...rows);
+        insertedFlatIndex = selectedSignalIndex + (before ? 0 : 1);
+      } else {
+        parsed.signal.push(...rows);
+        insertedFlatIndex = locations.length;
+      }
+
+      pushUndoBeforeChange();
+      const newText = JSON.stringify(parsed, null, 2);
+      rows.forEach((_row, offset) => {
+        adjustConnectionPointAfterRowInsert(insertedFlatIndex + offset);
+        adjustPendingNameEditAfterRowInsert(insertedFlatIndex + offset);
+      });
+      const newIndex = insertedFlatIndex + rows.length - 1;
+      const entry = buildSignalSourceMap(newText)[newIndex];
+      setSelectedSignal(newIndex, Math.max(0, selectedWaveColumnIndex));
+      applyEditorChange(newText, entry ? entry.start : newText.length, entry ? entry.end : newText.length);
+      scheduleFormatAfterWaveChange();
+      setStatus(true, '已粘贴 ' + rows.length + ' 行（未复制 node）');
+      return true;
+    }
+
+    function pasteVimRegister(before, count) {
+      if (vimRegister && vimRegister.type === 'row') return pasteVimRows(before, count);
+      if (vimRegister && vimRegister.type === 'wave') copiedWaveSelection = vimRegister.text;
+      if (!copiedWaveSelection) {
+        setStatus(false, 'Vim 寄存器为空');
+        return false;
+      }
+      if (!ensureVimWaveCursor()) return false;
+      const repeat = Math.max(1, Math.floor(count || 1));
+      return applyWaveRangeReplacement(
+        selectedSignalIndex,
+        selectedWaveColumnIndex,
+        copiedWaveSelection.repeat(repeat),
+        'Vim 覆盖粘贴'
+      );
+    }
+
+    function pruneEmptySignalGroups(signals) {
+      if (!Array.isArray(signals)) return;
+      const start = typeof signals[0] === 'string' ? 1 : 0;
+      for (let i = signals.length - 1; i >= start; i--) {
+        const item = signals[i];
+        if (!Array.isArray(item)) continue;
+        pruneEmptySignalGroups(item);
+        const childStart = typeof item[0] === 'string' ? 1 : 0;
+        if (item.length <= childStart) signals.splice(i, 1);
+      }
+    }
+
+    function getSignalNodeIds(signals) {
+      const ids = new Set();
+      flattenSignals(signals || []).forEach((signal) => {
+        String(signal.node || '').split('').forEach((char) => {
+          if (char !== '.') ids.add(char);
+        });
+      });
+      return ids;
+    }
+
+    function deleteVimSignalRange(startIndex, endIndex) {
+      let parsed;
+      try { parsed = JSON.parse(editor.value); } catch (_e) {
+        setStatus(false, 'JSON 错误，无法删除信号行');
+        return false;
+      }
+      if (!parsed || !Array.isArray(parsed.signal)) return false;
+      const locations = collectSignalLocations(parsed.signal);
+      if (!locations.length) return false;
+      const start = Math.max(0, Math.min(locations.length - 1, Math.min(startIndex, endIndex)));
+      const end = Math.max(start, Math.min(locations.length - 1, Math.max(startIndex, endIndex)));
+      for (let i = end; i >= start; i--) {
+        const location = locations[i];
+        const liveIndex = location.parent.indexOf(location.signal);
+        if (liveIndex >= 0) location.parent.splice(liveIndex, 1);
+      }
+      pruneEmptySignalGroups(parsed.signal);
+
+      const remainingNodeIds = getSignalNodeIds(parsed.signal);
+      if (Array.isArray(parsed.edge)) {
+        parsed.edge = parsed.edge.filter((edgeText) => {
+          const edge = parseEdgeString(edgeText);
+          if (!edge.from || !edge.to) return true;
+          return remainingNodeIds.has(edge.from) && remainingNodeIds.has(edge.to);
+        });
+      }
+
+      pushUndoBeforeChange();
+      const newText = JSON.stringify(parsed, null, 2);
+      for (let i = end; i >= start; i--) {
+        adjustConnectionPointAfterRowDelete(i);
+        adjustPendingNameEditAfterRowDelete(i);
+      }
+      const remainingCount = flattenSignals(parsed.signal).length;
+      const nextIndex = remainingCount ? Math.min(start, remainingCount - 1) : -1;
+      vimVisualRowAnchor = -1;
+      vimVisualRowHead = -1;
+      setSelectedSignal(nextIndex, nextIndex >= 0 ? 0 : -1);
+      applyEditorChange(newText, 0, 0, { skipFocus: true });
+      scheduleFormatAfterWaveChange();
+      setStatus(true, '已删除 ' + (end - start + 1) + ' 个信号行');
+      return true;
+    }
+
+    function deleteVimSelection() {
+      const rowRange = getVimVisualRowRange();
+      if (rowRange) return deleteVimSignalRange(rowRange.start, rowRange.end);
+      const result = deleteSelectedWaveRange();
+      clearVimVisualSelection();
+      return result;
+    }
+
+    function insertVimSignalRow(before) {
+      let parsed;
+      try { parsed = JSON.parse(editor.value); } catch (_e) {
+        setStatus(false, 'JSON 错误，新增行失败');
+        return false;
+      }
+      if (!Array.isArray(parsed.signal)) parsed.signal = [];
+      const locations = collectSignalLocations(parsed.signal);
+      const target = locations[selectedSignalIndex];
+      const row = {};
+      let newIndex = 0;
+      if (target) {
+        target.parent.splice(target.index + (before ? 0 : 1), 0, row);
+        newIndex = selectedSignalIndex + (before ? 0 : 1);
+      } else {
+        parsed.signal.push(row);
+        newIndex = locations.length;
+      }
+      pushUndoBeforeChange();
+      const newText = JSON.stringify(parsed, null, 2);
+      adjustConnectionPointAfterRowInsert(newIndex);
+      adjustPendingNameEditAfterRowInsert(newIndex);
+      pendingNameEditSignalIndex = newIndex;
+      const entry = buildSignalSourceMap(newText)[newIndex];
+      setSelectedSignal(newIndex, 0);
+      applyEditorChange(newText, entry ? entry.start : newText.length, entry ? entry.end : newText.length);
+      scheduleFormatAfterWaveChange();
+      setStatus(true, '已插入空白信号行');
+      return true;
+    }
+
+    function collectVisibleVimNavEntries() {
+      const entries = [];
+      if (!navTreeState) return entries;
+      const pushNode = (node, parent) => {
+        entries.push({ kind: 'directory', node, parent: parent || null });
+        if (!node.expanded) return;
+        (node.children || []).forEach((child) => pushNode(child, node));
+        (node.documents || []).forEach((name) => {
+          if (getSavedTagByName(name)) entries.push({ kind: 'document', name, parent: node });
+        });
+      };
+      pushNode(navTreeState, null);
+      return entries;
+    }
+
+    function getCurrentVimNavEntryIndex(entries) {
+      if (selectedNavDocumentName) {
+        return entries.findIndex((entry) => entry.kind === 'document' && entry.name === selectedNavDocumentName);
+      }
+      return entries.findIndex((entry) => entry.kind === 'directory' && entry.node.id === selectedNavNodeId);
+    }
+
+    function scrollSelectedVimNavEntryIntoView() {
+      requestAnimationFrame(() => {
+        const target = navTreeEl && navTreeEl.querySelector(
+          '.nav-tree-document-label.active, .nav-tree-node-label.active'
+        );
+        if (target && typeof target.scrollIntoView === 'function') {
+          target.scrollIntoView({ behavior: 'auto', block: 'nearest' });
+        }
+      });
+    }
+
+    function selectVimNavEntry(entry) {
+      if (!entry) return false;
+      if (entry.kind === 'document') {
+        selectNavDocumentInTree(entry.name);
+      } else {
+        setSelectedNavNode(entry.node.id, { skipFilter: true });
+      }
+      scrollSelectedVimNavEntryIntoView();
+      return true;
+    }
+
+    function moveVimNavCursor(direction, count) {
+      const entries = collectVisibleVimNavEntries();
+      if (!entries.length) return false;
+      const currentIndex = Math.max(0, getCurrentVimNavEntryIndex(entries));
+      const steps = Math.max(1, Math.floor(count || 1));
+      if (direction === 'up' || direction === 'previous-change') {
+        return selectVimNavEntry(entries[Math.max(0, currentIndex - steps)]);
+      }
+      if (direction === 'down' || direction === 'next-change') {
+        return selectVimNavEntry(entries[Math.min(entries.length - 1, currentIndex + steps)]);
+      }
+
+      const current = entries[currentIndex];
+      if (!current) return false;
+      if (direction === 'left') {
+        if (current.kind === 'directory' && current.node.expanded) {
+          current.node.expanded = false;
+          renderNavTree();
+          return true;
+        }
+        const parent = current.kind === 'document' ? current.parent : current.parent;
+        return parent ? selectVimNavEntry({ kind: 'directory', node: parent }) : false;
+      }
+      if (direction === 'right') {
+        if (current.kind !== 'directory') return false;
+        const hasChildren = (current.node.children || []).length || (current.node.documents || []).length;
+        if (!hasChildren) return false;
+        if (!current.node.expanded) {
+          current.node.expanded = true;
+          renderNavTree();
+          return true;
+        }
+        const nextEntries = collectVisibleVimNavEntries();
+        const nextIndex = getCurrentVimNavEntryIndex(nextEntries) + 1;
+        return selectVimNavEntry(nextEntries[nextIndex]);
+      }
+      return false;
+    }
+
+    function moveVimNavBoundary(last) {
+      const entries = collectVisibleVimNavEntries();
+      if (!entries.length) return false;
+      return selectVimNavEntry(entries[last ? entries.length - 1 : 0]);
+    }
+
+    function activateVimNavEntry() {
+      if (selectedNavDocumentName) {
+        openWaveDocumentForEditing(selectedNavDocumentName, { immediate: true });
+        if (vimController) vimController.setScope('wave');
+        return true;
+      }
+      const node = getNavNodeById(navTreeState, selectedNavNodeId);
+      if (!node) return false;
+      if ((node.children || []).length || (node.documents || []).length) {
+        node.expanded = !node.expanded;
+        renderNavTree();
+      }
+      return true;
+    }
+
+    function deleteVimNavEntry() {
+      if (selectedNavDocumentName) {
+        const tag = getSavedTagByName(selectedNavDocumentName);
+        const title = getSavedTagTitle(tag || { name: selectedNavDocumentName, content: '{}' });
+        if (!deleteSavedTag(selectedNavDocumentName)) return false;
+        setStatus(true, '已删除波形图: ' + title);
+        return true;
+      }
+      const node = getNavNodeById(navTreeState, selectedNavNodeId);
+      if (!node || !node.isCustom) {
+        setStatus(false, '根目录不能删除');
+        return false;
+      }
+      deleteNavDirectory(node);
+      return true;
+    }
+
+    function normalizeVimNumber(value) {
+      return String(value || '').trim().replace(/\.+$/, '');
+    }
+
+    function findWaveDocumentByNumber(number) {
+      const wanted = normalizeVimNumber(number);
+      if (!wanted || !navTreeState) return null;
+      for (let i = 0; i < savedTags.length; i++) {
+        const tag = savedTags[i];
+        const parent = findNavDocumentParent(navTreeState, tag.name);
+        if (normalizeVimNumber(getNavDocumentNumber(tag, parent)) === wanted) return tag;
+      }
+      return null;
+    }
+
+    function openWaveDocumentByNumber(number) {
+      const tag = findWaveDocumentByNumber(number);
+      if (!tag) {
+        setStatus(false, '未找到编号为 ' + String(number || '') + ' 的波形图');
+        return false;
+      }
+      openWaveDocumentForEditing(tag.name, { immediate: true });
+      if (vimController) vimController.setScope('wave');
+      setStatus(true, '已打开 ' + getNavDocumentDisplayName(tag));
+      return true;
+    }
+
+    function findNavDirectoryByNumberOrLabel(value) {
+      const wanted = normalizeVimNumber(value);
+      if (!navTreeState || !wanted) return null;
+      if (wanted === '0' || wanted === 'root') return navTreeState;
+      const stack = (navTreeState.children || []).slice();
+      while (stack.length) {
+        const node = stack.shift();
+        if (normalizeVimNumber(getNavDirectoryNumber(node)) === wanted || node.label === value) return node;
+        stack.unshift(...(node.children || []));
+      }
+      return null;
+    }
+
+    function moveCurrentDocumentByVimCommand(targetText) {
+      const documentName = selectedNavDocumentName || editingWaveDocumentName;
+      const from = documentName && findNavDocumentParent(navTreeState, documentName);
+      if (!documentName || !from) {
+        setStatus(false, '请先选择波形图');
+        return false;
+      }
+      if (!targetText) {
+        moveNavDocument(documentName, from);
+        return true;
+      }
+      const target = findNavDirectoryByNumberOrLabel(targetText);
+      if (!target) {
+        setStatus(false, '未找到目录: ' + targetText);
+        return false;
+      }
+      moveNavDocumentToDirectory(documentName, from, target, getNavDirectoryDisplayName(target));
+      return true;
+    }
+
+    function moveVimEdge(direction, count) {
+      let parsed;
+      try { parsed = JSON.parse(editor.value); } catch (_e) { return false; }
+      const edges = Array.isArray(parsed.edge) ? parsed.edge : [];
+      if (!edges.length) {
+        setStatus(false, '当前波形图没有连接线');
+        return false;
+      }
+      if (!connectionSelectActive) beginEdgeSelectSession();
+      const delta = direction === 'up' || direction === 'left' || direction === 'previous-change' ? -1 : 1;
+      const start = selectedEdgeIndex >= 0 ? selectedEdgeIndex : (delta > 0 ? -1 : edges.length);
+      const next = Math.max(0, Math.min(edges.length - 1, start + delta * Math.max(1, Math.floor(count || 1))));
+      selectEdge(next);
+      return true;
+    }
+
+    function openVimDataEditorAtCursor() {
+      let sourceMap = [];
+      try { sourceMap = buildSignalSourceMap(editor.value); } catch (_e) { return false; }
+      const entry = sourceMap[selectedSignalIndex];
+      if (!entry || selectedWaveColumnIndex < 0) return false;
+      const slot = getWaveDataSlotAtColumn(entry.signal.wave || '', selectedWaveColumnIndex);
+      if (!slot) return false;
+
+      if (waveEditMode !== 'modify') setWaveEditMode('modify');
+      setTextEditMode(true);
+      if (!isTextEditModeActive()) return false;
+
+      const svg = waveContainer.querySelector('svg');
+      const lane = svg ? getWaveLaneGroups(svg)[selectedSignalIndex] : null;
+      const drawGroup = lane && lane.querySelector('[id^="wavelane_draw_"]');
+      if (!drawGroup) return false;
+      const dataText = drawGroup.querySelector(
+        'text.wave-data-text[data-vwd-data-index="' + slot.dataIdx + '"]'
+      );
+      const anchor = dataText || drawGroup.querySelector('.wave-col-highlight') || drawGroup;
+      const value = Array.isArray(entry.signal.data) && entry.signal.data[slot.dataIdx] !== undefined
+        ? String(entry.signal.data[slot.dataIdx])
+        : '';
+      vimDirectInlineEditActive = true;
+      startInlineEdit(dataText || { textContent: value }, entry, 'data', slot.dataIdx, anchor);
+      if (!inlineEditActive) {
+        vimDirectInlineEditActive = false;
+        return false;
+      }
+      vwdDebugLog('vim', {
+        phase: 'open-data-editor',
+        rowIndex: selectedSignalIndex,
+        columnIndex: selectedWaveColumnIndex,
+        dataIdx: slot.dataIdx
+      });
+      setStatus(true, 'TEXT：正在编辑当前数据标签');
+      return true;
+    }
+
+    function editVimSelectedText() {
+      if (selectedEdgeIndex >= 0) {
+        setTextEditMode(true);
+        const input = document.getElementById('connection-label-input');
+        if (input) {
+          input.focus();
+          input.select();
+        }
+        return true;
+      }
+      if (selectedGroupIndex >= 0) {
+        setTextEditMode(true);
+        const svg = waveContainer.querySelector('svg');
+        const target = svg && svg.querySelector('[data-vwd-group-index="' + selectedGroupIndex + '"]');
+        if (target) {
+          target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+          return true;
+        }
+      }
+      if (openVimDataEditorAtCursor()) return true;
+      setTextEditMode(true);
+      setStatus(true, 'TEXT：当前格没有数据标签，可单击波形文字编辑');
+      return true;
+    }
+
+    function setVimScope(scope) {
+      if (!vimController || scope !== 'wave') return false;
+      vimController.setScope('wave');
+      setVimWaveAreaActive(true, 'scope-wave');
+      ensureVimWaveCursor();
+      if (wavePanel && wavePanel.focus) {
+        try { wavePanel.focus({ preventScroll: true }); } catch (_e) { wavePanel.focus(); }
+      }
+      return true;
+    }
+
+    function escapeVimMode() {
+      closeVimCommandBar();
+      closeVimHelp();
+      if (textEditModeActive) setTextEditMode(false);
+      if (vimWaveInsertModeActive) {
+        vimWaveInsertModeActive = false;
+        setWaveEditMode('modify');
+      }
+      if (wavePaintModeActive) exitWavePaintMode('vim-escape');
+      if (connectionAddSessionActive) endConnectionAddSession();
+      if (connectionSelectActive) setConnectionSelectActive(false);
+      if (groupPickActive) clearSelectedGroupState();
+      clearVimVisualSelection();
+      return true;
+    }
+
+    async function saveCurrentWaveLibrary() {
+      if (!waveLibraryServerMode) {
+        downloadWaveLibraryBundle();
+        return true;
+      }
+      if (!currentWaveLibraryFile) {
+        setStatus(false, '当前没有可保存的波形库文件');
+        return false;
+      }
+      try {
+        const response = await fetch('/api/wave-library?file=' + encodeURIComponent(currentWaveLibraryFile), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(getWaveLibraryBundle())
+        });
+        if (!response.ok) throw new Error('save failed');
+        setStatus(true, '已保存波形库：' + currentWaveLibraryFile);
+        return true;
+      } catch (_e) {
+        setStatus(false, '波形库保存失败');
+        return false;
+      }
+    }
+
+    function clearVimHighlights() {
+      clearVimVisualSelection();
+      clearEdgeSelection();
+      clearSelectedGroupState();
+      refreshVimWaveSelection();
+      setStatus(true, '已清除选择和高亮');
+      return true;
+    }
+
+    function executeVimCommandLine(rawCommand) {
+      const raw = String(rawCommand || '').trim().replace(/^:/, '');
+      if (!raw) return false;
+      const match = raw.match(/^(\S+)(?:\s+([\s\S]*))?$/);
+      const command = match ? match[1].toLowerCase() : raw.toLowerCase();
+      const argument = match && match[2] ? match[2].trim() : '';
+      vwdDebugLog('vim', { phase: 'ex-command', command, argument });
+
+      if (command === 'w' || command === 'write') {
+        void saveCurrentWaveLibrary();
+        return true;
+      }
+      if (command === 'open' || command === 'o') {
+        if (!/^\d+(?:\.\d+)*\.?$/.test(argument)) {
+          setStatus(false, '用法: :open 1.2（只输入波形图编号）');
+          return false;
+        }
+        return openWaveDocumentByNumber(argument);
+      }
+      if (command === 'format' || command === 'fo') {
+        formatEditorJson();
+        return true;
+      }
+      if (command === 'json' || command === 'j') {
+        setJsonPanelHidden(!app.classList.contains('json-panel-hidden'), true);
+        if (!app.classList.contains('json-panel-hidden')) requestAnimationFrame(() => codeMirrorEditor && codeMirrorEditor.refresh());
+        return true;
+      }
+      if (command === 'nav' || command === 'n') {
+        setNavSidebarHidden(!app.classList.contains('nav-sidebar-hidden'), true);
+        return true;
+      }
+      if (command === 'new') {
+        createEmptyWaveDocument();
+        return true;
+      }
+      if (command === 'move') return moveCurrentDocumentByVimCommand(argument);
+      if (command === 'debug' || command === 'deb') {
+        toggleDebugMode();
+        return true;
+      }
+      if (command === 'noh' || command === 'nohighlight') return clearVimHighlights();
+      if (command === 'set') {
+        if (argument === 'vim') return setVimModeEnabled(true);
+        if (argument === 'novim') return setVimModeEnabled(false);
+      }
+      if (command === 'help') {
+        showVimHelp();
+        return true;
+      }
+      setStatus(false, '未知 Vim 命令: :' + raw);
+      return false;
+    }
+
+    function executeVimAction(action, payload) {
+      const data = payload || {};
+      const scope = 'wave';
+      vwdDebugLog('vim', { phase: 'command', action, scope, count: data.count, direction: data.direction });
+      switch (action) {
+        case 'escape': return escapeVimMode();
+        case 'undo': undo(); return true;
+        case 'redo': redo(); return true;
+        case 'open-command': return openVimCommandBar();
+        case 'show-help': showVimHelp(); return true;
+        case 'save-library': void saveCurrentWaveLibrary(); return true;
+        case 'format-json': formatEditorJson(); return true;
+        case 'visual-start': return startVimVisualSelection(data.kind);
+        case 'visual-stop': clearVimVisualSelection(); return true;
+        case 'visual-swap': return swapVimVisualSelection();
+        case 'yank-selection': return yankVimSelection();
+        case 'yank-row': return yankVimCurrentRow();
+        case 'delete-selection': return deleteVimSelection();
+        case 'delete-wave': return deleteSelectedWaveRange();
+        case 'replace-wave': return replaceVimWave(data.char, data.count);
+        case 'replace-start':
+          setWavePaintMode(true, 'vim-replace');
+          setStatus(true, 'REPLACE：输入波形字符连续替换，Esc 退出');
+          return true;
+        case 'insert-start':
+          if (textEditModeActive) setTextEditMode(false);
+          vimWaveInsertModeActive = true;
+          setWaveEditMode('insert');
+          setStatus(true, 'INSERT：输入波形字符连续插入，Esc 退出');
+          return true;
+        case 'insert-wave': return insertVimWave(data.char, data.count);
+        case 'paste': return pasteVimRegister(data.before, data.count);
+        case 'edit-text': return editVimSelectedText();
+        case 'group': {
+          const range = getVimVisualRowRange();
+          if (range) {
+            vimVisualRowAnchor = -1;
+            vimVisualRowHead = -1;
+            createGroupFromSignalRows(range.start, range.end);
+            refreshVimWaveSelection();
+            if (vimController) vimController.setMode('normal');
+          } else {
+            beginGroupPick();
+          }
+          return true;
+        }
+        case 'add-connection': beginEdgeAddSession(); return true;
+        case 'select-connection': beginEdgeSelectSession(); return true;
+        case 'delete-context':
+          if (selectedGroupIndex >= 0) { deleteSelectedGroup(); return true; }
+          if (selectedEdgeIndex >= 0) { deleteEdgeAtIndex(selectedEdgeIndex); return true; }
+          return false;
+        case 'delete-row':
+          return deleteVimSignalRange(selectedSignalIndex, selectedSignalIndex);
+        case 'new-row':
+          return insertVimSignalRow(!!data.before);
+        case 'move-row':
+          void moveSelectedSignalRow(data.direction, data.count);
+          return true;
+        case 'activate': return ensureVimWaveCursor();
+        case 'move': return moveVimWaveCursor(data.direction, data.count, data.extend);
+        case 'move-first': return moveVimWaveBoundary('first-row', data.extend);
+        case 'move-last': return moveVimWaveBoundary('last-row', data.extend);
+        case 'move-line-start': return moveVimWaveBoundary('line-start', data.extend);
+        case 'move-line-end': return moveVimWaveBoundary('line-end', data.extend);
+        default: return false;
+      }
+    }
+
+    function initVimController() {
+      if (!window.VisualWaveDromVim || !VisualWaveDromVim.Controller) {
+        setStatus(false, 'Vim 控制器加载失败');
+        return false;
+      }
+      vimController = new VisualWaveDromVim.Controller({
+        shouldIgnore: shouldIgnoreVimKeyEvent,
+        getContext: getVimContext,
+        execute: executeVimAction,
+        onStateChange: updateVimModeUI
+      });
+      vimController.setEnabled(loadVimModePreference());
+      updateVimModeUI(vimController.getState(), 'init');
+      return true;
+    }
+
     editor.addEventListener('input', () => {
       updateLineNumbers();
       captureUndoIfNeeded();
@@ -10241,6 +11526,13 @@ ${lines.join('\n')}`;
 
     document.addEventListener('pointerdown', (e) => {
       const target = e.target && e.target.closest ? e.target : null;
+      if (vimController && vimController.getState().enabled) {
+        const insideActiveWave = !!(target && target.closest('#wave-container'));
+        setVimWaveAreaActive(insideActiveWave, insideActiveWave ? 'wave-pointer' : 'outside-wave-pointer');
+        if (insideActiveWave && wavePanel) {
+          try { wavePanel.focus({ preventScroll: true }); } catch (_e) { wavePanel.focus(); }
+        }
+      }
       const keepsWaveClipboardContext = !!(target && (
         target.closest('.wave-lane-interactive')
         || target.closest('.legend-item')
@@ -10266,6 +11558,7 @@ ${lines.join('\n')}`;
     });
 
     document.addEventListener('keydown', (e) => {
+      if (vimController && vimController.handleKeydown(e)) return;
       if (handleUndoRedoShortcut(e)) return;
       if (handleWaveClipboardShortcut(e)) return;
       handleSelectionDeleteShortcut(e);
@@ -10275,13 +11568,14 @@ ${lines.join('\n')}`;
     document.addEventListener('click', cancelConnectionSelectionForOtherButton, true);
 
     editor.addEventListener('keydown', (e) => {
+      if (codeMirrorEditor) return;
       if (e.key === 'Tab') {
         e.preventDefault();
         captureUndoIfNeeded();
         const start = editor.selectionStart;
         const end = editor.selectionEnd;
-        editor.value = editor.value.substring(0, start) + '  ' + editor.value.substring(end);
-        editor.selectionStart = editor.selectionEnd = start + 2;
+        setEditorValue(editor.value.substring(0, start) + '  ' + editor.value.substring(end));
+        setEditorSelection(start + 2, start + 2, true);
         updateLineNumbers();
         debouncedSaveUndo();
         debouncedRender();
@@ -10290,6 +11584,8 @@ ${lines.join('\n')}`;
     });
 
     window.addEventListener('beforeunload', () => {
+      if (codeMirrorEditor) codeMirrorEditor.save();
+      checkpointDirectJsonEdit('before-unload');
       persistEditingWaveDocumentOnExit();
       flushPersistSavedTags();
       flushPersistEditorJson();
@@ -10316,28 +11612,40 @@ ${lines.join('\n')}`;
       waveLibraryImportInput.addEventListener('change', (e) => importWaveLibraryFile(e.target.files && e.target.files[0]));
     }
     if (saveWaveLibraryBtn) {
-      saveWaveLibraryBtn.addEventListener('click', async () => {
-        if (!waveLibraryServerMode) {
-          downloadWaveLibraryBundle();
-          return;
-        }
-        if (!currentWaveLibraryFile) return;
-        try {
-          const response = await fetch('/api/wave-library?file=' + encodeURIComponent(currentWaveLibraryFile), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(getWaveLibraryBundle())
-          });
-          if (!response.ok) throw new Error('save failed');
-          setStatus(true, '已保存波形库：' + currentWaveLibraryFile);
-        } catch (e) {
-          setStatus(false, '波形库保存失败');
-        }
-      });
+      saveWaveLibraryBtn.addEventListener('click', () => { void saveCurrentWaveLibrary(); });
     }
     if (toggleJsonPanelBtn) {
       toggleJsonPanelBtn.addEventListener('click', () => {
         setJsonPanelHidden(!app.classList.contains('json-panel-hidden'), true);
+        if (!app.classList.contains('json-panel-hidden')) {
+          requestAnimationFrame(() => codeMirrorEditor && codeMirrorEditor.refresh());
+        }
+      });
+    }
+    if (vimModeBtn) {
+      vimModeBtn.addEventListener('click', () => {
+        setVimModeEnabled(!(vimController && vimController.getState().enabled));
+      });
+    }
+    if (vimHelpBtn) vimHelpBtn.addEventListener('click', showVimHelp);
+    if (vimCommandInput) {
+      vimCommandInput.addEventListener('keydown', (e) => {
+        e.stopPropagation();
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          const command = vimCommandInput.value;
+          closeVimCommandBar();
+          executeVimCommandLine(command);
+        } else if (e.key === 'Escape') {
+          e.preventDefault();
+          closeVimCommandBar();
+        }
+      });
+    }
+    if (vimHelpClose) vimHelpClose.addEventListener('click', closeVimHelp);
+    if (vimHelpModal) {
+      vimHelpModal.addEventListener('click', (e) => {
+        if (e.target === vimHelpModal) closeVimHelp();
       });
     }
     document.getElementById('btn-undo').addEventListener('click', undo);
@@ -10434,6 +11742,14 @@ ${lines.join('\n')}`;
       window.__vwdFindPresetIndexForEdge = findPresetIndexForEdge;
       window.__vwdGetPerf = () => vwdPerfMarks.slice();
       window.__vwdClearPerf = () => { vwdPerfMarks.length = 0; };
+      window.__vwdGetVimState = () => ({
+        controller: vimController ? vimController.getState() : null,
+        waveAreaActive: vimWaveAreaActive,
+        codeMirrorMode: codeMirrorVimMode,
+        register: vimRegister,
+        visualCell: [vimVisualCellAnchor, vimVisualCellHead],
+        visualRow: [vimVisualRowAnchor, vimVisualRowHead]
+      });
     }
     document.getElementById('btn-wave-edit-mode').addEventListener('click', toggleWaveEditMode);
     document.getElementById('btn-wave-paint-mode').addEventListener('click', toggleWavePaintMode);
@@ -10507,6 +11823,11 @@ ${lines.join('\n')}`;
       });
     }
     document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && vimHelpModal && !vimHelpModal.hidden) {
+        e.preventDefault();
+        closeVimHelp();
+        return;
+      }
       if (e.key === 'Escape' && moveDistanceModal && !moveDistanceModal.hidden) {
         e.preventDefault();
         closeMoveDistanceModal(null);
@@ -10541,8 +11862,13 @@ ${lines.join('\n')}`;
       restoreNavSidebarVisibility();
       restoreNavSidebarWidth();
       loadWaveEditMode();
+      initVimController();
+      initCodeMirrorEditor();
       initSavedTags();
       initEditor();
+      if (vimController && vimController.getState().enabled) {
+        requestAnimationFrame(() => setVimScope('wave'));
+      }
       seedRequestedWaveCopies();
       renderLegends();
       updateWavePaintModeUI();

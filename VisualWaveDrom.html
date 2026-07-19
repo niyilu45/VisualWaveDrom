@@ -6,12 +6,13 @@
   <title>VisualWaveDrom</title>
   <script src="inc/skins/default.js?v=20260712"></script>
   <script src="inc/wavedrom.min.js?v=20260712"></script>
-  <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260719-json-toolbar-v21">
+  <link rel="stylesheet" href="inc/codemirror.css?v=5.65.21">
+  <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260720-vim-v31">
 </head>
 <body>
   <div class="app" id="app">
     <!-- Nav Sidebar -->
-    <aside class="nav-sidebar" id="nav-sidebar">
+    <aside class="nav-sidebar" id="nav-sidebar" tabindex="-1">
       <div class="sidebar-header">
         <h1>波形目录</h1>
         <p>目录与波形图</p>
@@ -78,6 +79,21 @@
             <circle cx="12" cy="12" r="3"/>
           </svg>
           阅读模式
+        </button>
+        <button class="menu-btn vim-mode-btn" id="btn-vim-mode" type="button" aria-pressed="false" title="开启 Vim 模式">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <polyline points="4 7 9 12 4 17"/>
+            <line x1="12" y1="17" x2="20" y2="17"/>
+          </svg>
+          <span id="vim-mode-button-label">Vim 模式</span>
+          <span class="shortcut" id="vim-mode-button-state">Off</span>
+        </button>
+        <button class="menu-btn vim-help-btn" id="btn-vim-help" type="button" title="打开 Vim 模式使用说明">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H11v16H6.5A2.5 2.5 0 0 0 4 21.5z"/>
+            <path d="M20 5.5A2.5 2.5 0 0 0 17.5 3H13v16h4.5a2.5 2.5 0 0 1 2.5 2.5z"/>
+          </svg>
+          <span>Vim 模式说明</span>
         </button>
         <button class="menu-btn" id="btn-undo" title="撤销 (Ctrl+Z)">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -209,7 +225,7 @@
       </div>
 
       <!-- Connection Relations -->
-      <div class="menu-section connection-menu-section">
+      <div class="menu-section connection-menu-section" tabindex="-1">
         <div class="menu-section-title">连接关系</div>
         <div class="connection-mode-row">
           <button class="menu-btn legend-add-btn" id="btn-add-connection" type="button" title="依次选择起点和终点，再点击连接线样式生成连接">
@@ -266,7 +282,7 @@
         </svg>
       </button>
 
-      <div class="wave-panel" id="wave-panel">
+      <div class="wave-panel" id="wave-panel" tabindex="-1">
         <div class="wave-container" id="wave-container"></div>
         <div class="wave-library-container" id="wave-library-container"></div>
       </div>
@@ -305,7 +321,99 @@
           <textarea class="code-editor" id="code-editor" spellcheck="false"></textarea>
         </div>
       </div>
+      <div class="vim-status-bar" id="vim-status-bar" hidden aria-live="polite">
+        <span class="vim-status-mode" id="vim-status-mode">NORMAL</span>
+        <span class="vim-status-scope" id="vim-status-scope">WAVE</span>
+        <span class="vim-status-pending" id="vim-status-pending"></span>
+      </div>
+      <div class="vim-command-bar" id="vim-command-bar" hidden>
+        <span class="vim-command-prefix">:</span>
+        <input type="text" id="vim-command-input" class="vim-command-input" spellcheck="false" autocomplete="off" aria-label="Vim 命令">
+      </div>
     </main>
+  </div>
+
+  <div class="modal-overlay" id="vim-help-modal" hidden>
+    <div class="modal-dialog vim-help-dialog" role="dialog" aria-modal="true" aria-labelledby="vim-help-title">
+      <div class="modal-header" id="vim-help-title">Vim 模式使用说明</div>
+      <div class="vim-help-body">
+        <section class="vim-help-section">
+          <h3>快速开始</h3>
+          <p>先开启“Vim 模式”，再单击当前正在编辑的波形区域。Vim 仅在该波形区域内接管键盘；单击目录、工具栏、JSON 或说明区后会暂停接管。</p>
+          <div class="vim-help-grid">
+            <span>Esc</span><span>退出选择、替换、文本编辑或连接操作，返回 NORMAL</span>
+            <span>数字 + 命令</span><span>重复执行，例如 <kbd>5l</kbd>（数字 5 + 小写 L）向右移动 5 格</span>
+            <span>?</span><span>随时打开本使用说明</span>
+          </div>
+        </section>
+
+        <section class="vim-help-section">
+          <h3>模式和生效范围</h3>
+          <div class="vim-help-grid">
+            <span>NORMAL</span><span>移动、复制、删除及执行命令</span>
+            <span>VISUAL</span><span>选择连续波形格或连续信号行</span>
+            <span>INSERT / REPLACE</span><span>连续插入波形或连续替换波形</span>
+            <span>WAVE</span><span>仅当前编辑波形图中的波形区域支持 Vim；无需区域切换组合键</span>
+            <span>WAVE · 未聚焦</span><span>键盘由当前目录、工具栏、JSON 或说明编辑控件正常处理</span>
+          </div>
+        </section>
+
+        <section class="vim-help-section">
+          <h3>波形格和信号行</h3>
+          <div class="vim-help-grid">
+            <span>h / j / k / l（小写 L）</span><span>左、下、上、右移动波形光标</span>
+            <span>w / b</span><span>跳到后一个或前一个波形变化点</span>
+            <span>0 / $ / gg / G</span><span>跳到行首、行尾、首行、末行</span>
+            <span>v / V</span><span>进入波形格选择或信号行选择</span>
+            <span>o</span><span>在 VISUAL 中交换选择起点和终点</span>
+            <span>y / p / x</span><span>复制、覆盖粘贴、删除选中的波形格</span>
+            <span>r + 波形字符</span><span>替换当前位置；<kbd>R</kbd> 连续替换</span>
+            <span>i</span><span>进入波形插入模式；数据格插入在已有文本前时，data 自动用 “.” 占位</span>
+            <span>t</span><span>当前选中内容可编辑时，直接打开数据、分组或连接标签输入框</span>
+            <span>yy / dd</span><span>复制或删除当前信号行，复制时不包含 node</span>
+            <span>o / O</span><span>在当前信号行之后或之前插入空行</span>
+            <span>[r / ]r</span><span>上移或下移信号行，可使用数字前缀</span>
+            <span>Space+g</span><span>将 VISUAL 中选择的连续信号行建立为分组</span>
+          </div>
+        </section>
+
+        <section class="vim-help-section">
+          <h3>分组和连接线</h3>
+          <div class="vim-help-grid">
+            <span>Space+a / Space+c</span><span>在波形区域中新增连接或选择已有连接线</span>
+            <span>连接线 t / d</span><span>编辑或删除当前选中的连接线标签</span>
+            <span>分组 t / d</span><span>编辑或删除当前选中的分组标签</span>
+          </div>
+        </section>
+
+        <section class="vim-help-section">
+          <h3>历史记录</h3>
+          <div class="vim-help-grid">
+            <span>u / Ctrl+r</span><span>使用 VisualWaveDrom 的统一历史记录撤销或重做</span>
+            <span>.</span><span>重复最近一次可重复的修改</span>
+            <span>JSON 编辑器</span><span>始终使用普通文本编辑按键，不受 Vim 模式影响</span>
+          </div>
+        </section>
+
+        <section class="vim-help-section">
+          <h3>命令行</h3>
+          <p>按 <kbd>:</kbd> 打开命令行。<kbd>:open</kbd> 后只填写目录中的自动编号，不填写标题。</p>
+          <div class="vim-help-grid">
+            <span>:open 1.2</span><span>按自动编号打开波形图</span>
+            <span>:w</span><span>保存当前波形库</span>
+            <span>:format</span><span>格式化并对齐当前 JSON</span>
+            <span>:json / :nav</span><span>显示或隐藏 JSON 面板、波形目录</span>
+            <span>:new</span><span>在当前目录中新建空波形图</span>
+            <span>:move 编号</span><span>将当前波形图移动到指定目录</span>
+            <span>:debug / :noh</span><span>切换调试模式、清除选择和高亮</span>
+            <span>:set vim / :set novim</span><span>开启或关闭 Vim 模式</span>
+          </div>
+        </section>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="modal-btn modal-btn-primary" id="vim-help-close">关闭</button>
+      </div>
+    </div>
   </div>
 
   <!-- Load tag confirm modal -->
@@ -361,6 +469,9 @@
     </div>
   </div>
 
-    <script src="inc/visualwavedrom-app.js?v=20260719-json-toolbar-v21"></script>
+    <script src="inc/codemirror.js?v=5.65.21"></script>
+    <script src="inc/codemirror-javascript.js?v=5.65.21"></script>
+    <script src="inc/visualwavedrom-vim.js?v=20260720-vim-v31"></script>
+    <script src="inc/visualwavedrom-app.js?v=20260720-vim-v32"></script>
 </body>
 </html>
