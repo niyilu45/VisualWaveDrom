@@ -2247,6 +2247,26 @@
       background: rgba(59, 130, 246, 0.32);
     }
 
+    .app.vim-mode-enabled .editor-wrapper .CodeMirror,
+    .app.vim-mode-enabled .editor-wrapper .code-editor {
+      cursor: default;
+    }
+
+    .app.vim-mode-enabled .editor-wrapper .CodeMirror-lines,
+    .app.vim-mode-enabled .editor-wrapper .CodeMirror-code,
+    .app.vim-mode-enabled .editor-wrapper .code-editor {
+      -webkit-user-select: none;
+      user-select: none;
+    }
+
+    .app.vim-mode-enabled .editor-wrapper .CodeMirror-cursor {
+      display: none;
+    }
+
+    .app.vim-mode-enabled .editor-wrapper .CodeMirror-selected {
+      background: transparent;
+    }
+
     .editor-wrapper .cm-property { color: #93c5fd; }
     .editor-wrapper .cm-string { color: #86efac; }
     .editor-wrapper .cm-number { color: #fbbf24; }

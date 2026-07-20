@@ -8813,18 +8813,35 @@ ${lines.join('\n')}`;
       codeMirrorEditor.setGutterMarker(jsonErrorLine - 1, 'vwd-json-error-gutter', marker);
     }
 
-    function setCodeMirrorVimEnabled() {
+    function setJsonEditorVimDisplayOnly(enabled) {
+      const displayOnly = !!enabled;
+      editor.readOnly = displayOnly;
+      editor.setAttribute('aria-readonly', String(displayOnly));
+      if (editorPanel) editorPanel.setAttribute('aria-readonly', String(displayOnly));
       if (!codeMirrorEditor) return;
+
       codeMirrorEditor.setOption('keyMap', 'default');
+      codeMirrorEditor.setOption('readOnly', displayOnly ? 'nocursor' : false);
+      const wrapper = codeMirrorEditor.getWrapperElement();
+      if (wrapper) wrapper.setAttribute('aria-readonly', String(displayOnly));
+      if (displayOnly) {
+        const cursor = codeMirrorEditor.getCursor('head');
+        codeMirrorEditor.setCursor(cursor);
+        const input = codeMirrorEditor.getInputField();
+        if (input && typeof input.blur === 'function') input.blur();
+      }
       codeMirrorVimMode = 'normal';
       codeMirrorEditor.refresh();
+      vwdDebugLog('vim', { phase: 'json-display-only', enabled: displayOnly });
     }
 
     function initCodeMirrorEditor() {
       if (codeMirrorEditor || !window.CodeMirror || !editor) return false;
+      const vimDisplayOnly = !!(vimController && vimController.getState().enabled);
       codeMirrorEditor = CodeMirror.fromTextArea(editor, {
         mode: { name: 'javascript', json: true },
         keyMap: 'default',
+        readOnly: vimDisplayOnly ? 'nocursor' : false,
         lineNumbers: true,
         gutters: ['vwd-json-error-gutter', 'CodeMirror-linenumbers'],
         lineWrapping: false,
@@ -8848,6 +8865,7 @@ ${lines.join('\n')}`;
       codeMirrorEditor.on('blur', () => {
         checkpointDirectJsonEdit('editor-blur');
       });
+      setJsonEditorVimDisplayOnly(vimDisplayOnly);
       updateCodeMirrorErrorMarker();
       return true;
     }
@@ -10489,6 +10507,7 @@ ${lines.join('\n')}`;
         vimStatusPending.textContent = (current.count || '') + pendingLabel;
       }
       app.classList.toggle('vim-scope-wave', !!current.enabled && vimWaveAreaActive);
+      app.classList.toggle('vim-mode-enabled', !!current.enabled);
       ['nav', 'edge', 'json'].forEach((scope) => app.classList.remove('vim-scope-' + scope));
       if (reason && reason !== 'count') {
         vwdDebugLog('vim', {
@@ -10590,7 +10609,7 @@ ${lines.join('\n')}`;
       }
       vimController.setEnabled(next);
       saveVimModePreference(next);
-      setCodeMirrorVimEnabled(false);
+      setJsonEditorVimDisplayOnly(next);
       if (next) {
         vimController.setScope('wave');
         setVimWaveAreaActive(true, 'vim-enabled');
