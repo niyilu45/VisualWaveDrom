@@ -1135,6 +1135,20 @@
       font-size: 12px;
     }
 
+    .wave-document-open-single {
+      min-width: 62px;
+      height: 26px;
+      flex: 0 0 auto;
+      padding: 0 8px;
+      border: 1px solid #c9d4e1;
+      border-radius: 4px;
+      background: #fff;
+      color: #315b87;
+      cursor: pointer;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
     .wave-document-delete {
       width: 26px;
       height: 26px;
@@ -1152,7 +1166,8 @@
       border-color: #ef4444;
     }
 
-    .wave-document-open:hover {
+    .wave-document-open:hover,
+    .wave-document-open-single:hover {
       border-color: #3b82f6;
       color: #1d4ed8;
     }

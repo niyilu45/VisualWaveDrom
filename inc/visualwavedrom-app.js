@@ -9564,14 +9564,51 @@ ${lines.join('\n')}`;
       if (saveWaveLibraryLabel) saveWaveLibraryLabel.textContent = waveLibraryServerMode ? '保存波形库' : '保存波形库';
     }
 
-    function getWaveDocumentDeepLink(documentName) {
-      if (!waveLibraryServerMode || !currentWaveLibraryId || !documentName) return '';
+    function getWaveDocumentSingleViewParams(documentName) {
+      if (!documentName) return null;
       const params = new URLSearchParams({
-        libraryId: currentWaveLibraryId,
         waveId: documentName,
         view: 'single'
       });
-      return waveLinkProtocolScheme + '://open?' + params.toString();
+      if (currentWaveLibraryId) params.set('libraryId', currentWaveLibraryId);
+      return params;
+    }
+
+    function getWaveDocumentDeepLink(documentName) {
+      if (!waveLibraryServerMode || !currentWaveLibraryId) return '';
+      const params = getWaveDocumentSingleViewParams(documentName);
+      return params ? waveLinkProtocolScheme + '://open?' + params.toString() : '';
+    }
+
+    function getWaveDocumentSingleViewUrl(documentName) {
+      const params = getWaveDocumentSingleViewParams(documentName);
+      if (!params) return '';
+      if (waveLibraryServerMode) {
+        return new URL('/open?' + params.toString(), window.location.origin).href;
+      }
+      const url = new URL(window.location.href);
+      url.search = params.toString();
+      url.hash = '';
+      return url.href;
+    }
+
+    function openWaveDocumentInSingleWindow(documentName) {
+      const url = getWaveDocumentSingleViewUrl(documentName);
+      if (!url) {
+        setStatus(false, '无法生成单图地址');
+        return false;
+      }
+      const opened = window.open(url, '_blank');
+      if (!opened) {
+        setStatus(false, '浏览器阻止了新窗口，请允许此页面打开弹出式窗口');
+        vwdDebugLog('wave-library', { phase: 'open-single-window-blocked', documentName, url });
+        return false;
+      }
+      try { opened.opener = null; } catch (_e) { /* cross-window browser policy */ }
+      const tag = getSavedTagByName(documentName);
+      setStatus(true, '已单独打开波形图：' + getSavedTagTitle(tag || { name: documentName, content: '{}' }));
+      vwdDebugLog('wave-library', { phase: 'open-single-window', documentName, url });
+      return true;
     }
 
     function singleWaveSyncSignature(document) {
@@ -11101,6 +11138,14 @@ ${lines.join('\n')}`;
         }
         openWaveDocumentForEditing(documentName);
       });
+      const singleOpenButton = document.createElement('button');
+      singleOpenButton.type = 'button';
+      singleOpenButton.className = 'wave-document-open-single';
+      singleOpenButton.title = '在新窗口中单独打开并编辑此波形图';
+      singleOpenButton.textContent = '单独打开';
+      singleOpenButton.addEventListener('click', () => {
+        openWaveDocumentInSingleWindow(documentName);
+      });
       const deleteButton = document.createElement('button');
       deleteButton.type = 'button';
       deleteButton.className = 'wave-document-delete';
@@ -11117,6 +11162,7 @@ ${lines.join('\n')}`;
       header.appendChild(title);
       header.appendChild(screenshotButton);
       header.appendChild(openButton);
+      if (!singleWaveViewActive) header.appendChild(singleOpenButton);
       header.appendChild(deleteButton);
 
       const canvas = document.createElement('div');
