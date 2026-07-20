@@ -3513,7 +3513,15 @@ ${lines.join('\n')}`;
       if (newWave === wave) return false;
 
       pushUndoBeforeChange();
-      const updatedSignal = Object.assign({}, entry.signal, { wave: newWave });
+      let updatedSignal = Object.assign({}, entry.signal, { wave: newWave });
+      updatedSignal = applyWaveDataLabelsAfterReplacement(
+        updatedSignal,
+        wave,
+        newWave,
+        safeCol,
+        1,
+        null
+      );
       const indent = getIndentAt(text, entry.start);
       const newObjStr = formatSignalObject(updatedSignal, indent);
       const newText = text.slice(0, entry.start) + newObjStr + text.slice(entry.end);
@@ -3569,7 +3577,15 @@ ${lines.join('\n')}`;
       }
 
       pushUndoBeforeChange();
-      const updatedSignal = Object.assign({}, entry.signal, { wave: newWave });
+      let updatedSignal = Object.assign({}, entry.signal, { wave: newWave });
+      updatedSignal = applyWaveDataLabelsAfterReplacement(
+        updatedSignal,
+        wave,
+        newWave,
+        paintCol,
+        1,
+        null
+      );
       const indent = getIndentAt(text, entry.start);
       const newObjStr = formatSignalObject(updatedSignal, indent);
       const newText = text.slice(0, entry.start) + newObjStr + text.slice(entry.end);
@@ -3941,17 +3957,30 @@ ${lines.join('\n')}`;
       return repeated;
     }
 
-    function applyWaveClipboardDataToSignal(signal, originalWave, newWave, startCol, replacementLength, slots) {
+    function applyWaveDataLabelsAfterReplacement(
+      signal,
+      originalWave,
+      newWave,
+      startCol,
+      replacementLength,
+      replacementSlots
+    ) {
       const updated = Object.assign({}, signal);
       const originalData = normalizeWaveDataValues(signal && signal.data);
+      const usesReplacementLabels = Array.isArray(replacementSlots);
       const copiedByOffset = new Map();
-      cloneWaveClipboardDataSlots(slots).forEach((slot) => copiedByOffset.set(slot.offset, slot.value));
+      cloneWaveClipboardDataSlots(replacementSlots)
+        .forEach((slot) => copiedByOffset.set(slot.offset, slot.value));
       const endCol = startCol + replacementLength - 1;
       const newSlots = getWaveDataSlots(newWave);
       const nextData = newSlots.map((slot) => {
         if (slot.col >= startCol && slot.col <= endCol) {
           const offset = slot.col - startCol;
-          return copiedByOffset.has(offset) ? copiedByOffset.get(offset) : '';
+          if (usesReplacementLabels) {
+            return copiedByOffset.has(offset) ? copiedByOffset.get(offset) : '';
+          }
+          const originalChar = String(originalWave || '')[slot.col] || '';
+          if (!/[2-9=]/.test(originalChar)) return '';
         }
         const originalSlot = getWaveDataSlotAtColumn(originalWave, slot.col);
         return originalSlot && originalSlot.dataIdx < originalData.length
@@ -3959,7 +3988,7 @@ ${lines.join('\n')}`;
           : '';
       });
       const hadData = Object.prototype.hasOwnProperty.call(signal || {}, 'data');
-      const hasCopiedText = cloneWaveClipboardDataSlots(slots)
+      const hasCopiedText = cloneWaveClipboardDataSlots(replacementSlots)
         .some((slot) => slot.value !== undefined && slot.value !== null && String(slot.value) !== '');
       const hasRemainingText = nextData
         .some((value) => value !== undefined && value !== null && String(value) !== '');
@@ -3996,16 +4025,14 @@ ${lines.join('\n')}`;
       const endCol = safeStart + replacement.length - 1;
       setSelectedWaveRange(rowIndex, safeStart, endCol);
       let updatedSignal = Object.assign({}, entry.signal, { wave: newWave });
-      if (options && options.includeDataLabels) {
-        updatedSignal = applyWaveClipboardDataToSignal(
-          updatedSignal,
-          wave,
-          newWave,
-          safeStart,
-          replacement.length,
-          options.dataSlots
-        );
-      }
+      updatedSignal = applyWaveDataLabelsAfterReplacement(
+        updatedSignal,
+        wave,
+        newWave,
+        safeStart,
+        replacement.length,
+        options && options.includeDataLabels ? options.dataSlots : null
+      );
       const oldHasData = Object.prototype.hasOwnProperty.call(entry.signal, 'data');
       const newHasData = Object.prototype.hasOwnProperty.call(updatedSignal, 'data');
       const dataChanged = oldHasData !== newHasData
@@ -4082,16 +4109,14 @@ ${lines.join('\n')}`;
           replacement.text
         );
         let updatedSignal = Object.assign({}, originalSignal, { wave: newWave });
-        if (options && options.includeDataLabels) {
-          updatedSignal = applyWaveClipboardDataToSignal(
-            updatedSignal,
-            originalWave,
-            newWave,
-            safeStartCol,
-            replacement.text.length,
-            replacement.dataSlots
-          );
-        }
+        updatedSignal = applyWaveDataLabelsAfterReplacement(
+          updatedSignal,
+          originalWave,
+          newWave,
+          safeStartCol,
+          replacement.text.length,
+          options && options.includeDataLabels ? replacement.dataSlots : null
+        );
         if (JSON.stringify(updatedSignal) === JSON.stringify(originalSignal)) return;
         location.parent[location.index] = updatedSignal;
         changedCount++;
