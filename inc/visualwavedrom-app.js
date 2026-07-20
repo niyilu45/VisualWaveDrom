@@ -222,12 +222,14 @@ function getDefaultJson() {
     let vimController = null;
     let vimHelpReturnFocus = null;
     let vimWaveAreaActive = false;
+    let vimWaveScrollFrame = 0;
     let vimDirectInlineEditActive = false;
     let vimWaveInsertModeActive = false;
     let codeMirrorEditor = null;
     let syncingCodeMirror = false;
     let codeMirrorVimMode = 'normal';
     let copiedWaveSelection = '';
+    let copiedWaveDataSlots = [];
     let waveSelectionDrag = null;
     let waveClipboardShortcutActive = false;
     let groupDeleteShortcutActive = false;
@@ -3794,7 +3796,69 @@ ${lines.join('\n')}`;
       return true;
     }
 
-    function applyWaveRangeReplacement(rowIndex, startCol, replacement, actionLabel) {
+    function normalizeWaveDataValues(data) {
+      if (Array.isArray(data)) return data.slice();
+      if (data === undefined || data === null || data === '') return [];
+      return String(data).trim().split(/\s+/).filter(Boolean);
+    }
+
+    function cloneWaveClipboardDataSlots(slots) {
+      return Array.isArray(slots)
+        ? slots.map((slot) => ({ offset: slot.offset, value: slot.value }))
+        : [];
+    }
+
+    function collectWaveClipboardDataSlots(signal, wave, copiedWave, startCol) {
+      const data = normalizeWaveDataValues(signal && signal.data);
+      return getWaveDataSlots(copiedWave).map((slot) => {
+        const sourceSlot = getWaveDataSlotAtColumn(wave, startCol + slot.col);
+        const value = sourceSlot && sourceSlot.dataIdx < data.length
+          ? data[sourceSlot.dataIdx]
+          : '';
+        return { offset: slot.col, value };
+      });
+    }
+
+    function repeatWaveClipboardDataSlots(slots, segmentLength, count) {
+      const repeated = [];
+      const safeLength = Math.max(0, segmentLength);
+      const safeCount = Math.max(1, Math.floor(count || 1));
+      for (let index = 0; index < safeCount; index++) {
+        cloneWaveClipboardDataSlots(slots).forEach((slot) => {
+          repeated.push({ offset: slot.offset + index * safeLength, value: slot.value });
+        });
+      }
+      return repeated;
+    }
+
+    function applyWaveClipboardDataToSignal(signal, originalWave, newWave, startCol, replacementLength, slots) {
+      const updated = Object.assign({}, signal);
+      const originalData = normalizeWaveDataValues(signal && signal.data);
+      const copiedByOffset = new Map();
+      cloneWaveClipboardDataSlots(slots).forEach((slot) => copiedByOffset.set(slot.offset, slot.value));
+      const endCol = startCol + replacementLength - 1;
+      const newSlots = getWaveDataSlots(newWave);
+      const nextData = newSlots.map((slot) => {
+        if (slot.col >= startCol && slot.col <= endCol) {
+          const offset = slot.col - startCol;
+          return copiedByOffset.has(offset) ? copiedByOffset.get(offset) : '';
+        }
+        const originalSlot = getWaveDataSlotAtColumn(originalWave, slot.col);
+        return originalSlot && originalSlot.dataIdx < originalData.length
+          ? originalData[originalSlot.dataIdx]
+          : '';
+      });
+      const hadData = Object.prototype.hasOwnProperty.call(signal || {}, 'data');
+      const hasCopiedText = cloneWaveClipboardDataSlots(slots)
+        .some((slot) => slot.value !== undefined && slot.value !== null && String(slot.value) !== '');
+      const hasRemainingText = nextData
+        .some((value) => value !== undefined && value !== null && String(value) !== '');
+      if (newSlots.length && (hadData || hasCopiedText || hasRemainingText)) updated.data = nextData;
+      else delete updated.data;
+      return updated;
+    }
+
+    function applyWaveRangeReplacement(rowIndex, startCol, replacement, actionLabel, options) {
       if (rowIndex < 0 || startCol < 0 || !replacement) {
         setStatus(false, '请先选择要修改的波形格');
         return false;
@@ -3821,13 +3885,27 @@ ${lines.join('\n')}`;
       const newWave = replaceWaveRangePreservingContinuation(wave, safeStart, replacement);
       const endCol = safeStart + replacement.length - 1;
       setSelectedWaveRange(rowIndex, safeStart, endCol);
-      if (newWave === wave) {
+      let updatedSignal = Object.assign({}, entry.signal, { wave: newWave });
+      if (options && options.includeDataLabels) {
+        updatedSignal = applyWaveClipboardDataToSignal(
+          updatedSignal,
+          wave,
+          newWave,
+          safeStart,
+          replacement.length,
+          options.dataSlots
+        );
+      }
+      const oldHasData = Object.prototype.hasOwnProperty.call(entry.signal, 'data');
+      const newHasData = Object.prototype.hasOwnProperty.call(updatedSignal, 'data');
+      const dataChanged = oldHasData !== newHasData
+        || JSON.stringify(entry.signal.data) !== JSON.stringify(updatedSignal.data);
+      if (newWave === wave && !dataChanged) {
         setStatus(true, (actionLabel || '批量修改') + '完成，波形内容未变化');
         return false;
       }
 
       pushUndoBeforeChange();
-      const updatedSignal = Object.assign({}, entry.signal, { wave: newWave });
       const indent = getIndentAt(text, entry.start);
       const newObjStr = formatSignalObject(updatedSignal, indent);
       const newText = text.slice(0, entry.start) + newObjStr + text.slice(entry.end);
@@ -3840,6 +3918,9 @@ ${lines.join('\n')}`;
         startCol: safeStart,
         endCol,
         replacement,
+        dataSlotCount: options && options.includeDataLabels
+          ? cloneWaveClipboardDataSlots(options.dataSlots).length
+          : 0,
         oldWave: wave,
         newWave
       });
@@ -3874,6 +3955,7 @@ ${lines.join('\n')}`;
         copied = getWaveContinuationSourceChar(wave, range.start) + copied.slice(1);
       }
       copiedWaveSelection = copied;
+      copiedWaveDataSlots = collectWaveClipboardDataSlots(entry.signal, wave, copied, range.start);
       waveClipboardShortcutActive = true;
       updateLegendAvailability();
       vwdDebugLog('wave-selection', {
@@ -3882,9 +3964,13 @@ ${lines.join('\n')}`;
         startCol: range.start,
         endCol: range.end,
         length,
-        copied
+        copied,
+        dataSlots: cloneWaveClipboardDataSlots(copiedWaveDataSlots)
       });
-      setStatus(true, '已复制 ' + length + ' 个波形格');
+      const copiedTextCount = copiedWaveDataSlots
+        .filter((slot) => slot.value !== undefined && slot.value !== null && String(slot.value) !== '')
+        .length;
+      setStatus(true, '已复制 ' + length + ' 个波形格和 ' + copiedTextCount + ' 个文字');
       return true;
     }
 
@@ -3903,7 +3989,11 @@ ${lines.join('\n')}`;
         selectedSignalIndex,
         range.start,
         copiedWaveSelection,
-        '覆盖粘贴'
+        '覆盖粘贴',
+        {
+          includeDataLabels: true,
+          dataSlots: cloneWaveClipboardDataSlots(copiedWaveDataSlots)
+        }
       );
     }
 
@@ -9715,6 +9805,31 @@ ${lines.join('\n')}`;
       });
     }
 
+    function captureActiveWaveScrollState() {
+      const canvas = waveContainer.closest('.wave-document-canvas');
+      return {
+        canvas,
+        canvasScrollLeft: canvas ? canvas.scrollLeft : 0,
+        canvasScrollTop: canvas ? canvas.scrollTop : 0,
+        panelScrollTop: wavePanel ? wavePanel.scrollTop : 0
+      };
+    }
+
+    function restoreActiveWaveScrollState(state) {
+      if (!state) return;
+      const currentCanvas = waveContainer.closest('.wave-document-canvas');
+      if (state.canvas && state.canvas.isConnected && currentCanvas === state.canvas) {
+        state.canvas.scrollLeft = state.canvasScrollLeft;
+        state.canvas.scrollTop = state.canvasScrollTop;
+      }
+      if (wavePanel) wavePanel.scrollTop = state.panelScrollTop;
+      vwdDebugLog('wave-scroll', {
+        phase: 'restore-after-render',
+        scrollLeft: currentCanvas ? Math.round(currentCanvas.scrollLeft) : 0,
+        scrollTop: wavePanel ? Math.round(wavePanel.scrollTop) : 0
+      });
+    }
+
     function renderWaveform(jsonText) {
       if (isRenderingWaveform) {
         pendingRenderText = jsonText;
@@ -9727,6 +9842,7 @@ ${lines.join('\n')}`;
         vwdDebugLog('performance', { phase: 'active-render-cache-hit', textLength: jsonText.length });
         return true;
       }
+      const waveScrollState = captureActiveWaveScrollState();
       isRenderingWaveform = true;
       vwdMark('renderWaveform:start');
 
@@ -9794,6 +9910,7 @@ ${lines.join('\n')}`;
           return false;
         }
       } finally {
+        restoreActiveWaveScrollState(waveScrollState);
         isRenderingWaveform = false;
         if (pendingRenderText !== null) {
           const nextText = pendingRenderText;
@@ -10016,7 +10133,6 @@ ${lines.join('\n')}`;
     }
 
     function startWaveDocumentDescriptionEdit(tag, descriptionEl) {
-      if (!isTextEditModeActive()) return;
       exitWavePaintMode('wave-description');
       if (!tag || !descriptionEl) return;
       if (tag.name !== editingWaveDocumentName) {
@@ -10170,7 +10286,15 @@ ${lines.join('\n')}`;
       description.addEventListener('click', (event) => {
         if (event.target && typeof event.target.closest === 'function'
             && event.target.closest('.wave-document-description-editor, .wave-document-description-done')) return;
-        if (documentName !== editingWaveDocumentName || !isTextEditModeActive()) return;
+        const isEditingDocument = documentName === editingWaveDocumentName;
+        vwdDebugLog('wave-description', {
+          phase: 'click',
+          documentName,
+          editingWaveDocumentName,
+          isEditingDocument,
+          textEditModeActive: isTextEditModeActive()
+        });
+        if (!isEditingDocument) return;
         const tag = getSavedTagByName(documentName);
         if (tag) startWaveDocumentDescriptionEdit(tag, description);
       });
@@ -10320,7 +10444,7 @@ ${lines.join('\n')}`;
         entry.description.textContent = descriptionText || '暂无波形图说明';
       }
       entry.description.classList.toggle('empty', !descriptionText);
-      const descriptionEditable = isEditingDocument && isTextEditModeActive();
+      const descriptionEditable = isEditingDocument;
       entry.description.classList.toggle('editable', descriptionEditable);
       entry.description.title = descriptionEditable ? '点击编辑波形图说明' : '';
 
@@ -10624,13 +10748,128 @@ ${lines.join('\n')}`;
       return true;
     }
 
-    function refreshVimWaveSelection() {
+    function getVimWaveCursorClientBounds(lane, sourceEntry) {
+      if (!lane || !sourceEntry) return null;
+      const selectedRange = getSelectedWaveRange(selectedSignalIndex);
+      const cursorColumn = vimVisualCellHead >= 0
+        ? vimVisualCellHead
+        : selectedWaveColumnIndex;
+      if (cursorColumn < 0) return null;
+
+      const highlight = lane.querySelector('.wave-col-highlight');
+      if (highlight && selectedRange) {
+        const rect = highlight.getBoundingClientRect();
+        const cellCount = Math.max(1, selectedRange.end - selectedRange.start + 1);
+        const cellWidth = rect.width / cellCount;
+        const cellOffset = Math.max(0, Math.min(cellCount - 1, cursorColumn - selectedRange.start));
+        return {
+          left: rect.left + cellOffset * cellWidth,
+          right: rect.left + (cellOffset + 1) * cellWidth,
+          top: rect.top,
+          bottom: rect.bottom
+        };
+      }
+
+      const drawGroup = lane.querySelector('[id^="wavelane_draw_"]');
+      const coordinateRoot = drawGroup || lane;
+      const matrix = coordinateRoot.getScreenCTM && coordinateRoot.getScreenCTM();
+      const svg = coordinateRoot.ownerSVGElement;
+      if (!matrix || !svg || typeof svg.createSVGPoint !== 'function') return null;
+
+      const unitWidth = getWaveUnitWidth(editor.value);
+      const step = getWaveColumnWidth(unitWidth);
+      let x0 = cursorColumn * step;
+      let x1 = (cursorColumn + 1) * step;
+      if (drawGroup) {
+        const columns = buildWaveColumnMap(drawGroup, sourceEntry.signal.wave || '', unitWidth);
+        const column = columns[cursorColumn];
+        if (column && column.x1 > column.x0) {
+          x0 = column.x0;
+          x1 = column.x1;
+        }
+      }
+
+      const startPoint = svg.createSVGPoint();
+      startPoint.x = x0;
+      startPoint.y = 0;
+      const endPoint = svg.createSVGPoint();
+      endPoint.x = x1;
+      endPoint.y = 0;
+      const start = startPoint.matrixTransform(matrix);
+      const end = endPoint.matrixTransform(matrix);
+      const laneRect = lane.getBoundingClientRect();
+      return {
+        left: Math.min(start.x, end.x),
+        right: Math.max(start.x, end.x),
+        top: laneRect.top,
+        bottom: laneRect.bottom
+      };
+    }
+
+    function scheduleVimWaveCursorIntoView(lanes, sourceMap, reason) {
+      const state = vimController && vimController.getState();
+      if (!state || !state.enabled || !vimWaveAreaActive || !wavePanel) return;
+      if (vimWaveScrollFrame) cancelAnimationFrame(vimWaveScrollFrame);
+      vimWaveScrollFrame = requestAnimationFrame(() => {
+        vimWaveScrollFrame = 0;
+        const currentState = vimController && vimController.getState();
+        if (!currentState || !currentState.enabled || !vimWaveAreaActive) return;
+
+        const svg = waveContainer.querySelector('svg');
+        if (!svg || selectedSignalIndex < 0) return;
+        const lane = lanes[selectedSignalIndex];
+        const cursorBounds = getVimWaveCursorClientBounds(lane, sourceMap[selectedSignalIndex]);
+        if (!cursorBounds) return;
+
+        const horizontalScroller = lane.closest('.wave-document-canvas') || wavePanel;
+        const horizontalRect = horizontalScroller.getBoundingClientRect();
+        const panelRect = wavePanel.getBoundingClientRect();
+        const horizontalMargin = Math.min(24, Math.max(8, horizontalScroller.clientWidth * 0.05));
+        const verticalMargin = Math.min(24, Math.max(8, wavePanel.clientHeight * 0.05));
+        const visibleLeft = horizontalRect.left + horizontalMargin;
+        const visibleRight = horizontalRect.left + horizontalScroller.clientWidth - horizontalMargin;
+        const visibleTop = panelRect.top + verticalMargin;
+        const visibleBottom = panelRect.top + wavePanel.clientHeight - verticalMargin;
+        let nextLeft = horizontalScroller.scrollLeft;
+        let nextTop = wavePanel.scrollTop;
+
+        if (cursorBounds.right > visibleRight) nextLeft += cursorBounds.right - visibleRight;
+        else if (cursorBounds.left < visibleLeft) nextLeft -= visibleLeft - cursorBounds.left;
+        if (cursorBounds.bottom > visibleBottom) nextTop += cursorBounds.bottom - visibleBottom;
+        else if (cursorBounds.top < visibleTop) nextTop -= visibleTop - cursorBounds.top;
+
+        nextLeft = Math.max(0, Math.min(
+          nextLeft,
+          horizontalScroller.scrollWidth - horizontalScroller.clientWidth
+        ));
+        nextTop = Math.max(0, Math.min(nextTop, wavePanel.scrollHeight - wavePanel.clientHeight));
+        const horizontalChanged = Math.abs(nextLeft - horizontalScroller.scrollLeft) > 0.5;
+        const verticalChanged = Math.abs(nextTop - wavePanel.scrollTop) > 0.5;
+        if (!horizontalChanged && !verticalChanged) return;
+
+        horizontalScroller.scrollLeft = nextLeft;
+        wavePanel.scrollTop = nextTop;
+        vwdDebugLog('vim', {
+          phase: 'cursor-auto-scroll',
+          reason: reason || '',
+          rowIndex: selectedSignalIndex,
+          columnIndex: vimVisualCellHead >= 0 ? vimVisualCellHead : selectedWaveColumnIndex,
+          scrollLeft: Math.round(nextLeft),
+          scrollTop: Math.round(nextTop)
+        });
+      });
+    }
+
+    function refreshVimWaveSelection(autoScrollReason) {
       const svg = waveContainer.querySelector('svg');
       if (!svg) return;
       let sourceMap = [];
       try { sourceMap = buildSignalSourceMap(editor.value); } catch (_e) { return; }
       const lanes = getWaveLaneGroups(svg);
       restoreWaveSelection(lanes, sourceMap);
+      if (autoScrollReason) {
+        scheduleVimWaveCursorIntoView(lanes, sourceMap, autoScrollReason);
+      }
     }
 
     function ensureVimWaveCursor() {
@@ -10755,7 +10994,7 @@ ${lines.join('\n')}`;
       } else {
         setSelectedSignal(row, col);
       }
-      refreshVimWaveSelection();
+      refreshVimWaveSelection('cursor-move');
       return true;
     }
 
@@ -10780,7 +11019,7 @@ ${lines.join('\n')}`;
       } else {
         setSelectedSignal(row, col);
       }
-      refreshVimWaveSelection();
+      refreshVimWaveSelection('cursor-boundary');
       return true;
     }
 
@@ -10888,7 +11127,11 @@ ${lines.join('\n')}`;
       }
 
       if (!copySelectedWaveRange()) return false;
-      vimRegister = { type: 'wave', text: copiedWaveSelection };
+      vimRegister = {
+        type: 'wave',
+        text: copiedWaveSelection,
+        dataSlots: cloneWaveClipboardDataSlots(copiedWaveDataSlots)
+      };
       clearVimVisualSelection();
       return true;
     }
@@ -10948,18 +11191,30 @@ ${lines.join('\n')}`;
 
     function pasteVimRegister(before, count) {
       if (vimRegister && vimRegister.type === 'row') return pasteVimRows(before, count);
-      if (vimRegister && vimRegister.type === 'wave') copiedWaveSelection = vimRegister.text;
+      if (vimRegister && vimRegister.type === 'wave') {
+        copiedWaveSelection = vimRegister.text;
+        copiedWaveDataSlots = cloneWaveClipboardDataSlots(vimRegister.dataSlots);
+      }
       if (!copiedWaveSelection) {
         setStatus(false, 'Vim 寄存器为空');
         return false;
       }
       if (!ensureVimWaveCursor()) return false;
       const repeat = Math.max(1, Math.floor(count || 1));
+      const repeatedWave = copiedWaveSelection.repeat(repeat);
       return applyWaveRangeReplacement(
         selectedSignalIndex,
         selectedWaveColumnIndex,
-        copiedWaveSelection.repeat(repeat),
-        'Vim 覆盖粘贴'
+        repeatedWave,
+        'Vim 覆盖粘贴',
+        {
+          includeDataLabels: true,
+          dataSlots: repeatWaveClipboardDataSlots(
+            copiedWaveDataSlots,
+            copiedWaveSelection.length,
+            repeat
+          )
+        }
       );
     }
 
@@ -11750,6 +12005,7 @@ ${lines.join('\n')}`;
         selectedWaveColumnIndex,
         range: getSelectedWaveRange(),
         copiedWaveSelection,
+        copiedWaveDataSlots: cloneWaveClipboardDataSlots(copiedWaveDataSlots),
         waveClipboardShortcutActive,
         groupDeleteShortcutActive,
         drag: waveSelectionDrag

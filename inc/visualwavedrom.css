@@ -1143,7 +1143,7 @@
       font-style: italic;
     }
 
-    .app.text-edit-mode .wave-document-description.editable:hover {
+    .wave-document-description.editable:hover {
       border-color: #60a5fa;
       background: #f1f7ff;
       cursor: text;
