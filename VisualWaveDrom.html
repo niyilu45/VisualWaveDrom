@@ -7,7 +7,7 @@
   <script src="inc/skins/default.js?v=20260712"></script>
   <script src="inc/wavedrom.min.js?v=20260712"></script>
   <link rel="stylesheet" href="inc/codemirror.css?v=5.65.21">
-  <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260720-vim-v35">
+  <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260720-link-v1">
 </head>
 <body>
   <div class="app" id="app">
@@ -469,9 +469,32 @@
     </div>
   </div>
 
+  <div class="modal-overlay" id="wave-copy-modal" hidden>
+    <div class="modal-dialog wave-copy-dialog" role="dialog" aria-modal="true" aria-labelledby="wave-copy-modal-title">
+      <div class="modal-header" id="wave-copy-modal-title">复制图片到剪贴板</div>
+      <div class="modal-body wave-copy-options">
+        <button type="button" class="wave-copy-option" data-copy-mode="image">
+          <strong>仅复制图片</strong>
+          <span>粘贴普通 PNG 图片，不附带链接</span>
+        </button>
+        <button type="button" class="wave-copy-option" data-copy-mode="linked-image">
+          <strong>复制带链接截图</strong>
+          <span>粘贴到 Word 后，点击图片打开这张波形图</span>
+        </button>
+        <button type="button" class="wave-copy-option" data-copy-mode="link">
+          <strong>仅复制链接</strong>
+          <span>复制可自动启动 VisualWaveDrom 的单图链接</span>
+        </button>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="modal-btn" id="wave-copy-cancel">取消</button>
+      </div>
+    </div>
+  </div>
+
     <script src="inc/codemirror.js?v=5.65.21"></script>
     <script src="inc/codemirror-javascript.js?v=5.65.21"></script>
-    <script src="inc/visualwavedrom-vim.js?v=20260720-vim-v31"></script>
-    <script src="inc/visualwavedrom-app.js?v=20260720-vim-v37"></script>
+    <script src="inc/visualwavedrom-vim.js?v=20260720-vim-v32"></script>
+    <script src="inc/visualwavedrom-app.js?v=20260720-link-v3"></script>
 </body>
 </html>

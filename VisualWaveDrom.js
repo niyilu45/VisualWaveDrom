@@ -1,7 +1,8 @@
 const fs = require('fs');
 const http = require('http');
 const path = require('path');
-const { exec } = require('child_process');
+const crypto = require('crypto');
+const { exec, spawnSync } = require('child_process');
 
 function commandLineOption(name) {
   const index = process.argv.indexOf(name);
@@ -19,9 +20,21 @@ if (htmlName !== configuredHtmlName || !/\.html?$/i.test(htmlName)) {
   throw new Error(`Invalid HTML file name: ${configuredHtmlName}`);
 }
 const htmlPath = path.join(rootDir, htmlName);
-const waveDir = path.join(rootDir, 'Wave');
 const defaultLibraryName = `${path.basename(__filename, '.js')}-library.json`;
 const appId = 'VisualWaveDrom';
+const protocolScheme = 'visualwavedrom';
+let activeProtocolScheme = protocolScheme;
+const configuredLibraryOption = commandLineOption('--library');
+const configuredLibraryPath = configuredLibraryOption
+  ? path.resolve(rootDir, configuredLibraryOption)
+  : path.join(rootDir, 'Wave', defaultLibraryName);
+if (path.extname(configuredLibraryPath).toLowerCase() !== '.json') {
+  throw new Error(`Invalid wave library path: ${configuredLibraryOption}`);
+}
+const waveDir = path.dirname(configuredLibraryPath);
+const configuredLibraryName = path.basename(configuredLibraryPath);
+const requestedOpenUrl = commandLineOption('--open-url');
+const protocolHandlerPath = commandLineOption('--protocol-handler');
 const defaultPort = 4173;
 const configuredPort = Number(process.env.PORT);
 const preferredPort = Number.isInteger(configuredPort) && configuredPort >= 1 && configuredPort <= 65535
@@ -31,15 +44,56 @@ const noOpen = process.argv.includes('--no-open');
 let shutdownTimer = null;
 let requestedPort = preferredPort;
 let selectingFallbackPort = false;
+const connectedClients = new Set();
 
 function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'));
 }
 
+function newStableId(prefix) {
+  return `${prefix}-${crypto.randomUUID()}`;
+}
+
+function writeLibrary(filePath, library) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const tempPath = `${filePath}.${process.pid}.tmp`;
+  fs.writeFileSync(tempPath, `${JSON.stringify(library, null, 2)}\n`, 'utf8');
+  fs.renameSync(tempPath, filePath);
+}
+
+function normalizeLibraryIdentity(library) {
+  let changed = false;
+  if (!library.libraryId || typeof library.libraryId !== 'string') {
+    library.libraryId = newStableId('library');
+    changed = true;
+  }
+  if (!Number.isInteger(library.version) || library.version < 2) {
+    library.version = 2;
+    changed = true;
+  }
+  library.documents.forEach((document) => {
+    if (!document || typeof document !== 'object') return;
+    if (!Number.isInteger(document.revision) || document.revision < 0) {
+      document.revision = 0;
+      changed = true;
+    }
+  });
+  return changed;
+}
+
+function readLibrary(filePath, migrate) {
+  const library = readJson(filePath);
+  if (!library || library.kind !== 'VisualWaveDromWaveLibrary' || !Array.isArray(library.documents)) {
+    throw new Error('Invalid library');
+  }
+  if (normalizeLibraryIdentity(library) && migrate !== false) writeLibrary(filePath, library);
+  return library;
+}
+
 function isLibraryFile(filePath) {
   try {
-    const data = readJson(filePath);
-    return data && data.kind === 'VisualWaveDromWaveLibrary' && Array.isArray(data.documents);
+    readLibrary(filePath, false);
+    return true;
   } catch (_) {
     return false;
   }
@@ -47,7 +101,7 @@ function isLibraryFile(filePath) {
 
 function ensureWaveDirectory() {
   fs.mkdirSync(waveDir, { recursive: true });
-  const defaultPath = path.join(waveDir, defaultLibraryName);
+  const defaultPath = configuredLibraryPath;
   if (fs.existsSync(defaultPath)) return;
 
   let content = '{\n  "signal": []\n}';
@@ -55,20 +109,22 @@ function ensureWaveDirectory() {
   if (fs.existsSync(source)) content = fs.readFileSync(source, 'utf8');
   const library = {
     kind: 'VisualWaveDromWaveLibrary',
-    version: 1,
+    version: 2,
+    libraryId: newStableId('library'),
     updatedAt: new Date().toISOString(),
     documents: [{
       name: 'default-wave',
       content,
       hscale: 1,
       waveEditMode: 'modify',
+      revision: 0,
       savedAt: new Date().toISOString()
     }],
     directories: [],
     activeDocumentName: 'default-wave',
     selectedDirectoryId: 'nav-root'
   };
-  fs.writeFileSync(defaultPath, `${JSON.stringify(library, null, 2)}\n`, 'utf8');
+  writeLibrary(defaultPath, library);
 }
 
 function listLibraries() {
@@ -77,7 +133,10 @@ function listLibraries() {
     .filter((name) => name.toLowerCase().endsWith('.json'))
     .map((name) => ({ name, filePath: path.join(waveDir, name) }))
     .filter(({ filePath }) => isLibraryFile(filePath))
-    .map(({ name, filePath }) => ({ name, mtimeMs: fs.statSync(filePath).mtimeMs }))
+    .map(({ name, filePath }) => {
+      const library = readLibrary(filePath, true);
+      return { name, libraryId: library.libraryId, mtimeMs: fs.statSync(filePath).mtimeMs };
+    })
     .sort((a, b) => b.mtimeMs - a.mtimeMs);
 }
 
@@ -85,6 +144,13 @@ function safeLibraryPath(fileName) {
   const name = path.basename(String(fileName || ''));
   if (!name || name !== fileName || !name.toLowerCase().endsWith('.json')) return null;
   return path.join(waveDir, name);
+}
+
+function libraryPathById(libraryId) {
+  const id = String(libraryId || '').trim();
+  if (!id) return null;
+  const item = listLibraries().find((library) => library.libraryId === id);
+  return item ? path.join(waveDir, item.name) : null;
 }
 
 function contentType(filePath) {
@@ -97,9 +163,71 @@ function sendJson(res, status, payload) {
   res.end(JSON.stringify(payload));
 }
 
+function readRequestBody(req, maxBytes) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.setEncoding('utf8');
+    req.on('data', (part) => {
+      body += part;
+      if (body.length > maxBytes) {
+        reject(new Error('Request body is too large'));
+        req.destroy();
+      }
+    });
+    req.on('end', () => resolve(body));
+    req.on('error', reject);
+  });
+}
+
 function normalizedRoot(value) {
   const resolved = path.resolve(String(value || ''));
   return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+function registerProtocolHandler(handlerPath) {
+  if (process.platform !== 'win32' || !handlerPath) return;
+  const resolved = path.resolve(handlerPath);
+  if (!fs.existsSync(resolved) || path.extname(resolved).toLowerCase() !== '.bat') {
+    console.warn(`Protocol handler BAT not found: ${resolved}`);
+    return;
+  }
+  const command = `"${process.env.ComSpec || 'cmd.exe'}" /d /s /c ""${resolved}" "%1""`;
+  const library = readLibrary(configuredLibraryPath, true);
+  const librarySuffix = String(library.libraryId || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9+.-]/g, '-');
+  activeProtocolScheme = librarySuffix ? `${protocolScheme}-${librarySuffix}` : protocolScheme;
+  const schemes = Array.from(new Set([activeProtocolScheme, protocolScheme]));
+  const commands = schemes.flatMap((scheme) => {
+    const key = `HKCU\\Software\\Classes\\${scheme}`;
+    return [
+      ['add', key, '/ve', '/d', 'URL:VisualWaveDrom Protocol', '/f'],
+      ['add', key, '/v', 'URL Protocol', '/t', 'REG_SZ', '/f'],
+      ['add', `${key}\\DefaultIcon`, '/ve', '/d', `"${htmlPath}",0`, '/f'],
+      ['add', `${key}\\shell\\open\\command`, '/ve', '/d', command, '/f']
+    ];
+  });
+  const results = commands.map((args) => spawnSync('reg.exe', args, { stdio: 'ignore' }));
+  const failed = results.some((result) => result.status !== 0);
+  if (failed) console.warn('Could not register the VisualWaveDrom URL protocol.');
+}
+
+function requestedPagePath(rawUrl) {
+  if (!rawUrl) return `/${htmlName}`;
+  try {
+    const requestUrl = new URL(rawUrl);
+    if (requestUrl.protocol !== `${protocolScheme}:`
+        && requestUrl.protocol !== `${activeProtocolScheme}:`) return `/${htmlName}`;
+    const params = new URLSearchParams();
+    ['libraryId', 'waveId', 'view'].forEach((name) => {
+      const value = requestUrl.searchParams.get(name);
+      if (value) params.set(name, value);
+    });
+    if (!params.has('view')) params.set('view', 'single');
+    return `/open?${params.toString()}`;
+  } catch (_) {
+    return `/${htmlName}`;
+  }
 }
 
 function probeServerInfo(port) {
@@ -143,8 +271,8 @@ function probeServerInfo(port) {
   });
 }
 
-function pageAddress(port) {
-  return `http://127.0.0.1:${port}/${htmlName}`;
+function pageAddress(port, rawUrl) {
+  return `http://127.0.0.1:${port}${requestedPagePath(rawUrl)}`;
 }
 
 function openAddress(address) {
@@ -164,63 +292,179 @@ function serveStatic(req, res, pathname) {
   fs.createReadStream(target).pipe(res);
 }
 
-const server = http.createServer((req, res) => {
+function resolveRequestLibraryPath(url, useConfiguredDefault) {
+  const byId = libraryPathById(url.searchParams.get('libraryId'));
+  if (byId) return byId;
+  const fileName = url.searchParams.get('file');
+  if (fileName) return safeLibraryPath(fileName);
+  return useConfiguredDefault ? configuredLibraryPath : null;
+}
+
+const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`);
-  if (url.pathname === '/api/server-info' && req.method === 'GET') {
-    sendJson(res, 200, { app: appId, rootDir, htmlName });
-    return;
-  }
-  if (url.pathname === '/api/client-connect' && req.method === 'POST') {
-    clearTimeout(shutdownTimer);
-    shutdownTimer = null;
-    sendJson(res, 200, { ok: true });
-    return;
-  }
-  if (url.pathname === '/api/client-disconnect' && req.method === 'POST') {
-    clearTimeout(shutdownTimer);
-    shutdownTimer = setTimeout(() => {
-      server.close(() => process.exit(0));
-    }, 1800);
-    sendJson(res, 200, { ok: true });
-    return;
-  }
-  if (url.pathname === '/api/wave-libraries' && req.method === 'GET') {
-    const libraries = listLibraries();
-    sendJson(res, 200, { files: libraries.map((item) => item.name), current: libraries[0] && libraries[0].name });
-    return;
-  }
-  if (url.pathname === '/api/wave-library') {
-    const filePath = safeLibraryPath(url.searchParams.get('file'));
-    if (!filePath) { sendJson(res, 400, { error: 'Invalid library file name' }); return; }
-    if (req.method === 'GET') {
-      if (!fs.existsSync(filePath) || !isLibraryFile(filePath)) { sendJson(res, 404, { error: 'Library not found' }); return; }
-      sendJson(res, 200, readJson(filePath));
+  try {
+    if (url.pathname === '/open' && req.method === 'GET') {
+      const target = new URL(`/${htmlName}`, `http://${req.headers.host || '127.0.0.1'}`);
+      url.searchParams.forEach((value, name) => target.searchParams.set(name, value));
+      res.writeHead(302, { Location: `${target.pathname}${target.search}` });
+      res.end();
       return;
     }
-    if (req.method === 'POST') {
-      let body = '';
-      req.setEncoding('utf8');
-      req.on('data', (part) => { body += part; if (body.length > 20 * 1024 * 1024) req.destroy(); });
-      req.on('end', () => {
-        try {
-          const library = JSON.parse(body);
-          if (!library || library.kind !== 'VisualWaveDromWaveLibrary' || !Array.isArray(library.documents)) throw new Error('Invalid library');
-          library.updatedAt = new Date().toISOString();
-          const tempPath = `${filePath}.tmp`;
-          fs.writeFileSync(tempPath, `${JSON.stringify(library, null, 2)}\n`, 'utf8');
-          fs.renameSync(tempPath, filePath);
-          sendJson(res, 200, { ok: true, file: path.basename(filePath) });
-        } catch (error) {
-          sendJson(res, 400, { error: error.message });
-        }
+    if (url.pathname === '/api/server-info' && req.method === 'GET') {
+      const library = readLibrary(configuredLibraryPath, true);
+      sendJson(res, 200, {
+        app: appId,
+        rootDir,
+        htmlName,
+        protocolScheme: activeProtocolScheme,
+        libraryDir: waveDir,
+        currentLibrary: configuredLibraryName,
+        currentLibraryId: library.libraryId
       });
       return;
     }
+    if (url.pathname === '/api/client-connect' && req.method === 'POST') {
+      const clientId = url.searchParams.get('id') || 'legacy-client';
+      connectedClients.add(clientId);
+      clearTimeout(shutdownTimer);
+      shutdownTimer = null;
+      sendJson(res, 200, { ok: true, clients: connectedClients.size });
+      return;
+    }
+    if (url.pathname === '/api/client-disconnect' && req.method === 'POST') {
+      const clientId = url.searchParams.get('id') || 'legacy-client';
+      connectedClients.delete(clientId);
+      clearTimeout(shutdownTimer);
+      if (connectedClients.size === 0) {
+        shutdownTimer = setTimeout(() => {
+          server.close(() => process.exit(0));
+        }, 1800);
+      }
+      sendJson(res, 200, { ok: true, clients: connectedClients.size });
+      return;
+    }
+    if (url.pathname === '/api/wave-libraries' && req.method === 'GET') {
+      const libraries = listLibraries();
+      const configured = libraries.find((item) => item.name === configuredLibraryName);
+      const current = configured || libraries[0] || null;
+      sendJson(res, 200, {
+        files: libraries.map((item) => item.name),
+        libraries,
+        current: current && current.name,
+        currentLibraryId: current && current.libraryId,
+        protocolScheme: activeProtocolScheme
+      });
+      return;
+    }
+    if (url.pathname === '/api/wave-library') {
+      const filePath = resolveRequestLibraryPath(url, true);
+      if (!filePath) { sendJson(res, 400, { error: 'Invalid library' }); return; }
+      if (req.method === 'GET') {
+        if (!fs.existsSync(filePath) || !isLibraryFile(filePath)) { sendJson(res, 404, { error: 'Library not found' }); return; }
+        sendJson(res, 200, readLibrary(filePath, true));
+        return;
+      }
+      if (req.method === 'POST') {
+        const incoming = JSON.parse(await readRequestBody(req, 20 * 1024 * 1024));
+        if (!incoming || incoming.kind !== 'VisualWaveDromWaveLibrary' || !Array.isArray(incoming.documents)) {
+          throw new Error('Invalid library');
+        }
+        const existing = fs.existsSync(filePath) && isLibraryFile(filePath) ? readLibrary(filePath, true) : null;
+        if (!incoming.libraryId && existing) incoming.libraryId = existing.libraryId;
+        if (existing && incoming.libraryId !== existing.libraryId) {
+          sendJson(res, 409, { error: 'Library identity conflict', libraryId: existing.libraryId });
+          return;
+        }
+        normalizeLibraryIdentity(incoming);
+        if (existing) {
+          const existingByName = new Map(existing.documents
+            .filter((document) => document && typeof document.name === 'string')
+            .map((document) => [document.name, document]));
+          const conflict = incoming.documents.find((document) => {
+            const current = document && existingByName.get(document.name);
+            if (!current || document.revision === current.revision) return false;
+            const sameState = document.content === current.content
+              && document.hscale === current.hscale
+              && document.waveEditMode === current.waveEditMode;
+            if (sameState) {
+              document.revision = current.revision;
+              return false;
+            }
+            return true;
+          });
+          if (conflict) {
+            sendJson(res, 409, {
+              error: 'Wave document revision conflict',
+              waveId: conflict.name
+            });
+            return;
+          }
+        }
+        incoming.updatedAt = new Date().toISOString();
+        writeLibrary(filePath, incoming);
+        sendJson(res, 200, { ok: true, file: path.basename(filePath), libraryId: incoming.libraryId });
+        return;
+      }
+    }
+    if (url.pathname === '/api/wave-document') {
+      if (req.method === 'GET') {
+        const filePath = resolveRequestLibraryPath(url, false);
+        const waveId = String(url.searchParams.get('waveId') || '');
+        if (!filePath || !waveId || !fs.existsSync(filePath)) {
+          sendJson(res, 404, { error: 'Wave document not found' });
+          return;
+        }
+        const library = readLibrary(filePath, true);
+        const document = library.documents.find((item) => item && item.name === waveId);
+        if (!document) { sendJson(res, 404, { error: 'Wave document not found' }); return; }
+        sendJson(res, 200, {
+          libraryId: library.libraryId,
+          file: path.basename(filePath),
+          document
+        });
+        return;
+      }
+      if (req.method === 'PATCH') {
+        const payload = JSON.parse(await readRequestBody(req, 4 * 1024 * 1024));
+        const libraryId = String(payload.libraryId || '');
+        const waveId = String(payload.waveId || '');
+        const filePath = libraryPathById(libraryId);
+        if (!filePath || !waveId || !payload.document) {
+          sendJson(res, 404, { error: 'Wave document not found' });
+          return;
+        }
+        const library = readLibrary(filePath, true);
+        const index = library.documents.findIndex((item) => item && item.name === waveId);
+        if (index < 0) { sendJson(res, 404, { error: 'Wave document not found' }); return; }
+        const previous = library.documents[index];
+        const expectedRevision = Number(payload.expectedRevision);
+        if (Number.isInteger(expectedRevision) && expectedRevision !== previous.revision) {
+          sendJson(res, 409, { error: 'Wave document revision conflict', document: previous });
+          return;
+        }
+        if (typeof payload.document.content !== 'string') throw new Error('Invalid wave document content');
+        JSON.parse(payload.document.content);
+        const document = Object.assign({}, previous, payload.document, {
+          name: waveId,
+          revision: previous.revision + 1,
+          savedAt: new Date().toISOString()
+        });
+        library.documents[index] = document;
+        library.updatedAt = new Date().toISOString();
+        writeLibrary(filePath, library);
+        sendJson(res, 200, { ok: true, libraryId: library.libraryId, file: path.basename(filePath), document });
+        return;
+      }
+    }
+    serveStatic(req, res, url.pathname);
+  } catch (error) {
+    if (!res.headersSent) sendJson(res, 400, { error: error.message });
+    else res.end();
   }
-  serveStatic(req, res, url.pathname);
 });
 
 ensureWaveDirectory();
+registerProtocolHandler(protocolHandlerPath);
 if (!fs.existsSync(htmlPath) || !fs.statSync(htmlPath).isFile()) {
   console.error(`HTML file not found: ${htmlPath}`);
   process.exit(1);
@@ -228,7 +472,7 @@ if (!fs.existsSync(htmlPath) || !fs.statSync(htmlPath).isFile()) {
 server.on('listening', () => {
   const serverAddress = server.address();
   const activePort = serverAddress && typeof serverAddress === 'object' ? serverAddress.port : requestedPort;
-  const address = pageAddress(activePort);
+  const address = pageAddress(activePort, requestedOpenUrl);
   if (activePort !== preferredPort) {
     console.log(`Port ${preferredPort} is in use; using available port ${activePort}.`);
   }
@@ -248,10 +492,11 @@ server.on('error', async (error) => {
   const sameService = info
     && info.app === appId
     && info.htmlName === htmlName
-    && normalizedRoot(info.rootDir) === normalizedRoot(rootDir);
+    && normalizedRoot(info.rootDir) === normalizedRoot(rootDir)
+    && normalizedRoot(info.libraryDir) === normalizedRoot(waveDir);
 
   if (sameService) {
-    const address = pageAddress(occupiedPort);
+    const address = pageAddress(occupiedPort, requestedOpenUrl);
     console.log(`VisualWaveDrom is already running at ${address}`);
     openAddress(address);
     return;

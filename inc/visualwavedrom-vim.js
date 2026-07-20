@@ -298,9 +298,9 @@
         }
       } else if (key === 'o' && this.mode === 'visual') {
         this.execute('visual-swap', {}, { noRepeat: true });
-      } else if (key === 'y' && this.mode === 'visual') {
+      } else if (key === 'y' && (this.mode === 'visual' || context.hasWaveRange)) {
         this.execute('yank-selection', {}, { noRepeat: true });
-        this.setMode('normal');
+        if (this.mode === 'visual') this.setMode('normal');
       } else if (key === 'd' && this.mode === 'visual') {
         this.execute('delete-selection');
         this.setMode('normal');

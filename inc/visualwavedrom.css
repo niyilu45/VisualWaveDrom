@@ -1079,6 +1079,51 @@
       white-space: nowrap;
     }
 
+    .wave-document-screenshot {
+      width: auto;
+      height: 26px;
+      flex: 0 0 auto;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      border: 1px solid #c9d4e1;
+      border-radius: 4px;
+      background: #fff;
+      color: #315b87;
+      cursor: pointer;
+      padding: 0 8px;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .wave-document-screenshot svg {
+      width: 15px;
+      height: 15px;
+      pointer-events: none;
+    }
+
+    .wave-document-screenshot span {
+      pointer-events: none;
+    }
+
+    .wave-document-screenshot:hover:not(:disabled) {
+      border-color: #3b82f6;
+      color: #1d4ed8;
+      background: #eff6ff;
+    }
+
+    .wave-document-screenshot.copying {
+      cursor: progress;
+      opacity: 0.65;
+    }
+
+    .wave-document-screenshot.copied {
+      border-color: #22c55e;
+      color: #15803d;
+      background: #f0fdf4;
+    }
+
     .wave-document-open {
       width: 28px;
       height: 26px;
@@ -1318,6 +1363,71 @@
       display: flex;
       flex-direction: column;
       gap: 12px;
+    }
+
+    .wave-copy-dialog {
+      width: min(100%, 430px);
+    }
+
+    .wave-copy-options {
+      gap: 8px;
+    }
+
+    .wave-copy-option {
+      width: 100%;
+      min-height: 58px;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      justify-content: center;
+      gap: 4px;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--surface-2);
+      color: var(--text);
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .wave-copy-option:hover,
+    .wave-copy-option:focus-visible {
+      border-color: var(--accent);
+      background: rgba(37, 99, 235, 0.1);
+      outline: none;
+    }
+
+    .wave-copy-option strong {
+      font-size: 0.84rem;
+    }
+
+    .wave-copy-option span {
+      color: var(--text-muted);
+      font-size: 0.72rem;
+      line-height: 1.45;
+    }
+
+    body.single-wave-view .nav-sidebar,
+    body.single-wave-view .nav-resize-handle {
+      display: none;
+    }
+
+    body.single-wave-view .wave-library-container {
+      margin-top: 0;
+    }
+
+    body.single-wave-view .wave-document-delete {
+      display: none;
+    }
+
+    .single-wave-not-found {
+      width: 100%;
+      padding: 24px;
+      border: 1px solid #fecaca;
+      border-radius: 6px;
+      background: #fff7f7;
+      color: #b91c1c;
+      font-size: 14px;
     }
 
     .modal-field-label {

@@ -211,7 +211,8 @@ function getDefaultJson() {
     let pendingNameEditSignalIndex = -1;
     let selectedSignalIndex = -1;
     let selectedWaveColumnIndex = -1;
-    let selectedWaveRangeRowIndex = -1;
+    let selectedWaveRangeAnchorRowIndex = -1;
+    let selectedWaveRangeHeadRowIndex = -1;
     let selectedWaveRangeStart = -1;
     let selectedWaveRangeEnd = -1;
     let vimVisualCellAnchor = -1;
@@ -230,6 +231,7 @@ function getDefaultJson() {
     let codeMirrorVimMode = 'normal';
     let copiedWaveSelection = '';
     let copiedWaveDataSlots = [];
+    let copiedWaveRows = [];
     let waveSelectionDrag = null;
     let waveClipboardShortcutActive = false;
     let groupDeleteShortcutActive = false;
@@ -680,9 +682,24 @@ ${lines.join('\n')}`;
     let pendingLoadTagName = null;
     const WAVE_LIBRARY_KIND = 'VisualWaveDromWaveLibrary';
     const waveLibraryServerMode = /^https?:$/.test(window.location.protocol);
+    const pageQuery = new URLSearchParams(window.location.search);
+    const requestedLibraryId = String(pageQuery.get('libraryId') || '').trim();
+    const requestedWaveDocumentName = String(pageQuery.get('waveId') || '').trim();
+    const singleWaveViewActive = pageQuery.get('view') === 'single' && !!requestedWaveDocumentName;
+    const waveLibraryClientId = 'client-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
     let currentWaveLibraryFile = '';
+    let currentWaveLibraryId = '';
+    let waveLinkProtocolScheme = 'visualwavedrom';
     let waveLibrarySaveTimer = null;
+    let singleWaveSaveInFlight = false;
+    let singleWaveSaveQueued = false;
+    let lastSingleWaveSyncedSignature = '';
     let applyingWaveLibraryBundle = false;
+    let pendingWaveCopyDocumentName = '';
+    let pendingWaveCopyButton = null;
+    let waveLibrarySyncChannel = null;
+
+    document.body.classList.toggle('single-wave-view', singleWaveViewActive);
 
     const savedTagsListEl = document.getElementById('saved-tags-list');
     const savedTagsEmptyEl = document.getElementById('saved-tags-empty');
@@ -696,6 +713,8 @@ ${lines.join('\n')}`;
     const moveDistanceHint = document.getElementById('move-distance-hint');
     const waveLibraryPickerModal = document.getElementById('wave-library-picker-modal');
     const waveLibraryPickerOptions = document.getElementById('wave-library-picker-options');
+    const waveCopyModal = document.getElementById('wave-copy-modal');
+    const waveCopyCancel = document.getElementById('wave-copy-cancel');
 
     function escapeRegex(str) {
       return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -2672,6 +2691,14 @@ ${lines.join('\n')}`;
       clearTimeout(persistTimer);
       persistTimer = null;
       saveEditorJsonToStorage(editor.value);
+      const current = editingWaveDocumentName && getSavedTagByName(editingWaveDocumentName);
+      if (current && current.content !== editor.value && isValidJsonText(editor.value)) {
+        upsertSavedTag(editingWaveDocumentName, getCurrentStateSnapshot(), {
+          skipListRefresh: true,
+          skipSort: true
+        });
+        refreshWaveDocumentTitle(editingWaveDocumentName, false);
+      }
     }
 
     function debouncedPersistEditorJson() {
@@ -3689,12 +3716,86 @@ ${lines.join('\n')}`;
     }
 
     function deleteSelectedWaveRange() {
-      const range = getSelectedWaveRange();
-      if (!range) {
+      const block = getSelectedWaveBlock();
+      if (!block) {
         setStatus(false, '请先点击或拖动选择波形格');
         return false;
       }
-      return deleteWaveRangeAtColumns(selectedSignalIndex, range.start, range.end);
+      if (block.endRow === block.startRow) {
+        return deleteWaveRangeAtColumns(block.startRow, block.start, block.end);
+      }
+
+      let parsed;
+      try {
+        parsed = JSON.parse(editor.value);
+      } catch (e) {
+        setStatus(false, 'JSON 错误，无法删除多行波形');
+        return false;
+      }
+      if (!Array.isArray(parsed.signal)) return false;
+
+      const locations = collectSignalLocations(parsed.signal);
+      let changedRows = 0;
+      let deletedCells = 0;
+      let nextColumn = -1;
+      for (let rowIndex = block.startRow; rowIndex <= block.endRow; rowIndex++) {
+        const location = locations[rowIndex];
+        if (!location) continue;
+        const signal = location.signal || {};
+        const wave = signal.wave || '';
+        const safeStart = Math.max(0, block.start);
+        const safeEnd = Math.min(wave.length - 1, block.end);
+        if (safeStart >= wave.length || safeEnd < safeStart) continue;
+
+        let suffix = wave.slice(safeEnd + 1);
+        let continuationOffset = 0;
+        while (continuationOffset < suffix.length && suffix[continuationOffset] === '|') {
+          continuationOffset++;
+        }
+        if (suffix[continuationOffset] === '.') {
+          const continuationChar = getWaveContinuationSourceChar(
+            wave,
+            safeEnd + 1 + continuationOffset
+          );
+          suffix = suffix.slice(0, continuationOffset)
+            + continuationChar
+            + suffix.slice(continuationOffset + 1);
+        }
+        const newWave = wave.slice(0, safeStart) + suffix;
+        if (newWave === wave) continue;
+        location.parent[location.index] = Object.assign({}, signal, { wave: newWave });
+        changedRows++;
+        deletedCells += safeEnd - safeStart + 1;
+        if (nextColumn < 0) {
+          nextColumn = newWave.length > 0 ? Math.min(safeStart, newWave.length - 1) : -1;
+        }
+      }
+
+      if (!changedRows) {
+        setStatus(false, '选中的多行空位置没有可删除波形');
+        return false;
+      }
+      pushUndoBeforeChange();
+      const newText = JSON.stringify(parsed, null, 2);
+      const firstEntry = buildSignalSourceMap(newText)[block.startRow];
+      setSelectedSignal(block.startRow, nextColumn);
+      applyEditorChange(
+        newText,
+        firstEntry ? firstEntry.start : 0,
+        firstEntry ? firstEntry.end : undefined
+      );
+      scheduleFormatAfterWaveChange();
+      setStatus(true, '已从 ' + changedRows + ' 行删除 ' + deletedCells + ' 个波形格');
+      vwdDebugLog('wave-selection', {
+        phase: 'delete-rows',
+        startRow: block.startRow,
+        endRow: block.endRow,
+        startCol: block.start,
+        endCol: block.end,
+        changedRows,
+        deletedCells
+      });
+      return true;
     }
 
     function waveEditModeLabel() {
@@ -3805,6 +3906,15 @@ ${lines.join('\n')}`;
     function cloneWaveClipboardDataSlots(slots) {
       return Array.isArray(slots)
         ? slots.map((slot) => ({ offset: slot.offset, value: slot.value }))
+        : [];
+    }
+
+    function cloneWaveClipboardRows(rows) {
+      return Array.isArray(rows)
+        ? rows.map((row) => ({
+          text: String(row && row.text || ''),
+          dataSlots: cloneWaveClipboardDataSlots(row && row.dataSlots)
+        }))
         : [];
     }
 
@@ -3931,52 +4041,161 @@ ${lines.join('\n')}`;
       return true;
     }
 
+    function applyWaveRowsReplacement(startRow, startCol, rows, actionLabel, options) {
+      const replacements = cloneWaveClipboardRows(rows).filter((row) => row.text);
+      if (startRow < 0 || startCol < 0 || !replacements.length) {
+        setStatus(false, '请先选择多行波形的粘贴起点');
+        return false;
+      }
+
+      let parsed;
+      try {
+        parsed = JSON.parse(editor.value);
+      } catch (e) {
+        setStatus(false, 'JSON 错误，无法修改多行波形');
+        return false;
+      }
+      if (!Array.isArray(parsed.signal)) {
+        setStatus(false, '当前 JSON 中没有可修改的信号行');
+        return false;
+      }
+
+      const locations = collectSignalLocations(parsed.signal);
+      const safeStartRow = Math.max(0, Math.floor(startRow));
+      const safeStartCol = Math.max(0, Math.floor(startCol));
+      const availableCount = Math.max(0, locations.length - safeStartRow);
+      const targetRows = replacements.slice(0, availableCount);
+      if (!targetRows.length) {
+        setStatus(false, '粘贴起点下方没有足够的信号行');
+        return false;
+      }
+
+      let changedCount = 0;
+      targetRows.forEach((replacement, offset) => {
+        const location = locations[safeStartRow + offset];
+        if (!location) return;
+        const originalSignal = location.signal || {};
+        const originalWave = originalSignal.wave || '';
+        const newWave = replaceWaveRangePreservingContinuation(
+          originalWave,
+          safeStartCol,
+          replacement.text
+        );
+        let updatedSignal = Object.assign({}, originalSignal, { wave: newWave });
+        if (options && options.includeDataLabels) {
+          updatedSignal = applyWaveClipboardDataToSignal(
+            updatedSignal,
+            originalWave,
+            newWave,
+            safeStartCol,
+            replacement.text.length,
+            replacement.dataSlots
+          );
+        }
+        if (JSON.stringify(updatedSignal) === JSON.stringify(originalSignal)) return;
+        location.parent[location.index] = updatedSignal;
+        changedCount++;
+      });
+
+      const maxLength = targetRows.reduce((max, row) => Math.max(max, row.text.length), 1);
+      const lastRow = safeStartRow + targetRows.length - 1;
+      setSelectedWaveBlock(
+        lastRow,
+        safeStartRow,
+        safeStartCol,
+        safeStartCol + maxLength - 1
+      );
+      if (!changedCount) {
+        setStatus(true, (actionLabel || '多行修改') + '完成，波形内容未变化');
+        return false;
+      }
+
+      pushUndoBeforeChange();
+      const newText = JSON.stringify(parsed, null, 2);
+      const firstEntry = buildSignalSourceMap(newText)[safeStartRow];
+      applyEditorChange(
+        newText,
+        firstEntry ? firstEntry.start : 0,
+        firstEntry ? firstEntry.end : undefined
+      );
+      scheduleFormatAfterWaveChange();
+      vwdDebugLog('wave-selection', {
+        phase: 'replace-rows',
+        action: actionLabel || 'replace-rows',
+        startRow: safeStartRow,
+        endRow: lastRow,
+        startCol: safeStartCol,
+        endCol: safeStartCol + maxLength - 1,
+        requestedRowCount: replacements.length,
+        appliedRowCount: targetRows.length,
+        changedRowCount: changedCount
+      });
+      setStatus(
+        true,
+        (actionLabel || '多行修改') + '：已覆盖 ' + targetRows.length + ' 行 × ' + maxLength + ' 格'
+          + (targetRows.length < replacements.length ? '（目标剩余行不足）' : '')
+      );
+      return true;
+    }
+
     function copySelectedWaveRange() {
-      const range = getSelectedWaveRange();
-      if (!range) {
+      const block = getSelectedWaveBlock();
+      if (!block) {
         setStatus(false, '请先点击或拖动选择波形格');
         return false;
       }
 
-      let entry;
+      let sourceMap = [];
       try {
-        entry = buildSignalSourceMap(editor.value)[selectedSignalIndex];
+        sourceMap = buildSignalSourceMap(editor.value);
       } catch (e) { /* handled below */ }
-      if (!entry) {
-        setStatus(false, '未找到要复制的信号行');
+      const entries = sourceMap.slice(block.startRow, block.endRow + 1);
+      if (!entries.length || entries.some((entry) => !entry)) {
+        setStatus(false, '未找到要复制的多行信号');
         return false;
       }
 
-      const wave = entry.signal.wave || '';
-      const length = range.end - range.start + 1;
-      let copied = wave.padEnd(range.end + 1, EMPTY_WAVE_FILL_CHAR)
-        .slice(range.start, range.end + 1);
-      if (copied[0] === '.') {
-        copied = getWaveContinuationSourceChar(wave, range.start) + copied.slice(1);
-      }
-      copiedWaveSelection = copied;
-      copiedWaveDataSlots = collectWaveClipboardDataSlots(entry.signal, wave, copied, range.start);
+      const columnCount = block.end - block.start + 1;
+      copiedWaveRows = entries.map((entry) => {
+        const wave = entry.signal.wave || '';
+        let copied = wave.padEnd(block.end + 1, EMPTY_WAVE_FILL_CHAR)
+          .slice(block.start, block.end + 1);
+        if (copied[0] === '.') {
+          copied = getWaveContinuationSourceChar(wave, block.start) + copied.slice(1);
+        }
+        return {
+          text: copied,
+          dataSlots: collectWaveClipboardDataSlots(entry.signal, wave, copied, block.start)
+        };
+      });
+      copiedWaveSelection = copiedWaveRows[0].text;
+      copiedWaveDataSlots = cloneWaveClipboardDataSlots(copiedWaveRows[0].dataSlots);
       waveClipboardShortcutActive = true;
       updateLegendAvailability();
       vwdDebugLog('wave-selection', {
         phase: 'copy',
-        rowIndex: selectedSignalIndex,
-        startCol: range.start,
-        endCol: range.end,
-        length,
-        copied,
-        dataSlots: cloneWaveClipboardDataSlots(copiedWaveDataSlots)
+        startRow: block.startRow,
+        endRow: block.endRow,
+        startCol: block.start,
+        endCol: block.end,
+        rowCount: copiedWaveRows.length,
+        columnCount,
+        rows: cloneWaveClipboardRows(copiedWaveRows)
       });
-      const copiedTextCount = copiedWaveDataSlots
+      const copiedTextCount = copiedWaveRows
+        .flatMap((row) => row.dataSlots)
         .filter((slot) => slot.value !== undefined && slot.value !== null && String(slot.value) !== '')
         .length;
-      setStatus(true, '已复制 ' + length + ' 个波形格和 ' + copiedTextCount + ' 个文字');
+      setStatus(
+        true,
+        '已复制 ' + copiedWaveRows.length + ' 行 × ' + columnCount + ' 格和 ' + copiedTextCount + ' 个文字'
+      );
       return true;
     }
 
     function pasteCopiedWaveRange() {
-      const range = getSelectedWaveRange();
-      if (!range) {
+      const block = getSelectedWaveBlock();
+      if (!block) {
         setStatus(false, '请先选择粘贴起点');
         return false;
       }
@@ -3985,14 +4204,29 @@ ${lines.join('\n')}`;
         return false;
       }
       waveClipboardShortcutActive = true;
+      const rows = copiedWaveRows.length
+        ? cloneWaveClipboardRows(copiedWaveRows)
+        : [{
+          text: copiedWaveSelection,
+          dataSlots: cloneWaveClipboardDataSlots(copiedWaveDataSlots)
+        }];
+      if (rows.length > 1) {
+        return applyWaveRowsReplacement(
+          block.startRow,
+          block.start,
+          rows,
+          '多行覆盖粘贴',
+          { includeDataLabels: true }
+        );
+      }
       return applyWaveRangeReplacement(
-        selectedSignalIndex,
-        range.start,
-        copiedWaveSelection,
+        block.startRow,
+        block.start,
+        rows[0].text,
         '覆盖粘贴',
         {
           includeDataLabels: true,
-          dataSlots: cloneWaveClipboardDataSlots(copiedWaveDataSlots)
+          dataSlots: cloneWaveClipboardDataSlots(rows[0].dataSlots)
         }
       );
     }
@@ -4036,7 +4270,8 @@ ${lines.join('\n')}`;
         phase: 'clipboard-shortcut',
         key,
         handled,
-        copiedLength: copiedWaveSelection.length
+        copiedLength: copiedWaveSelection.length,
+        copiedRowCount: copiedWaveRows.length || (copiedWaveSelection ? 1 : 0)
       });
       return true;
     }
@@ -4058,7 +4293,12 @@ ${lines.join('\n')}`;
       if (e.type === 'copy') {
         handled = copySelectedWaveRange();
         if (handled && e.clipboardData && copiedWaveSelection) {
-          e.clipboardData.setData('text/plain', copiedWaveSelection);
+          e.clipboardData.setData(
+            'text/plain',
+            (copiedWaveRows.length ? copiedWaveRows : [{ text: copiedWaveSelection }])
+              .map((row) => row.text)
+              .join('\n')
+          );
         }
       } else {
         handled = pasteCopiedWaveRange();
@@ -4067,7 +4307,8 @@ ${lines.join('\n')}`;
         phase: 'clipboard-event',
         type: e.type,
         handled,
-        copiedLength: copiedWaveSelection.length
+        copiedLength: copiedWaveSelection.length,
+        copiedRowCount: copiedWaveRows.length || (copiedWaveSelection ? 1 : 0)
       });
       return true;
     }
@@ -4188,8 +4429,10 @@ ${lines.join('\n')}`;
       let hasRow = false;
       let hasCol = selectedWaveColumnIndex >= 0;
       const selectedRange = getSelectedWaveRange();
-      const selectedWaveCount = selectedRange ? selectedRange.end - selectedRange.start + 1 : 0;
-      let waveLen = 0;
+      const selectedBlock = getSelectedWaveBlock();
+      const selectedColumnCount = selectedRange ? selectedRange.end - selectedRange.start + 1 : 0;
+      const selectedRowCount = selectedBlock ? selectedBlock.endRow - selectedBlock.startRow + 1 : 0;
+      const selectedWaveCount = selectedColumnCount * selectedRowCount;
       let sourceMap = [];
       let groupMap = [];
       try {
@@ -4197,7 +4440,6 @@ ${lines.join('\n')}`;
         signalCount = sourceMap.length;
         const rowEntry = sourceMap[selectedSignalIndex];
         hasRow = !!rowEntry;
-        if (rowEntry) waveLen = (rowEntry.signal.wave || '').length;
       } catch (e) { /* ignore */ }
       try {
         groupMap = buildGroupSourceMap(editor.value);
@@ -4207,9 +4449,16 @@ ${lines.join('\n')}`;
       const hasSelection = hasRow || hasGroup;
       const hasSelectedConnection = connectionSelectActive && selectedEdgeIndex >= 0;
 
-      const selectedExistingWaveCount = selectedRange
-        ? Math.max(0, Math.min(selectedRange.end, waveLen - 1) - selectedRange.start + 1)
-        : 0;
+      let selectedExistingWaveCount = 0;
+      if (selectedBlock) {
+        for (let rowIndex = selectedBlock.startRow; rowIndex <= selectedBlock.endRow; rowIndex++) {
+          const waveLength = sourceMap[rowIndex] ? (sourceMap[rowIndex].signal.wave || '').length : 0;
+          selectedExistingWaveCount += Math.max(
+            0,
+            Math.min(selectedBlock.end, waveLength - 1) - selectedBlock.start + 1
+          );
+        }
+      }
       const canDeleteCol = hasRow && hasCol && selectedExistingWaveCount > 0;
       const deleteColBtn = document.getElementById('btn-delete-wave-col');
       if (deleteColBtn) {
@@ -4242,7 +4491,7 @@ ${lines.join('\n')}`;
       if (copyWaveBtn) {
         copyWaveBtn.disabled = !hasRow || !selectedRange;
         copyWaveBtn.title = selectedRange
-          ? '复制当前选中的 ' + selectedWaveCount + ' 个波形格 (Ctrl+C)'
+          ? '复制当前选中的 ' + selectedRowCount + ' 行 × ' + selectedColumnCount + ' 格 (Ctrl+C)'
           : '请先点击或拖动选择波形格';
       }
       const pasteWaveBtn = document.getElementById('btn-paste-wave-selection');
@@ -4250,7 +4499,9 @@ ${lines.join('\n')}`;
         pasteWaveBtn.disabled = !hasRow || !selectedRange || !copiedWaveSelection;
         pasteWaveBtn.title = !copiedWaveSelection
           ? '请先复制波形 (Ctrl+C)'
-          : (selectedRange ? '从所选起点覆盖粘贴 ' + copiedWaveSelection.length + ' 个波形格 (Ctrl+V)' : '请先选择粘贴起点');
+          : (selectedRange
+            ? '从所选起点覆盖粘贴 ' + (copiedWaveRows.length || 1) + ' 行 × ' + copiedWaveSelection.length + ' 格 (Ctrl+V)'
+            : '请先选择粘贴起点');
       }
 
       const groupSignalBtn = document.getElementById('btn-group-signal');
@@ -4280,7 +4531,7 @@ ${lines.join('\n')}`;
           ? '画笔已选择 ' + JSON.stringify(wavePaintChar) + '，点击格子连续绘制'
           : '点击选择画笔波形')
         : (selectedWaveCount > 1
-          ? '替换当前选中的 ' + selectedWaveCount + ' 个波形格'
+          ? '替换当前选中的 ' + selectedRowCount + ' 行 × ' + selectedColumnCount + ' 格'
           : (waveEditMode === 'insert'
           ? '点击在选中列位置插入波形字符'
           : '点击替换选中列的波形字符'));
@@ -4295,37 +4546,53 @@ ${lines.join('\n')}`;
       });
     }
 
-    function getSelectedWaveRange(rowIndex) {
-      const targetRow = Number.isFinite(rowIndex) ? rowIndex : selectedSignalIndex;
-      if (targetRow < 0 || targetRow !== selectedSignalIndex || selectedWaveColumnIndex < 0) return null;
-      if (selectedWaveRangeRowIndex !== targetRow
-          || selectedWaveRangeStart < 0
-          || selectedWaveRangeEnd < 0) {
-        return { start: selectedWaveColumnIndex, end: selectedWaveColumnIndex };
-      }
+    function getSelectedWaveBlock() {
+      if (selectedSignalIndex < 0 || selectedWaveColumnIndex < 0) return null;
+      const anchorRow = selectedWaveRangeAnchorRowIndex >= 0
+        ? selectedWaveRangeAnchorRowIndex
+        : selectedSignalIndex;
+      const headRow = selectedWaveRangeHeadRowIndex >= 0
+        ? selectedWaveRangeHeadRowIndex
+        : selectedSignalIndex;
+      const startCol = selectedWaveRangeStart >= 0
+        ? selectedWaveRangeStart
+        : selectedWaveColumnIndex;
+      const endCol = selectedWaveRangeEnd >= 0
+        ? selectedWaveRangeEnd
+        : selectedWaveColumnIndex;
       return {
-        start: Math.min(selectedWaveRangeStart, selectedWaveRangeEnd),
-        end: Math.max(selectedWaveRangeStart, selectedWaveRangeEnd)
+        startRow: Math.min(anchorRow, headRow),
+        endRow: Math.max(anchorRow, headRow),
+        start: Math.min(startCol, endCol),
+        end: Math.max(startCol, endCol)
       };
     }
 
-    function setSelectedWaveRange(rowIndex, startCol, endCol, options) {
+    function getSelectedWaveRange(rowIndex) {
+      const targetRow = Number.isFinite(rowIndex) ? rowIndex : selectedSignalIndex;
+      const block = getSelectedWaveBlock();
+      if (!block || targetRow < block.startRow || targetRow > block.endRow) return null;
+      return { start: block.start, end: block.end };
+    }
+
+    function setSelectedWaveBlock(anchorRowIndex, headRowIndex, startCol, endCol, options) {
       const opts = options || {};
       const hasFilter = isNavFilteringActive();
       const visibleSet = getNavVisibleRowSet();
-      if (hasFilter && Number.isFinite(rowIndex) && rowIndex >= 0 && !visibleSet.has(rowIndex)) {
-        rowIndex = -1;
+      if (hasFilter && Number.isFinite(headRowIndex) && headRowIndex >= 0 && !visibleSet.has(headRowIndex)) {
+        headRowIndex = -1;
       }
-      if (rowIndex < 0) {
+      if (anchorRowIndex < 0 || headRowIndex < 0) {
         setSelectedSignal(-1, -1);
         return;
       }
 
       const safeStart = Math.max(0, Math.floor(startCol));
       const safeEnd = Math.max(0, Math.floor(endCol));
-      selectedSignalIndex = rowIndex;
+      selectedSignalIndex = headRowIndex;
       selectedWaveColumnIndex = Math.min(safeStart, safeEnd);
-      selectedWaveRangeRowIndex = rowIndex;
+      selectedWaveRangeAnchorRowIndex = anchorRowIndex;
+      selectedWaveRangeHeadRowIndex = headRowIndex;
       selectedWaveRangeStart = safeStart;
       selectedWaveRangeEnd = safeEnd;
       selectedGroupIndex = -1;
@@ -4334,6 +4601,10 @@ ${lines.join('\n')}`;
         if (svg) refreshGroupSelection(svg, buildGroupSourceMap(editor.value || ''));
       }
       if (!opts.deferControls) updateLegendAvailability();
+    }
+
+    function setSelectedWaveRange(rowIndex, startCol, endCol, options) {
+      setSelectedWaveBlock(rowIndex, rowIndex, startCol, endCol, options);
     }
 
     function setSelectedSignal(rowIndex, colIndex) {
@@ -4346,17 +4617,20 @@ ${lines.join('\n')}`;
       selectedSignalIndex = rowIndex;
       if (rowIndex < 0) {
         selectedWaveColumnIndex = -1;
-        selectedWaveRangeRowIndex = -1;
+        selectedWaveRangeAnchorRowIndex = -1;
+        selectedWaveRangeHeadRowIndex = -1;
         selectedWaveRangeStart = -1;
         selectedWaveRangeEnd = -1;
       } else if (colIndex !== undefined) {
         selectedWaveColumnIndex = colIndex;
         if (colIndex >= 0) {
-          selectedWaveRangeRowIndex = rowIndex;
+          selectedWaveRangeAnchorRowIndex = rowIndex;
+          selectedWaveRangeHeadRowIndex = rowIndex;
           selectedWaveRangeStart = colIndex;
           selectedWaveRangeEnd = colIndex;
         } else {
-          selectedWaveRangeRowIndex = -1;
+          selectedWaveRangeAnchorRowIndex = -1;
+          selectedWaveRangeHeadRowIndex = -1;
           selectedWaveRangeStart = -1;
           selectedWaveRangeEnd = -1;
         }
@@ -4684,8 +4958,8 @@ ${lines.join('\n')}`;
 
         const isFrom = connectionFromPoint && connectionFromPoint.rowIndex === idx;
         const isTo = connectionToPoint && connectionToPoint.rowIndex === idx;
-        const isSelected = selectedSignalIndex === idx;
-        const selectedRange = isSelected ? getSelectedWaveRange(idx) : null;
+        const selectedRange = getSelectedWaveRange(idx);
+        const isSelected = !!selectedRange;
 
         const highlightRoot = drawGroup || lane;
         highlightRoot.querySelectorAll('.wave-col-highlight, .wave-col-highlight-from, .wave-col-highlight-to')
@@ -4729,8 +5003,12 @@ ${lines.join('\n')}`;
       const vimRowEnd = vimVisualRowAnchor >= 0 && vimVisualRowHead >= 0
         ? Math.max(vimVisualRowAnchor, vimVisualRowHead)
         : -1;
+      const selectedBlock = getSelectedWaveBlock();
       lanes.forEach((lane, idx) => {
-        lane.classList.toggle('wave-lane-selected', idx === selectedSignalIndex);
+        lane.classList.toggle(
+          'wave-lane-selected',
+          !!selectedBlock && idx >= selectedBlock.startRow && idx <= selectedBlock.endRow
+        );
         lane.classList.toggle('vim-row-range-selected', vimRowStart >= 0 && idx >= vimRowStart && idx <= vimRowEnd);
       });
 
@@ -4766,7 +5044,22 @@ ${lines.join('\n')}`;
         return;
       }
 
+      const selectedBlock = getSelectedWaveBlock();
       const selectedRange = getSelectedWaveRange();
+      if (selectedBlock && selectedBlock.endRow > selectedBlock.startRow) {
+        const columnCount = selectedBlock.end - selectedBlock.start + 1;
+        const rowCount = selectedBlock.endRow - selectedBlock.startRow + 1;
+        applyWaveRowsReplacement(
+          selectedBlock.startRow,
+          selectedBlock.start,
+          Array.from({ length: rowCount }, () => ({
+            text: char.repeat(columnCount),
+            dataSlots: []
+          })),
+          '多行批量替换'
+        );
+        return;
+      }
       if (selectedRange && selectedRange.end > selectedRange.start) {
         const count = selectedRange.end - selectedRange.start + 1;
         applyWaveRangeReplacement(
@@ -8676,12 +8969,67 @@ ${lines.join('\n')}`;
             return true;
           };
 
+          const resolveWaveSelectionRowIndex = (clientY) => {
+            let resolvedIndex = idx;
+            let nearestDistance = Number.POSITIVE_INFINITY;
+            lanes.forEach((candidateLane, laneIndex) => {
+              if (!sourceMap[laneIndex]) return;
+              const rect = candidateLane.getBoundingClientRect();
+              if (rect.height <= 0 || rect.width <= 0) return;
+              if (clientY >= rect.top && clientY <= rect.bottom) {
+                resolvedIndex = laneIndex;
+                nearestDistance = -1;
+                return;
+              }
+              if (nearestDistance < 0) return;
+              const distance = Math.abs(clientY - (rect.top + rect.bottom) / 2);
+              if (distance < nearestDistance) {
+                nearestDistance = distance;
+                resolvedIndex = laneIndex;
+              }
+            });
+            return resolvedIndex;
+          };
+
+          const moveWaveRangeSelection = (e) => {
+            if (!waveSelectionDrag
+                || waveSelectionDrag.pointerId !== e.pointerId
+                || waveSelectionDrag.anchorRow !== idx) return;
+            const colIndex = resolveLaneColumnIndex(e.clientX, false);
+            const rowIndex = resolveWaveSelectionRowIndex(e.clientY);
+            if (colIndex === waveSelectionDrag.currentCol
+                && rowIndex === waveSelectionDrag.currentRow) return;
+            waveSelectionDrag.currentCol = colIndex;
+            waveSelectionDrag.currentRow = rowIndex;
+            waveSelectionDrag.moved = true;
+            setSelectedWaveBlock(
+              waveSelectionDrag.anchorRow,
+              rowIndex,
+              waveSelectionDrag.anchorCol,
+              colIndex,
+              { deferGroupRefresh: true, deferControls: true }
+            );
+            const firstRow = Math.min(waveSelectionDrag.anchorRow, rowIndex);
+            const lastRow = Math.max(waveSelectionDrag.anchorRow, rowIndex);
+            lanes.forEach((currentLane, laneIndex) => {
+              currentLane.classList.toggle(
+                'wave-lane-selected',
+                laneIndex >= firstRow && laneIndex <= lastRow
+              );
+            });
+            scheduleConnectionHighlightUpdate(lanes, sourceMap);
+            e.preventDefault();
+          };
+
           const finishWaveRangeSelection = (e, cancelled) => {
             if (!waveSelectionDrag
                 || waveSelectionDrag.pointerId !== e.pointerId
-                || waveSelectionDrag.rowIndex !== idx) return;
+                || waveSelectionDrag.anchorRow !== idx) return;
             const finished = waveSelectionDrag;
             waveSelectionDrag = null;
+            window.removeEventListener('pointermove', moveWaveRangeSelection);
+            window.removeEventListener('pointerup', completeWaveRangeSelection);
+            window.removeEventListener('pointercancel', cancelWaveRangeSelection);
             lane.dataset.vwdSuppressClick = '1';
             window.setTimeout(() => {
               if (lane.dataset.vwdSuppressClick === '1') delete lane.dataset.vwdSuppressClick;
@@ -8691,25 +9039,32 @@ ${lines.join('\n')}`;
             } catch (_e) { /* ignore */ }
             updateLegendAvailability();
             scheduleConnectionHighlightUpdate(lanes, sourceMap);
-            const range = getSelectedWaveRange(idx);
-            if (!cancelled && range) {
+            const block = getSelectedWaveBlock();
+            if (!cancelled && block) {
               requestAnimationFrame(() => scrollEditorToSignal(entry));
-              const count = range.end - range.start + 1;
+              const columnCount = block.end - block.start + 1;
+              const rowCount = block.endRow - block.startRow + 1;
+              const count = columnCount * rowCount;
               setStatus(
                 true,
-                count > 1
-                  ? '已选中第 ' + (range.start + 1) + ' 至 ' + (range.end + 1) + ' 格，共 ' + count + ' 格'
-                  : '已选中: ' + entry.signal.name + ' [' + range.start + ']'
+                rowCount > 1
+                  ? '已选中 ' + rowCount + ' 行 × ' + columnCount + ' 格，共 ' + count + ' 个波形格'
+                  : (count > 1
+                    ? '已选中第 ' + (block.start + 1) + ' 至 ' + (block.end + 1) + ' 格，共 ' + count + ' 格'
+                    : '已选中: ' + entry.signal.name + ' [' + block.start + ']')
               );
             }
             vwdDebugLog('wave-selection', {
               phase: cancelled ? 'drag-cancel' : 'drag-end',
-              rowIndex: idx,
+              anchorRow: finished.anchorRow,
+              currentRow: finished.currentRow,
               anchorCol: finished.anchorCol,
               currentCol: finished.currentCol,
               moved: finished.moved
             });
           };
+          const completeWaveRangeSelection = (e) => finishWaveRangeSelection(e, false);
+          const cancelWaveRangeSelection = (e) => finishWaveRangeSelection(e, true);
 
           lane.addEventListener('pointerdown', (e) => {
             if (!canStartWaveRangeSelection(e)) return;
@@ -8718,7 +9073,8 @@ ${lines.join('\n')}`;
             const colIndex = resolveLaneColumnIndex(e.clientX, false);
             waveSelectionDrag = {
               pointerId: e.pointerId,
-              rowIndex: idx,
+              anchorRow: idx,
+              currentRow: idx,
               anchorCol: colIndex,
               currentCol: colIndex,
               moved: false
@@ -8728,31 +9084,17 @@ ${lines.join('\n')}`;
               currentLane.classList.toggle('wave-lane-selected', laneIndex === idx);
             });
             scheduleConnectionHighlightUpdate(lanes, sourceMap);
+            window.addEventListener('pointermove', moveWaveRangeSelection, { passive: false });
+            window.addEventListener('pointerup', completeWaveRangeSelection);
+            window.addEventListener('pointercancel', cancelWaveRangeSelection);
             try { lane.setPointerCapture(e.pointerId); } catch (_e) { /* ignore */ }
             e.preventDefault();
             vwdDebugLog('wave-selection', { phase: 'drag-start', rowIndex: idx, colIndex });
           });
 
-          lane.addEventListener('pointermove', (e) => {
-            if (!waveSelectionDrag
-                || waveSelectionDrag.pointerId !== e.pointerId
-                || waveSelectionDrag.rowIndex !== idx) return;
-            const colIndex = resolveLaneColumnIndex(e.clientX, false);
-            if (colIndex === waveSelectionDrag.currentCol) return;
-            waveSelectionDrag.currentCol = colIndex;
-            waveSelectionDrag.moved = true;
-            setSelectedWaveRange(
-              idx,
-              waveSelectionDrag.anchorCol,
-              colIndex,
-              { deferGroupRefresh: true, deferControls: true }
-            );
-            scheduleConnectionHighlightUpdate(lanes, sourceMap);
-            e.preventDefault();
-          });
-
-          lane.addEventListener('pointerup', (e) => finishWaveRangeSelection(e, false));
-          lane.addEventListener('pointercancel', (e) => finishWaveRangeSelection(e, true));
+          lane.addEventListener('pointermove', moveWaveRangeSelection);
+          lane.addEventListener('pointerup', completeWaveRangeSelection);
+          lane.addEventListener('pointercancel', cancelWaveRangeSelection);
           lane.addEventListener('click', (e) => {
             const isText = e.target.closest('text') || e.target.classList.contains('wave-text-edit-overlay');
             const isNameZone = e.target.classList.contains('wave-name-click-zone');
@@ -9032,6 +9374,7 @@ ${lines.join('\n')}`;
         content: content,
         hscale: raw.hscale,
         waveEditMode: raw.waveEditMode,
+        revision: Number.isInteger(raw.revision) && raw.revision >= 0 ? raw.revision : 0,
         savedAt: raw.savedAt || new Date().toISOString()
       };
     }
@@ -9199,7 +9542,8 @@ ${lines.join('\n')}`;
       if (current) Object.assign(current, getCurrentStateSnapshot());
       return {
         kind: WAVE_LIBRARY_KIND,
-        version: 1,
+        version: 2,
+        libraryId: currentWaveLibraryId || undefined,
         updatedAt: new Date().toISOString(),
         documents,
         directories: collectCustomNavNodes(navTreeState || { children: [] }),
@@ -9214,10 +9558,108 @@ ${lines.join('\n')}`;
     function updateWaveLibraryFileStatus() {
       if (waveLibraryFileStatus) {
         waveLibraryFileStatus.textContent = waveLibraryServerMode
-          ? ('波形库：' + (currentWaveLibraryFile || '未加载'))
+          ? ('波形库：' + (currentWaveLibraryFile || '未加载') + (singleWaveViewActive ? ' · 单图模式' : ''))
           : ('波形库：' + (currentWaveLibraryFile || '本地浏览器数据'));
       }
       if (saveWaveLibraryLabel) saveWaveLibraryLabel.textContent = waveLibraryServerMode ? '保存波形库' : '保存波形库';
+    }
+
+    function getWaveDocumentDeepLink(documentName) {
+      if (!waveLibraryServerMode || !currentWaveLibraryId || !documentName) return '';
+      const params = new URLSearchParams({
+        libraryId: currentWaveLibraryId,
+        waveId: documentName,
+        view: 'single'
+      });
+      return waveLinkProtocolScheme + '://open?' + params.toString();
+    }
+
+    function singleWaveSyncSignature(document) {
+      if (!document) return '';
+      return JSON.stringify([
+        String(document.content || ''),
+        document.hscale == null ? null : document.hscale,
+        document.waveEditMode || ''
+      ]);
+    }
+
+    function notifyWaveDocumentSync(document) {
+      if (!waveLibrarySyncChannel || !document) return;
+      try {
+        waveLibrarySyncChannel.postMessage({
+          type: 'wave-document-saved',
+          libraryId: currentWaveLibraryId,
+          waveId: document.name,
+          revision: document.revision
+        });
+      } catch (_e) { /* page is closing */ }
+    }
+
+    async function saveSingleWaveDocumentToServer(options) {
+      const opts = options || {};
+      const name = requestedWaveDocumentName || editingWaveDocumentName;
+      const stored = getSavedTagByName(name);
+      if (!stored || !currentWaveLibraryId) return false;
+      const documentSnapshot = Object.assign({}, stored,
+        name === editingWaveDocumentName ? getCurrentStateSnapshot() : null,
+        { name });
+      const snapshotSignature = singleWaveSyncSignature(documentSnapshot);
+      if (snapshotSignature && snapshotSignature === lastSingleWaveSyncedSignature) return true;
+      try {
+        JSON.parse(documentSnapshot.content);
+      } catch (_e) {
+        setStatus(false, 'JSON 解析错误，未同步到波形库');
+        return false;
+      }
+      if (singleWaveSaveInFlight) {
+        singleWaveSaveQueued = true;
+        return true;
+      }
+      singleWaveSaveInFlight = true;
+      try {
+        const response = await fetch('/api/wave-document', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          keepalive: !!opts.keepalive,
+          body: JSON.stringify({
+            libraryId: currentWaveLibraryId,
+            waveId: name,
+            expectedRevision: stored.revision || 0,
+            document: documentSnapshot
+          })
+        });
+        const result = await response.json().catch(() => ({}));
+        if (response.status === 409) {
+          setStatus(false, '同步冲突：波形库中的这张图已被其他页面修改');
+          vwdDebugLog('wave-library', { phase: 'single-save-conflict', documentName: name });
+          return false;
+        }
+        if (!response.ok || !result.document) throw new Error(result.error || 'save failed');
+        const current = getSavedTagByName(name);
+        if (current) {
+          current.revision = result.document.revision;
+          if (current.content === documentSnapshot.content) current.savedAt = result.document.savedAt;
+        }
+        lastSingleWaveSyncedSignature = snapshotSignature;
+        notifyWaveDocumentSync(result.document);
+        setStatus(true, '已同步到波形库：' + getSavedTagTitle(current || stored));
+        vwdDebugLog('wave-library', {
+          phase: 'single-save-success',
+          documentName: name,
+          revision: result.document.revision
+        });
+        return true;
+      } finally {
+        singleWaveSaveInFlight = false;
+        if (singleWaveSaveQueued) {
+          singleWaveSaveQueued = false;
+          clearTimeout(waveLibrarySaveTimer);
+          waveLibrarySaveTimer = setTimeout(() => {
+            waveLibrarySaveTimer = null;
+            saveSingleWaveDocumentToServer().catch(() => setStatus(false, '波形图自动同步失败'));
+          }, 0);
+        }
+      }
     }
 
     function scheduleWaveLibraryServerSave() {
@@ -9225,10 +9667,16 @@ ${lines.join('\n')}`;
       clearTimeout(waveLibrarySaveTimer);
       waveLibrarySaveTimer = setTimeout(() => {
         waveLibrarySaveTimer = null;
+        if (singleWaveViewActive) {
+          saveSingleWaveDocumentToServer().catch(() => setStatus(false, '波形图自动同步失败'));
+          return;
+        }
         fetch('/api/wave-library?file=' + encodeURIComponent(currentWaveLibraryFile), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(getWaveLibraryBundle())
+        }).then((response) => {
+          if (!response.ok) throw new Error('save failed');
         }).catch(() => setStatus(false, '波形库自动保存失败'));
       }, 350);
     }
@@ -9240,9 +9688,15 @@ ${lines.join('\n')}`;
       }
       applyingWaveLibraryBundle = true;
       try {
+        if (requestedLibraryId && bundle.libraryId && bundle.libraryId !== requestedLibraryId) {
+          setStatus(false, '链接指定的波形库与当前波形库不一致');
+          return false;
+        }
+        currentWaveLibraryFile = fileName || currentWaveLibraryFile;
+        currentWaveLibraryId = String(bundle.libraryId || currentWaveLibraryId || '');
         savedTags = bundle.documents.map(normalizeSavedTag).filter(Boolean);
         rebuildSavedTagIndex();
-        persistSavedTags();
+        persistSavedTags({ immediate: true });
         saveNavCustomTreeToStorage(
           Array.isArray(bundle.directories) ? bundle.directories : [],
           Array.isArray(bundle.rootDocuments) ? bundle.rootDocuments : []
@@ -9251,8 +9705,13 @@ ${lines.join('\n')}`;
         selectedNavDocumentName = null;
         editingWaveDocumentName = null;
         activeTagName = null;
-        const preferredName = bundle.activeDocumentName || (savedTags[0] && savedTags[0].name);
-        const preferred = getSavedTagByName(preferredName) || savedTags[0];
+        const preferredName = singleWaveViewActive
+          ? requestedWaveDocumentName
+          : (bundle.activeDocumentName || (savedTags[0] && savedTags[0].name));
+        const preferred = getSavedTagByName(preferredName) || (singleWaveViewActive ? null : savedTags[0]);
+        lastSingleWaveSyncedSignature = singleWaveViewActive && preferred
+          ? singleWaveSyncSignature(preferred)
+          : '';
         if (preferred) {
           setEditorValue(preferred.content, { clearCodeMirrorHistory: true });
           setEditorHistoryBaseline(editor.value);
@@ -9263,9 +9722,10 @@ ${lines.join('\n')}`;
           renderNavTree();
           renderWaveLibrary();
         }
-        currentWaveLibraryFile = fileName || currentWaveLibraryFile;
         updateWaveLibraryFileStatus();
-        setStatus(true, '已导入波形库：' + (currentWaveLibraryFile || '未命名'));
+        setStatus(!!preferred || !singleWaveViewActive, preferred
+          ? ('已导入波形库：' + (currentWaveLibraryFile || '未命名'))
+          : '链接指定的波形图不存在或已被删除');
         return true;
       } finally {
         applyingWaveLibraryBundle = false;
@@ -9312,20 +9772,75 @@ ${lines.join('\n')}`;
         updateWaveLibraryFileStatus();
         return;
       }
-      fetch('/api/client-connect', { method: 'POST', keepalive: true }).catch(() => {});
+      const clientQuery = '?id=' + encodeURIComponent(waveLibraryClientId);
+      fetch('/api/client-connect' + clientQuery, { method: 'POST', keepalive: true }).catch(() => {});
       window.addEventListener('pagehide', () => {
-        navigator.sendBeacon('/api/client-disconnect', '');
+        navigator.sendBeacon('/api/client-disconnect' + clientQuery, '');
       }, { once: true });
       try {
         const response = await fetch('/api/wave-libraries');
         const catalog = await response.json();
-        const fileName = catalog.current || (catalog.files && catalog.files[0]);
+        waveLinkProtocolScheme = catalog.protocolScheme || waveLinkProtocolScheme;
+        const requestedLibrary = requestedLibraryId && Array.isArray(catalog.libraries)
+          ? catalog.libraries.find((item) => item.libraryId === requestedLibraryId)
+          : null;
+        if (requestedLibraryId && !requestedLibrary) throw new Error('linked library not found');
+        const fileName = (requestedLibrary && requestedLibrary.name)
+          || catalog.current
+          || (catalog.files && catalog.files[0]);
         if (fileName) await loadServerWaveLibrary(fileName);
         else updateWaveLibraryFileStatus();
       } catch (e) {
         updateWaveLibraryFileStatus();
         setStatus(false, '本地波形库服务不可用');
       }
+    }
+
+    function initWaveLibrarySyncChannel() {
+      if (!waveLibraryServerMode || typeof window.BroadcastChannel !== 'function') return;
+      waveLibrarySyncChannel = new BroadcastChannel('visualwavedrom-wave-library-sync');
+      waveLibrarySyncChannel.addEventListener('message', async (event) => {
+        const message = event.data || {};
+        if (message.type !== 'wave-document-saved'
+            || !currentWaveLibraryId
+            || message.libraryId !== currentWaveLibraryId
+            || !message.waveId) return;
+        const local = getSavedTagByName(message.waveId);
+        if (local && message.waveId === editingWaveDocumentName && !currentStateMatchesTag(local)) {
+          setStatus(false, '同步冲突：另一个页面修改了当前波形图');
+          return;
+        }
+        try {
+          const query = new URLSearchParams({ libraryId: currentWaveLibraryId, waveId: message.waveId });
+          const response = await fetch('/api/wave-document?' + query.toString());
+          if (!response.ok) return;
+          const result = await response.json();
+          const remote = normalizeSavedTag(result.document);
+          if (!remote) return;
+          const index = findSavedTagIndex(remote.name);
+          if (index >= 0) savedTags[index] = remote;
+          else savedTags.push(remote);
+          rebuildSavedTagIndex();
+          if (singleWaveViewActive && remote.name === requestedWaveDocumentName) {
+            lastSingleWaveSyncedSignature = singleWaveSyncSignature(remote);
+          }
+          try {
+            localStorage.setItem(WAVE_DOCUMENTS_KEY, JSON.stringify(savedTags));
+          } catch (_e) { /* storage is optional */ }
+          if (remote.name === editingWaveDocumentName) loadSavedTag(remote.name);
+          else {
+            refreshWaveDocumentCard(remote.name);
+            refreshWaveDocumentTitle(remote.name, true);
+          }
+          vwdDebugLog('wave-library', {
+            phase: 'cross-page-sync',
+            documentName: remote.name,
+            revision: remote.revision
+          });
+        } catch (_e) {
+          setStatus(false, '无法读取其他页面同步的波形图');
+        }
+      });
     }
 
     async function changeServerWaveLibrary() {
@@ -9387,8 +9902,9 @@ ${lines.join('\n')}`;
       const opts = options || {};
       const trimmed = String(name || '').trim();
       if (!trimmed) return false;
-      const entry = Object.assign({ name: trimmed }, snapshot);
       const idx = findSavedTagIndex(trimmed);
+      const existing = idx >= 0 ? savedTags[idx] : null;
+      const entry = Object.assign({}, existing || { name: trimmed, revision: 0 }, snapshot, { name: trimmed });
       if (idx >= 0) savedTags[idx] = entry;
       else savedTags.push(entry);
       if (!opts.skipSort) {
@@ -10237,6 +10753,317 @@ ${lines.join('\n')}`;
       vwdDebugLog('wave-library', { phase: 'open-description-editor', documentName: tag.name });
     }
 
+    function getWaveScreenshotMetrics(svg) {
+      const viewBox = svg && svg.viewBox && svg.viewBox.baseVal;
+      if (viewBox && viewBox.width > 0 && viewBox.height > 0) {
+        return { x: viewBox.x, y: viewBox.y, width: viewBox.width, height: viewBox.height };
+      }
+      try {
+        const box = svg.getBBox();
+        if (box.width > 0 && box.height > 0) {
+          return { x: box.x, y: box.y, width: box.width, height: box.height };
+        }
+      } catch (_e) { /* use attributes below */ }
+      return {
+        x: 0,
+        y: 0,
+        width: Math.max(1, parseFloat(svg.getAttribute('width') || '1')),
+        height: Math.max(1, parseFloat(svg.getAttribute('height') || '1'))
+      };
+    }
+
+    function cloneWaveSvgForScreenshot(svg, metrics) {
+      const clone = svg.cloneNode(true);
+      clone.querySelectorAll([
+        '.wave-col-highlight',
+        '.wave-col-highlight-from',
+        '.wave-col-highlight-to',
+        '.wave-edge-hit-target',
+        '.wave-name-click-zone',
+        '.wave-text-edit-overlay',
+        '.wave-group-label-fallback',
+        'rect.lane-hover-bg'
+      ].join(',')).forEach((element) => element.remove());
+      clone.querySelectorAll([
+        '.wave-edge-selected',
+        '.wave-edge-blink',
+        '.wave-edge-label-blink',
+        '.wave-group-label-selected',
+        '.wave-group-selected-lane',
+        '.wave-group-range-start',
+        '.wave-group-range-end',
+        '.wave-group-pick-start'
+      ].join(',')).forEach((element) => {
+        element.classList.remove(
+          'wave-edge-selected',
+          'wave-edge-blink',
+          'wave-edge-label-blink',
+          'wave-group-label-selected',
+          'wave-group-selected-lane',
+          'wave-group-range-start',
+          'wave-group-range-end',
+          'wave-group-pick-start'
+        );
+      });
+      clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+      clone.setAttribute('xmlns:xlink', 'http://www.w3.org/1999/xlink');
+      clone.setAttribute('viewBox', [metrics.x, metrics.y, metrics.width, metrics.height].join(' '));
+      clone.setAttribute('width', String(metrics.width));
+      clone.setAttribute('height', String(metrics.height));
+
+      const background = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+      background.setAttribute('x', String(metrics.x));
+      background.setAttribute('y', String(metrics.y));
+      background.setAttribute('width', String(metrics.width));
+      background.setAttribute('height', String(metrics.height));
+      background.setAttribute('fill', '#ffffff');
+      clone.insertBefore(background, clone.firstChild);
+      return clone;
+    }
+
+    function renderWaveSvgScreenshot(svg) {
+      const metrics = getWaveScreenshotMetrics(svg);
+      const clone = cloneWaveSvgForScreenshot(svg, metrics);
+      const maxDimension = 8192;
+      const maxPixels = 32000000;
+      const scale = Math.max(0.25, Math.min(
+        2,
+        maxDimension / metrics.width,
+        maxDimension / metrics.height,
+        Math.sqrt(maxPixels / (metrics.width * metrics.height))
+      ));
+      const pixelWidth = Math.max(1, Math.round(metrics.width * scale));
+      const pixelHeight = Math.max(1, Math.round(metrics.height * scale));
+      const serialized = new XMLSerializer().serializeToString(clone);
+      const sourceBlob = new Blob(
+        ['<?xml version="1.0" encoding="UTF-8"?>', serialized],
+        { type: 'image/svg+xml;charset=utf-8' }
+      );
+
+      return new Promise((resolve, reject) => {
+        const imageUrl = URL.createObjectURL(sourceBlob);
+        const image = new Image();
+        image.onload = () => {
+          try {
+            const canvas = document.createElement('canvas');
+            canvas.width = pixelWidth;
+            canvas.height = pixelHeight;
+            const context = canvas.getContext('2d');
+            if (!context) throw new Error('无法创建图片画布');
+            context.fillStyle = '#ffffff';
+            context.fillRect(0, 0, pixelWidth, pixelHeight);
+            context.drawImage(image, 0, 0, pixelWidth, pixelHeight);
+            const verifyCanvas = document.createElement('canvas');
+            const verifyScale = Math.min(1, 256 / pixelWidth, 256 / pixelHeight);
+            verifyCanvas.width = Math.max(1, Math.round(pixelWidth * verifyScale));
+            verifyCanvas.height = Math.max(1, Math.round(pixelHeight * verifyScale));
+            const verifyContext = verifyCanvas.getContext('2d');
+            if (!verifyContext) throw new Error('无法校验截图内容');
+            verifyContext.fillStyle = '#ffffff';
+            verifyContext.fillRect(0, 0, verifyCanvas.width, verifyCanvas.height);
+            verifyContext.drawImage(canvas, 0, 0, verifyCanvas.width, verifyCanvas.height);
+            const pixels = verifyContext.getImageData(
+              0,
+              0,
+              verifyCanvas.width,
+              verifyCanvas.height
+            ).data;
+            let inkPixels = 0;
+            for (let index = 0; index < pixels.length; index += 4) {
+              if (pixels[index + 3] > 16
+                  && pixels[index] + pixels[index + 1] + pixels[index + 2] < 735) {
+                inkPixels++;
+              }
+            }
+            if (inkPixels < 4) throw new Error('截图内容为空');
+            canvas.toBlob((blob) => {
+              URL.revokeObjectURL(imageUrl);
+              if (!blob) {
+                reject(new Error('PNG 图片生成失败'));
+                return;
+              }
+              resolve({ blob, width: pixelWidth, height: pixelHeight, scale, inkPixels });
+            }, 'image/png');
+          } catch (error) {
+            URL.revokeObjectURL(imageUrl);
+            reject(error);
+          }
+        };
+        image.onerror = () => {
+          URL.revokeObjectURL(imageUrl);
+          reject(new Error('SVG 图片加载失败'));
+        };
+        image.src = imageUrl;
+      });
+    }
+
+    function blobToDataUrl(blob) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = () => reject(new Error('图片编码失败'));
+        reader.readAsDataURL(blob);
+      });
+    }
+
+    function escapeHtmlAttribute(value) {
+      return String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    }
+
+    async function copyWaveDocumentLink(documentName) {
+      const link = getWaveDocumentDeepLink(documentName);
+      if (!link) {
+        setStatus(false, '带链接复制仅支持服务模式，并且需要已加载波形库');
+        return false;
+      }
+      if (!navigator.clipboard || typeof navigator.clipboard.writeText !== 'function') {
+        setStatus(false, '当前浏览器不支持复制链接');
+        return false;
+      }
+      try {
+        await navigator.clipboard.writeText(link);
+        setStatus(true, '单图链接已复制到剪贴板');
+        vwdDebugLog('wave-screenshot', { phase: 'link-copied', documentName, link });
+        return true;
+      } catch (error) {
+        setStatus(false, '复制链接失败，请检查浏览器剪贴板权限');
+        vwdDebugLog('wave-screenshot', {
+          phase: 'link-copy-error',
+          documentName,
+          message: error && error.message ? error.message : String(error)
+        });
+        return false;
+      }
+    }
+
+    function closeWaveCopyModal() {
+      if (waveCopyModal) waveCopyModal.hidden = true;
+      pendingWaveCopyDocumentName = '';
+      pendingWaveCopyButton = null;
+    }
+
+    function openWaveCopyModal(documentName, button) {
+      if (!waveCopyModal || !documentName) return;
+      pendingWaveCopyDocumentName = documentName;
+      pendingWaveCopyButton = button || null;
+      waveCopyModal.hidden = false;
+      const first = waveCopyModal.querySelector('[data-copy-mode]');
+      if (first) requestAnimationFrame(() => first.focus());
+      vwdDebugLog('wave-screenshot', { phase: 'chooser-open', documentName });
+    }
+
+    async function copyWaveDocumentScreenshot(documentName, button, copyMode) {
+      const mode = copyMode || 'image';
+      if (mode === 'link') return copyWaveDocumentLink(documentName);
+      if (!button || button.dataset.copying === '1') return false;
+      const entry = waveLibraryCardCache.get(documentName);
+      const tag = getSavedTagByName(documentName);
+      if (!entry || !tag) {
+        setStatus(false, '未找到要截图的波形图');
+        return false;
+      }
+
+      if (!window.ClipboardItem
+          || !navigator.clipboard
+          || typeof navigator.clipboard.write !== 'function') {
+        setStatus(false, '当前浏览器不支持图片剪贴板，请使用新版 Chrome');
+        vwdDebugLog('wave-screenshot', {
+          phase: 'unsupported',
+          documentName,
+          hasClipboardItem: typeof window.ClipboardItem === 'function',
+          hasClipboardWrite: !!(navigator.clipboard && navigator.clipboard.write)
+        });
+        return false;
+      }
+
+      if (documentName !== editingWaveDocumentName && !entry.previewHost.querySelector('svg')) {
+        renderWaveDocumentPreview(entry, tag);
+      }
+      const svg = entry.previewHost.querySelector('svg');
+      if (!svg) {
+        setStatus(false, '当前波形图未成功渲染，无法截图');
+        vwdDebugLog('wave-screenshot', {
+          phase: 'missing-svg',
+          documentName,
+          isEditingDocument: documentName === editingWaveDocumentName
+        });
+        return false;
+      }
+
+      button.dataset.copying = '1';
+      button.disabled = true;
+      button.classList.add('copying');
+      const originalTitle = button.title;
+      button.title = '正在复制波形图截图';
+      const deepLink = mode === 'linked-image' ? getWaveDocumentDeepLink(documentName) : '';
+      if (mode === 'linked-image' && !deepLink) {
+        delete button.dataset.copying;
+        button.disabled = false;
+        button.classList.remove('copying');
+        button.title = originalTitle;
+        setStatus(false, '带链接截图仅支持服务模式，并且需要已加载波形库');
+        return false;
+      }
+      vwdDebugLog('wave-screenshot', { phase: 'start', documentName, mode });
+      try {
+        const renderPromise = renderWaveSvgScreenshot(svg);
+        const blobPromise = renderPromise.then((result) => result.blob);
+        const clipboardData = { 'image/png': blobPromise };
+        if (mode === 'linked-image') {
+          const titleText = getSavedTagTitle(tag);
+          const htmlPromise = blobPromise
+            .then(blobToDataUrl)
+            .then((dataUrl) => new Blob([
+              '<a href="' + escapeHtmlAttribute(deepLink) + '">'
+                + '<img src="' + escapeHtmlAttribute(dataUrl) + '" alt="'
+                + escapeHtmlAttribute(titleText) + '">'
+                + '</a>'
+            ], { type: 'text/html' }));
+          clipboardData['text/html'] = htmlPromise;
+          clipboardData['text/plain'] = Promise.resolve(new Blob([deepLink], { type: 'text/plain' }));
+        }
+        const clipboardItem = new ClipboardItem(clipboardData);
+        await navigator.clipboard.write([clipboardItem]);
+        const result = await renderPromise;
+        const titleText = getSavedTagTitle(tag);
+        setStatus(true, mode === 'linked-image'
+          ? ('带链接截图已复制，可粘贴到 Word：' + titleText)
+          : ('波形图截图已复制，可直接粘贴到 Word：' + titleText));
+        button.classList.add('copied');
+        button.title = '截图已复制';
+        vwdDebugLog('wave-screenshot', {
+          phase: 'success',
+          documentName,
+          width: result.width,
+          height: result.height,
+          scale: result.scale,
+          inkPixels: result.inkPixels,
+          blobSize: result.blob.size,
+          mode,
+          link: deepLink || undefined
+        });
+        window.setTimeout(() => {
+          button.classList.remove('copied');
+          if (button.dataset.copying !== '1') button.title = originalTitle;
+        }, 1500);
+        return true;
+      } catch (error) {
+        const message = error && error.message ? error.message : String(error);
+        setStatus(false, '复制波形图截图失败，请检查浏览器剪贴板权限');
+        vwdDebugLog('wave-screenshot', { phase: 'error', documentName, message });
+        return false;
+      } finally {
+        delete button.dataset.copying;
+        button.disabled = false;
+        button.classList.remove('copying');
+        if (!button.classList.contains('copied')) button.title = originalTitle;
+      }
+    }
+
     function createWaveDocumentCard(documentName) {
       const sequence = ++waveLibraryCardSequence;
       const card = document.createElement('article');
@@ -10246,12 +11073,34 @@ ${lines.join('\n')}`;
       const header = document.createElement('div');
       header.className = 'wave-document-card-header';
       const title = document.createElement('h2');
+      const screenshotButton = document.createElement('button');
+      screenshotButton.type = 'button';
+      screenshotButton.className = 'wave-document-screenshot';
+      screenshotButton.title = '复制图片到剪贴板';
+      screenshotButton.setAttribute('aria-label', '复制图片到剪贴板');
+      screenshotButton.innerHTML = ''
+        + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">'
+        + '<path d="M14.5 4 16 6h3a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h3l1.5-2z"/>'
+        + '<circle cx="12" cy="13" r="3"/>'
+        + '</svg>'
+        + '<span>复制图片到剪贴板</span>';
+      screenshotButton.addEventListener('click', () => {
+        openWaveCopyModal(documentName, screenshotButton);
+      });
       const openButton = document.createElement('button');
       openButton.type = 'button';
       openButton.className = 'wave-document-open';
-      openButton.title = '打开此波形图进行编辑';
-      openButton.textContent = '打开';
-      openButton.addEventListener('click', () => openWaveDocumentForEditing(documentName));
+      openButton.title = singleWaveViewActive ? '返回完整波形库' : '打开此波形图进行编辑';
+      openButton.textContent = singleWaveViewActive ? '返回' : '打开';
+      openButton.addEventListener('click', () => {
+        if (singleWaveViewActive) {
+          const params = new URLSearchParams();
+          if (currentWaveLibraryId) params.set('libraryId', currentWaveLibraryId);
+          window.location.href = '/open' + (params.toString() ? ('?' + params.toString()) : '');
+          return;
+        }
+        openWaveDocumentForEditing(documentName);
+      });
       const deleteButton = document.createElement('button');
       deleteButton.type = 'button';
       deleteButton.className = 'wave-document-delete';
@@ -10266,6 +11115,7 @@ ${lines.join('\n')}`;
         }
       });
       header.appendChild(title);
+      header.appendChild(screenshotButton);
       header.appendChild(openButton);
       header.appendChild(deleteButton);
 
@@ -10308,6 +11158,7 @@ ${lines.join('\n')}`;
         documentName,
         card,
         title,
+        screenshotButton,
         canvas,
         previewHost,
         previewDisplay,
@@ -10495,7 +11346,18 @@ ${lines.join('\n')}`;
       }
 
       const selected = getNavNodeById(navTreeState, selectedNavNodeId) || navTreeState;
-      const documentNames = collectNavDocuments(selected, []).filter((name) => savedTagByName.has(name));
+      if (singleWaveViewActive && !savedTagByName.has(requestedWaveDocumentName)) {
+        mountWaveContainerOutsideLibrary();
+        const message = document.createElement('div');
+        message.className = 'single-wave-not-found';
+        message.textContent = '链接指定的波形图不存在或已被删除。';
+        waveLibraryContainer.replaceChildren(message);
+        waveLibraryContainer.hidden = false;
+        return;
+      }
+      const documentNames = singleWaveViewActive
+        ? [requestedWaveDocumentName]
+        : collectNavDocuments(selected, []).filter((name) => savedTagByName.has(name));
       const activeName = documentNames.includes(editingWaveDocumentName) ? editingWaveDocumentName : null;
       snapshotActiveWavePreview(activeName);
       if (!activeName) mountWaveContainerOutsideLibrary();
@@ -10701,6 +11563,7 @@ ${lines.join('\n')}`;
 
     function getVimContext() {
       const state = vimController ? vimController.getState() : { scope: 'wave', mode: 'normal', visualKind: '' };
+      const selectedBlock = getSelectedWaveBlock();
       return {
         scope: 'wave',
         mode: state.mode,
@@ -10708,6 +11571,10 @@ ${lines.join('\n')}`;
         hasGroup: selectedGroupIndex >= 0,
         hasEdge: selectedEdgeIndex >= 0,
         hasWave: selectedSignalIndex >= 0,
+        hasWaveRange: !!selectedBlock && (
+          selectedBlock.endRow > selectedBlock.startRow
+          || selectedBlock.end > selectedBlock.start
+        ),
         hasNavDocument: !!selectedNavDocumentName
       };
     }
@@ -11028,36 +11895,64 @@ ${lines.join('\n')}`;
         setStatus(false, '不支持的波形字符: ' + String(char));
         return false;
       }
-      if (!ensureVimWaveCursor()) return false;
       const state = vimController ? vimController.getState() : { mode: 'normal', visualKind: '' };
+      const selectedBlock = getSelectedWaveBlock();
+      const shouldReplaceSelection = !!selectedBlock && (
+        selectedBlock.endRow > selectedBlock.startRow
+        || selectedBlock.end > selectedBlock.start
+        || (state.mode === 'visual' && state.visualKind === 'cell')
+      );
+      if (!ensureVimWaveCursor()) return false;
+      let targetRow = selectedSignalIndex;
       let start = selectedWaveColumnIndex;
       let length = Math.max(1, Math.floor(count || 1));
-      if (state.mode === 'visual' && state.visualKind === 'cell') {
-        const range = getSelectedWaveRange();
-        if (range) {
-          start = range.start;
-          length = range.end - range.start + 1;
-        }
+      if (shouldReplaceSelection) {
+        targetRow = selectedBlock.startRow;
+        start = selectedBlock.start;
+        length = selectedBlock.end - selectedBlock.start + 1;
       }
-      const changed = applyWaveRangeReplacement(
-        selectedSignalIndex,
-        start,
-        String(char).repeat(length),
-        state.mode === 'replace' ? 'Vim 连续替换' : 'Vim 替换'
-      );
+      const rowCount = shouldReplaceSelection
+        ? selectedBlock.endRow - selectedBlock.startRow + 1
+        : 1;
+      const actionLabel = state.mode === 'replace' ? 'Vim 连续替换' : 'Vim 替换';
+      const changed = rowCount > 1
+        ? applyWaveRowsReplacement(
+          targetRow,
+          start,
+          Array.from({ length: rowCount }, () => ({
+            text: String(char).repeat(length),
+            dataSlots: []
+          })),
+          actionLabel
+        )
+        : applyWaveRangeReplacement(
+          targetRow,
+          start,
+          String(char).repeat(length),
+          actionLabel
+        );
+      if (state.mode === 'visual' && state.visualKind === 'cell') {
+        vimVisualCellAnchor = -1;
+        vimVisualCellHead = -1;
+        if (vimController) vimController.setMode('normal');
+      }
       if (!changed) {
-        if (state.mode !== 'replace') return false;
+        if (state.mode !== 'replace') {
+          setSelectedSignal(targetRow, start);
+          refreshVimWaveSelection();
+          return true;
+        }
         selectWavePaintChar(char);
-        setSelectedSignal(selectedSignalIndex, start + length);
+        setSelectedSignal(targetRow, start + length);
         refreshVimWaveSelection();
         setStatus(true, 'REPLACE：波形未变化，光标已前进');
         return true;
       }
       if (state.mode === 'replace') {
         selectWavePaintChar(char);
-        setSelectedSignal(selectedSignalIndex, start + length);
+        setSelectedSignal(targetRow, start + length);
       } else {
-        setSelectedSignal(selectedSignalIndex, start);
+        setSelectedSignal(targetRow, start);
       }
       refreshVimWaveSelection();
       return true;
@@ -11130,7 +12025,8 @@ ${lines.join('\n')}`;
       vimRegister = {
         type: 'wave',
         text: copiedWaveSelection,
-        dataSlots: cloneWaveClipboardDataSlots(copiedWaveDataSlots)
+        dataSlots: cloneWaveClipboardDataSlots(copiedWaveDataSlots),
+        rows: cloneWaveClipboardRows(copiedWaveRows)
       };
       clearVimVisualSelection();
       return true;
@@ -11194,6 +12090,12 @@ ${lines.join('\n')}`;
       if (vimRegister && vimRegister.type === 'wave') {
         copiedWaveSelection = vimRegister.text;
         copiedWaveDataSlots = cloneWaveClipboardDataSlots(vimRegister.dataSlots);
+        copiedWaveRows = vimRegister.rows && vimRegister.rows.length
+          ? cloneWaveClipboardRows(vimRegister.rows)
+          : [{
+            text: copiedWaveSelection,
+            dataSlots: cloneWaveClipboardDataSlots(copiedWaveDataSlots)
+          }];
       }
       if (!copiedWaveSelection) {
         setStatus(false, 'Vim 寄存器为空');
@@ -11201,19 +12103,30 @@ ${lines.join('\n')}`;
       }
       if (!ensureVimWaveCursor()) return false;
       const repeat = Math.max(1, Math.floor(count || 1));
-      const repeatedWave = copiedWaveSelection.repeat(repeat);
+      const rows = (copiedWaveRows.length
+        ? cloneWaveClipboardRows(copiedWaveRows)
+        : [{ text: copiedWaveSelection, dataSlots: cloneWaveClipboardDataSlots(copiedWaveDataSlots) }])
+        .map((row) => ({
+          text: row.text.repeat(repeat),
+          dataSlots: repeatWaveClipboardDataSlots(row.dataSlots, row.text.length, repeat)
+        }));
+      if (rows.length > 1) {
+        return applyWaveRowsReplacement(
+          selectedSignalIndex,
+          selectedWaveColumnIndex,
+          rows,
+          'Vim 多行覆盖粘贴',
+          { includeDataLabels: true }
+        );
+      }
       return applyWaveRangeReplacement(
         selectedSignalIndex,
         selectedWaveColumnIndex,
-        repeatedWave,
+        rows[0].text,
         'Vim 覆盖粘贴',
         {
           includeDataLabels: true,
-          dataSlots: repeatWaveClipboardDataSlots(
-            copiedWaveDataSlots,
-            copiedWaveSelection.length,
-            repeat
-          )
+          dataSlots: cloneWaveClipboardDataSlots(rows[0].dataSlots)
         }
       );
     }
@@ -11616,6 +12529,15 @@ ${lines.join('\n')}`;
         downloadWaveLibraryBundle();
         return true;
       }
+      if (singleWaveViewActive) {
+        try {
+          flushPersistEditorJson();
+          return await saveSingleWaveDocumentToServer();
+        } catch (_e) {
+          setStatus(false, '波形图同步失败');
+          return false;
+        }
+      }
       if (!currentWaveLibraryFile) {
         setStatus(false, '当前没有可保存的波形库文件');
         return false;
@@ -11860,9 +12782,14 @@ ${lines.join('\n')}`;
     window.addEventListener('beforeunload', () => {
       if (codeMirrorEditor) codeMirrorEditor.save();
       checkpointDirectJsonEdit('before-unload');
+      flushPersistEditorJson();
       persistEditingWaveDocumentOnExit();
       flushPersistSavedTags();
-      flushPersistEditorJson();
+      if (singleWaveViewActive && currentWaveLibraryId) {
+        clearTimeout(waveLibrarySaveTimer);
+        waveLibrarySaveTimer = null;
+        void saveSingleWaveDocumentToServer({ keepalive: true });
+      }
     });
 
     ensureDebugModeButton();
@@ -11922,6 +12849,30 @@ ${lines.join('\n')}`;
         if (e.target === vimHelpModal) closeVimHelp();
       });
     }
+    if (waveCopyCancel) waveCopyCancel.addEventListener('click', closeWaveCopyModal);
+    if (waveCopyModal) {
+      waveCopyModal.addEventListener('click', (event) => {
+        if (event.target === waveCopyModal) {
+          closeWaveCopyModal();
+          return;
+        }
+        const option = event.target && event.target.closest
+          ? event.target.closest('[data-copy-mode]')
+          : null;
+        if (!option) return;
+        const documentName = pendingWaveCopyDocumentName;
+        const button = pendingWaveCopyButton;
+        const mode = option.dataset.copyMode;
+        closeWaveCopyModal();
+        void copyWaveDocumentScreenshot(documentName, button, mode);
+      });
+    }
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && waveCopyModal && !waveCopyModal.hidden) {
+        event.preventDefault();
+        closeWaveCopyModal();
+      }
+    }, true);
     document.getElementById('btn-undo').addEventListener('click', undo);
     document.getElementById('btn-redo').addEventListener('click', redo);
     const debugModeBtn = document.getElementById('btn-debug-mode');
@@ -12004,8 +12955,10 @@ ${lines.join('\n')}`;
         selectedSignalIndex,
         selectedWaveColumnIndex,
         range: getSelectedWaveRange(),
+        block: getSelectedWaveBlock(),
         copiedWaveSelection,
         copiedWaveDataSlots: cloneWaveClipboardDataSlots(copiedWaveDataSlots),
+        copiedWaveRows: cloneWaveClipboardRows(copiedWaveRows),
         waveClipboardShortcutActive,
         groupDeleteShortcutActive,
         drag: waveSelectionDrag
@@ -12155,6 +13108,7 @@ ${lines.join('\n')}`;
       updateConnectionPointStatusUI();
       setDebugModeUI(vwdDebugEnabled);
       setStatus(true, waveEditModeLabel());
+      initWaveLibrarySyncChannel();
       initializeServerWaveLibrary();
     });
 
