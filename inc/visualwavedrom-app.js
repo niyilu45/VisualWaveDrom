@@ -8850,9 +8850,12 @@ ${lines.join('\n')}`;
       const svg = waveContainer.querySelector('svg');
       if (!svg) return;
 
-      // Multi-wave cards render the document description below the SVG so it
-      // never overlaps WaveDrom's foot area.
-      if (waveContainer.closest('.wave-document-card')) return;
+      const existing = svg.querySelector('#vwd-global-describe');
+      if (existing) existing.remove();
+
+      // Wave-document cards render the description below the SVG. Single-wave
+      // startup can render before its card is mounted, so also check the view.
+      if (singleWaveViewActive || waveContainer.closest('.wave-document-card')) return;
 
       let parsed = parsedSource;
       try {
@@ -8860,9 +8863,6 @@ ${lines.join('\n')}`;
       } catch (e) {
         return;
       }
-
-      const existing = svg.querySelector('#vwd-global-describe');
-      if (existing) existing.remove();
 
       const describe = getGlobalDescribeOldValue(parsed);
       const svgBox = svg.viewBox && svg.viewBox.baseVal ? svg.viewBox.baseVal : null;
