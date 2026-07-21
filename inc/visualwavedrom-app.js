@@ -7858,9 +7858,34 @@ ${lines.join('\n')}`;
       }
     }
 
+    function handleWavePanelShiftWheel(e) {
+      if (!e.shiftKey || e.ctrlKey || e.metaKey) return false;
+      const target = e.target;
+      if (!target || !(target instanceof Element) || !wavePanel.contains(target)) return false;
+      if (target.closest && target.closest('.wave-text-edit-overlay')) return false;
+
+      const horizontalScroller = target.closest('.wave-document-canvas') || wavePanel;
+      const maxLeft = Math.max(0, horizontalScroller.scrollWidth - horizontalScroller.clientWidth);
+      if (maxLeft <= 4) return false;
+
+      const rawDelta = Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
+      if (!rawDelta) return false;
+      const deltaScale = e.deltaMode === 1
+        ? 20
+        : (e.deltaMode === 2 ? Math.max(1, horizontalScroller.clientWidth) : 1);
+      const nextLeft = Math.max(0, Math.min(maxLeft, horizontalScroller.scrollLeft + rawDelta * deltaScale));
+      if (Math.abs(nextLeft - horizontalScroller.scrollLeft) <= 0.5) return false;
+
+      e.preventDefault();
+      horizontalScroller.scrollLeft = nextLeft;
+      return true;
+    }
+
     function handleWavePanelWheelPaging(e) {
       if (!wavePanel || !e) return;
       if (inlineEditActive) return;
+      if (handleWavePanelShiftWheel(e)) return;
+      if (e.shiftKey) return;
       if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
       const hasScrollY = wavePanel.scrollHeight > wavePanel.clientHeight + 4;
       if (!hasScrollY) return;
@@ -9612,6 +9637,10 @@ ${lines.join('\n')}`;
         indentWithTabs: false,
         viewportMargin: 20
       });
+      codeMirrorEditor.setOption(
+        'cursorScrollMargin',
+        Math.max(0, codeMirrorEditor.defaultTextHeight() * 2)
+      );
       if (editorWrapper) editorWrapper.classList.add('codemirror-active');
 
       codeMirrorEditor.on('change', (cm) => {
