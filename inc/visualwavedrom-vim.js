@@ -18,6 +18,8 @@
     if (event.key === ' ') return '<Space>';
     if (event.key === 'Escape') return '<Esc>';
     if (event.key === 'Enter') return '<Enter>';
+    if (event.key === '｜') return '|';
+    if (event.shiftKey && event.code === 'Backslash') return '|';
     if (event.key === '[' && (event.ctrlKey || event.metaKey)) return '<C-[>';
     if (String(event.key || '').toLowerCase() === 'r' && (event.ctrlKey || event.metaKey)) return '<C-r>';
     return event.key;
@@ -316,6 +318,8 @@
         this.execute('paste', { before: key === 'P' });
       } else if (key === 'r') {
         this.setPending('r');
+      } else if (key === '|') {
+        this.execute('replace-wave', { char: key });
       } else if (key === 'R') {
         this.execute('replace-start', {}, { noRepeat: true });
         this.setMode('replace');
