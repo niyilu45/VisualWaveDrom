@@ -44,6 +44,26 @@ function getDefaultJson() {
 
     const CONNECTION_ARROW_STYLES = ['start', 'end', 'both'];
     const CONNECTION_LINE_STYLES = ['straight', 'dashed', 'orthogonal', 'curve'];
+    const CONNECTION_LINE_VARIANTS = {
+      straight: [{ id: 'straight', token: '-', label: '实线' }],
+      dashed: [{ id: 'dashed', token: '-', label: '虚线' }],
+      orthogonal: [
+        { id: 'horizontal-vertical', token: '-|', label: '先横后竖' },
+        { id: 'vertical-horizontal', token: '|-', label: '先竖后横' },
+        { id: 'centered-orthogonal', token: '-|-', label: '横竖横' }
+      ],
+      curve: [
+        { id: 'smooth-curve', token: '~', label: '连续曲线' },
+        { id: 'horizontal-curve', token: '-~', label: '先横后曲' },
+        { id: 'curve-horizontal', token: '~-', label: '先曲后横' }
+      ]
+    };
+    const CONNECTION_LINE_STYLE_LABELS = {
+      straight: '实线',
+      dashed: '虚线',
+      orthogonal: '折线',
+      curve: '曲线'
+    };
 
     // Keep the row visually blank while preserving a real WaveDrom lane that
     // can be selected and edited immediately.
@@ -262,6 +282,7 @@ function getDefaultJson() {
     let pendingEdgeTemplate = null;
     let connectionArrowStyle = 'end';
     let connectionLineStyle = 'straight';
+    let connectionLineVariant = 'straight';
     let selectedEdgeIndex = -1;
     let isRenderingWaveform = false;
     let pendingRenderText = null;
@@ -4790,19 +4811,47 @@ ${lines.join('\n')}`;
       return connectionAddSessionActive && connectionFromPoint && connectionToPoint;
     }
 
-    function getConnectionArrowToken(arrowStyle, lineStyle) {
-      const lineToken = lineStyle === 'curve'
-        ? '~'
-        : (lineStyle === 'orthogonal' ? '-|' : '-');
+    function getConnectionLineVariants(lineStyle) {
+      return CONNECTION_LINE_VARIANTS[lineStyle] || CONNECTION_LINE_VARIANTS.straight;
+    }
+
+    function getConnectionLineVariant(lineStyle, variantId) {
+      const variants = getConnectionLineVariants(lineStyle);
+      return variants.find((variant) => variant.id === variantId) || variants[0];
+    }
+
+    function getConnectionShapeToken(arrowToken) {
+      return String(arrowToken || '').replace(/^</, '').replace(/>$/, '');
+    }
+
+    function getConnectionVariantFromArrow(lineStyle, arrowToken) {
+      const variants = getConnectionLineVariants(lineStyle);
+      const shapeToken = getConnectionShapeToken(arrowToken);
+      return variants.find((variant) => variant.token === shapeToken) || variants[0];
+    }
+
+    function getConnectionArrowToken(arrowStyle, lineStyle, lineVariant) {
+      const lineToken = getConnectionLineVariant(lineStyle, lineVariant).token;
       // WaveDrom has no native start-only arrow token. Keep its valid path token
       // and add the start marker from edgeOptions after rendering.
       if (arrowStyle === 'start') return lineToken;
-      if (arrowStyle === 'both') return '<' + lineToken + '>';
+      if (arrowStyle === 'both') {
+        const nativeBothArrowTokens = {
+          '-': '<->',
+          '~': '<~>',
+          '-~': '<-~>',
+          '-|': '<-|>',
+          '-|-': '<-|->'
+        };
+        // WaveDrom lacks native both-arrow tokens for "~-" and "|-".
+        // Their start marker is restored from the English edgeOptions value.
+        return nativeBothArrowTokens[lineToken] || (lineToken + '>');
+      }
       return lineToken + '>';
     }
 
-    function buildConnectionTemplate(arrowStyle, lineStyle) {
-      return '{from}' + getConnectionArrowToken(arrowStyle, lineStyle) + '{to} {label}';
+    function buildConnectionTemplate(arrowStyle, lineStyle, lineVariant) {
+      return '{from}' + getConnectionArrowToken(arrowStyle, lineStyle, lineVariant) + '{to} {label}';
     }
 
     function getEdgeLineStyleOption(source, index) {
@@ -4819,7 +4868,7 @@ ${lines.join('\n')}`;
         : {};
       if (lineStyle === 'dashed') option.lineStyle = 'dashed';
       else delete option.lineStyle;
-      if (arrowStyle === 'start') option.arrowStyle = 'start';
+      if (arrowStyle === 'start' || arrowStyle === 'both') option.arrowStyle = arrowStyle;
       else delete option.arrowStyle;
       options[index] = Object.keys(option).length ? option : null;
       while (options.length && !options[options.length - 1]) options.pop();
@@ -4840,7 +4889,8 @@ ${lines.join('\n')}`;
       if (arrow.includes('~')) lineStyle = 'curve';
       else if (arrow.includes('|')) lineStyle = 'orthogonal';
       if (getEdgeLineStyleOption(source, index) === 'dashed') lineStyle = 'dashed';
-      return { arrowStyle, lineStyle };
+      const lineVariant = getConnectionVariantFromArrow(lineStyle, arrow).id;
+      return { arrowStyle, lineStyle, lineVariant };
     }
 
     function findPresetIndexForEdge(edgeStr) {
@@ -4885,8 +4935,20 @@ ${lines.join('\n')}`;
       });
       document.querySelectorAll('#connection-list [data-line-style]').forEach((button) => {
         const active = button.dataset.lineStyle === connectionLineStyle;
+        const variants = getConnectionLineVariants(button.dataset.lineStyle);
+        const variant = active
+          ? getConnectionLineVariant(connectionLineStyle, connectionLineVariant)
+          : variants[0];
+        const variantIndex = Math.max(0, variants.findIndex((item) => item.id === variant.id));
+        const styleLabel = CONNECTION_LINE_STYLE_LABELS[button.dataset.lineStyle] || button.dataset.lineStyle;
         button.classList.toggle('active', active);
         button.setAttribute('aria-pressed', String(active));
+        button.dataset.lineVariant = variant.id;
+        button.dataset.lineVariantIndex = String(variantIndex);
+        button.setAttribute('aria-label', styleLabel + '：' + variant.label);
+        button.title = variants.length > 1
+          ? (styleLabel + '：' + variant.label + '（再次点击切换，共 ' + variants.length + ' 种）')
+          : (styleLabel + '：' + variant.label);
         button.disabled = !canChooseLine;
       });
 
@@ -6092,6 +6154,7 @@ ${lines.join('\n')}`;
             const presentation = getEdgePresentation(edges[selectedEdgeIndex], parsed, selectedEdgeIndex);
             connectionArrowStyle = presentation.arrowStyle;
             connectionLineStyle = presentation.lineStyle;
+            connectionLineVariant = presentation.lineVariant;
           }
         } catch (e) { /* ignore */ }
       } else {
@@ -6335,13 +6398,14 @@ ${lines.join('\n')}`;
         current.from,
         current.to,
         current.prefix,
-        getConnectionArrowToken(connectionArrowStyle, connectionLineStyle),
+        getConnectionArrowToken(connectionArrowStyle, connectionLineStyle, connectionLineVariant),
         current.label
       );
 
       const currentPresentation = getEdgePresentation(edges[selectedEdgeIndex], parsed, selectedEdgeIndex);
       if (newEdgeStr === edges[selectedEdgeIndex]
           && currentPresentation.lineStyle === connectionLineStyle
+          && currentPresentation.lineVariant === connectionLineVariant
           && currentPresentation.arrowStyle === connectionArrowStyle) {
         updateConnectionPropertiesUI();
         return true;
@@ -6397,16 +6461,38 @@ ${lines.join('\n')}`;
         return;
       }
       connectionArrowStyle = arrowStyle;
-      pendingEdgeTemplate = buildConnectionTemplate(connectionArrowStyle, connectionLineStyle);
+      pendingEdgeTemplate = buildConnectionTemplate(
+        connectionArrowStyle,
+        connectionLineStyle,
+        connectionLineVariant
+      );
       if (selectedEdgeIndex >= 0) modifySelectedEdgeProperties();
       else updateConnectionPropertiesUI();
-      vwdDebugLog('connection', { phase: 'arrow-style', arrowStyle, selectedEdgeIndex });
+      vwdDebugLog('connection', {
+        phase: 'arrow-style',
+        arrowStyle,
+        lineVariant: connectionLineVariant,
+        selectedEdgeIndex
+      });
     }
 
     function handleConnectionLineStyleClick(lineStyle) {
       if (!CONNECTION_LINE_STYLES.includes(lineStyle)) return;
+      const variants = getConnectionLineVariants(lineStyle);
+      const shouldCycle = selectedEdgeIndex >= 0 && connectionLineStyle === lineStyle && variants.length > 1;
+      if (shouldCycle) {
+        const currentVariant = getConnectionLineVariant(lineStyle, connectionLineVariant);
+        const currentIndex = Math.max(0, variants.findIndex((variant) => variant.id === currentVariant.id));
+        connectionLineVariant = variants[(currentIndex + 1) % variants.length].id;
+      } else {
+        connectionLineVariant = variants[0].id;
+      }
       connectionLineStyle = lineStyle;
-      const template = buildConnectionTemplate(connectionArrowStyle, connectionLineStyle);
+      const template = buildConnectionTemplate(
+        connectionArrowStyle,
+        connectionLineStyle,
+        connectionLineVariant
+      );
       pendingEdgeTemplate = template;
       if (areConnectionPresetsEnabledForInsert()) {
         if (isInsertingEdge) return;
@@ -6426,6 +6512,14 @@ ${lines.join('\n')}`;
       } else if (!connectionToPoint) {
         setStatus(false, '请继续选择连接终点');
       }
+      vwdDebugLog('connection', {
+        phase: 'line-style',
+        lineStyle,
+        lineVariant: connectionLineVariant,
+        variantCount: variants.length,
+        cycled: shouldCycle,
+        selectedEdgeIndex
+      });
     }
 
     function beginEdgeAddSession() {
@@ -6438,7 +6532,12 @@ ${lines.join('\n')}`;
       connectionAddSessionActive = true;
       connectionArrowStyle = 'end';
       connectionLineStyle = 'straight';
-      pendingEdgeTemplate = buildConnectionTemplate(connectionArrowStyle, connectionLineStyle);
+      connectionLineVariant = 'straight';
+      pendingEdgeTemplate = buildConnectionTemplate(
+        connectionArrowStyle,
+        connectionLineStyle,
+        connectionLineVariant
+      );
       const labelInput = document.getElementById('connection-label-input');
       if (labelInput) labelInput.value = '';
       setConnectionPickActive(true);
@@ -6557,11 +6656,27 @@ ${lines.join('\n')}`;
       const parsed = parseEdgeString(edgeStr);
       const dx = toPt.x - fromPt.x;
       const dy = toPt.y - fromPt.y;
-      if (parsed.arrow.includes('~')) {
+      const shapeToken = getConnectionShapeToken(parsed.arrow);
+      if (shapeToken === '-~') {
+        return 'M ' + fromPt.x + ',' + fromPt.y
+          + ' c ' + (0.7 * dx) + ',0 ' + dx + ',' + dy + ' ' + dx + ',' + dy;
+      }
+      if (shapeToken === '~-') {
+        return 'M ' + fromPt.x + ',' + fromPt.y
+          + ' c 0,0 ' + (0.3 * dx) + ',' + dy + ' ' + dx + ',' + dy;
+      }
+      if (shapeToken === '~') {
         return 'M ' + fromPt.x + ',' + fromPt.y
           + ' c ' + (0.7 * dx) + ',0 ' + (0.3 * dx) + ',' + dy + ' ' + dx + ',' + dy;
       }
-      if (parsed.arrow.includes('|')) {
+      if (shapeToken === '|-') {
+        return 'm ' + fromPt.x + ',' + fromPt.y + ' 0,' + dy + ' ' + dx + ',0';
+      }
+      if (shapeToken === '-|-') {
+        return 'm ' + fromPt.x + ',' + fromPt.y
+          + ' ' + (dx / 2) + ',0 0,' + dy + ' ' + (dx / 2) + ',0';
+      }
+      if (shapeToken === '-|') {
         return 'm ' + fromPt.x + ',' + fromPt.y + ' ' + dx + ',0 0,' + dy;
       }
       return 'M ' + fromPt.x + ',' + fromPt.y + ' ' + toPt.x + ',' + toPt.y;
@@ -13033,6 +13148,7 @@ ${lines.join('\n')}`;
         pendingEdgeTemplate,
         connectionArrowStyle,
         connectionLineStyle,
+        connectionLineVariant,
         isInsertingEdge,
         isRenderingWaveform,
         waveformRenderingBusy,
