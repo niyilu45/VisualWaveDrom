@@ -170,7 +170,9 @@ set "WAVE_LIBRARY_RELATIVE_PATH=Wave\VisualWaveDrom-library.json"
 
 ## JSON 面板
 
-功能菜单中的“隐藏 JSON”可以折叠或恢复 WaveDrom JSON 编辑窗口，状态会保存到浏览器本地设置中。
+JSON 面板标题栏中的“隐藏”按钮可以直接隐藏 WaveDrom JSON 编辑窗口；隐藏后可通过功能菜单中的“显示 JSON”恢复。显示状态会保存到浏览器本地设置中。
+
+功能菜单中的“添加列号”按 `Off → Tick → Tock → Off` 循环：`Tick` 写入 `head.tick`，在列边界显示编号；`Tock` 写入 `head.tock`，在列中间显示编号。首次启用默认从 `0` 开始，切换模式时保留已有起始编号，并支持撤销和重做。
 
 JSON 面板提供格式化和导出功能。JSON 解析失败时，错误行左侧会显示 `×`。
 

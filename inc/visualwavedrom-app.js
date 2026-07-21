@@ -190,8 +190,11 @@ function getDefaultJson() {
     const wavePanel = document.getElementById('wave-panel');
     const toggleJsonPanelBtn = document.getElementById('btn-toggle-json-panel');
     const toggleJsonPanelLabel = document.getElementById('toggle-json-panel-label');
+    const hideJsonPanelBtn = document.getElementById('btn-hide-json-panel');
     const backBtn = document.getElementById('btn-back');
     const hscaleInput = document.getElementById('input-hscale');
+    const columnNumberBtn = document.getElementById('btn-column-number');
+    const columnNumberState = document.getElementById('column-number-state');
     const navSidebar = document.getElementById('nav-sidebar');
     const navTreeEl = document.getElementById('nav-tree');
     const navMoveUpBtn = document.getElementById('btn-nav-move-up');
@@ -2919,6 +2922,7 @@ ${lines.join('\n')}`;
       setEditorSelection(selStart, selEnd ?? selStart, !opts.skipFocus && !preserveNonJsonFocus);
       updateLineNumbers();
       syncLineNumberScroll();
+      syncColumnNumberButtonFromJson(newText);
       if (opts.skipRender) {
         syncHscaleInputFromJson(newText);
         renderConnectionEdgeList();
@@ -3002,6 +3006,102 @@ ${lines.join('\n')}`;
       } catch (e) {
         return 1;
       }
+    }
+
+    function readColumnNumberSetting(source) {
+      const head = source && source.head && typeof source.head === 'object' && !Array.isArray(source.head)
+        ? source.head
+        : null;
+      if (!head) return { mode: 'off', value: 0 };
+      const hasTick = Object.prototype.hasOwnProperty.call(head, 'tick');
+      const hasTock = Object.prototype.hasOwnProperty.call(head, 'tock');
+      if (hasTick && hasTock) return { mode: 'both', value: head.tick };
+      if (hasTick) return { mode: 'tick', value: head.tick };
+      if (hasTock) return { mode: 'tock', value: head.tock };
+      return { mode: 'off', value: 0 };
+    }
+
+    function syncColumnNumberButtonFromJson(jsonText, parsedSource) {
+      if (!columnNumberBtn) return false;
+      let source = parsedSource;
+      if (!source) {
+        try {
+          source = JSON.parse(jsonText);
+        } catch (_e) {
+          columnNumberBtn.dataset.mode = 'invalid';
+          columnNumberBtn.classList.remove('active');
+          columnNumberBtn.setAttribute('aria-pressed', 'false');
+          columnNumberBtn.title = 'JSON 有误，暂时无法设置列号';
+          if (columnNumberState) columnNumberState.textContent = '?';
+          return false;
+        }
+      }
+
+      const setting = readColumnNumberSetting(source);
+      const active = setting.mode !== 'off';
+      const stateLabels = { off: 'Off', tick: 'Tick', tock: 'Tock', both: 'Tick+Tock' };
+      const titles = {
+        off: '添加列号：点击使用 tick，再次点击切换为 tock',
+        tick: '当前使用 head.tick（列边界编号）；点击切换为 head.tock',
+        tock: '当前使用 head.tock（列中间编号）；点击关闭列号',
+        both: '当前 JSON 同时包含 head.tick 和 head.tock；点击关闭列号'
+      };
+      columnNumberBtn.dataset.mode = setting.mode;
+      columnNumberBtn.classList.toggle('active', active);
+      columnNumberBtn.setAttribute('aria-pressed', String(active));
+      columnNumberBtn.title = titles[setting.mode] || titles.off;
+      if (columnNumberState) columnNumberState.textContent = stateLabels[setting.mode] || 'Off';
+      return true;
+    }
+
+    function toggleColumnNumbers() {
+      let source;
+      try {
+        source = JSON.parse(editor.value);
+      } catch (_e) {
+        setStatus(false, 'JSON 错误，无法添加列号');
+        syncColumnNumberButtonFromJson(editor.value);
+        return false;
+      }
+      if (!source || typeof source !== 'object' || Array.isArray(source)) {
+        setStatus(false, 'JSON 根节点必须是对象');
+        return false;
+      }
+      if (source.head != null && (typeof source.head !== 'object' || Array.isArray(source.head))) {
+        setStatus(false, 'head 必须是对象，无法添加列号');
+        return false;
+      }
+
+      const current = readColumnNumberSetting(source);
+      const nextMode = current.mode === 'off'
+        ? 'tick'
+        : (current.mode === 'tick' ? 'tock' : 'off');
+      const startValue = typeof current.value === 'number' && Number.isFinite(current.value)
+        ? current.value
+        : 0;
+      const head = Object.assign({}, source.head || {});
+      delete head.tick;
+      delete head.tock;
+      if (nextMode === 'tick') head.tick = startValue;
+      if (nextMode === 'tock') head.tock = startValue;
+      if (Object.keys(head).length) source.head = head;
+      else delete source.head;
+
+      const newText = JSON.stringify(source, null, 2);
+      if (newText === editor.value) return false;
+      pushUndoBeforeChange();
+      applyEditorChange(newText, editor.selectionStart, editor.selectionEnd, { skipFocus: true });
+      scheduleFormatAfterWaveChange();
+      vwdDebugLog('column-number', {
+        phase: 'toggle',
+        from: current.mode,
+        to: nextMode,
+        start: startValue
+      });
+      if (nextMode === 'tick') setStatus(true, '已添加列号：head.tick = ' + startValue);
+      else if (nextMode === 'tock') setStatus(true, '已切换列号：head.tock = ' + startValue);
+      else setStatus(true, '已移除列号');
+      return true;
     }
 
     function getWaveUnitWidth(jsonText, parsedSource) {
@@ -7592,6 +7692,277 @@ ${lines.join('\n')}`;
         });
     }
 
+    function getSvgElementBounds(element) {
+      if (!element || typeof element.getBBox !== 'function' || typeof element.getCTM !== 'function') return null;
+      try {
+        const box = element.getBBox();
+        const matrix = element.getCTM();
+        if (!matrix || !Number.isFinite(box.x) || !Number.isFinite(box.y)) return null;
+        const points = [
+          [box.x, box.y],
+          [box.x + box.width, box.y],
+          [box.x, box.y + box.height],
+          [box.x + box.width, box.y + box.height]
+        ].map(([x, y]) => ({
+          x: matrix.a * x + matrix.c * y + matrix.e,
+          y: matrix.b * x + matrix.d * y + matrix.f
+        }));
+        return {
+          x: Math.min(...points.map((point) => point.x)),
+          y: Math.min(...points.map((point) => point.y)),
+          right: Math.max(...points.map((point) => point.x)),
+          bottom: Math.max(...points.map((point) => point.y))
+        };
+      } catch (_e) {
+        return null;
+      }
+    }
+
+    function getSvgMatrixValue(matrix) {
+      if (!matrix) return '';
+      return 'matrix(' + [matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f]
+        .map((value) => Number.isFinite(value) ? value : 0)
+        .join(' ') + ')';
+    }
+
+    function stripFrozenLabelCloneIds(root) {
+      if (!root) return;
+      [root, ...root.querySelectorAll('*')].forEach((element) => {
+        element.removeAttribute('id');
+        if (element.dataset) {
+          delete element.dataset.vwdNameBound;
+          delete element.dataset.vwdGroupBound;
+        }
+      });
+    }
+
+    function scheduleFrozenWaveLabelUpdate(scroller) {
+      const controller = scroller && scroller.__vwdFrozenLabelController;
+      if (!controller || controller.updateRaf !== null) return;
+      controller.updateRaf = requestAnimationFrame(() => {
+        controller.updateRaf = null;
+        controller.update();
+      });
+    }
+
+    function updateFrozenWaveLabelsForScroller(scroller) {
+      const controller = scroller && scroller.__vwdFrozenLabelController;
+      if (controller && typeof controller.update === 'function') controller.update();
+    }
+
+    function clearFrozenWaveLabelsForHost(renderHost) {
+      if (!renderHost || typeof renderHost.closest !== 'function') return;
+      const svg = renderHost.querySelector ? renderHost.querySelector('svg') : null;
+      const svgController = svg && svg.__vwdFrozenLabelController;
+      if (svgController && typeof svgController.dispose === 'function') {
+        svgController.dispose();
+        return;
+      }
+      const scroller = renderHost.closest('.wave-document-canvas') || wavePanel;
+      const controller = scroller && scroller.__vwdFrozenLabelController;
+      if (!controller || !controller.svg || !renderHost.contains(controller.svg)) return;
+      controller.dispose();
+    }
+
+    function setupFrozenWaveLabels(renderHost) {
+      const svg = renderHost && renderHost.querySelector ? renderHost.querySelector('svg') : null;
+      if (!svg) return false;
+      const scroller = svg.closest('.wave-document-canvas') || wavePanel;
+      if (!scroller) return false;
+
+      const existingController = svg.__vwdFrozenLabelController;
+      if (existingController && existingController.scroller === scroller) {
+        existingController.update();
+        return true;
+      }
+      if (existingController && typeof existingController.dispose === 'function') {
+        existingController.dispose();
+      }
+
+      const previousController = scroller.__vwdFrozenLabelController;
+      if (previousController && typeof previousController.dispose === 'function') {
+        previousController.dispose();
+      }
+      svg.querySelectorAll(':scope > .vwd-frozen-label-layer').forEach((element) => element.remove());
+
+      const allLanes = getWaveLaneGroups(svg);
+      if (!allLanes.length) return false;
+      const visibleLanes = allLanes.filter((lane) => !lane.classList.contains('wave-lane-hidden') && lane.style.display !== 'none');
+      const lanes = visibleLanes.length ? visibleLanes : allLanes;
+      const drawBounds = lanes
+        .map((lane) => getSvgElementBounds(lane.querySelector('[id^="wavelane_draw_"]')))
+        .filter(Boolean);
+      if (!drawBounds.length) return false;
+
+      const viewBox = svg.viewBox && svg.viewBox.baseVal;
+      const viewX = viewBox && Number.isFinite(viewBox.x) ? viewBox.x : 0;
+      const viewY = viewBox && Number.isFinite(viewBox.y) ? viewBox.y : 0;
+      const viewHeight = viewBox && viewBox.height > 0
+        ? viewBox.height
+        : Math.max(1, parseFloat(svg.getAttribute('height') || '1'));
+      const boundaryX = Math.max(viewX + 1, Math.min(...drawBounds.map((bounds) => bounds.x)));
+      let frozenBackgroundX = viewX;
+      try {
+        const svgRect = svg.getBoundingClientRect();
+        const userWidth = viewBox && viewBox.width > 0
+          ? viewBox.width
+          : Math.max(1, parseFloat(svg.getAttribute('width') || '1'));
+        const userUnitsPerPixel = svgRect.width > 0 ? userWidth / svgRect.width : 1;
+        const scrollerStyle = getComputedStyle(scroller);
+        const leftPadding = Math.max(0, parseFloat(scrollerStyle.paddingLeft || '0'));
+        frozenBackgroundX -= (leftPadding + 1) * userUnitsPerPixel;
+      } catch (_e) {
+        frozenBackgroundX = viewX;
+      }
+      const groupRoot = svg.querySelector('[id^="groups_"]');
+      const verticalBounds = lanes.map(getSvgElementBounds).filter(Boolean);
+      const groupBounds = getSvgElementBounds(groupRoot);
+      if (groupBounds) verticalBounds.push(groupBounds);
+      const backgroundY = verticalBounds.length
+        ? Math.min(...verticalBounds.map((bounds) => bounds.y)) - 4
+        : viewY;
+      const backgroundBottom = verticalBounds.length
+        ? Math.max(...verticalBounds.map((bounds) => bounds.bottom)) + 4
+        : viewY + viewHeight;
+
+      const svgNs = 'http://www.w3.org/2000/svg';
+      const layer = document.createElementNS(svgNs, 'g');
+      layer.setAttribute('class', 'vwd-frozen-label-layer');
+      layer.setAttribute('aria-hidden', 'false');
+
+      const background = document.createElementNS(svgNs, 'rect');
+      background.setAttribute('class', 'vwd-frozen-label-background');
+      background.setAttribute('x', String(frozenBackgroundX));
+      background.setAttribute('y', String(backgroundY));
+      background.setAttribute('width', String(Math.max(1, boundaryX - frozenBackgroundX)));
+      background.setAttribute('height', String(Math.max(1, backgroundBottom - backgroundY)));
+      layer.appendChild(background);
+
+      const divider = document.createElementNS(svgNs, 'line');
+      divider.setAttribute('class', 'vwd-frozen-label-divider');
+      divider.setAttribute('x1', String(boundaryX));
+      divider.setAttribute('x2', String(boundaryX));
+      divider.setAttribute('y1', String(backgroundY));
+      divider.setAttribute('y2', String(backgroundBottom));
+      layer.appendChild(divider);
+
+      if (groupRoot) {
+        const groupClone = groupRoot.cloneNode(true);
+        const groupMatrix = groupRoot.getCTM ? groupRoot.getCTM() : null;
+        stripFrozenLabelCloneIds(groupClone);
+        groupClone.setAttribute('class', ((groupClone.getAttribute('class') || '') + ' vwd-frozen-group-clone').trim());
+        if (groupMatrix) groupClone.setAttribute('transform', getSvgMatrixValue(groupMatrix));
+        groupClone.setAttribute('pointer-events', 'none');
+        groupClone.querySelectorAll('[data-vwd-group-index]').forEach((cloneTarget) => {
+          const index = cloneTarget.dataset.vwdGroupIndex;
+          const sourceTarget = [...groupRoot.querySelectorAll('[data-vwd-group-index]')]
+            .find((candidate) => candidate.dataset.vwdGroupIndex === index);
+          const invoke = sourceTarget && sourceTarget.__vwdFrozenLabelClick;
+          if (typeof invoke !== 'function') return;
+          cloneTarget.classList.add('vwd-frozen-group-label');
+          cloneTarget.setAttribute('pointer-events', 'all');
+          cloneTarget.addEventListener('click', (event) => invoke(event, cloneTarget));
+        });
+        layer.appendChild(groupClone);
+      }
+
+      lanes.forEach((lane) => {
+        const nameText = lane.querySelector('text.info');
+        if (!nameText) return;
+        let matrix = null;
+        try { matrix = lane.getCTM(); } catch (_e) { matrix = null; }
+        if (!matrix) return;
+
+        const row = document.createElementNS(svgNs, 'g');
+        row.setAttribute('class', 'wave-lane-interactive vwd-frozen-signal-row');
+        row.setAttribute('transform', getSvgMatrixValue(matrix));
+        row.setAttribute('pointer-events', 'none');
+
+        const nameClone = nameText.cloneNode(true);
+        stripFrozenLabelCloneIds(nameClone);
+        nameClone.classList.add('vwd-frozen-signal-name');
+        const invokeName = nameText.__vwdFrozenLabelClick;
+        if (typeof invokeName === 'function') {
+          nameClone.setAttribute('pointer-events', 'all');
+          nameClone.addEventListener('click', (event) => invokeName(event, nameClone));
+        } else {
+          nameClone.setAttribute('pointer-events', 'none');
+        }
+        row.appendChild(nameClone);
+
+        const nameZone = lane.querySelector('rect.wave-name-click-zone');
+        if (nameZone) {
+          const zoneClone = nameZone.cloneNode(true);
+          stripFrozenLabelCloneIds(zoneClone);
+          zoneClone.classList.add('vwd-frozen-signal-click-zone');
+          const invokeZone = nameZone.__vwdFrozenLabelClick;
+          if (typeof invokeZone === 'function') {
+            zoneClone.setAttribute('pointer-events', 'all');
+            zoneClone.addEventListener('click', (event) => invokeZone(event, zoneClone));
+          } else {
+            zoneClone.setAttribute('pointer-events', 'none');
+          }
+          row.insertBefore(zoneClone, nameClone);
+        }
+        layer.appendChild(row);
+      });
+
+      svg.appendChild(layer);
+
+      const controller = {
+        svg,
+        scroller,
+        layer,
+        updateRaf: null,
+        resizeObserver: null,
+        update() {
+          if (!svg.isConnected || !layer.isConnected) return;
+          const rect = svg.getBoundingClientRect();
+          const currentViewBox = svg.viewBox && svg.viewBox.baseVal;
+          const userWidth = currentViewBox && currentViewBox.width > 0
+            ? currentViewBox.width
+            : Math.max(1, parseFloat(svg.getAttribute('width') || '1'));
+          const userUnitsPerPixel = rect.width > 0 ? userWidth / rect.width : 1;
+          const translateX = Math.max(0, scroller.scrollLeft) * userUnitsPerPixel;
+          layer.setAttribute('transform', 'translate(' + translateX + ' 0)');
+        },
+        dispose() {
+          if (this.updateRaf !== null) cancelAnimationFrame(this.updateRaf);
+          this.updateRaf = null;
+          if (this.resizeObserver) this.resizeObserver.disconnect();
+          this.resizeObserver = null;
+          if (this.layer && this.layer.isConnected) this.layer.remove();
+          if (this.svg && this.svg.__vwdFrozenLabelController === this) {
+            delete this.svg.__vwdFrozenLabelController;
+          }
+          if (this.scroller && this.scroller.__vwdFrozenLabelController === this) {
+            this.scroller.__vwdFrozenLabelController = null;
+          }
+        }
+      };
+
+      svg.__vwdFrozenLabelController = controller;
+      scroller.__vwdFrozenLabelController = controller;
+      if (!scroller.__vwdFrozenLabelScrollBound) {
+        scroller.addEventListener('scroll', () => scheduleFrozenWaveLabelUpdate(scroller), { passive: true });
+        scroller.__vwdFrozenLabelScrollBound = true;
+      }
+      if (typeof ResizeObserver === 'function') {
+        controller.resizeObserver = new ResizeObserver(() => scheduleFrozenWaveLabelUpdate(scroller));
+        controller.resizeObserver.observe(svg);
+        controller.resizeObserver.observe(scroller);
+      }
+      controller.update();
+      vwdDebugLog('wave-scroll', {
+        phase: 'freeze-labels-setup',
+        boundaryX: Math.round(boundaryX * 100) / 100,
+        laneCount: lanes.length,
+        hasGroups: !!groupRoot,
+        scroller: scroller.classList.contains('wave-document-canvas') ? 'document-canvas' : 'wave-panel'
+      });
+      return true;
+    }
+
     function addLaneHoverRect(lane, maxBoundaryIndex, unitWidth) {
       if (lane.querySelector('rect.lane-hover-bg')) return;
       try {
@@ -7694,6 +8065,8 @@ ${lines.join('\n')}`;
         openNameEdit(anchorEl);
       };
 
+      nameText.__vwdFrozenLabelClick = (event, anchorEl) => onNameClick(event, anchorEl || nameText);
+
       if (hasVisibleSvgText(nameText)) {
         nameText.dataset.vwdNameBound = '1';
         nameText.addEventListener('click', (e) => onNameClick(e, nameText));
@@ -7703,6 +8076,7 @@ ${lines.join('\n')}`;
       const zone = ensureSignalNameClickZone(lane, nameText);
       nameText.dataset.vwdNameBound = '1';
       zone.dataset.vwdNameBound = '1';
+      zone.__vwdFrozenLabelClick = (event, anchorEl) => onNameClick(event, anchorEl || zone);
       zone.addEventListener('click', (e) => onNameClick(e, zone));
       nameText.addEventListener('click', (e) => onNameClick(e, nameText));
     }
@@ -8486,7 +8860,7 @@ ${lines.join('\n')}`;
       }
 
       const labelText = (selectedGroup.label || '分组');
-      const labelEl = [...svg.querySelectorAll('text')].find((textEl) => {
+      const labelEls = [...svg.querySelectorAll('text')].filter((textEl) => {
         const cls = textEl.getAttribute('class') || '';
         if (cls.includes('wave-name-click-zone')) return false;
         const text = String(textEl.textContent || '').trim();
@@ -8495,9 +8869,7 @@ ${lines.join('\n')}`;
         if (!Number.isFinite(idx)) return false;
         return idx === selected;
       });
-      if (labelEl) {
-        labelEl.classList.add('wave-group-label-selected');
-      }
+      labelEls.forEach((labelEl) => labelEl.classList.add('wave-group-label-selected'));
     }
 
     function attachGroupInteractivity(jsonText) {
@@ -8897,12 +9269,12 @@ ${lines.join('\n')}`;
       });
 
       allGroupLabelTargets.forEach((targetEl) => {
-        const clickHandler = (e) => {
+        const invokeGroupLabelClick = (e, anchorOverride) => {
           e.stopPropagation();
           const idx = parseInt(targetEl.dataset.vwdGroupIndex, 10);
           const explicitStart = parseInt(targetEl.dataset.vwdGroupLabelStart, 10);
           const explicitEnd = parseInt(targetEl.dataset.vwdGroupLabelEnd, 10);
-          const anchorEl = targetEl.__vwdGroupLabelAnchor || targetEl;
+          const anchorEl = anchorOverride || targetEl.__vwdGroupLabelAnchor || targetEl;
           const shouldOpen = isTextEditModeActive();
           vwdDebugLog('group-label', {
             phase: 'click',
@@ -8915,9 +9287,11 @@ ${lines.join('\n')}`;
           });
           handleGroupLabelAction(e, idx, explicitStart, explicitEnd, anchorEl, shouldOpen);
         };
+        const clickHandler = (e) => invokeGroupLabelClick(e);
 
         const previousClick = targetEl.__vwdGroupLabelDirectClick;
         if (previousClick) targetEl.removeEventListener('click', previousClick);
+        targetEl.__vwdFrozenLabelClick = invokeGroupLabelClick;
         targetEl.__vwdGroupLabelDirectClick = clickHandler;
         targetEl.addEventListener('click', clickHandler);
       });
@@ -11065,6 +11439,7 @@ ${lines.join('\n')}`;
         state.canvas.scrollTop = state.canvasScrollTop;
       }
       if (wavePanel) wavePanel.scrollTop = state.panelScrollTop;
+      updateFrozenWaveLabelsForScroller(currentCanvas || wavePanel);
       vwdDebugLog('wave-scroll', {
         phase: 'restore-after-render',
         scrollLeft: currentCanvas ? Math.round(currentCanvas.scrollLeft) : 0,
@@ -11073,6 +11448,7 @@ ${lines.join('\n')}`;
     }
 
     function renderWaveform(jsonText) {
+      syncColumnNumberButtonFromJson(jsonText);
       if (isRenderingWaveform) {
         pendingRenderText = jsonText;
         return false;
@@ -11089,6 +11465,7 @@ ${lines.join('\n')}`;
       vwdMark('renderWaveform:start');
 
       try {
+        clearFrozenWaveLabelsForHost(waveContainer);
         waveContainer.innerHTML = '';
 
         if (!isWaveDromReady()) {
@@ -11139,6 +11516,7 @@ ${lines.join('\n')}`;
           applyNavVisibilityToWave();
           renderConnectionEdgeList(source);
           fitWaveSvgToContent();
+          setupFrozenWaveLabels(waveContainer);
           lastRenderedWaveText = jsonText;
           lastRenderedWaveSource = source;
           vwdMark('renderWaveform:done');
@@ -11502,6 +11880,7 @@ ${lines.join('\n')}`;
     function cloneWaveSvgForScreenshot(svg, metrics) {
       const clone = svg.cloneNode(true);
       clone.querySelectorAll([
+        '.vwd-frozen-label-layer',
         '.wave-col-highlight',
         '.wave-col-highlight-from',
         '.wave-col-highlight-to',
@@ -11920,6 +12299,7 @@ ${lines.join('\n')}`;
         return true;
       }
 
+      clearFrozenWaveLabelsForHost(display);
       display.innerHTML = '';
       syncWaveDocumentDescriptionWidth(display);
       const meta = getWaveDocumentMeta(tag, false);
@@ -11932,6 +12312,7 @@ ${lines.join('\n')}`;
         WaveDrom.RenderWaveForm(0, meta.renderSource, entry.prefix, false);
         if (!display.querySelector('svg')) throw new Error('未生成 SVG');
         syncWaveDocumentDescriptionWidth(display);
+        setupFrozenWaveLabels(display);
         entry.renderedContent = tag.content;
         vwdDebugLog('performance', { phase: 'preview-render', documentName: tag.name, textLength: tag.content.length });
         return true;
@@ -13588,12 +13969,20 @@ ${lines.join('\n')}`;
     if (saveWaveLibraryBtn) {
       saveWaveLibraryBtn.addEventListener('click', () => { void saveCurrentWaveLibrary(); });
     }
+    if (columnNumberBtn) {
+      columnNumberBtn.addEventListener('click', toggleColumnNumbers);
+    }
     if (toggleJsonPanelBtn) {
       toggleJsonPanelBtn.addEventListener('click', () => {
         setJsonPanelHidden(!app.classList.contains('json-panel-hidden'), true);
         if (!app.classList.contains('json-panel-hidden')) {
           requestAnimationFrame(() => codeMirrorEditor && codeMirrorEditor.refresh());
         }
+      });
+    }
+    if (hideJsonPanelBtn) {
+      hideJsonPanelBtn.addEventListener('click', () => {
+        setJsonPanelHidden(true, true);
       });
     }
     if (vimModeBtn) {

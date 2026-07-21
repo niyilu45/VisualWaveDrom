@@ -320,6 +320,12 @@
     }
     .menu-btn:disabled:hover { background: transparent; }
 
+    .menu-btn.column-number-btn.active {
+      color: #93c5fd;
+      background: rgba(59, 130, 246, 0.14);
+      box-shadow: inset 3px 0 0 var(--accent);
+    }
+
     .menu-btn svg {
       width: 18px;
       height: 18px;
@@ -2055,6 +2061,37 @@
       fill: transparent;
       stroke: transparent;
       pointer-events: all;
+    }
+
+    .vwd-frozen-label-layer,
+    .vwd-frozen-group-clone,
+    .vwd-frozen-signal-row {
+      pointer-events: none;
+    }
+
+    .vwd-frozen-label-background {
+      fill: #ffffff;
+      pointer-events: none;
+    }
+
+    .vwd-frozen-label-divider {
+      stroke: #d8e0ea;
+      stroke-width: 1;
+      vector-effect: non-scaling-stroke;
+      pointer-events: none;
+    }
+
+    .vwd-frozen-signal-name,
+    .vwd-frozen-signal-click-zone,
+    .vwd-frozen-group-label {
+      pointer-events: all;
+      cursor: pointer;
+    }
+
+    .app.text-edit-mode .vwd-frozen-signal-name,
+    .app.text-edit-mode .vwd-frozen-signal-click-zone,
+    .app.text-edit-mode .vwd-frozen-group-label {
+      cursor: text;
     }
 
     .wave-lane-interactive .wave-name-click-zone:hover {

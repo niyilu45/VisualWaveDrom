@@ -7,7 +7,7 @@
   <script src="inc/skins/default.js?v=20260712"></script>
   <script src="inc/wavedrom.min.js?v=20260712"></script>
   <link rel="stylesheet" href="inc/codemirror.css?v=5.65.21">
-  <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260721-browser-compat-v1">
+  <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260722-column-numbers-v1">
 </head>
 <body>
   <div class="app" id="app">
@@ -71,6 +71,18 @@
         </button>
         <button class="menu-btn" id="btn-save-wave-library" type="button" title="保存完整波形库 JSON 文件">
           <span id="save-wave-library-label">保存波形库</span>
+        </button>
+        <button class="menu-btn column-number-btn" id="btn-column-number" type="button"
+          aria-pressed="false" data-mode="off"
+          title="添加列号：点击使用 tick，再次点击切换为 tock">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <line x1="4" y1="9" x2="20" y2="9"/>
+            <line x1="4" y1="15" x2="20" y2="15"/>
+            <line x1="10" y1="3" x2="8" y2="21"/>
+            <line x1="16" y1="3" x2="14" y2="21"/>
+          </svg>
+          <span>添加列号</span>
+          <span class="shortcut" id="column-number-state">Off</span>
         </button>
         <input type="file" id="wave-library-import-input" accept="application/json,.json" hidden>
         <button class="menu-btn" id="btn-reading-mode" title="阅读模式">
@@ -310,6 +322,15 @@
               </svg>
               <span>导出</span>
             </button>
+            <button type="button" class="editor-copy-btn" id="btn-hide-json-panel" title="隐藏 WaveDrom JSON 窗口">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                <path d="M4 4l16 16"/>
+                <path d="M9.9 4.2A10.7 10.7 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-3.2 4.2"/>
+                <path d="M6.6 6.6C3.9 8.4 1 12 1 12s4 8 11 8a10.7 10.7 0 0 0 3.4-.6"/>
+                <circle cx="12" cy="12" r="3"/>
+              </svg>
+              <span>隐藏</span>
+            </button>
             <div class="editor-status">
               <span class="status-dot" id="status-dot"></span>
               <span id="status-text">就绪</span>
@@ -495,6 +516,6 @@
     <script src="inc/codemirror.js?v=5.65.21"></script>
     <script src="inc/codemirror-javascript.js?v=5.65.21"></script>
     <script src="inc/visualwavedrom-vim.js?v=20260721-vim-pipe-v1"></script>
-    <script src="inc/visualwavedrom-app.js?v=20260721-edge-endpoint-cleanup-v1"></script>
+    <script src="inc/visualwavedrom-app.js?v=20260722-json-hide-button-v1"></script>
 </body>
 </html>
