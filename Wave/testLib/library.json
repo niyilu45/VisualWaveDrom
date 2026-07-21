@@ -1,0 +1,81 @@
+{
+  "kind": "VisualWaveDromSplitWaveLibrary",
+  "version": 3,
+  "updatedAt": "2026-07-21T19:29:22.5057428Z",
+  "directories": [
+    {
+      "label": "标题以",
+      "rows": [
+
+      ],
+      "documents": [
+        "wave-document-mrfg20wx",
+        "default-wave",
+        "wave-document-mrfg8dwp",
+        "wave-document-mrfg8e8h"
+      ],
+      "expanded": true,
+      "isCustom": true,
+      "path": [
+        "nav-root",
+        "nav-root",
+        "nav-root"
+      ],
+      "children": [
+
+      ],
+      "id": "nav-2629391460048186-mrfg25ct"
+    }
+  ],
+  "activeDocumentName": "wave-document-mrfg8e8h",
+  "selectedDirectoryId": "nav-2629391460048186-mrfg25ct",
+  "libraryId": "library-137a0c7e-51b8-4edf-9db6-4c8650bf36d3",
+  "storage": "split-v1",
+  "sourceLibraryVersion": 2,
+  "documents": [
+    {
+      "name": "wave-document-mrfg8e8h",
+      "hscale": 1,
+      "waveEditMode": "modify",
+      "savedAt": "2026-07-10T21:29:51.731Z",
+      "revision": 0,
+      "file": "documents/wave-document-mrfg8e8h-b77e9efc9f.json",
+      "contentLength": 55,
+      "titleCache": "波形图 4",
+      "descriptionCache": ""
+    },
+    {
+      "name": "wave-document-mrfg8dwp",
+      "hscale": 1,
+      "waveEditMode": "modify",
+      "savedAt": "2026-07-10T21:29:50.953Z",
+      "revision": 0,
+      "file": "documents/wave-document-mrfg8dwp-712ac342af.json",
+      "contentLength": 55,
+      "titleCache": "波形图 3",
+      "descriptionCache": ""
+    },
+    {
+      "name": "wave-document-mrfg20wx",
+      "hscale": 1,
+      "waveEditMode": "modify",
+      "savedAt": "2026-07-10T21:25:43.784Z",
+      "revision": 0,
+      "file": "documents/wave-document-mrfg20wx-6100d73b8d.json",
+      "contentLength": 55,
+      "titleCache": "波形图 2",
+      "descriptionCache": ""
+    },
+    {
+      "name": "default-wave",
+      "hscale": 1,
+      "waveEditMode": "modify",
+      "savedAt": "2026-07-10T21:24:54.176Z",
+      "revision": 0,
+      "file": "documents/default-wave-9d2e5f1f71.json",
+      "contentLength": 512,
+      "titleCache": "WaveDrom Example",
+      "descriptionCache": ""
+    }
+  ]
+}

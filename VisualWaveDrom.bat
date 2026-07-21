@@ -3,7 +3,7 @@ setlocal
 
 rem ===== PROJECT SETTINGS - CHANGE THESE VALUES ONLY =====
 set "HTML_FILE_NAME=VisualWaveDrom.html"
-set "WAVE_LIBRARY_RELATIVE_PATH=Wave\VisualWaveDrom-library.json"
+set "WAVE_LIBRARY_RELATIVE_PATH=Wave\VisualWaveDrom-library\library.json"
 rem ========================================================
 
 cd /d "%~dp0"

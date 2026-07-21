@@ -235,6 +235,7 @@ function getDefaultJson() {
     let directJsonEditDirty = false;
     let directJsonEditMonitorTimer = null;
     let historySequence = 0;
+    let pendingEditorHistoryEntry = null;
     let inlineEditActive = false;
     let activeInlineEditState = null;
     let pendingNameEditSignalIndex = -1;
@@ -288,6 +289,7 @@ function getDefaultJson() {
     let connectionSelectActive = false;
     let connectionFromPoint = null;
     let connectionToPoint = null;
+    let connectionEndpointEditMode = '';
     let pendingEdgeTemplate = null;
     let connectionArrowStyle = 'end';
     let connectionLineStyle = 'straight';
@@ -295,13 +297,20 @@ function getDefaultJson() {
     let selectedEdgeIndex = -1;
     let isRenderingWaveform = false;
     let pendingRenderText = null;
+    let pendingRenderAnalysis = null;
     let isInsertingEdge = false;
     let connectionHighlightRaf = null;
     let pendingHighlightLanes = null;
     let pendingHighlightSourceMap = null;
     let renderWaveformRaf = null;
     let scheduledRenderText = null;
+    let scheduledRenderAnalysis = null;
     let scheduledRenderCallbacks = null;
+    let waveAnalysisWorker = null;
+    let waveAnalysisWorkerUnavailable = false;
+    let waveAnalysisRequestSequence = 0;
+    let waveAnalysisGeneration = 0;
+    const pendingWaveAnalysisRequests = new Map();
     let deferredEdgeRenderTimer = null;
     let deferredEditorUiTimer = null;
     let deferredKnownValidPersistTimer = null;
@@ -745,13 +754,21 @@ ${lines.join('\n')}`;
     const EDITOR_JSON_KEY = 'vwd-editor-json';
     const EDITOR_JSON_VALID_KEY = 'vwd-editor-json-valid';
     const WAVE_DOCUMENTS_KEY = 'vwd-wave-documents';
+    const WAVE_DOCUMENTS_LOADED_CACHE_KEY = 'vwd-wave-documents-loaded-cache-v1';
     const WAVE_LIBRARY_PENDING_SAVE_KEY = 'vwd-wave-library-pending-save-v1';
     const LEGACY_SAVED_TAGS_KEY = 'vwd-saved-tags';
     const NAV_COPY_SEED_KEY = 'vwd-nav-copy-seed-2222-51515-v2';
     const PERSIST_DEBOUNCE_MS = 500;
-    const SAVED_TAGS_PERSIST_DEBOUNCE_MS = 250;
+    const SAVED_TAGS_PERSIST_DEBOUNCE_MS = 1200;
+    const SAVED_TAGS_PERSIST_IDLE_TIMEOUT_MS = 2500;
     const DIRECT_JSON_HISTORY_INTERVAL_MS = 5000;
-    const WAVE_PREVIEW_ROOT_MARGIN = '700px 0px';
+    const WAVE_PREVIEW_ROOT_MARGIN = '600px 0px';
+    const WAVE_PREVIEW_MAX_RENDERED = 6;
+    const WAVE_PREVIEW_FALLBACK_HEIGHT = 120;
+    const WAVE_PREVIEW_WORKER_PARSE_THRESHOLD = 50000;
+    const WAVE_PREVIEW_CANVAS_CELL_THRESHOLD = 12000;
+    const WAVE_PREVIEW_CANVAS_COLUMN_THRESHOLD = 1500;
+    const WAVE_ANALYSIS_WORKER_URL = 'inc/visualwavedrom-worker.js?v=20260722-speed-v2';
     const DRAG_THRESHOLD = 5;
     let backBtnDrag = null;
     let waveEditMode = 'modify';
@@ -765,7 +782,9 @@ ${lines.join('\n')}`;
     let waveLibraryPreviewObserver = null;
     let waveLibraryPreviewQueue = [];
     let waveLibraryPreviewWorkHandle = null;
+    let waveLibraryPreviewUseSequence = 0;
     let savedTagsPersistTimer = null;
+    let savedTagsPersistIdleHandle = null;
     let activeTagName = null;
     let editingWaveDocumentName = null;
     let pendingLoadTagName = null;
@@ -783,6 +802,13 @@ ${lines.join('\n')}`;
     let singleWaveSaveInFlight = false;
     let singleWaveSaveQueued = false;
     let lastSingleWaveSyncedSignature = '';
+    const dirtyWaveDocumentNames = new Set();
+    const deletedWaveDocumentNames = new Set();
+    const waveDocumentLoadPromises = new Map();
+    let waveLibraryStructureDirty = false;
+    let waveLibraryStructureRevision = 0;
+    let waveLibraryServerSaveInFlight = false;
+    let waveLibraryServerSaveQueued = false;
     let applyingWaveLibraryBundle = false;
     let pendingWaveCopyDocumentName = '';
     let pendingWaveCopyButton = null;
@@ -1233,6 +1259,10 @@ ${lines.join('\n')}`;
           updatedAt: new Date().toISOString()
         }));
         vwdDebugLog('nav-tree', { phase: 'storage-save', ok: true, nodeCount: Array.isArray(nodes) ? nodes.length : 0 });
+        if (!applyingWaveLibraryBundle) {
+          waveLibraryStructureDirty = true;
+          waveLibraryStructureRevision += 1;
+        }
         scheduleWaveLibraryServerSave();
         return true;
       } catch (error) {
@@ -2205,6 +2235,7 @@ ${lines.join('\n')}`;
           pendingFormatRenderCallbacks.push(...scheduledRenderCallbacks);
         }
         scheduledRenderText = null;
+        scheduledRenderAnalysis = null;
         scheduledRenderCallbacks = null;
       }
       formatAfterWaveChangeRaf = requestAnimationFrame(() => {
@@ -2869,6 +2900,7 @@ ${lines.join('\n')}`;
     function setEditorValue(value, options) {
       const text = value == null ? '' : String(value);
       const opts = options || {};
+      if (!isApplyingHistory && editor.value !== text) compactPendingEditorHistory(text);
       editor.value = text;
       if (codeMirrorEditor && codeMirrorEditor.getValue() !== text) {
         syncingCodeMirror = true;
@@ -3186,10 +3218,86 @@ ${lines.join('\n')}`;
       return entry && Number.isFinite(entry.sequence) ? entry.sequence : 0;
     }
 
-    function getEditorHistoryContent(entry) {
+    function hashHistoryText(text) {
+      const value = String(text == null ? '' : text);
+      let hash = 2166136261;
+      for (let i = 0; i < value.length; i += 1) {
+        hash ^= value.charCodeAt(i);
+        hash = Math.imul(hash, 16777619);
+      }
+      return hash >>> 0;
+    }
+
+    function createTextHistoryPatch(sourceContent, targetContent) {
+      const source = String(sourceContent == null ? '' : sourceContent);
+      const target = String(targetContent == null ? '' : targetContent);
+      let start = 0;
+      const commonLength = Math.min(source.length, target.length);
+      while (start < commonLength && source.charCodeAt(start) === target.charCodeAt(start)) start += 1;
+      let sourceEnd = source.length;
+      let targetEnd = target.length;
+      while (sourceEnd > start && targetEnd > start
+          && source.charCodeAt(sourceEnd - 1) === target.charCodeAt(targetEnd - 1)) {
+        sourceEnd -= 1;
+        targetEnd -= 1;
+      }
+      return {
+        start,
+        deleteText: source.slice(start, sourceEnd),
+        insertText: target.slice(start, targetEnd),
+        sourceLength: source.length,
+        targetLength: target.length,
+        sourceHash: hashHistoryText(source),
+        targetHash: hashHistoryText(target)
+      };
+    }
+
+    function createEditorHistoryEntry(targetContent, sourceContent, sequence, reason) {
+      const target = String(targetContent == null ? '' : targetContent);
+      const entry = {
+        content: target,
+        sequence: Number.isFinite(sequence) ? sequence : nextHistorySequence(),
+        reason: reason || 'editor-change'
+      };
+      if (sourceContent == null) return entry;
+      const patch = createTextHistoryPatch(sourceContent, target);
+      const patchSize = patch.deleteText.length + patch.insertText.length + 96;
+      if (patchSize >= target.length) return entry;
+      delete entry.content;
+      entry.patch = patch;
+      return entry;
+    }
+
+    function getEditorHistoryContent(entry, sourceContent) {
+      if (entry && typeof entry === 'object' && entry.patch) {
+        const source = String(sourceContent == null ? '' : sourceContent);
+        const patch = entry.patch;
+        if (source.length !== patch.sourceLength || hashHistoryText(source) !== patch.sourceHash) return null;
+        if (source.slice(patch.start, patch.start + patch.deleteText.length) !== patch.deleteText) return null;
+        const target = source.slice(0, patch.start)
+          + patch.insertText
+          + source.slice(patch.start + patch.deleteText.length);
+        if (target.length !== patch.targetLength || hashHistoryText(target) !== patch.targetHash) return null;
+        return target;
+      }
       return entry && typeof entry === 'object' && typeof entry.content === 'string'
         ? entry.content
         : String(entry == null ? '' : entry);
+    }
+
+    function compactPendingEditorHistory(sourceContent) {
+      const entry = pendingEditorHistoryEntry;
+      pendingEditorHistoryEntry = null;
+      if (!entry || undoStack[undoStack.length - 1] !== entry || typeof entry.content !== 'string') return;
+      if (entry.content === String(sourceContent == null ? '' : sourceContent)) {
+        undoStack.pop();
+        updateUndoRedoButtons();
+        return;
+      }
+      const compact = createEditorHistoryEntry(entry.content, sourceContent, entry.sequence, entry.reason);
+      if (!compact.patch) return;
+      delete entry.content;
+      entry.patch = compact.patch;
     }
 
     function setEditorHistoryBaseline(text) {
@@ -3206,13 +3314,12 @@ ${lines.join('\n')}`;
       updateUndoRedoButtons();
     }
 
-    function pushEditorUndoSnapshot(content, reason) {
-      undoStack.push({
-        content: String(content == null ? '' : content),
-        sequence: nextHistorySequence(),
-        reason: reason || 'editor-change'
-      });
+    function pushEditorUndoSnapshot(content, reason, sourceContent) {
+      compactPendingEditorHistory(sourceContent == null ? editor.value : sourceContent);
+      const entry = createEditorHistoryEntry(content, sourceContent, nextHistorySequence(), reason);
+      undoStack.push(entry);
       if (undoStack.length > 100) undoStack.shift();
+      pendingEditorHistoryEntry = sourceContent == null ? entry : null;
       redoStack = [];
       waveLibraryRedoStack = [];
     }
@@ -3225,7 +3332,7 @@ ${lines.join('\n')}`;
         return false;
       }
       const previous = editorHistoryBaseline;
-      pushEditorUndoSnapshot(previous, reason || 'direct-json-interval');
+      pushEditorUndoSnapshot(previous, reason || 'direct-json-interval', current);
       setEditorHistoryBaseline(current);
       updateUndoRedoButtons();
       vwdDebugLog('history', {
@@ -5092,7 +5199,11 @@ ${lines.join('\n')}`;
     }
 
     function isConnectionPickFlow() {
-      return connectionAddSessionActive && connectionPickActive;
+      return connectionPickActive && (
+        connectionAddSessionActive
+        || connectionEndpointEditMode === 'from'
+        || connectionEndpointEditMode === 'to'
+      );
     }
 
     function areConnectionPresetsEnabledForInsert() {
@@ -5212,6 +5323,22 @@ ${lines.join('\n')}`;
         'connection-add-mode',
         connectionAddSessionActive && connectionPickActive
       );
+      app.classList.toggle(
+        'connection-endpoint-edit-mode',
+        !!connectionEndpointEditMode && connectionPickActive
+      );
+
+      const canEditEndpoint = connectionSelectActive && selectedEdgeIndex >= 0;
+      document.querySelectorAll('#connection-endpoint-controls [data-endpoint]').forEach((button) => {
+        const endpoint = button.dataset.endpoint;
+        const active = connectionEndpointEditMode === endpoint && connectionPickActive;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-pressed', String(active));
+        button.disabled = !canEditEndpoint;
+        button.textContent = active
+          ? (endpoint === 'from' ? '点击新起点' : '点击新终点')
+          : (endpoint === 'from' ? '修改起点' : '修改终点');
+      });
 
       const canEditArrow = connectionAddSessionActive || selectedEdgeIndex >= 0;
       const canChooseLine = areConnectionPresetsEnabledForInsert() || selectedEdgeIndex >= 0;
@@ -6074,6 +6201,59 @@ ${lines.join('\n')}`;
       return name + '[' + point.colIndex + ']';
     }
 
+    function findConnectionPointByNodeId(sourceMap, nodeId) {
+      if (!nodeId) return null;
+      for (let rowIndex = 0; rowIndex < sourceMap.length; rowIndex++) {
+        const entry = sourceMap[rowIndex];
+        const node = entry && entry.signal && typeof entry.signal.node === 'string'
+          ? entry.signal.node
+          : '';
+        const colIndex = node.indexOf(nodeId);
+        if (colIndex >= 0) return { rowIndex, colIndex };
+      }
+      return null;
+    }
+
+    function syncConnectionPointsFromSelectedEdge() {
+      if (selectedEdgeIndex < 0) {
+        connectionFromPoint = null;
+        connectionToPoint = null;
+        updateConnectionPointStatusUI();
+        refreshConnectionHighlightsFromDom();
+        return false;
+      }
+      try {
+        const parsed = JSON.parse(editor.value);
+        const edges = Array.isArray(parsed.edge) ? parsed.edge : [];
+        if (selectedEdgeIndex >= edges.length) throw new Error('edge index out of range');
+        const edge = parseEdgeString(edges[selectedEdgeIndex]);
+        const sourceMap = buildSignalSourceMap(editor.value);
+        connectionFromPoint = findConnectionPointByNodeId(sourceMap, edge.from);
+        connectionToPoint = findConnectionPointByNodeId(sourceMap, edge.to);
+        updateConnectionPointStatusUI();
+        refreshConnectionHighlightsFromDom();
+        return true;
+      } catch (e) {
+        connectionFromPoint = null;
+        connectionToPoint = null;
+        updateConnectionPointStatusUI();
+        refreshConnectionHighlightsFromDom();
+        return false;
+      }
+    }
+
+    function cancelConnectionEndpointEdit(showStatus) {
+      const previousMode = connectionEndpointEditMode;
+      connectionEndpointEditMode = '';
+      if (!connectionAddSessionActive) connectionPickActive = false;
+      syncConnectionPointsFromSelectedEdge();
+      updateConnectionPropertiesUI();
+      if (showStatus && previousMode) setStatus(true, '已取消修改连接端点');
+      if (previousMode) {
+        vwdDebugLog('connection', { phase: 'endpoint-edit-cancelled', endpoint: previousMode });
+      }
+    }
+
     function clearConnectionPoints() {
       connectionFromPoint = null;
       connectionToPoint = null;
@@ -6089,11 +6269,13 @@ ${lines.join('\n')}`;
 
     function setConnectionSelectActive(active) {
       connectionSelectActive = !!active;
+      connectionEndpointEditMode = '';
       if (connectionSelectActive) {
         connectionAddSessionActive = false;
         connectionPickActive = false;
         clearConnectionPoints();
       } else {
+        connectionPickActive = false;
         clearEdgeSelection();
       }
       updateConnectionPointStatusUI();
@@ -6117,7 +6299,11 @@ ${lines.join('\n')}`;
         : '未选择';
 
       let hint = '';
-      if (connectionAddSessionActive && connectionPickActive) {
+      if (connectionEndpointEditMode === 'from' && connectionPickActive) {
+        hint = ' · 请在波形边沿点击新的起点';
+      } else if (connectionEndpointEditMode === 'to' && connectionPickActive) {
+        hint = ' · 请在波形边沿点击新的终点';
+      } else if (connectionAddSessionActive && connectionPickActive) {
         if (!connectionFromPoint) hint = ' · 请在波形上点击连接起点';
         else if (!connectionToPoint) hint = ' · 请点击连接终点';
         else hint = ' · 请选择连接样式';
@@ -6142,7 +6328,15 @@ ${lines.join('\n')}`;
     }
 
     function handleConnectionPointClick(rowIndex, colIndex, svgPoint) {
-      if (!connectionAddSessionActive || !connectionPickActive) return false;
+      if (!connectionPickActive) return false;
+
+      if (connectionEndpointEditMode === 'from' || connectionEndpointEditMode === 'to') {
+        const endpoint = connectionEndpointEditMode;
+        const point = Object.assign({ rowIndex, colIndex }, svgPoint || {});
+        return modifySelectedEdgeEndpoint(endpoint, point) ? 'endpoint-updated' : true;
+      }
+
+      if (!connectionAddSessionActive) return false;
 
       if (!connectionFromPoint) {
         connectionFromPoint = Object.assign({ rowIndex, colIndex }, svgPoint || {});
@@ -6407,6 +6601,146 @@ ${lines.join('\n')}`;
       return result;
     }
 
+    function beginConnectionEndpointEdit(endpoint) {
+      if (endpoint !== 'from' && endpoint !== 'to') return false;
+      if (!connectionSelectActive || selectedEdgeIndex < 0) {
+        setStatus(false, '请先选择一条连接线');
+        return false;
+      }
+      if (connectionEndpointEditMode === endpoint && connectionPickActive) {
+        cancelConnectionEndpointEdit(true);
+        return true;
+      }
+
+      connectionAddSessionActive = false;
+      connectionEndpointEditMode = endpoint;
+      connectionPickActive = true;
+      syncConnectionPointsFromSelectedEdge();
+      updateConnectionPropertiesUI();
+      setStatus(true, endpoint === 'from'
+        ? '修改连接起点：请点击新的波形边沿'
+        : '修改连接终点：请点击新的波形边沿');
+      vwdDebugLog('connection', {
+        phase: 'endpoint-edit-started',
+        endpoint,
+        selectedEdgeIndex
+      });
+      return true;
+    }
+
+    function modifySelectedEdgeEndpoint(endpoint, point) {
+      if ((endpoint !== 'from' && endpoint !== 'to') || selectedEdgeIndex < 0 || !point) return false;
+
+      const text = editor.value;
+      let parsed;
+      let sourceMap;
+      try {
+        parsed = JSON.parse(text);
+        sourceMap = buildSignalSourceMap(text);
+      } catch (e) {
+        setStatus(false, 'JSON 错误，无法修改连接端点');
+        return false;
+      }
+
+      const edges = Array.isArray(parsed.edge) ? parsed.edge : [];
+      if (selectedEdgeIndex >= edges.length) {
+        setStatus(false, '未找到选中的连接线');
+        return false;
+      }
+      const entry = sourceMap[point.rowIndex];
+      if (!entry) {
+        setStatus(false, '未找到所选波形行');
+        return false;
+      }
+
+      const current = parseEdgeString(edges[selectedEdgeIndex]);
+      if (!current.from || !current.to) {
+        setStatus(false, '选中的连接线缺少有效端点');
+        return false;
+      }
+
+      const safeCol = Math.max(0, Math.floor(Number(point.colIndex) || 0));
+      const used = collectUsedNodeIds(parsed);
+      const existingNode = getNodeAtColumn(entry.signal, safeCol);
+      const newNode = existingNode || allocateNodeId(used);
+      if (!newNode) {
+        setStatus(false, '没有可用的 node 标识符');
+        return false;
+      }
+
+      const oldNode = endpoint === 'from' ? current.from : current.to;
+      const otherNode = endpoint === 'from' ? current.to : current.from;
+      if (newNode === otherNode) {
+        setStatus(false, '起点与终点不能使用同一 node 锚点');
+        return false;
+      }
+      if (newNode === oldNode) {
+        cancelConnectionEndpointEdit(false);
+        setStatus(true, endpoint === 'from' ? '连接起点未变化' : '连接终点未变化');
+        return true;
+      }
+
+      const newFrom = endpoint === 'from' ? newNode : current.from;
+      const newTo = endpoint === 'to' ? newNode : current.to;
+      const newEdgeStr = formatEdgeFromParts(newFrom, newTo, current.prefix, current.arrow, current.label);
+      const updates = existingNode ? [] : [{
+        rowIndex: point.rowIndex,
+        signal: ensureNodeCharAtColumn(entry.signal, safeCol, newNode)
+      }];
+
+      let newText = applySignalUpdatesInText(text, updates, sourceMap);
+      newText = replaceEdgeAtIndex(newText, selectedEdgeIndex, newEdgeStr);
+      let orphanCleanup = { removedNodes: [], changedSignalCount: 0 };
+      try {
+        const updated = JSON.parse(newText);
+        const finalEdge = parseEdgeString((updated.edge || [])[selectedEdgeIndex] || '');
+        if (finalEdge.from !== newFrom || finalEdge.to !== newTo) {
+          throw new Error('endpoint replacement failed');
+        }
+        orphanCleanup = cleanupOrphanedNodesInParsedSource(updated);
+        newText = JSON.stringify(updated, null, 2);
+      } catch (e) {
+        setStatus(false, '连接端点修改后 JSON 校验失败');
+        return false;
+      }
+
+      const edgePosition = findEdgePositionInText(newText, selectedEdgeIndex);
+      if (!edgePosition) {
+        setStatus(false, '无法定位修改后的连接线');
+        return false;
+      }
+
+      pushUndoBeforeChange();
+      connectionEndpointEditMode = '';
+      connectionPickActive = false;
+      applyEditorChange(newText, edgePosition.absStart, edgePosition.absEnd, {
+        skipFocus: true,
+        onRenderComplete: () => {
+          syncConnectionPointsFromSelectedEdge();
+          highlightSelectedEdgeInSvg();
+          updateConnectionPropertiesUI();
+        }
+      });
+      syncConnectionPointsFromSelectedEdge();
+      updateConnectionPropertiesUI();
+      setStatus(true, endpoint === 'from'
+        ? ('已修改连接起点: ' + connectionPointLabel({ rowIndex: point.rowIndex, colIndex: safeCol }, sourceMap))
+        : ('已修改连接终点: ' + connectionPointLabel({ rowIndex: point.rowIndex, colIndex: safeCol }, sourceMap)));
+      vwdDebugLog('connection', {
+        phase: 'endpoint-modified',
+        endpoint,
+        edgeIndex: selectedEdgeIndex,
+        oldNode,
+        newNode,
+        rowIndex: point.rowIndex,
+        colIndex: safeCol,
+        edge: newEdgeStr,
+        removedOrphanNodes: orphanCleanup.removedNodes,
+        changedNodeSignalCount: orphanCleanup.changedSignalCount
+      });
+      return true;
+    }
+
     function buildEdgeFromTemplate(template, fromNode, toNode, label) {
       const trimmedLabel = (label || '').trim();
       let result = template
@@ -6501,7 +6835,10 @@ ${lines.join('\n')}`;
     }
 
     function selectEdge(index) {
+      connectionEndpointEditMode = '';
+      connectionPickActive = false;
       selectedEdgeIndex = index;
+      syncConnectionPointsFromSelectedEdge();
       updateEdgeLabelEditUI();
       renderConnectionEdgeList();
       updateConnectionPresetDisabledState();
@@ -6521,6 +6858,10 @@ ${lines.join('\n')}`;
 
     function clearEdgeSelection() {
       selectedEdgeIndex = -1;
+      connectionEndpointEditMode = '';
+      if (!connectionAddSessionActive) connectionPickActive = false;
+      clearConnectionPoints();
+      refreshConnectionHighlightsFromDom();
       renderConnectionEdgeList();
       updateEdgeLabelEditUI();
       updateConnectionPresetDisabledState();
@@ -7236,7 +7577,7 @@ ${lines.join('\n')}`;
         if (!signal.node) return;
         let changed = false;
         let node = String(signal.node).split('').map((char) => {
-          if (char === '.' || used.has(char)) return char;
+          if (char === '.' || !/[a-zA-Z0-9]/.test(char) || used.has(char)) return char;
           changed = true;
           removedNodes.add(char);
           return '.';
@@ -7683,13 +8024,17 @@ ${lines.join('\n')}`;
     }
 
     function getWaveLaneGroups(svg) {
-      return [...svg.querySelectorAll('g[id^="wavelane_"]')]
+      if (!svg) return [];
+      if (Array.isArray(svg.__vwdLaneGroupCache)) return svg.__vwdLaneGroupCache;
+      const lanes = [...svg.querySelectorAll('g[id^="wavelane_"]')]
         .filter(g => /^wavelane_\d+_\d+$/.test(g.id))
         .sort((a, b) => {
           const ai = parseInt(a.id.match(/^wavelane_(\d+)_/)[1], 10);
           const bi = parseInt(b.id.match(/^wavelane_(\d+)_/)[1], 10);
           return ai - bi;
         });
+      svg.__vwdLaneGroupCache = lanes;
+      return lanes;
     }
 
     function getSvgElementBounds(element) {
@@ -10319,14 +10664,19 @@ ${lines.join('\n')}`;
       if (!raw || typeof raw.name !== 'string') return null;
       const content = typeof raw.content === 'string' ? raw.content
         : (typeof raw.json === 'string' ? raw.json : null);
-      if (content == null) return null;
+      const deferred = raw.deferred === true && content == null;
+      if (content == null && !deferred) return null;
       return {
         name: raw.name.trim(),
-        content: content,
+        content: deferred ? null : content,
         hscale: raw.hscale,
         waveEditMode: raw.waveEditMode,
         revision: Number.isInteger(raw.revision) && raw.revision >= 0 ? raw.revision : 0,
-        savedAt: raw.savedAt || new Date().toISOString()
+        savedAt: raw.savedAt || new Date().toISOString(),
+        deferred,
+        titleCache: typeof raw.titleCache === 'string' ? raw.titleCache : '',
+        descriptionCache: typeof raw.descriptionCache === 'string' ? raw.descriptionCache : '',
+        contentLength: Number.isFinite(raw.contentLength) ? raw.contentLength : (content ? content.length : 0)
       };
     }
 
@@ -10347,6 +10697,17 @@ ${lines.join('\n')}`;
 
     function getWaveDocumentMeta(tag, preferEditor) {
       if (!tag) return { content: '', source: null, renderSource: null, title: '', description: '', error: null };
+      if (tag.deferred) {
+        return {
+          content: null,
+          source: null,
+          renderSource: null,
+          title: tag.titleCache || tag.name || '',
+          description: tag.descriptionCache || '',
+          error: null,
+          deferred: true
+        };
+      }
       const useEditor = preferEditor !== false && tag.name === editingWaveDocumentName;
       const content = useEditor ? (editor.value || '') : (tag.content || '');
       const cacheKey = (useEditor ? 'editor:' : 'saved:') + tag.name;
@@ -10397,11 +10758,15 @@ ${lines.join('\n')}`;
 
     function getSavedTagTitle(tag) {
       if (!tag) return '';
+      if (tag.name !== editingWaveDocumentName && tag.titleCache) return tag.titleCache;
       return getWaveDocumentMeta(tag, true).title || tag.name || '未命名波形图';
     }
 
     function getWaveDocumentDescription(tag) {
-      if (!tag || !tag.content) return '';
+      if (!tag) return '';
+      if (tag.deferred) return tag.descriptionCache || '';
+      if (tag.name !== editingWaveDocumentName && tag.descriptionCache) return tag.descriptionCache;
+      if (!tag.content) return '';
       const meta = getWaveDocumentMeta(tag, true);
       if (!meta.error) return meta.description;
       return getWaveDocumentMeta(tag, false).description;
@@ -10411,9 +10776,10 @@ ${lines.join('\n')}`;
       if (!documentName || !navTreeState) return false;
       const tag = getSavedTagByName(documentName);
       if (!tag) return false;
-      const meta = getWaveDocumentMeta(tag, true);
-      if (meta.error) return false;
-      const title = meta.title || tag.name || '未命名波形图';
+      const meta = documentName === editingWaveDocumentName ? getWaveDocumentMeta(tag, true) : null;
+      if (meta && meta.error) return false;
+      const title = (meta && meta.title) || getSavedTagTitle(tag) || tag.name || '未命名波形图';
+      tag.titleCache = title;
       if (!force && navDocumentTitleCache.get(documentName) === title) return false;
       navDocumentTitleCache.set(documentName, title);
       const parent = findNavDocumentParent(navTreeState, documentName);
@@ -10471,10 +10837,40 @@ ${lines.join('\n')}`;
     function flushPersistSavedTags() {
       clearTimeout(savedTagsPersistTimer);
       savedTagsPersistTimer = null;
+      if (savedTagsPersistIdleHandle !== null) {
+        if (savedTagsPersistIdleHandle.kind === 'idle' && typeof cancelIdleCallback === 'function') {
+          cancelIdleCallback(savedTagsPersistIdleHandle.id);
+        } else {
+          clearTimeout(savedTagsPersistIdleHandle.id);
+        }
+        savedTagsPersistIdleHandle = null;
+      }
       try {
-        localStorage.setItem(WAVE_DOCUMENTS_KEY, JSON.stringify(savedTags));
+        if (waveLibraryServerMode && savedTags.some((tag) => tag.deferred)) {
+          const loadedDocuments = savedTags.filter((tag) => !tag.deferred);
+          localStorage.setItem(WAVE_DOCUMENTS_LOADED_CACHE_KEY, JSON.stringify(loadedDocuments));
+        } else {
+          localStorage.setItem(WAVE_DOCUMENTS_KEY, JSON.stringify(savedTags));
+          localStorage.removeItem(WAVE_DOCUMENTS_LOADED_CACHE_KEY);
+        }
       } catch (e) { /* quota / private mode */ }
       scheduleWaveLibraryServerSave();
+    }
+
+    function schedulePersistSavedTagsDuringIdle() {
+      if (savedTagsPersistIdleHandle !== null) return;
+      const run = () => {
+        savedTagsPersistIdleHandle = null;
+        flushPersistSavedTags();
+      };
+      if (typeof requestIdleCallback === 'function') {
+        savedTagsPersistIdleHandle = {
+          kind: 'idle',
+          id: requestIdleCallback(run, { timeout: SAVED_TAGS_PERSIST_IDLE_TIMEOUT_MS })
+        };
+      } else {
+        savedTagsPersistIdleHandle = { kind: 'timeout', id: setTimeout(run, 32) };
+      }
     }
 
     function persistSavedTags(options) {
@@ -10484,11 +10880,25 @@ ${lines.join('\n')}`;
         flushPersistSavedTags();
         return;
       }
-      savedTagsPersistTimer = setTimeout(flushPersistSavedTags, SAVED_TAGS_PERSIST_DEBOUNCE_MS);
+      savedTagsPersistTimer = setTimeout(() => {
+        savedTagsPersistTimer = null;
+        schedulePersistSavedTagsDuringIdle();
+      }, SAVED_TAGS_PERSIST_DEBOUNCE_MS);
+    }
+
+    function getWaveDocumentServerSnapshot(tag, useEditorState) {
+      if (!tag || tag.deferred) return null;
+      const document = Object.assign({}, tag,
+        useEditorState && tag.name === editingWaveDocumentName ? getCurrentStateSnapshot() : null);
+      delete document.deferred;
+      delete document.titleCache;
+      delete document.descriptionCache;
+      delete document.contentLength;
+      return document;
     }
 
     function getWaveLibraryBundle() {
-      const documents = savedTags.map((tag) => Object.assign({}, tag));
+      const documents = savedTags.map((tag) => getWaveDocumentServerSnapshot(tag, false)).filter(Boolean);
       const current = documents.find((tag) => tag.name === editingWaveDocumentName);
       if (current) Object.assign(current, getCurrentStateSnapshot());
       return {
@@ -10504,6 +10914,32 @@ ${lines.join('\n')}`;
         activeDocumentName: editingWaveDocumentName || '',
         selectedDirectoryId: selectedNavNodeId || 'nav-root'
       };
+    }
+
+    function buildWaveLibraryStatePayload(options) {
+      const opts = options || {};
+      const names = new Set(opts.documentNames || dirtyWaveDocumentNames);
+      if (singleWaveViewActive && editingWaveDocumentName) names.add(editingWaveDocumentName);
+      const documents = [];
+      names.forEach((name) => {
+        const tag = getSavedTagByName(name);
+        const snapshot = getWaveDocumentServerSnapshot(tag, true);
+        if (snapshot) documents.push(snapshot);
+      });
+      const payload = {
+        libraryId: currentWaveLibraryId,
+        activeDocumentName: editingWaveDocumentName || '',
+        selectedDirectoryId: selectedNavNodeId || 'nav-root',
+        documents,
+        deletedDocuments: Array.from(deletedWaveDocumentNames)
+      };
+      if (opts.includeStructure || waveLibraryStructureDirty) {
+        payload.directories = collectCustomNavNodes(navTreeState || { children: [] });
+        payload.rootDocuments = navTreeState && Array.isArray(navTreeState.documents)
+          ? navTreeState.documents.slice()
+          : [];
+      }
+      return payload;
     }
 
     function readPendingWaveLibrarySave() {
@@ -10527,7 +10963,8 @@ ${lines.join('\n')}`;
         activeDocumentName: editingWaveDocumentName || '',
         selectedDirectoryId: selectedNavNodeId || 'nav-root',
         token: Date.now().toString(36) + '-' + Math.random().toString(36).slice(2),
-        markedAt: new Date().toISOString()
+        markedAt: new Date().toISOString(),
+        state: buildWaveLibraryStatePayload({ includeStructure: waveLibraryStructureDirty })
       };
       try {
         localStorage.setItem(WAVE_LIBRARY_PENDING_SAVE_KEY, JSON.stringify(pending));
@@ -10558,10 +10995,13 @@ ${lines.join('\n')}`;
       const pending = readPendingWaveLibrarySave();
       if (!pending) return 'none';
       try {
-        const response = await fetch('/api/wave-library?file=' + encodeURIComponent(pending.file), {
-          method: 'POST',
+        const incremental = pending.state && pending.state.libraryId;
+        const response = await fetch(incremental
+          ? '/api/wave-library-state'
+          : ('/api/wave-library?file=' + encodeURIComponent(pending.file)), {
+          method: incremental ? 'PATCH' : 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(buildPendingWaveLibraryBundle(pending))
+          body: JSON.stringify(incremental ? pending.state : buildPendingWaveLibraryBundle(pending))
         });
         if (!response.ok) throw new Error('recovery save failed: ' + response.status);
         clearPendingWaveLibrarySave(pending);
@@ -10666,10 +11106,8 @@ ${lines.join('\n')}`;
       const opts = options || {};
       const name = requestedWaveDocumentName || editingWaveDocumentName;
       const stored = getSavedTagByName(name);
-      if (!stored || !currentWaveLibraryId) return false;
-      const documentSnapshot = Object.assign({}, stored,
-        name === editingWaveDocumentName ? getCurrentStateSnapshot() : null,
-        { name });
+      if (!stored || stored.deferred || !currentWaveLibraryId) return false;
+      const documentSnapshot = getWaveDocumentServerSnapshot(stored, name === editingWaveDocumentName);
       const snapshotSignature = singleWaveSyncSignature(documentSnapshot);
       if (snapshotSignature && snapshotSignature === lastSingleWaveSyncedSignature) return true;
       try {
@@ -10730,24 +11168,171 @@ ${lines.join('\n')}`;
       }
     }
 
+    async function saveWaveDocumentPatchToServer(documentName) {
+      const stored = getSavedTagByName(documentName);
+      if (!stored || stored.deferred || !currentWaveLibraryId) return false;
+      const documentSnapshot = getWaveDocumentServerSnapshot(stored, false);
+      const snapshotSignature = singleWaveSyncSignature(documentSnapshot);
+      try {
+        JSON.parse(documentSnapshot.content);
+      } catch (_e) {
+        setStatus(false, 'JSON 解析错误，当前波形尚未同步');
+        return false;
+      }
+      const response = await fetch('/api/wave-document', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          libraryId: currentWaveLibraryId,
+          waveId: documentName,
+          expectedRevision: stored.revision || 0,
+          document: documentSnapshot
+        })
+      });
+      const result = await response.json().catch(() => ({}));
+      if (response.status === 409) {
+        setStatus(false, '同步冲突：波形库中的这张图已被其他页面修改');
+        vwdDebugLog('wave-library', { phase: 'incremental-save-conflict', documentName });
+        return false;
+      }
+      if (!response.ok || !result.document) throw new Error(result.error || 'document save failed');
+      const current = getSavedTagByName(documentName);
+      if (current) {
+        current.revision = result.document.revision;
+        if (singleWaveSyncSignature(current) === snapshotSignature) {
+          current.savedAt = result.document.savedAt;
+          dirtyWaveDocumentNames.delete(documentName);
+        }
+      } else {
+        dirtyWaveDocumentNames.delete(documentName);
+      }
+      notifyWaveDocumentSync(result.document);
+      vwdDebugLog('performance', {
+        phase: 'document-save-incremental',
+        documentName,
+        contentLength: documentSnapshot.content.length,
+        revision: result.document.revision
+      });
+      return true;
+    }
+
+    async function saveWaveLibraryStateToServer(options) {
+      const opts = options || {};
+      const structureRevision = waveLibraryStructureRevision;
+      const payload = opts.payload || buildWaveLibraryStatePayload({
+        includeStructure: waveLibraryStructureDirty,
+        documentNames: opts.documentNames
+      });
+      const signatures = new Map(payload.documents.map((document) => [
+        document.name,
+        singleWaveSyncSignature(document)
+      ]));
+      const deletedSnapshot = new Set(payload.deletedDocuments || []);
+      const response = await fetch('/api/wave-library-state', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        keepalive: !!opts.keepalive,
+        body: JSON.stringify(payload)
+      });
+      const result = await response.json().catch(() => ({}));
+      if (response.status === 409) {
+        setStatus(false, '同步冲突：波形库中的数据已被其他页面修改');
+        return false;
+      }
+      if (!response.ok) throw new Error(result.error || 'library state save failed');
+      (result.revisions || []).forEach((item) => {
+        const current = getSavedTagByName(item.name);
+        if (!current) return;
+        current.revision = item.revision;
+        current.savedAt = item.savedAt || current.savedAt;
+        if (singleWaveSyncSignature(current) === signatures.get(item.name)) {
+          dirtyWaveDocumentNames.delete(item.name);
+        }
+      });
+      deletedSnapshot.forEach((name) => {
+        if (!getSavedTagByName(name)) deletedWaveDocumentNames.delete(name);
+      });
+      if (payload.directories && structureRevision === waveLibraryStructureRevision) {
+        waveLibraryStructureDirty = false;
+      }
+      vwdDebugLog('performance', {
+        phase: 'library-save-incremental-state',
+        documentCount: payload.documents.length,
+        deletedCount: deletedSnapshot.size,
+        structureIncluded: !!payload.directories
+      });
+      return true;
+    }
+
+    async function flushScheduledWaveLibraryServerSave(pendingMarker) {
+      if (waveLibraryServerSaveInFlight) {
+        waveLibraryServerSaveQueued = true;
+        return false;
+      }
+      waveLibraryServerSaveInFlight = true;
+      let saveSucceeded = true;
+      try {
+        if (singleWaveViewActive) {
+          return await saveSingleWaveDocumentToServer({ pendingMarker });
+        }
+        if (!currentWaveLibraryId) {
+          const structureRevision = waveLibraryStructureRevision;
+          const documentSignatures = new Map(savedTags.map((tag) => [tag.name, singleWaveSyncSignature(tag)]));
+          const response = await fetch('/api/wave-library?file=' + encodeURIComponent(currentWaveLibraryFile), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(getWaveLibraryBundle())
+          });
+          if (!response.ok) throw new Error('library save failed');
+          if (structureRevision === waveLibraryStructureRevision) waveLibraryStructureDirty = false;
+          documentSignatures.forEach((signature, name) => {
+            const current = getSavedTagByName(name);
+            if (current && singleWaveSyncSignature(current) === signature) dirtyWaveDocumentNames.delete(name);
+          });
+          vwdDebugLog('performance', {
+            phase: 'library-save-full',
+            documentCount: savedTags.length,
+            structureRevision
+          });
+        } else if (waveLibraryStructureDirty || deletedWaveDocumentNames.size > 0) {
+          saveSucceeded = await saveWaveLibraryStateToServer();
+        } else {
+          const names = Array.from(dirtyWaveDocumentNames);
+          for (let i = 0; i < names.length; i += 1) {
+            const saved = await saveWaveDocumentPatchToServer(names[i]);
+            if (!saved) saveSucceeded = false;
+          }
+        }
+        if (saveSucceeded && !waveLibraryStructureDirty
+            && dirtyWaveDocumentNames.size === 0 && deletedWaveDocumentNames.size === 0) {
+          clearPendingWaveLibrarySave(pendingMarker);
+        }
+        return saveSucceeded;
+      } catch (error) {
+        setStatus(false, '波形库自动保存失败');
+        vwdDebugLog('persistence', {
+          phase: 'server-save-failed',
+          message: error && error.message ? error.message : String(error)
+        });
+        return false;
+      } finally {
+        waveLibraryServerSaveInFlight = false;
+        if (waveLibraryServerSaveQueued) {
+          waveLibraryServerSaveQueued = false;
+          scheduleWaveLibraryServerSave();
+        }
+      }
+    }
+
     function scheduleWaveLibraryServerSave() {
       if (!waveLibraryServerMode || applyingWaveLibraryBundle || !currentWaveLibraryFile) return;
+      if (!singleWaveViewActive && !waveLibraryStructureDirty
+          && dirtyWaveDocumentNames.size === 0 && deletedWaveDocumentNames.size === 0) return;
       const pendingMarker = markWaveLibraryServerSavePending();
       clearTimeout(waveLibrarySaveTimer);
       waveLibrarySaveTimer = setTimeout(() => {
         waveLibrarySaveTimer = null;
-        if (singleWaveViewActive) {
-          saveSingleWaveDocumentToServer({ pendingMarker }).catch(() => setStatus(false, '波形图自动同步失败'));
-          return;
-        }
-        fetch('/api/wave-library?file=' + encodeURIComponent(currentWaveLibraryFile), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(getWaveLibraryBundle())
-        }).then((response) => {
-          if (!response.ok) throw new Error('save failed');
-          clearPendingWaveLibrarySave(pendingMarker);
-        }).catch(() => setStatus(false, '波形库自动保存失败'));
+        void flushScheduledWaveLibraryServerSave(pendingMarker);
       }, 350);
     }
 
@@ -10765,11 +11350,12 @@ ${lines.join('\n')}`;
         return true;
       }
       try {
-        fetch('/api/wave-library?file=' + encodeURIComponent(currentWaveLibraryFile), {
-          method: 'POST',
+        const payload = buildWaveLibraryStatePayload({ includeStructure: waveLibraryStructureDirty });
+        fetch('/api/wave-library-state', {
+          method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           keepalive: true,
-          body: JSON.stringify(getWaveLibraryBundle())
+          body: JSON.stringify(payload)
         }).then((response) => {
           if (response.ok) clearPendingWaveLibrarySave(pendingMarker);
         }).catch(() => { /* startup recovery will retry */ });
@@ -10807,11 +11393,14 @@ ${lines.join('\n')}`;
           ? requestedWaveDocumentName
           : (bundle.activeDocumentName || (savedTags[0] && savedTags[0].name));
         const preferred = getSavedTagByName(preferredName) || (singleWaveViewActive ? null : savedTags[0]);
-        lastSingleWaveSyncedSignature = singleWaveViewActive && preferred
+        lastSingleWaveSyncedSignature = singleWaveViewActive && preferred && !preferred.deferred
           ? singleWaveSyncSignature(preferred)
           : '';
-        if (preferred) {
+        if (preferred && !preferred.deferred) {
           setEditorValue(preferred.content, { clearCodeMirrorHistory: true });
+          setEditorHistoryBaseline(editor.value);
+        } else {
+          setEditorValue(getDefaultJson(), { clearCodeMirrorHistory: true });
           setEditorHistoryBaseline(editor.value);
         }
         rebuildNavTreeStateFromJson(editor.value || getDefaultJson());
@@ -10826,6 +11415,10 @@ ${lines.join('\n')}`;
           : '链接指定的波形图不存在或已被删除');
         return true;
       } finally {
+        dirtyWaveDocumentNames.clear();
+        deletedWaveDocumentNames.clear();
+        waveDocumentLoadPromises.clear();
+        waveLibraryStructureDirty = false;
         applyingWaveLibraryBundle = false;
       }
     }
@@ -10835,7 +11428,9 @@ ${lines.join('\n')}`;
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
-      link.download = currentWaveLibraryFile || 'VisualWaveDrom-library.json';
+      const libraryBaseName = String(currentWaveLibraryFile || 'VisualWaveDrom-library')
+        .replace(/\.json$/i, '');
+      link.download = libraryBaseName + '.json';
       document.body.appendChild(link);
       link.click();
       link.remove();
@@ -10859,7 +11454,7 @@ ${lines.join('\n')}`;
     }
 
     async function loadServerWaveLibrary(fileName) {
-      const response = await fetch('/api/wave-library?file=' + encodeURIComponent(fileName));
+      const response = await fetch('/api/wave-library?summary=1&file=' + encodeURIComponent(fileName));
       if (!response.ok) throw new Error('load failed');
       const bundle = await response.json();
       applyWaveLibraryBundle(bundle, fileName);
@@ -10924,9 +11519,7 @@ ${lines.join('\n')}`;
           if (singleWaveViewActive && remote.name === requestedWaveDocumentName) {
             lastSingleWaveSyncedSignature = singleWaveSyncSignature(remote);
           }
-          try {
-            localStorage.setItem(WAVE_DOCUMENTS_KEY, JSON.stringify(savedTags));
-          } catch (_e) { /* storage is optional */ }
+          persistSavedTags();
           if (remote.name === editingWaveDocumentName) loadSavedTag(remote.name);
           else {
             refreshWaveDocumentCard(remote.name);
@@ -10947,24 +11540,39 @@ ${lines.join('\n')}`;
       try {
         const response = await fetch('/api/wave-libraries');
         const catalog = await response.json();
-        const files = catalog.files || [];
+        const libraries = Array.isArray(catalog.libraries) ? catalog.libraries : [];
         if (!waveLibraryPickerModal || !waveLibraryPickerOptions) return;
         waveLibraryPickerOptions.innerHTML = '';
-        files.forEach((fileName) => {
+        libraries.forEach((library) => {
+          const libraryName = String(library && library.name || '');
+          if (!libraryName) return;
           const option = document.createElement('button');
           option.type = 'button';
           option.className = 'nav-move-option';
-          option.textContent = fileName;
+          option.textContent = libraryName + '（' + Number(library.documentCount || 0) + ' 张波形）';
+          if (libraryName === currentWaveLibraryFile) option.classList.add('selected');
           option.addEventListener('click', async () => {
             waveLibraryPickerModal.hidden = true;
+            if (libraryName === currentWaveLibraryFile) {
+              setStatus(true, '当前正在使用波形库：' + libraryName);
+              return;
+            }
             try {
-              await loadServerWaveLibrary(fileName);
+              const saved = !currentWaveLibraryFile || await saveCurrentWaveLibrary();
+              if (!saved) throw new Error('current library save failed');
+              await loadServerWaveLibrary(libraryName);
             } catch (e) {
               setStatus(false, '更换波形库失败');
             }
           });
           waveLibraryPickerOptions.appendChild(option);
         });
+        if (!waveLibraryPickerOptions.childElementCount) {
+          const empty = document.createElement('div');
+          empty.className = 'modal-empty-state';
+          empty.textContent = 'Wave 文件夹中没有可用的波形库';
+          waveLibraryPickerOptions.appendChild(empty);
+        }
         waveLibraryPickerModal.hidden = false;
       } catch (e) {
         setStatus(false, '更换波形库失败');
@@ -11005,12 +11613,27 @@ ${lines.join('\n')}`;
       const idx = findSavedTagIndex(trimmed);
       const existing = idx >= 0 ? savedTags[idx] : null;
       const entry = Object.assign({}, existing || { name: trimmed, revision: 0 }, snapshot, { name: trimmed });
+      entry.deferred = false;
       if (idx >= 0) savedTags[idx] = entry;
       else savedTags.push(entry);
+      const entryMeta = getWaveDocumentMeta(entry, trimmed === editingWaveDocumentName);
+      if (!entryMeta.error) {
+        entry.titleCache = entryMeta.title || trimmed;
+        entry.descriptionCache = entryMeta.description || '';
+        entry.contentLength = typeof entry.content === 'string' ? entry.content.length : 0;
+      }
       if (!opts.skipSort) {
         savedTags.sort((a, b) => new Date(b.savedAt) - new Date(a.savedAt));
       }
       savedTagByName.set(trimmed, entry);
+      if (!applyingWaveLibraryBundle) {
+        dirtyWaveDocumentNames.add(trimmed);
+        deletedWaveDocumentNames.delete(trimmed);
+        if (!existing) {
+          waveLibraryStructureDirty = true;
+          waveLibraryStructureRevision += 1;
+        }
+      }
       persistSavedTags();
       activeTagName = trimmed;
       if (!opts.skipListRefresh) renderSavedTagsList();
@@ -11021,9 +11644,15 @@ ${lines.join('\n')}`;
       return JSON.parse(JSON.stringify(value));
     }
 
+    function cloneWaveDocumentSnapshots(documents) {
+      return (documents || []).map((document) => Object.assign({}, document));
+    }
+
     function captureWaveLibrarySnapshot() {
       return {
-        savedTags: cloneWaveLibrarySnapshotValue(savedTags),
+        // Wave document fields are immutable strings/primitives. Shallow copies
+        // preserve snapshot isolation without duplicating every JSON string.
+        savedTags: cloneWaveDocumentSnapshots(savedTags),
         customNodes: cloneWaveLibrarySnapshotValue(collectCustomNavNodes(navTreeState || { children: [] })),
         rootDocuments: cloneWaveLibrarySnapshotValue(
           navTreeState && Array.isArray(navTreeState.documents) ? navTreeState.documents : []
@@ -11040,8 +11669,23 @@ ${lines.join('\n')}`;
 
     function restoreWaveLibrarySnapshot(snapshot) {
       if (!snapshot) return false;
+      const previousByName = new Map(savedTags.map((tag) => [tag.name, tag]));
       savedTags = (snapshot.savedTags || []).map(normalizeSavedTag).filter(Boolean);
       rebuildSavedTagIndex();
+      const restoredNames = new Set(savedTags.map((tag) => tag.name));
+      previousByName.forEach((_tag, name) => {
+        if (!restoredNames.has(name)) {
+          dirtyWaveDocumentNames.delete(name);
+          deletedWaveDocumentNames.add(name);
+        }
+      });
+      savedTags.forEach((tag) => {
+        const previous = previousByName.get(tag.name);
+        if (!previous || singleWaveSyncSignature(previous) !== singleWaveSyncSignature(tag)) {
+          if (!tag.deferred) dirtyWaveDocumentNames.add(tag.name);
+        }
+        deletedWaveDocumentNames.delete(tag.name);
+      });
       persistSavedTags();
       saveNavCustomTreeToStorage(snapshot.customNodes || [], snapshot.rootDocuments || []);
 
@@ -11082,6 +11726,10 @@ ${lines.join('\n')}`;
       if (idx < 0) return false;
       savedTags.splice(idx, 1);
       rebuildSavedTagIndex();
+      dirtyWaveDocumentNames.delete(name);
+      deletedWaveDocumentNames.add(name);
+      waveLibraryStructureDirty = true;
+      waveLibraryStructureRevision += 1;
       persistSavedTags();
       if (activeTagName === name) activeTagName = null;
       if (editingWaveDocumentName === name) editingWaveDocumentName = null;
@@ -11148,6 +11796,7 @@ ${lines.join('\n')}`;
     }
 
     function currentStateMatchesTag(tag) {
+      if (!tag || tag.deferred) return false;
       if (editor.value !== tag.content) return false;
       if (tag.waveEditMode && tag.waveEditMode !== waveEditMode) return false;
       return true;
@@ -11224,6 +11873,8 @@ ${lines.join('\n')}`;
       snapshotActiveWavePreview(name);
       editingWaveDocumentName = name;
       activeTagName = name;
+      const targetEntry = waveLibraryCardCache.get(name);
+      if (!targetEntry || !targetEntry.card.isConnected) renderWaveLibrary();
       if (previousName && previousName !== name) refreshWaveDocumentCard(previousName);
       refreshWaveDocumentCard(name);
       loadSavedTag(name);
@@ -11236,6 +11887,50 @@ ${lines.join('\n')}`;
         elapsedMs: Math.round((now - startedAt) * 10) / 10
       });
       return true;
+    }
+
+    function ensureWaveDocumentLoaded(name) {
+      const tag = getSavedTagByName(name);
+      if (!tag || !tag.deferred) return Promise.resolve(tag);
+      if (!waveLibraryServerMode || !currentWaveLibraryId) return Promise.resolve(null);
+      if (waveDocumentLoadPromises.has(name)) return waveDocumentLoadPromises.get(name);
+      const query = new URLSearchParams({ libraryId: currentWaveLibraryId, waveId: name });
+      const load = fetch('/api/wave-document?' + query.toString())
+        .then((response) => {
+          if (!response.ok) throw new Error('document load failed: ' + response.status);
+          return response.json();
+        })
+        .then((result) => {
+          const loaded = normalizeSavedTag(result.document);
+          if (!loaded) throw new Error('invalid wave document');
+          loaded.titleCache = tag.titleCache || loaded.titleCache;
+          loaded.descriptionCache = tag.descriptionCache || loaded.descriptionCache;
+          const index = findSavedTagIndex(name);
+          if (index >= 0) savedTags[index] = loaded;
+          else savedTags.push(loaded);
+          rebuildSavedTagIndex();
+          refreshWaveDocumentTitle(name, true);
+          refreshWaveDocumentCard(name);
+          persistSavedTags();
+          vwdDebugLog('performance', {
+            phase: 'document-load-on-demand',
+            documentName: name,
+            contentLength: loaded.content ? loaded.content.length : 0
+          });
+          return loaded;
+        })
+        .catch((error) => {
+          setStatus(false, '波形图加载失败: ' + getSavedTagTitle(tag));
+          vwdDebugLog('performance', {
+            phase: 'document-load-failed',
+            documentName: name,
+            message: error && error.message ? error.message : String(error)
+          });
+          return null;
+        })
+        .finally(() => waveDocumentLoadPromises.delete(name));
+      waveDocumentLoadPromises.set(name, load);
+      return load;
     }
 
     function scheduleWaveDocumentActivation(name, previousName, startedAt) {
@@ -11270,17 +11965,26 @@ ${lines.join('\n')}`;
       const previousName = editingWaveDocumentName;
       selectNavDocumentInTree(name);
       focusWaveDocument(name);
-      setStatus(true, '正在打开波形图: ' + getSavedTagTitle(getSavedTagByName(name) || { name: name, content: '{}' }));
+      const requestedTag = getSavedTagByName(name);
+      setStatus(true, '正在打开波形图: ' + getSavedTagTitle(requestedTag || { name: name, content: '{}' }));
       vwdDebugLog('performance', {
         phase: 'nav-document-jump-ready',
         documentName: name,
-        deferred: !opts.immediate
+        deferred: !!(requestedTag && requestedTag.deferred) || !opts.immediate
       });
-      if (opts.immediate) {
-        activateWaveDocumentForEditing(name, previousName, startedAt);
-      } else {
-        scheduleWaveDocumentActivation(name, previousName, startedAt);
+      const sequence = waveDocumentOpenSequence;
+      const activate = () => {
+        if (sequence !== waveDocumentOpenSequence) return;
+        if (opts.immediate) activateWaveDocumentForEditing(name, previousName, startedAt);
+        else scheduleWaveDocumentActivation(name, previousName, startedAt);
+      };
+      if (requestedTag && requestedTag.deferred) {
+        ensureWaveDocumentLoaded(name).then((loaded) => {
+          if (loaded) activate();
+        });
+        return;
       }
+      activate();
     }
 
     function loadSavedTag(name) {
@@ -11289,6 +11993,7 @@ ${lines.join('\n')}`;
 
       undoStack = [];
       redoStack = [];
+      pendingEditorHistoryEntry = null;
       undoBurstCaptured = false;
       flushUndoDebounce();
 
@@ -11397,8 +12102,57 @@ ${lines.join('\n')}`;
       container.appendChild(errDiv);
     }
 
-    function scheduleRenderWaveform(jsonText, onComplete) {
+    function disableWaveAnalysisWorker(reason) {
+      waveAnalysisWorkerUnavailable = true;
+      if (waveAnalysisWorker) waveAnalysisWorker.terminate();
+      waveAnalysisWorker = null;
+      pendingWaveAnalysisRequests.forEach((request) => {
+        clearTimeout(request.timer);
+        request.resolve(null);
+      });
+      pendingWaveAnalysisRequests.clear();
+      vwdDebugLog('performance', { phase: 'worker-disabled', reason: reason || 'unavailable' });
+    }
+
+    function ensureWaveAnalysisWorker() {
+      if (waveAnalysisWorker) return waveAnalysisWorker;
+      if (waveAnalysisWorkerUnavailable || typeof Worker !== 'function') return null;
+      try {
+        waveAnalysisWorker = new Worker(WAVE_ANALYSIS_WORKER_URL);
+        waveAnalysisWorker.addEventListener('message', (event) => {
+          const result = event.data || {};
+          const request = pendingWaveAnalysisRequests.get(result.id);
+          if (!request) return;
+          pendingWaveAnalysisRequests.delete(result.id);
+          clearTimeout(request.timer);
+          request.resolve(Object.assign({ text: request.text }, result));
+        });
+        waveAnalysisWorker.addEventListener('error', () => disableWaveAnalysisWorker('load-error'));
+        return waveAnalysisWorker;
+      } catch (_e) {
+        disableWaveAnalysisWorker('create-error');
+        return null;
+      }
+    }
+
+    function requestWaveJsonAnalysis(jsonText) {
+      const worker = ensureWaveAnalysisWorker();
+      if (!worker) return Promise.resolve(null);
+      const id = ++waveAnalysisRequestSequence;
+      const text = String(jsonText == null ? '' : jsonText);
+      return new Promise((resolve) => {
+        const timer = setTimeout(() => {
+          pendingWaveAnalysisRequests.delete(id);
+          resolve(null);
+        }, 10000);
+        pendingWaveAnalysisRequests.set(id, { resolve, timer, text });
+        worker.postMessage({ id, type: 'analyze-document', text });
+      });
+    }
+
+    function scheduleRenderWaveform(jsonText, onComplete, analysis) {
       scheduledRenderText = jsonText;
+      scheduledRenderAnalysis = analysis && analysis.text === jsonText ? analysis : null;
       if (onComplete) {
         scheduledRenderCallbacks = scheduledRenderCallbacks || [];
         scheduledRenderCallbacks.push(onComplete);
@@ -11407,12 +12161,14 @@ ${lines.join('\n')}`;
       renderWaveformRaf = requestAnimationFrame(() => {
         renderWaveformRaf = null;
         const text = scheduledRenderText;
+        const analysisResult = scheduledRenderAnalysis;
         const callbacks = scheduledRenderCallbacks;
         scheduledRenderText = null;
+        scheduledRenderAnalysis = null;
         scheduledRenderCallbacks = null;
         if (text == null) return;
         vwdMark('scheduleRenderWaveform:run');
-        const ok = renderWaveform(text);
+        const ok = renderWaveform(text, analysisResult);
         if (callbacks) {
           callbacks.forEach((cb) => {
             try { cb(ok); } catch (e) { /* ignore */ }
@@ -11447,10 +12203,11 @@ ${lines.join('\n')}`;
       });
     }
 
-    function renderWaveform(jsonText) {
+    function renderWaveform(jsonText, preparedAnalysis) {
       syncColumnNumberButtonFromJson(jsonText);
       if (isRenderingWaveform) {
         pendingRenderText = jsonText;
+        pendingRenderAnalysis = preparedAnalysis && preparedAnalysis.text === jsonText ? preparedAnalysis : null;
         return false;
       }
       if (lastRenderedWaveText === jsonText && waveContainer.querySelector('svg')) {
@@ -11483,7 +12240,18 @@ ${lines.join('\n')}`;
 
         let source;
         try {
-          source = JSON.parse(jsonText);
+          if (preparedAnalysis && preparedAnalysis.text === jsonText) {
+            if (!preparedAnalysis.ok) throw new Error(preparedAnalysis.error || 'JSON 解析失败');
+            source = preparedAnalysis.source;
+            vwdDebugLog('performance', {
+              phase: 'worker-analysis-used',
+              textLength: jsonText.length,
+              signalCount: preparedAnalysis.metrics && preparedAnalysis.metrics.signalCount,
+              maxWaveLength: preparedAnalysis.metrics && preparedAnalysis.metrics.maxWaveLength
+            });
+          } else {
+            source = JSON.parse(jsonText);
+          }
           source = getWaveRenderSource(source);
           setJsonErrorLine(-1);
           if (!navTreeState) rebuildNavTreeStateFromJson(jsonText);
@@ -11534,8 +12302,10 @@ ${lines.join('\n')}`;
         isRenderingWaveform = false;
         if (pendingRenderText !== null) {
           const nextText = pendingRenderText;
+          const nextAnalysis = pendingRenderAnalysis;
           pendingRenderText = null;
-          renderWaveform(nextText);
+          pendingRenderAnalysis = null;
+          renderWaveform(nextText, nextAnalysis);
         }
       }
     }
@@ -11544,7 +12314,12 @@ ${lines.join('\n')}`;
       clearTimeout(renderTimer);
       renderTimer = setTimeout(() => {
         renderTimer = null;
-        scheduleRenderWaveform(editor.value);
+        const text = editor.value;
+        const generation = ++waveAnalysisGeneration;
+        requestWaveJsonAnalysis(text).then((analysis) => {
+          if (generation !== waveAnalysisGeneration || editor.value !== text) return;
+          scheduleRenderWaveform(text, null, analysis);
+        });
       }, 300);
     }
 
@@ -11623,14 +12398,23 @@ ${lines.join('\n')}`;
       flushUndoDebounce();
       undoBurstCaptured = false;
       const entry = undoStack.pop();
+      pendingEditorHistoryEntry = null;
+      const targetContent = getEditorHistoryContent(entry, editor.value);
+      if (targetContent === null) {
+        undoStack.push(entry);
+        setStatus(false, '撤销记录与当前 JSON 不匹配，已保留当前内容');
+        updateUndoRedoButtons();
+        return;
+      }
       isApplyingHistory = true;
       try {
-        redoStack.push({
-          content: editor.value,
-          sequence: getHistorySequence(entry),
-          reason: entry && entry.reason ? entry.reason : 'editor-change'
-        });
-        setEditorValue(getEditorHistoryContent(entry), { clearCodeMirrorHistory: true });
+        redoStack.push(createEditorHistoryEntry(
+          editor.value,
+          targetContent,
+          getHistorySequence(entry),
+          entry && entry.reason ? entry.reason : 'editor-change'
+        ));
+        setEditorValue(targetContent, { clearCodeMirrorHistory: true });
         setEditorHistoryBaseline(editor.value);
         updateLineNumbers();
         renderWaveform(editor.value);
@@ -11665,14 +12449,23 @@ ${lines.join('\n')}`;
       flushUndoDebounce();
       undoBurstCaptured = false;
       const entry = redoStack.pop();
+      pendingEditorHistoryEntry = null;
+      const targetContent = getEditorHistoryContent(entry, editor.value);
+      if (targetContent === null) {
+        redoStack.push(entry);
+        setStatus(false, '重做记录与当前 JSON 不匹配，已保留当前内容');
+        updateUndoRedoButtons();
+        return;
+      }
       isApplyingHistory = true;
       try {
-        undoStack.push({
-          content: editor.value,
-          sequence: getHistorySequence(entry),
-          reason: entry && entry.reason ? entry.reason : 'editor-change'
-        });
-        setEditorValue(getEditorHistoryContent(entry), { clearCodeMirrorHistory: true });
+        undoStack.push(createEditorHistoryEntry(
+          editor.value,
+          targetContent,
+          getHistorySequence(entry),
+          entry && entry.reason ? entry.reason : 'editor-change'
+        ));
+        setEditorValue(targetContent, { clearCodeMirrorHistory: true });
         setEditorHistoryBaseline(editor.value);
         updateLineNumbers();
         renderWaveform(editor.value);
@@ -11690,6 +12483,7 @@ ${lines.join('\n')}`;
       setEditorValue(initialJson, { clearCodeMirrorHistory: true });
       undoStack = [];
       redoStack = [];
+      pendingEditorHistoryEntry = null;
       setEditorHistoryBaseline(initialJson);
       flushUndoDebounce();
       updateLineNumbers();
@@ -12063,10 +12857,14 @@ ${lines.join('\n')}`;
       if (mode === 'link') return copyWaveDocumentLink(documentName);
       if (!button || button.dataset.copying === '1') return false;
       const entry = waveLibraryCardCache.get(documentName);
-      const tag = getSavedTagByName(documentName);
+      let tag = getSavedTagByName(documentName);
       if (!entry || !tag) {
         setStatus(false, '未找到要截图的波形图');
         return false;
+      }
+      if (tag.deferred) {
+        tag = await ensureWaveDocumentLoaded(documentName);
+        if (!tag) return false;
       }
 
       if (!window.ClipboardItem
@@ -12083,7 +12881,7 @@ ${lines.join('\n')}`;
       }
 
       if (documentName !== editingWaveDocumentName && !entry.previewHost.querySelector('svg')) {
-        renderWaveDocumentPreview(entry, tag);
+        renderWaveDocumentPreview(entry, tag, null, { forceSvg: true });
       }
       const svg = entry.previewHost.querySelector('svg');
       if (!svg) {
@@ -12277,7 +13075,10 @@ ${lines.join('\n')}`;
         prefix,
         renderedContent: null,
         queuedContent: null,
-        previewQueued: false
+        previewQueued: false,
+        analysisPending: false,
+        previewHeight: 0,
+        lastPreviewUse: 0
       };
     }
 
@@ -12291,34 +13092,197 @@ ${lines.join('\n')}`;
       return entry.previewDisplay;
     }
 
-    function renderWaveDocumentPreview(entry, tag) {
-      if (!entry || !tag || tag.name === editingWaveDocumentName || !entry.card.isConnected) return false;
+    function rememberWavePreviewHeight(entry, sourceElement) {
+      if (!entry) return WAVE_PREVIEW_FALLBACK_HEIGHT;
+      const target = sourceElement || entry.previewDisplay;
+      let height = 0;
+      if (target && typeof target.getBoundingClientRect === 'function') {
+        height = target.getBoundingClientRect().height;
+      }
+      if (!(height > 0) && target) height = target.scrollHeight || target.offsetHeight || 0;
+      if (height > 0) entry.previewHeight = Math.ceil(height);
+      return entry.previewHeight || WAVE_PREVIEW_FALLBACK_HEIGHT;
+    }
+
+    function setWavePreviewLoadingState(entry, loading) {
+      if (!entry) return;
+      entry.previewHost.classList.toggle('preview-unloaded', !!loading);
+      if (loading) {
+        entry.previewHost.style.minHeight = rememberWavePreviewHeight(entry) + 'px';
+      } else {
+        entry.previewHost.style.minHeight = '';
+      }
+    }
+
+    function releaseWaveDocumentPreview(entry, reason) {
+      if (!entry || entry.documentName === editingWaveDocumentName) return false;
+      const display = ensureWavePreviewDisplay(entry);
+      const hasRenderedPreview = !!display.querySelector('svg, .wave-fast-preview, .wave-error');
+      if (!hasRenderedPreview && entry.renderedContent === null) return false;
+      rememberWavePreviewHeight(entry, display);
+      clearFrozenWaveLabelsForHost(display);
+      display.replaceChildren();
+      entry.renderedContent = null;
+      entry.queuedContent = null;
+      setWavePreviewLoadingState(entry, true);
+      vwdDebugLog('performance', {
+        phase: 'preview-release',
+        documentName: entry.documentName,
+        reason: reason || 'offscreen',
+        retainedHeight: entry.previewHeight
+      });
+      return true;
+    }
+
+    function trimRenderedWavePreviews(keepEntry) {
+      const rendered = [];
+      waveLibraryCardCache.forEach((candidate) => {
+        if (!candidate || candidate === keepEntry || candidate.documentName === editingWaveDocumentName) return;
+        if (candidate.previewDisplay.querySelector('svg, .wave-fast-preview, .wave-error')) {
+          rendered.push(candidate);
+        }
+      });
+      rendered.sort((a, b) => b.lastPreviewUse - a.lastPreviewUse);
+      rendered.slice(Math.max(0, WAVE_PREVIEW_MAX_RENDERED - 1)).forEach((candidate) => {
+        releaseWaveDocumentPreview(candidate, 'preview-lru');
+      });
+    }
+
+    function flattenWavePreviewSignals(signals, result) {
+      const rows = result || [];
+      if (!Array.isArray(signals)) return rows;
+      signals.forEach((signal) => {
+        if (Array.isArray(signal)) {
+          flattenWavePreviewSignals(signal.slice(1), rows);
+          return;
+        }
+        if (!signal || typeof signal !== 'object') return;
+        rows.push(signal);
+        if (Array.isArray(signal.children)) flattenWavePreviewSignals(signal.children, rows);
+      });
+      return rows;
+    }
+
+    function renderLargeWaveCanvasPreview(entry, source, metrics) {
+      const rows = flattenWavePreviewSignals(source && source.signal, []);
+      const visibleRows = rows.slice(0, 360);
+      const maxWaveLength = Math.max(1, metrics && metrics.maxWaveLength || 1);
+      const rowHeight = 22;
+      const labelWidth = 140;
+      const columnWidth = Math.max(2, Math.min(12, Math.floor((8192 - labelWidth) / maxWaveLength)));
+      const width = Math.min(8192, Math.max(640, labelWidth + maxWaveLength * columnWidth));
+      const height = Math.max(70, 28 + visibleRows.length * rowHeight);
+      const canvas = document.createElement('canvas');
+      canvas.className = 'wave-fast-preview';
+      canvas.width = width;
+      canvas.height = height;
+      canvas.setAttribute('role', 'img');
+      canvas.setAttribute('aria-label', '大型波形快速预览');
+      const context = canvas.getContext('2d', { alpha: false });
+      if (!context) return false;
+      context.fillStyle = '#ffffff';
+      context.fillRect(0, 0, width, height);
+      context.font = '12px Arial, sans-serif';
+      context.textBaseline = 'middle';
+      const colors = {
+        '0': '#475569', '1': '#0f766e', x: '#dc2626', X: '#dc2626',
+        z: '#7c3aed', Z: '#7c3aed', p: '#2563eb', P: '#2563eb',
+        n: '#0891b2', N: '#0891b2', '=': '#15803d', '2': '#15803d',
+        '3': '#15803d', '4': '#15803d', '5': '#15803d', '6': '#15803d',
+        '7': '#15803d', '8': '#15803d', '9': '#15803d'
+      };
+      visibleRows.forEach((signal, rowIndex) => {
+        const y = 28 + rowIndex * rowHeight;
+        context.fillStyle = rowIndex % 2 ? '#f8fafc' : '#ffffff';
+        context.fillRect(0, y, width, rowHeight);
+        context.fillStyle = '#334155';
+        context.fillText(String(signal.name || ''), 8, y + rowHeight / 2);
+        const wave = typeof signal.wave === 'string' ? signal.wave : '';
+        let previous = 'x';
+        for (let column = 0; column < maxWaveLength; column += 1) {
+          const token = wave[column] || '';
+          if (token && token !== '.') previous = token;
+          const effective = token === '.' ? previous : token;
+          const x = labelWidth + column * columnWidth;
+          context.fillStyle = colors[effective] || '#94a3b8';
+          if (effective === '0' || effective === '1') {
+            const lineY = y + (effective === '1' ? 6 : rowHeight - 6);
+            context.fillRect(x, lineY, Math.max(1, columnWidth), 2);
+          } else if (effective) {
+            context.fillRect(x, y + 5, Math.max(1, columnWidth - 1), rowHeight - 10);
+          }
+        }
+      });
+      context.fillStyle = '#475569';
+      context.fillText('大型波形快速预览，打开后可完整编辑', 8, 14);
+      entry.previewDisplay.replaceChildren(canvas);
+      if (rows.length > visibleRows.length) {
+        const note = document.createElement('div');
+        note.className = 'wave-fast-preview-note';
+        note.textContent = '预览显示前 ' + visibleRows.length + ' 行，共 ' + rows.length + ' 行';
+        entry.previewDisplay.appendChild(note);
+      }
+      return true;
+    }
+
+    function renderWaveDocumentPreview(entry, tag, preparedAnalysis, options) {
+      const opts = options || {};
+      if (!entry || !tag || tag.deferred || tag.name === editingWaveDocumentName || !entry.card.isConnected) return false;
       const display = ensureWavePreviewDisplay(entry);
       if (entry.renderedContent === tag.content
-          && (display.querySelector('svg') || display.querySelector('.wave-error'))) {
+          && (display.querySelector('svg') || (!opts.forceSvg && display.querySelector('.wave-fast-preview, .wave-error')))) {
+        entry.lastPreviewUse = ++waveLibraryPreviewUseSequence;
         return true;
       }
 
       clearFrozenWaveLabelsForHost(display);
       display.innerHTML = '';
       syncWaveDocumentDescriptionWidth(display);
-      const meta = getWaveDocumentMeta(tag, false);
+      const hasPrepared = preparedAnalysis && preparedAnalysis.text === tag.content;
+      const meta = hasPrepared ? {
+        source: preparedAnalysis.ok ? preparedAnalysis.source : null,
+        renderSource: preparedAnalysis.ok ? getWaveRenderSource(preparedAnalysis.source) : null,
+        error: preparedAnalysis.ok ? null : new Error(preparedAnalysis.error || '无效 JSON')
+      } : getWaveDocumentMeta(tag, false);
       if (meta.error || !meta.renderSource) {
         showWaveError(display, '波形图渲染失败: ' + (meta.error && meta.error.message ? meta.error.message : '无效 JSON'));
         entry.renderedContent = tag.content;
+        entry.lastPreviewUse = ++waveLibraryPreviewUseSequence;
+        setWavePreviewLoadingState(entry, false);
+        trimRenderedWavePreviews(entry);
         return false;
       }
       try {
-        WaveDrom.RenderWaveForm(0, meta.renderSource, entry.prefix, false);
-        if (!display.querySelector('svg')) throw new Error('未生成 SVG');
+        const metrics = hasPrepared ? preparedAnalysis.metrics : null;
+        const useCanvas = !opts.forceSvg && metrics && (
+          metrics.cellCount >= WAVE_PREVIEW_CANVAS_CELL_THRESHOLD
+          || metrics.maxWaveLength >= WAVE_PREVIEW_CANVAS_COLUMN_THRESHOLD
+        );
+        if (useCanvas) {
+          if (!renderLargeWaveCanvasPreview(entry, meta.renderSource, metrics)) throw new Error('未生成 Canvas');
+        } else {
+          WaveDrom.RenderWaveForm(0, meta.renderSource, entry.prefix, false);
+          if (!display.querySelector('svg')) throw new Error('未生成 SVG');
+        }
         syncWaveDocumentDescriptionWidth(display);
-        setupFrozenWaveLabels(display);
+        if (!useCanvas) setupFrozenWaveLabels(display);
         entry.renderedContent = tag.content;
-        vwdDebugLog('performance', { phase: 'preview-render', documentName: tag.name, textLength: tag.content.length });
+        entry.lastPreviewUse = ++waveLibraryPreviewUseSequence;
+        rememberWavePreviewHeight(entry, display);
+        setWavePreviewLoadingState(entry, false);
+        trimRenderedWavePreviews(entry);
+        vwdDebugLog('performance', {
+          phase: useCanvas ? 'preview-render-canvas' : 'preview-render-svg',
+          documentName: tag.name,
+          textLength: tag.content.length
+        });
         return true;
       } catch (error) {
         showWaveError(display, '波形图渲染失败: ' + (error && error.message ? error.message : '无效 JSON'));
         entry.renderedContent = tag.content;
+        entry.lastPreviewUse = ++waveLibraryPreviewUseSequence;
+        setWavePreviewLoadingState(entry, false);
+        trimRenderedWavePreviews(entry);
         vwdDebugLog('wave-library', { phase: 'document-render-error', documentName: tag.name, message: error && error.message ? error.message : String(error) });
         return false;
       }
@@ -12332,7 +13296,24 @@ ${lines.join('\n')}`;
         const entry = waveLibraryPreviewQueue.shift();
         entry.previewQueued = false;
         const tag = getSavedTagByName(entry.documentName);
-        if (tag && entry.queuedContent === tag.content) renderWaveDocumentPreview(entry, tag);
+        if (tag && tag.deferred) {
+          ensureWaveDocumentLoaded(tag.name).then((loaded) => {
+            if (loaded && entry.card.isConnected) queueWaveLibraryPreview(entry, loaded, true);
+          });
+        } else if (tag && entry.queuedContent === tag.content) {
+          if (tag.content.length >= WAVE_PREVIEW_WORKER_PARSE_THRESHOLD && !entry.analysisPending) {
+            entry.analysisPending = true;
+            requestWaveJsonAnalysis(tag.content).then((analysis) => {
+              entry.analysisPending = false;
+              const current = getSavedTagByName(entry.documentName);
+              if (current && current.content === tag.content && entry.card.isConnected) {
+                renderWaveDocumentPreview(entry, current, analysis);
+              }
+            });
+          } else if (!entry.analysisPending) {
+            renderWaveDocumentPreview(entry, tag);
+          }
+        }
         processed += 1;
         if (!deadline && processed >= 1) break;
       }
@@ -12352,7 +13333,7 @@ ${lines.join('\n')}`;
 
     function queueWaveLibraryPreview(entry, tag, priority) {
       if (!entry || !tag || tag.name === editingWaveDocumentName) return;
-      entry.queuedContent = tag.content;
+      entry.queuedContent = tag.deferred ? ('deferred:' + tag.revision) : tag.content;
       if (!entry.previewQueued) {
         entry.previewQueued = true;
         if (priority) waveLibraryPreviewQueue.unshift(entry);
@@ -12367,10 +13348,16 @@ ${lines.join('\n')}`;
       }
       waveLibraryPreviewObserver = new IntersectionObserver((items) => {
         items.forEach((item) => {
-          if (!item.isIntersecting) return;
           const entry = waveLibraryCardCache.get(item.target.dataset.documentName || '');
           const tag = entry && getSavedTagByName(entry.documentName);
-          if (entry && tag) queueWaveLibraryPreview(entry, tag, true);
+          if (!entry) return;
+          if (item.isIntersecting) {
+            if (tag) queueWaveLibraryPreview(entry, tag, true);
+          } else {
+            entry.previewQueued = false;
+            waveLibraryPreviewQueue = waveLibraryPreviewQueue.filter((candidate) => candidate !== entry);
+            releaseWaveDocumentPreview(entry, 'intersection-exit');
+          }
         });
       }, { root: null, rootMargin: WAVE_PREVIEW_ROOT_MARGIN, threshold: 0 });
       return waveLibraryPreviewObserver;
@@ -12383,16 +13370,13 @@ ${lines.join('\n')}`;
       const entry = waveLibraryCardCache.get(currentName);
       const tag = getSavedTagByName(currentName);
       if (!entry) return;
-
-      const activeDisplay = waveContainer.querySelector('#wave-display-0');
-      const canClone = tag && activeDisplay && lastRenderedWaveText === tag.content;
-      const clones = canClone
-        ? Array.from(activeDisplay.childNodes).map((node) => node.cloneNode(true))
-        : [];
+      rememberWavePreviewHeight(entry, waveContainer);
       const display = ensureWavePreviewDisplay(entry);
-      display.replaceChildren(...clones);
-      entry.renderedContent = canClone ? tag.content : null;
-      if (!canClone && tag) queueWaveLibraryPreview(entry, tag, true);
+      clearFrozenWaveLabelsForHost(waveContainer);
+      display.replaceChildren();
+      entry.renderedContent = null;
+      setWavePreviewLoadingState(entry, true);
+      if (tag) queueWaveLibraryPreview(entry, tag, true);
     }
 
     function mountWaveContainerOutsideLibrary() {
@@ -12425,10 +13409,13 @@ ${lines.join('\n')}`;
       }
 
       ensureWavePreviewDisplay(entry);
+      if (tag.deferred && entry.renderedContent === null) setWavePreviewLoadingState(entry, true);
       const contentChanged = entry.renderedContent !== tag.content;
       if (contentChanged) {
+        rememberWavePreviewHeight(entry, entry.previewDisplay);
         entry.previewDisplay.innerHTML = '';
         entry.renderedContent = null;
+        setWavePreviewLoadingState(entry, true);
       }
       if (observer) {
         if (contentChanged) observer.unobserve(entry.card);
@@ -13685,14 +14672,10 @@ ${lines.join('\n')}`;
         return false;
       }
       try {
+        if (!saveCurrentWaveDocumentBeforeSwitch()) throw new Error('current document save failed');
         const pendingMarker = markWaveLibraryServerSavePending();
-        const response = await fetch('/api/wave-library?file=' + encodeURIComponent(currentWaveLibraryFile), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(getWaveLibraryBundle())
-        });
-        if (!response.ok) throw new Error('save failed');
-        clearPendingWaveLibrarySave(pendingMarker);
+        const saved = await flushScheduledWaveLibraryServerSave(pendingMarker);
+        if (!saved) throw new Error('save failed');
         setStatus(true, '已保存波形库：' + currentWaveLibraryFile);
         return true;
       } catch (_e) {
@@ -14070,6 +15053,12 @@ ${lines.join('\n')}`;
         beginEdgeSelectSession();
       }
     });
+    document.getElementById('btn-edit-connection-start').addEventListener('click', () => {
+      beginConnectionEndpointEdit('from');
+    });
+    document.getElementById('btn-edit-connection-end').addEventListener('click', () => {
+      beginConnectionEndpointEdit('to');
+    });
     bindNavControlButtons();
     document.getElementById('btn-apply-edge-label').addEventListener('click', applyEdgeLabelFromInput);
     document.getElementById('connection-label-input').addEventListener('keydown', (e) => {
@@ -14098,6 +15087,7 @@ ${lines.join('\n')}`;
         connectionPickActive,
         connectionAddSessionActive,
         connectionSelectActive,
+        connectionEndpointEditMode,
         connectionFromPoint,
         connectionToPoint,
         pendingEdgeTemplate,

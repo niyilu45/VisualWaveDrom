@@ -965,7 +965,10 @@
 
     .app.connection-add-mode .wave-edge-interactive,
     .app.connection-add-mode .wave-edge-interactive *,
-    .app.connection-add-mode .wave-edge-hit-target {
+    .app.connection-add-mode .wave-edge-hit-target,
+    .app.connection-endpoint-edit-mode .wave-edge-interactive,
+    .app.connection-endpoint-edit-mode .wave-edge-interactive *,
+    .app.connection-endpoint-edit-mode .wave-edge-hit-target {
       pointer-events: none !important;
     }
 
@@ -1184,8 +1187,39 @@
       overflow: auto;
     }
 
+    .wave-document-preview.preview-unloaded {
+      position: relative;
+      contain: layout paint;
+    }
+
+    .wave-document-preview.preview-unloaded::after {
+      content: "";
+      position: absolute;
+      left: 16px;
+      right: 16px;
+      top: 50%;
+      height: 1px;
+      background: #d8e0ea;
+      pointer-events: none;
+    }
+
     .wave-document-preview {
       min-height: 44px;
+    }
+
+    .wave-fast-preview {
+      display: block;
+      max-width: none;
+      background: #fff;
+    }
+
+    .wave-fast-preview-note {
+      padding: 6px 8px;
+      color: #64748b;
+      font-size: 12px;
+      text-align: left;
+      background: #f8fafc;
+      border-top: 1px solid #e2e8f0;
     }
 
     .wave-document-description {
@@ -1534,6 +1568,18 @@
     .nav-move-option:hover {
       border-color: var(--accent);
       background: var(--border);
+    }
+
+    .nav-move-option.selected {
+      border-color: var(--accent);
+      box-shadow: inset 3px 0 0 var(--accent);
+    }
+
+    .modal-empty-state {
+      padding: 12px 10px;
+      color: var(--text-muted);
+      font-size: 0.82rem;
+      text-align: left;
     }
 
     .modal-duplicate-confirm p {
@@ -1921,6 +1967,10 @@
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 4px;
+    }
+
+    .connection-endpoint-controls {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
     .connection-segmented button,

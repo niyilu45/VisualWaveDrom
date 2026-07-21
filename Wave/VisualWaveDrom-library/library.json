@@ -1,0 +1,92 @@
+{
+  "kind": "VisualWaveDromSplitWaveLibrary",
+  "version": 3,
+  "updatedAt": "2026-07-21T19:32:36.477Z",
+  "directories": [
+    {
+      "label": "标题以",
+      "rows": [],
+      "documents": [
+        "wave-document-mrfgawfv",
+        "wave-document-mrfg20wx",
+        "default-wave",
+        "wave-document-mrfga57n"
+      ],
+      "expanded": true,
+      "isCustom": true,
+      "path": [
+        "nav-root",
+        "nav-root",
+        "nav-root"
+      ],
+      "children": [],
+      "id": "nav-2629391460048186-mrfg25ct"
+    },
+    {
+      "label": "标题2",
+      "rows": [],
+      "documents": [],
+      "expanded": true,
+      "isCustom": true,
+      "path": [
+        "nav-root",
+        "nav-root",
+        "nav-root"
+      ],
+      "children": [],
+      "id": "nav-5502974415941949-mrfgff2j"
+    }
+  ],
+  "rootDocuments": [],
+  "activeDocumentName": "default-wave",
+  "selectedDirectoryId": "nav-2629391460048186-mrfg25ct",
+  "libraryId": "library-0a4336e2-9843-4d3a-bae1-59f1955f6e95",
+  "storage": "split-v1",
+  "sourceLibraryVersion": 2,
+  "documents": [
+    {
+      "name": "default-wave",
+      "hscale": 1,
+      "waveEditMode": "modify",
+      "savedAt": "2026-07-21T19:32:36.477Z",
+      "revision": 1,
+      "file": "documents/default-wave-9d2e5f1f71.json",
+      "contentLength": 718,
+      "titleCache": "WaveDrom Example",
+      "descriptionCache": ""
+    },
+    {
+      "name": "wave-document-mrfgawfv",
+      "hscale": 1,
+      "waveEditMode": "modify",
+      "savedAt": "2026-07-19T16:27:09.953Z",
+      "revision": 0,
+      "file": "documents/wave-document-mrfgawfv-64ea57121e.json",
+      "contentLength": 358,
+      "titleCache": "还灭有想好",
+      "descriptionCache": "骄傲\n放假啊二零飞机"
+    },
+    {
+      "name": "wave-document-mrfg20wx",
+      "hscale": 1,
+      "waveEditMode": "modify",
+      "savedAt": "2026-07-19T16:53:45.041Z",
+      "revision": 0,
+      "file": "documents/wave-document-mrfg20wx-6100d73b8d.json",
+      "contentLength": 55,
+      "titleCache": "波形图 2",
+      "descriptionCache": ""
+    },
+    {
+      "name": "wave-document-mrfga57n",
+      "hscale": 1,
+      "waveEditMode": "modify",
+      "savedAt": "2026-07-20T11:04:22.742Z",
+      "revision": 0,
+      "file": "documents/wave-document-mrfga57n-15daaf59e4.json",
+      "contentLength": 55,
+      "titleCache": "波形图 3",
+      "descriptionCache": ""
+    }
+  ]
+}

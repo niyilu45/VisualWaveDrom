@@ -7,7 +7,7 @@
   <script src="inc/skins/default.js?v=20260712"></script>
   <script src="inc/wavedrom.min.js?v=20260712"></script>
   <link rel="stylesheet" href="inc/codemirror.css?v=5.65.21">
-  <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260722-column-numbers-v1">
+  <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260722-endpoint-edit-v1">
 </head>
 <body>
   <div class="app" id="app">
@@ -66,7 +66,7 @@
           <span id="toggle-nav-sidebar-label">隐藏目录</span>
         </button>
         <div class="wave-library-file-status" id="wave-library-file-status">波形库：本地浏览器数据</div>
-        <button class="menu-btn" id="btn-import-wave-library" type="button" title="导入完整波形库 JSON 文件">
+        <button class="menu-btn" id="btn-import-wave-library" type="button" title="从 Wave 文件夹选择波形库">
           <span>导入波形库</span>
         </button>
         <button class="menu-btn" id="btn-save-wave-library" type="button" title="保存完整波形库 JSON 文件">
@@ -256,6 +256,13 @@
         </div>
         <div class="connection-point-status" id="connection-point-status">点击“新增连接”后选择起点和终点</div>
         <div class="connection-properties" id="connection-properties">
+          <div class="connection-property-group">
+            <div class="connection-property-label">连接端点</div>
+            <div class="connection-segmented connection-endpoint-controls" id="connection-endpoint-controls">
+              <button type="button" id="btn-edit-connection-start" data-endpoint="from" disabled>修改起点</button>
+              <button type="button" id="btn-edit-connection-end" data-endpoint="to" disabled>修改终点</button>
+            </div>
+          </div>
           <div class="connection-property-group">
             <div class="connection-property-label">箭头样式</div>
             <div class="connection-segmented" id="connection-arrow-controls">
@@ -480,7 +487,7 @@
 
   <div class="modal-overlay" id="wave-library-picker-modal" hidden>
     <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="wave-library-picker-title">
-      <div class="modal-header" id="wave-library-picker-title">选择波形库</div>
+      <div class="modal-header" id="wave-library-picker-title">选择 Wave 文件夹中的波形库</div>
       <div class="modal-body">
         <div class="nav-move-options" id="wave-library-picker-options"></div>
       </div>
@@ -516,6 +523,6 @@
     <script src="inc/codemirror.js?v=5.65.21"></script>
     <script src="inc/codemirror-javascript.js?v=5.65.21"></script>
     <script src="inc/visualwavedrom-vim.js?v=20260721-vim-pipe-v1"></script>
-    <script src="inc/visualwavedrom-app.js?v=20260722-json-hide-button-v1"></script>
+    <script src="inc/visualwavedrom-app.js?v=20260722-endpoint-edit-v1"></script>
 </body>
 </html>
