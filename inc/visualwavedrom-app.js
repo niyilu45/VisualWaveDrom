@@ -4354,7 +4354,9 @@ ${lines.join('\n')}`;
       if (!canUseWaveClipboardForTarget(e.target) || inlineEditActive) return false;
 
       let action = '';
-      if (groupDeleteShortcutActive && selectedGroupIndex >= 0) {
+      if (selectedEdgeIndex >= 0) {
+        action = 'connection';
+      } else if (groupDeleteShortcutActive && selectedGroupIndex >= 0) {
         action = 'group';
       } else if (waveClipboardShortcutActive && getSelectedWaveRange()) {
         action = 'wave-range';
@@ -4364,9 +4366,9 @@ ${lines.join('\n')}`;
 
       e.preventDefault();
       e.stopPropagation();
-      const handled = action === 'group'
-        ? deleteSelectedGroup()
-        : deleteSelectedWaveRange();
+      const handled = action === 'connection'
+        ? deleteSelectedEdge('keyboard')
+        : (action === 'group' ? deleteSelectedGroup() : deleteSelectedWaveRange());
       vwdDebugLog('selection-delete', { action, handled });
       return true;
     }
@@ -4472,7 +4474,7 @@ ${lines.join('\n')}`;
 
       const hasGroup = selectedGroupIndex >= 0 && selectedGroupIndex < groupMap.length;
       const hasSelection = hasRow || hasGroup;
-      const hasSelectedConnection = connectionSelectActive && selectedEdgeIndex >= 0;
+      const hasSelectedConnection = selectedEdgeIndex >= 0;
 
       let selectedExistingWaveCount = 0;
       if (selectedBlock) {
@@ -6465,7 +6467,7 @@ ${lines.join('\n')}`;
       const edgeJson = JSON.stringify(edgeStr);
       const idx = text.indexOf(edgeJson);
       if (idx < 0) return;
-      setEditorSelection(idx, idx + edgeJson.length, true);
+      setEditorSelection(idx, idx + edgeJson.length, false);
       const before = text.slice(0, idx);
       const line = before.split('\n').length;
       const lineHeight = 13 * 1.6;
@@ -6891,18 +6893,21 @@ ${lines.join('\n')}`;
         parsed = JSON.parse(editor.value);
       } catch (e) {
         setStatus(false, '未找到要删除的连接');
-        return;
+        return false;
       }
 
       const edges = parsed.edge || [];
-      if (index < 0 || index >= edges.length) return;
+      if (index < 0 || index >= edges.length) {
+        setStatus(false, '未找到要删除的连接');
+        return false;
+      }
 
       const removed = edges[index];
       const wasSelected = selectedEdgeIndex === index;
       let text = removeEdgeFromText(editor.value, index);
       if (text === editor.value) {
         setStatus(false, '未找到要删除的连接');
-        return;
+        return false;
       }
 
       parsed.edge = edges.filter((_, i) => i !== index);
@@ -6925,7 +6930,7 @@ ${lines.join('\n')}`;
         text = JSON.stringify(normalized, null, 2);
       } catch (e) {
         setStatus(false, '删除连接后 JSON 校验失败');
-        return;
+        return false;
       }
 
       pushUndoBeforeChange();
@@ -6945,6 +6950,23 @@ ${lines.join('\n')}`;
         removedNodes: endpointCleanup.removedNodes,
         retainedNodes: endpointCleanup.retainedNodes
       });
+      return true;
+    }
+
+    function deleteSelectedEdge(source) {
+      const index = selectedEdgeIndex;
+      if (index < 0) {
+        setStatus(false, '请先选择要删除的连接线');
+        return false;
+      }
+      const handled = deleteEdgeAtIndex(index);
+      vwdDebugLog('connection', {
+        phase: 'delete-selected',
+        source: source || 'unknown',
+        index,
+        handled
+      });
+      return handled;
     }
 
     function renderConnectionEdgeList(parsedSource) {
@@ -13054,8 +13076,8 @@ ${lines.join('\n')}`;
     document.getElementById('btn-wave-paint-mode').addEventListener('click', toggleWavePaintMode);
     document.getElementById('btn-wave-text-edit-mode').addEventListener('click', toggleTextEditMode);
     document.getElementById('btn-delete-wave-col').addEventListener('click', () => {
-      if (connectionSelectActive && selectedEdgeIndex >= 0) {
-        deleteEdgeAtIndex(selectedEdgeIndex);
+      if (selectedEdgeIndex >= 0) {
+        deleteSelectedEdge('toolbar');
         return;
       }
       deleteSelectedWaveRange();
