@@ -496,6 +496,34 @@ function getDefaultJson() {
       });
     }
 
+    function commitOpenTextEditors(reason) {
+      const editors = Array.from(document.querySelectorAll(
+        '.wave-text-edit-overlay, .wave-document-description-editor'
+      ));
+      let committedCount = 0;
+      editors.forEach((element) => {
+        if (!element.isConnected || typeof element.__vwdCommit !== 'function') return;
+        try {
+          element.__vwdCommit();
+          committedCount++;
+        } catch (error) {
+          vwdDebugLog('persistence', {
+            phase: 'inline-commit-error',
+            reason: reason || '',
+            message: error && error.message ? error.message : String(error)
+          });
+        }
+      });
+      if (committedCount > 0) {
+        vwdDebugLog('persistence', {
+          phase: 'inline-editors-committed',
+          reason: reason || '',
+          count: committedCount
+        });
+      }
+      return committedCount;
+    }
+
     function insertInlineNewline(overlay, event) {
       const start = typeof overlay.selectionStart === 'number' ? overlay.selectionStart : overlay.value.length;
       const end = typeof overlay.selectionEnd === 'number' ? overlay.selectionEnd : start;
@@ -714,6 +742,7 @@ ${lines.join('\n')}`;
     const EDITOR_JSON_KEY = 'vwd-editor-json';
     const EDITOR_JSON_VALID_KEY = 'vwd-editor-json-valid';
     const WAVE_DOCUMENTS_KEY = 'vwd-wave-documents';
+    const WAVE_LIBRARY_PENDING_SAVE_KEY = 'vwd-wave-library-pending-save-v1';
     const LEGACY_SAVED_TAGS_KEY = 'vwd-saved-tags';
     const NAV_COPY_SEED_KEY = 'vwd-nav-copy-seed-2222-51515-v2';
     const PERSIST_DEBOUNCE_MS = 500;
@@ -755,6 +784,7 @@ ${lines.join('\n')}`;
     let pendingWaveCopyDocumentName = '';
     let pendingWaveCopyButton = null;
     let waveLibrarySyncChannel = null;
+    let pageExitStateFlushed = false;
 
     document.body.classList.toggle('single-wave-view', singleWaveViewActive);
 
@@ -864,13 +894,33 @@ ${lines.join('\n')}`;
           root.children.push(child);
         }
       }
+      const validDocumentNames = new Set(savedTags.map((tag) => tag.name));
       const assigned = new Set();
+      const droppedAssignments = [];
       (function collectAssigned(nodes) {
         (nodes || []).forEach((node) => {
-          (node.documents || []).forEach((name) => assigned.add(name));
+          node.documents = (node.documents || []).filter((name) => {
+            if (!validDocumentNames.has(name)) {
+              droppedAssignments.push({ name, reason: 'missing-document', nodeId: node.id });
+              return false;
+            }
+            if (assigned.has(name)) {
+              droppedAssignments.push({ name, reason: 'duplicate-assignment', nodeId: node.id });
+              return false;
+            }
+            assigned.add(name);
+            return true;
+          });
           collectAssigned(node.children || []);
         });
       })(root.children);
+      if (droppedAssignments.length > 0) {
+        vwdDebugLog('nav-tree', {
+          phase: 'normalize-document-assignments',
+          droppedCount: droppedAssignments.length,
+          droppedAssignments
+        });
+      }
       const unassignedDocuments = savedTags.filter((tag) => !assigned.has(tag.name)).map((tag) => tag.name);
       const availableDocuments = new Set(unassignedDocuments);
       const orderedDocuments = [];
@@ -962,6 +1012,17 @@ ${lines.join('\n')}`;
         if (parent) return parent;
       }
       return null;
+    }
+
+    function removeNavDocumentAssignments(root, documentName) {
+      if (!root || !documentName) return 0;
+      const beforeCount = Array.isArray(root.documents) ? root.documents.length : 0;
+      root.documents = (root.documents || []).filter((name) => name !== documentName);
+      let removedCount = beforeCount - root.documents.length;
+      (root.children || []).forEach((child) => {
+        removedCount += removeNavDocumentAssignments(child, documentName);
+      });
+      return removedCount;
     }
 
     function getNavDocumentNumber(tag, parentNode) {
@@ -1727,14 +1788,21 @@ ${lines.join('\n')}`;
         directory = getNavNodeById(navTreeState, selectedNavNodeId);
         if (!directory) return;
       }
+      const removedAssignments = removeNavDocumentAssignments(navTreeState, documentName);
       directory.documents = Array.isArray(directory.documents) ? directory.documents : [];
-      if (!directory.documents.includes(documentName)) directory.documents.push(documentName);
+      directory.documents.push(documentName);
       directory.expanded = true;
       const saved = saveNavCustomNodesFromTree();
       setSelectedNavNode(directory.id);
       pushWaveLibraryHistory(before, captureWaveLibrarySnapshot());
       setStatus(true, '已收录波形图: ' + getSavedTagTitle(getSavedTagByName(documentName) || { name: documentName, content: '{}' }));
-      vwdDebugLog('nav-tree', { phase: 'add-document', directoryId: directory.id, documentName: documentName, saved: saved });
+      vwdDebugLog('nav-tree', {
+        phase: 'add-document',
+        directoryId: directory.id,
+        documentName: documentName,
+        removedAssignments,
+        saved: saved
+      });
     }
 
     function createEmptyWaveDocument() {
@@ -1842,16 +1910,23 @@ ${lines.join('\n')}`;
       if (!navTreeState || !documentName || !fromNode || !target) return;
       if (target.id === fromNode.id) return;
       const before = captureWaveLibrarySnapshot();
-      fromNode.documents = (fromNode.documents || []).filter((name) => name !== documentName);
+      const removedAssignments = removeNavDocumentAssignments(navTreeState, documentName);
       target.documents = Array.isArray(target.documents) ? target.documents : [];
-      if (!target.documents.includes(documentName)) target.documents.push(documentName);
+      target.documents.push(documentName);
       target.expanded = true;
       const saved = saveNavCustomNodesFromTree();
       selectedNavDocumentName = documentName;
       setSelectedNavNode(target.id, { skipFilter: true, keepDocumentSelection: true });
       pushWaveLibraryHistory(before, captureWaveLibrarySnapshot());
       setStatus(true, '已移动波形图到：' + (targetLabel || getNavDirectoryDisplayName(target)));
-      vwdDebugLog('nav-tree', { phase: 'move-document', documentName: documentName, fromId: fromNode.id, toId: target.id, saved: saved });
+      vwdDebugLog('nav-tree', {
+        phase: 'move-document',
+        documentName: documentName,
+        fromId: fromNode.id,
+        toId: target.id,
+        removedAssignments,
+        saved: saved
+      });
     }
 
     function seedRequestedWaveCopies() {
@@ -6455,6 +6530,22 @@ ${lines.join('\n')}`;
       const edges = parsed.edge || [];
       if (index < 0 || index >= edges.length) return false;
 
+      const originalEdge = parseEdgeString(edges[index]);
+      let endpointInvariantRestored = false;
+      if (lineStyle || arrowStyle) {
+        const requestedEdge = parseEdgeString(newEdgeStr);
+        endpointInvariantRestored = requestedEdge.from !== originalEdge.from
+          || requestedEdge.to !== originalEdge.to
+          || requestedEdge.prefix !== originalEdge.prefix;
+        newEdgeStr = formatEdgeFromParts(
+          originalEdge.from,
+          originalEdge.to,
+          originalEdge.prefix,
+          requestedEdge.arrow,
+          requestedEdge.label
+        );
+      }
+
       const text = editor.value;
       const edgeTextChanged = newEdgeStr !== edges[index];
       let newText = edgeTextChanged ? replaceEdgeAtIndex(text, index, newEdgeStr) : text;
@@ -6463,11 +6554,24 @@ ${lines.join('\n')}`;
         return false;
       }
 
+      let orphanCleanup = { removedNodes: [], changedSignalCount: 0 };
       try {
         const updated = JSON.parse(newText);
         if (lineStyle || arrowStyle) {
           setEdgeLineStyleOption(updated, index, lineStyle || connectionLineStyle, arrowStyle || connectionArrowStyle);
         }
+        const finalEdge = parseEdgeString((updated.edge || [])[index] || '');
+        if (finalEdge.from !== originalEdge.from || finalEdge.to !== originalEdge.to) {
+          setStatus(false, '连接样式修改失败：起点或终点发生变化');
+          vwdDebugLog('connection', {
+            phase: 'edge-endpoint-invariant-failed',
+            index,
+            before: { from: originalEdge.from, to: originalEdge.to },
+            after: { from: finalEdge.from, to: finalEdge.to }
+          });
+          return false;
+        }
+        orphanCleanup = cleanupOrphanedNodesInParsedSource(updated);
         newText = JSON.stringify(updated, null, 2);
       } catch (e) {
         setStatus(false, '连接修改后 JSON 校验失败');
@@ -6487,7 +6591,15 @@ ${lines.join('\n')}`;
         index,
         edge: newEdgeStr,
         lineStyle: lineStyle || null,
-        arrowStyle: arrowStyle || null
+        arrowStyle: arrowStyle || null,
+        beforeEndpoints: { from: originalEdge.from, to: originalEdge.to },
+        afterEndpoints: {
+          from: parseEdgeString(newEdgeStr).from,
+          to: parseEdgeString(newEdgeStr).to
+        },
+        endpointInvariantRestored,
+        removedOrphanNodes: orphanCleanup.removedNodes,
+        changedNodeSignalCount: orphanCleanup.changedSignalCount
       });
       return true;
     }
@@ -6910,6 +7022,7 @@ ${lines.join('\n')}`;
             lineStyle || connectionLineStyle,
             connectionArrowStyle
           );
+          const orphanCleanup = cleanupOrphanedNodesInParsedSource(updatedSource);
           newText = JSON.stringify(updatedSource, null, 2);
           const newEdgePos = findEdgePositionInText(newText, newEdgeIndex);
           if (!newEdgePos) {
@@ -6959,7 +7072,9 @@ ${lines.join('\n')}`;
             arrowStyle: connectionArrowStyle,
             lineStyle: lineStyle || connectionLineStyle,
             from: endpoints.from,
-            to: endpoints.to
+            to: endpoints.to,
+            removedOrphanNodes: orphanCleanup.removedNodes,
+            changedNodeSignalCount: orphanCleanup.changedSignalCount
           });
           setWaveformRenderingBusy(false);
           isInsertingEdge = false;
@@ -7011,6 +7126,31 @@ ${lines.join('\n')}`;
         if (edge.to) used.add(edge.to);
       });
       return used;
+    }
+
+    function cleanupOrphanedNodesInParsedSource(parsed) {
+      const used = getNodeIdsFromEdges(parsed && parsed.edge ? parsed.edge : []);
+      const removedNodes = new Set();
+      let changedSignalCount = 0;
+      flattenSignals(parsed && parsed.signal ? parsed.signal : []).forEach((signal) => {
+        if (!signal.node) return;
+        let changed = false;
+        let node = String(signal.node).split('').map((char) => {
+          if (char === '.' || used.has(char)) return char;
+          changed = true;
+          removedNodes.add(char);
+          return '.';
+        }).join('');
+        if (!changed) return;
+        node = node.replace(/\.+$/, '');
+        if (node) signal.node = node;
+        else delete signal.node;
+        changedSignalCount += 1;
+      });
+      return {
+        removedNodes: [...removedNodes],
+        changedSignalCount
+      };
     }
 
     function cleanupDeletedEdgeEndpointUpdates(parsed, removedEdge) {
@@ -7151,10 +7291,12 @@ ${lines.join('\n')}`;
         text = applySignalUpdatesInText(text, endpointCleanup.updates);
       }
 
+      let orphanCleanup = { removedNodes: [], changedSignalCount: 0 };
       try {
         const normalized = JSON.parse(text);
         if (parsed.edgeOptions) normalized.edgeOptions = parsed.edgeOptions;
         else delete normalized.edgeOptions;
+        orphanCleanup = cleanupOrphanedNodesInParsedSource(normalized);
         text = JSON.stringify(normalized, null, 2);
       } catch (e) {
         setStatus(false, '删除连接后 JSON 校验失败');
@@ -7176,7 +7318,9 @@ ${lines.join('\n')}`;
         index,
         edge: removed,
         removedNodes: endpointCleanup.removedNodes,
-        retainedNodes: endpointCleanup.retainedNodes
+        retainedNodes: endpointCleanup.retainedNodes,
+        removedOrphanNodes: orphanCleanup.removedNodes,
+        changedNodeSignalCount: orphanCleanup.changedSignalCount
       });
       return true;
     }
@@ -7585,6 +7729,62 @@ ${lines.join('\n')}`;
       return getWaveDataSlots(value).find((slot) => slot.col === slotCol) || null;
     }
 
+    function hasUsableInlineEditAnchor(element) {
+      if (!element || typeof element.getBoundingClientRect !== 'function') return false;
+      try {
+        const rect = element.getBoundingClientRect();
+        return Number.isFinite(rect.left)
+          && Number.isFinite(rect.top)
+          && rect.width > 0.5
+          && rect.height > 0.5;
+      } catch (_e) {
+        return false;
+      }
+    }
+
+    function createWaveDataSlotEditAnchor(drawGroup, wave, slot, svgRoot, preferredText, fallbackClientX) {
+      if (hasUsableInlineEditAnchor(preferredText)) return preferredText;
+
+      const drawRect = drawGroup.getBoundingClientRect();
+      const columnWidth = getWaveColumnWidth(getWaveUnitWidth(editor.value));
+      const waveValue = String(wave || '');
+      let endCol = slot.col + 1;
+      while (endCol < waveValue.length && (waveValue[endCol] === '.' || waveValue[endCol] === '|')) {
+        endCol++;
+      }
+
+      let centerX = Number.isFinite(fallbackClientX)
+        ? fallbackClientX
+        : drawRect.left + (slot.col + 0.5) * columnWidth;
+      try {
+        const matrix = drawGroup.getScreenCTM();
+        if (matrix && svgRoot && typeof svgRoot.createSVGPoint === 'function') {
+          const point = svgRoot.createSVGPoint();
+          point.x = ((slot.col + endCol) / 2) * columnWidth;
+          point.y = 0;
+          centerX = point.matrixTransform(matrix).x;
+        }
+      } catch (_e) {
+        // Keep the click or bounding-box fallback when SVG transforms are unavailable.
+      }
+
+      const anchorHeight = Math.max(16, Math.min(22, drawRect.height || 20));
+      const rect = {
+        x: centerX - 24,
+        y: drawRect.top + Math.max(0, (drawRect.height - anchorHeight) / 2),
+        width: 0,
+        height: anchorHeight
+      };
+      rect.left = rect.x;
+      rect.top = rect.y;
+      rect.right = rect.x;
+      rect.bottom = rect.y + rect.height;
+      return {
+        __vwdAnchorKind: 'data-slot',
+        getBoundingClientRect: () => rect
+      };
+    }
+
     function attachDataLabelTextEditHandler(drawGroup, entry, svg) {
       if (drawGroup.dataset.vwdDataTextEditBound === '1') return;
       drawGroup.dataset.vwdDataTextEditBound = '1';
@@ -7597,12 +7797,18 @@ ${lines.join('\n')}`;
         if (Number.isInteger(explicitDataIdx) && explicitDataIdx >= 0) {
           e.stopPropagation();
           e.preventDefault();
+          const wave = entry.signal.wave || '';
+          const slot = getWaveDataSlots(wave)[explicitDataIdx];
+          const anchor = slot
+            ? createWaveDataSlotEditAnchor(drawGroup, wave, slot, svg, targetText, e.clientX)
+            : targetText;
           vwdDebugLog('data-label', {
             phase: 'open-editor-by-index',
             signal: entry.signal.name || '',
-            dataIdx: explicitDataIdx
+            dataIdx: explicitDataIdx,
+            anchorKind: anchor && anchor.__vwdAnchorKind ? anchor.__vwdAnchorKind : 'text'
           });
-          startInlineEdit(targetText, entry, 'data', explicitDataIdx, targetText);
+          startInlineEdit(targetText, entry, 'data', explicitDataIdx, anchor);
           return;
         }
         const wave = entry.signal.wave || '';
@@ -7623,9 +7829,17 @@ ${lines.join('\n')}`;
         if (!slot) return;
         e.stopPropagation();
         e.preventDefault();
-        const anchor = e.target || drawGroup;
-        vwdDebugLog('data-label', { phase: 'open-editor', dataIdx: slot.dataIdx, col });
-        startInlineEdit(anchor, entry, 'data', slot.dataIdx, anchor);
+        const dataText = drawGroup.querySelector(
+          'text.wave-data-text[data-vwd-data-index="' + slot.dataIdx + '"]'
+        );
+        const anchor = createWaveDataSlotEditAnchor(drawGroup, wave, slot, svg, dataText, e.clientX);
+        vwdDebugLog('data-label', {
+          phase: 'open-editor',
+          dataIdx: slot.dataIdx,
+          col,
+          anchorKind: anchor && anchor.__vwdAnchorKind ? anchor.__vwdAnchorKind : 'text'
+        });
+        startInlineEdit(dataText || { textContent: data[slot.dataIdx] || '' }, entry, 'data', slot.dataIdx, anchor);
       }, true);
     }
 
@@ -7898,7 +8112,7 @@ ${lines.join('\n')}`;
       if (e.ctrlKey || e.metaKey) return;
       e.preventDefault();
 
-      const pageHeight = Math.max(1, Math.floor((wavePanel.clientHeight - 32) * 0.9));
+      const pageHeight = Math.max(1, Math.floor((wavePanel.clientHeight - 32) * 0.45));
       const delta = e.deltaY > 0 ? 1 : -1;
       const nextTop = wavePanel.scrollTop + delta * pageHeight;
       const maxTop = Math.max(0, wavePanel.scrollHeight - wavePanel.clientHeight);
@@ -8191,6 +8405,7 @@ ${lines.join('\n')}`;
         applyEditorChange(replaceText, newCaretPos, newCaretPos);
         setStatus(true, '已更新分组标签：' + newVal);
       };
+      overlay.__vwdCommit = commit;
 
       overlay.addEventListener('blur', () => {
         if (!blurCommitArmed && performance.now() - openedAt < 80) {
@@ -8882,6 +9097,7 @@ ${lines.join('\n')}`;
           else setStatus(true, '已更新字段');
         }
       };
+      overlay.__vwdCommit = commit;
 
       overlay.addEventListener('blur', commit);
       overlay.addEventListener('keydown', (e) => {
@@ -8979,6 +9195,7 @@ ${lines.join('\n')}`;
           setStatus(true, field === 'head' ? 'Updated header text' : 'Updated footer text');
         }
       };
+      overlay.__vwdCommit = commit;
 
       overlay.addEventListener('blur', commit);
       overlay.addEventListener('keydown', (e) => {
@@ -9104,6 +9321,7 @@ ${lines.join('\n')}`;
           setStatus(true, '已更新波形说明');
         }
       };
+      overlay.__vwdCommit = commit;
 
       overlay.addEventListener('blur', commit);
       overlay.addEventListener('keydown', (e) => {
@@ -9914,6 +10132,85 @@ ${lines.join('\n')}`;
       };
     }
 
+    function readPendingWaveLibrarySave() {
+      try {
+        const raw = localStorage.getItem(WAVE_LIBRARY_PENDING_SAVE_KEY);
+        if (!raw) return null;
+        const pending = JSON.parse(raw);
+        if (!pending || !pending.file || !pending.libraryId || !pending.token) return null;
+        return pending;
+      } catch (_e) {
+        return null;
+      }
+    }
+
+    function markWaveLibraryServerSavePending() {
+      if (!waveLibraryServerMode || applyingWaveLibraryBundle
+          || !currentWaveLibraryFile || !currentWaveLibraryId) return null;
+      const pending = {
+        file: currentWaveLibraryFile,
+        libraryId: currentWaveLibraryId,
+        activeDocumentName: editingWaveDocumentName || '',
+        selectedDirectoryId: selectedNavNodeId || 'nav-root',
+        token: Date.now().toString(36) + '-' + Math.random().toString(36).slice(2),
+        markedAt: new Date().toISOString()
+      };
+      try {
+        localStorage.setItem(WAVE_LIBRARY_PENDING_SAVE_KEY, JSON.stringify(pending));
+        return pending;
+      } catch (_e) {
+        return null;
+      }
+    }
+
+    function clearPendingWaveLibrarySave(expected) {
+      try {
+        const current = readPendingWaveLibrarySave();
+        if (!current) return;
+        if (expected && current.token !== expected.token) return;
+        localStorage.removeItem(WAVE_LIBRARY_PENDING_SAVE_KEY);
+      } catch (_e) { /* ignore */ }
+    }
+
+    function buildPendingWaveLibraryBundle(pending) {
+      const bundle = getWaveLibraryBundle();
+      bundle.libraryId = pending.libraryId;
+      bundle.activeDocumentName = pending.activeDocumentName || bundle.activeDocumentName;
+      bundle.selectedDirectoryId = pending.selectedDirectoryId || bundle.selectedDirectoryId;
+      return bundle;
+    }
+
+    async function recoverPendingWaveLibraryServerSave() {
+      const pending = readPendingWaveLibrarySave();
+      if (!pending) return 'none';
+      try {
+        const response = await fetch('/api/wave-library?file=' + encodeURIComponent(pending.file), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(buildPendingWaveLibraryBundle(pending))
+        });
+        if (!response.ok) throw new Error('recovery save failed: ' + response.status);
+        clearPendingWaveLibrarySave(pending);
+        vwdDebugLog('persistence', {
+          phase: 'pending-library-recovered',
+          file: pending.file,
+          markedAt: pending.markedAt || ''
+        });
+        return 'saved';
+      } catch (error) {
+        currentWaveLibraryFile = pending.file;
+        currentWaveLibraryId = pending.libraryId;
+        updateWaveLibraryFileStatus();
+        setStatus(false, '上次刷新前的数据尚未写入波形库，已保留浏览器中的最新数据');
+        vwdDebugLog('persistence', {
+          phase: 'pending-library-recovery-failed',
+          file: pending.file,
+          message: error && error.message ? error.message : String(error)
+        });
+        return 'failed';
+      }
+    }
+
     function updateWaveLibraryFileStatus() {
       if (waveLibraryFileStatus) {
         waveLibraryFileStatus.textContent = waveLibraryServerMode
@@ -10037,6 +10334,7 @@ ${lines.join('\n')}`;
           if (current.content === documentSnapshot.content) current.savedAt = result.document.savedAt;
         }
         lastSingleWaveSyncedSignature = snapshotSignature;
+        if (opts.pendingMarker) clearPendingWaveLibrarySave(opts.pendingMarker);
         notifyWaveDocumentSync(result.document);
         setStatus(true, '已同步到波形库：' + getSavedTagTitle(current || stored));
         vwdDebugLog('wave-library', {
@@ -10060,11 +10358,12 @@ ${lines.join('\n')}`;
 
     function scheduleWaveLibraryServerSave() {
       if (!waveLibraryServerMode || applyingWaveLibraryBundle || !currentWaveLibraryFile) return;
+      const pendingMarker = markWaveLibraryServerSavePending();
       clearTimeout(waveLibrarySaveTimer);
       waveLibrarySaveTimer = setTimeout(() => {
         waveLibrarySaveTimer = null;
         if (singleWaveViewActive) {
-          saveSingleWaveDocumentToServer().catch(() => setStatus(false, '波形图自动同步失败'));
+          saveSingleWaveDocumentToServer({ pendingMarker }).catch(() => setStatus(false, '波形图自动同步失败'));
           return;
         }
         fetch('/api/wave-library?file=' + encodeURIComponent(currentWaveLibraryFile), {
@@ -10073,8 +10372,37 @@ ${lines.join('\n')}`;
           body: JSON.stringify(getWaveLibraryBundle())
         }).then((response) => {
           if (!response.ok) throw new Error('save failed');
+          clearPendingWaveLibrarySave(pendingMarker);
         }).catch(() => setStatus(false, '波形库自动保存失败'));
       }, 350);
+    }
+
+    function flushWaveLibraryServerSaveOnExit() {
+      if (!waveLibraryServerMode || applyingWaveLibraryBundle
+          || !currentWaveLibraryFile || !currentWaveLibraryId) return false;
+      clearTimeout(waveLibrarySaveTimer);
+      waveLibrarySaveTimer = null;
+      const pendingMarker = markWaveLibraryServerSavePending() || readPendingWaveLibrarySave();
+      if (singleWaveViewActive) {
+        void saveSingleWaveDocumentToServer({
+          keepalive: true,
+          pendingMarker
+        });
+        return true;
+      }
+      try {
+        fetch('/api/wave-library?file=' + encodeURIComponent(currentWaveLibraryFile), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          keepalive: true,
+          body: JSON.stringify(getWaveLibraryBundle())
+        }).then((response) => {
+          if (response.ok) clearPendingWaveLibrarySave(pendingMarker);
+        }).catch(() => { /* startup recovery will retry */ });
+        return true;
+      } catch (_e) {
+        return false;
+      }
     }
 
     function applyWaveLibraryBundle(bundle, fileName) {
@@ -10184,6 +10512,8 @@ ${lines.join('\n')}`;
         const fileName = (requestedLibrary && requestedLibrary.name)
           || catalog.current
           || (catalog.files && catalog.files[0]);
+        const recovery = await recoverPendingWaveLibraryServerSave();
+        if (recovery === 'failed') return;
         if (fileName) await loadServerWaveLibrary(fileName);
         else updateWaveLibraryFileStatus();
       } catch (e) {
@@ -11114,6 +11444,7 @@ ${lines.join('\n')}`;
         closeEditor(nextValue);
         setStatus(true, '已保存波形图说明');
       };
+      editorBox.__vwdCommit = commit;
       const doneButton = document.createElement('button');
       doneButton.type = 'button';
       doneButton.className = 'wave-document-description-done';
@@ -11706,6 +12037,7 @@ ${lines.join('\n')}`;
       if (isEditingDocument) {
         if (observer) observer.unobserve(entry.card);
         entry.previewQueued = false;
+        waveContainer.hidden = false;
         entry.previewHost.replaceChildren(waveContainer);
         syncWaveDocumentDescriptionWidth(waveContainer);
         return;
@@ -11752,6 +12084,7 @@ ${lines.join('\n')}`;
       const selected = getNavNodeById(navTreeState, selectedNavNodeId) || navTreeState;
       if (singleWaveViewActive && !savedTagByName.has(requestedWaveDocumentName)) {
         mountWaveContainerOutsideLibrary();
+        waveContainer.hidden = true;
         const message = document.createElement('div');
         message.className = 'single-wave-not-found';
         message.textContent = '链接指定的波形图不存在或已被删除。';
@@ -11763,8 +12096,16 @@ ${lines.join('\n')}`;
         ? [requestedWaveDocumentName]
         : collectNavDocuments(selected, []).filter((name) => savedTagByName.has(name));
       const activeName = documentNames.includes(editingWaveDocumentName) ? editingWaveDocumentName : null;
+      const showStandaloneWave = !singleWaveViewActive
+        && selected.id === 'nav-root'
+        && documentNames.length === 0;
       snapshotActiveWavePreview(activeName);
-      if (!activeName) mountWaveContainerOutsideLibrary();
+      if (!activeName) {
+        mountWaveContainerOutsideLibrary();
+        waveContainer.hidden = !showStandaloneWave;
+      } else {
+        waveContainer.hidden = false;
+      }
 
       const entries = documentNames.map((documentName) => {
         let entry = waveLibraryCardCache.get(documentName);
@@ -11776,14 +12117,21 @@ ${lines.join('\n')}`;
         return entry;
       });
 
-      entries.forEach((entry, index) => {
-        const current = waveLibraryContainer.children[index];
-        if (current !== entry.card) waveLibraryContainer.insertBefore(entry.card, current || null);
+      const expectedCards = entries.map((entry) => entry.card);
+      const expectedCardSet = new Set(expectedCards);
+      const currentCards = Array.from(waveLibraryContainer.children);
+      const removedUnexpectedNames = currentCards
+        .filter((card) => !expectedCardSet.has(card))
+        .map((card) => card.dataset.documentName || '');
+      currentCards.forEach((card) => {
+        if (!expectedCardSet.has(card) && waveLibraryPreviewObserver) {
+          waveLibraryPreviewObserver.unobserve(card);
+        }
       });
-      while (waveLibraryContainer.children.length > entries.length) {
-        const extra = waveLibraryContainer.lastElementChild;
-        if (waveLibraryPreviewObserver) waveLibraryPreviewObserver.unobserve(extra);
-        extra.remove();
+      const sequenceMatches = currentCards.length === expectedCards.length
+        && currentCards.every((card, index) => card === expectedCards[index]);
+      if (!sequenceMatches) {
+        waveLibraryContainer.replaceChildren(...expectedCards);
       }
       pruneWaveLibraryCardCache();
 
@@ -11792,7 +12140,9 @@ ${lines.join('\n')}`;
         phase: 'library-reconcile',
         selectedId: selected.id,
         documentCount: documentNames.length,
-        cachedCardCount: waveLibraryCardCache.size
+        cachedCardCount: waveLibraryCardCache.size,
+        hiddenActiveDocument: activeName ? '' : (editingWaveDocumentName || ''),
+        removedUnexpectedNames
       });
     }
 
@@ -12856,7 +13206,14 @@ ${lines.join('\n')}`;
       const dataText = drawGroup.querySelector(
         'text.wave-data-text[data-vwd-data-index="' + slot.dataIdx + '"]'
       );
-      const anchor = dataText || drawGroup.querySelector('.wave-col-highlight') || drawGroup;
+      const anchor = createWaveDataSlotEditAnchor(
+        drawGroup,
+        entry.signal.wave || '',
+        slot,
+        svg,
+        dataText,
+        Number.NaN
+      );
       const value = Array.isArray(entry.signal.data) && entry.signal.data[slot.dataIdx] !== undefined
         ? String(entry.signal.data[slot.dataIdx])
         : '';
@@ -12947,12 +13304,14 @@ ${lines.join('\n')}`;
         return false;
       }
       try {
+        const pendingMarker = markWaveLibraryServerSavePending();
         const response = await fetch('/api/wave-library?file=' + encodeURIComponent(currentWaveLibraryFile), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(getWaveLibraryBundle())
         });
         if (!response.ok) throw new Error('save failed');
+        clearPendingWaveLibrarySave(pendingMarker);
         setStatus(true, '已保存波形库：' + currentWaveLibraryFile);
         return true;
       } catch (_e) {
@@ -13183,17 +13542,27 @@ ${lines.join('\n')}`;
       }
     });
 
-    window.addEventListener('beforeunload', () => {
+    function persistPageStateBeforeExit(reason) {
+      if (pageExitStateFlushed) return;
+      pageExitStateFlushed = true;
+      commitOpenTextEditors(reason);
       if (codeMirrorEditor) codeMirrorEditor.save();
-      checkpointDirectJsonEdit('before-unload');
+      checkpointDirectJsonEdit(reason);
       flushPersistEditorJson();
       persistEditingWaveDocumentOnExit();
       flushPersistSavedTags();
-      if (singleWaveViewActive && currentWaveLibraryId) {
-        clearTimeout(waveLibrarySaveTimer);
-        waveLibrarySaveTimer = null;
-        void saveSingleWaveDocumentToServer({ keepalive: true });
-      }
+      flushWaveLibraryServerSaveOnExit();
+      vwdDebugLog('persistence', { phase: 'page-state-flushed', reason });
+    }
+
+    window.addEventListener('beforeunload', () => {
+      persistPageStateBeforeExit('before-unload');
+    });
+    window.addEventListener('pagehide', () => {
+      persistPageStateBeforeExit('page-hide');
+    });
+    window.addEventListener('pageshow', () => {
+      pageExitStateFlushed = false;
     });
 
     ensureDebugModeButton();
