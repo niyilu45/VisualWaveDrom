@@ -2,7 +2,7 @@ const fs = require('fs');
 const http = require('http');
 const path = require('path');
 const crypto = require('crypto');
-const { exec, spawnSync } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const sqliteStore = require('./inc/visualwavedrom-sqlite-node.js');
 
 function commandLineOption(name) {
@@ -614,6 +614,12 @@ function normalizedRoot(value) {
   return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
 }
 
+function quoteWindowsCommandArgument(value) {
+  const text = String(value == null ? '' : value);
+  if (text.includes('"')) throw new Error('Windows command arguments cannot contain quotes');
+  return `"${text}"`;
+}
+
 function registerProtocolHandler(handlerPath) {
   if (process.platform !== 'win32' || !handlerPath) return;
   const resolved = path.resolve(handlerPath);
@@ -621,7 +627,18 @@ function registerProtocolHandler(handlerPath) {
     console.warn(`Protocol handler BAT not found: ${resolved}`);
     return;
   }
-  const command = `"${process.env.ComSpec || 'cmd.exe'}" /d /s /c ""${resolved}" "%1""`;
+  const command = [
+    quoteWindowsCommandArgument(process.execPath),
+    quoteWindowsCommandArgument(__filename),
+    '--html',
+    quoteWindowsCommandArgument(htmlName),
+    '--library',
+    quoteWindowsCommandArgument(configuredLibraryPath),
+    '--protocol-handler',
+    quoteWindowsCommandArgument(resolved),
+    '--open-url',
+    '"%1"'
+  ].join(' ');
   const library = sqliteStore.readLibrarySummary(configuredLibraryPath);
   const librarySuffix = String(library.libraryId || '')
     .toLowerCase()
@@ -707,9 +724,40 @@ function pageAddress(port, rawUrl) {
 
 function openAddress(address) {
   if (noOpen) return;
-  exec(`start "" "${address}"`, (error) => {
-    if (error) console.warn(`Could not open the browser automatically: ${error.message}`);
+  let target;
+  try {
+    target = new URL(address);
+    if (!/^https?:$/.test(target.protocol) || target.hostname !== '127.0.0.1') {
+      throw new Error('Only local VisualWaveDrom HTTP addresses may be opened');
+    }
+  } catch (error) {
+    console.warn(`Could not open the browser automatically: ${error.message}`);
+    return;
+  }
+
+  let command;
+  let args;
+  if (process.platform === 'win32') {
+    command = 'rundll32.exe';
+    args = ['url.dll,FileProtocolHandler', target.href];
+  } else if (process.platform === 'darwin') {
+    command = 'open';
+    args = [target.href];
+  } else {
+    command = 'xdg-open';
+    args = [target.href];
+  }
+
+  const opener = spawn(command, args, {
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true,
+    shell: false
   });
+  opener.once('error', (error) => {
+    console.warn(`Could not open the browser automatically: ${error.message}`);
+  });
+  opener.unref();
 }
 
 function serveStatic(req, res, pathname) {
