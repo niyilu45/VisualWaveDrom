@@ -509,6 +509,20 @@ function getDefaultJson() {
       });
     }
 
+    function trackInlineEditorHistoryState(element, initialValue) {
+      if (!element) return;
+      const originalValue = String(initialValue == null ? '' : initialValue);
+      element.__vwdHasPendingChange = () => String(element.value == null ? '' : element.value) !== originalValue;
+      element.addEventListener('input', updateUndoRedoButtons);
+    }
+
+    function hasPendingInlineEditorChange() {
+      return Array.from(document.querySelectorAll(
+        '.wave-text-edit-overlay, .wave-document-description-editor'
+      )).some((element) => typeof element.__vwdHasPendingChange === 'function'
+        && element.__vwdHasPendingChange());
+    }
+
     function commitOpenTextEditors(reason) {
       const editors = Array.from(document.querySelectorAll(
         '.wave-text-edit-overlay, .wave-document-description-editor'
@@ -517,7 +531,7 @@ function getDefaultJson() {
       editors.forEach((element) => {
         if (!element.isConnected || typeof element.__vwdCommit !== 'function') return;
         try {
-          element.__vwdCommit();
+          element.__vwdCommit(reason);
           committedCount++;
         } catch (error) {
           vwdDebugLog('persistence', {
@@ -534,6 +548,7 @@ function getDefaultJson() {
           count: committedCount
         });
       }
+      updateUndoRedoButtons();
       return committedCount;
     }
 
@@ -3365,11 +3380,15 @@ ${lines.join('\n')}`;
       markDirectJsonEdit();
     }
 
-    function pushUndoBeforeChange() {
+    function pushUndoBeforeChange(nextContent) {
       if (isApplyingHistory) return;
       flushUndoDebounce();
       checkpointDirectJsonEdit('before-toolbar-change');
-      pushEditorUndoSnapshot(editor.value, 'toolbar-change');
+      pushEditorUndoSnapshot(
+        editor.value,
+        'toolbar-change',
+        typeof nextContent === 'string' ? nextContent : undefined
+      );
       setEditorHistoryBaseline(editor.value);
       updateUndoRedoButtons();
     }
@@ -7451,7 +7470,6 @@ ${lines.join('\n')}`;
           text = ensured.text;
           const bounds = ensured.bounds;
 
-          if (text.length <= 500000) pushUndoBeforeChange();
           const indent = getIndentAt(text, bounds.arrStart) || '  ';
           const itemIndent = indent + '  ';
           const edgeJson = JSON.stringify(edgeStr);
@@ -7486,6 +7504,7 @@ ${lines.join('\n')}`;
             return;
           }
 
+          pushUndoBeforeChange(newText);
           vwdMark('commitEdgeInsert:beforeApply');
           deferCompletion = true;
 
@@ -8985,6 +9004,7 @@ ${lines.join('\n')}`;
         if (prev !== overlay && prev.parentElement) prev.remove();
       });
       document.body.appendChild(overlay);
+      trackInlineEditorHistoryState(overlay, oldValue);
       attachInlineTextInputAutoWidth(overlay, {
         minWidth: overlayWidth,
         left: overlayLeft
@@ -9197,6 +9217,7 @@ ${lines.join('\n')}`;
             document.removeEventListener('mousedown', outsideClick, true);
           }
           inlineEditActive = false;
+          updateUndoRedoButtons();
         }
       });
       overlay.addEventListener('keyup', (e) => {
@@ -9778,6 +9799,7 @@ ${lines.join('\n')}`;
         overlay.style.left = '0px';
       }
       overlayParent.appendChild(overlay);
+      trackInlineEditorHistoryState(overlay, oldValue);
       if (!isDescriptionField) {
         attachInlineTextInputAutoWidth(overlay, {
           container: wavePanel,
@@ -9830,10 +9852,10 @@ ${lines.join('\n')}`;
         finishVimDirectEdit();
         if (newVal !== oldValue) {
           const currentText = editor.value || '';
-          if (currentText.length <= 500000) pushUndoBeforeChange();
           const mapBefore = buildSignalSourceMap(currentText);
           const laneIdx = mapBefore.findIndex(m => m.start === entry.start);
           const newText = replaceFieldInSource(currentText, entry, field, newVal, dataIdx);
+          pushUndoBeforeChange(newText);
           const map = buildSignalSourceMap(newText);
           const updated = laneIdx >= 0 ? map[laneIdx] : map.find(m => m.signal.name === newVal);
           applyEditorChange(newText, updated ? updated.start : editor.selectionStart, updated ? updated.end : undefined);
@@ -9880,6 +9902,7 @@ ${lines.join('\n')}`;
           inlineEditActive = false;
           setActiveInlineEditState(null);
           finishVimDirectEdit();
+          updateUndoRedoButtons();
         }
       });
     }
@@ -9912,6 +9935,7 @@ ${lines.join('\n')}`;
       overlay.style.height = Math.max(rect.height + 4, 22) + 'px';
 
       wavePanel.appendChild(overlay);
+      trackInlineEditorHistoryState(overlay, oldValue);
       attachInlineTextInputAutoWidth(overlay, {
         container: wavePanel,
         minWidth: Math.max(rect.width + 16, 120),
@@ -9929,8 +9953,8 @@ ${lines.join('\n')}`;
         inlineEditActive = false;
         if (newVal !== oldValue) {
           const currentText = editor.value || '';
-          if (currentText.length <= 500000) pushUndoBeforeChange();
           const newText = replaceHeadFootTextInSource(currentText, field, newVal);
+          pushUndoBeforeChange(newText);
           const block = findTopLevelKeyBlock(newText, field);
           applyEditorChange(
             newText,
@@ -9952,6 +9976,7 @@ ${lines.join('\n')}`;
           committed = true;
           overlay.remove();
           inlineEditActive = false;
+          updateUndoRedoButtons();
         }
       });
     }
@@ -10039,6 +10064,7 @@ ${lines.join('\n')}`;
       overlay.addEventListener('input', resizeDescriptionOverlay);
 
       document.body.appendChild(overlay);
+      trackInlineEditorHistoryState(overlay, oldValue);
       requestAnimationFrame(() => resizeDescriptionOverlay());
       overlay.focus();
       overlay.select();
@@ -10061,8 +10087,8 @@ ${lines.join('\n')}`;
         setActiveInlineEditState(null);
         if (newVal !== oldValue) {
           const currentText = editor.value || '';
-          if (currentText.length <= 500000) pushUndoBeforeChange();
           const newText = replaceGlobalDescribeInSource(currentText, newVal);
+          pushUndoBeforeChange(newText);
           applyEditorChange(newText, editor.selectionStart, editor.selectionEnd);
           setStatus(true, '已更新波形说明');
         }
@@ -10098,6 +10124,7 @@ ${lines.join('\n')}`;
           overlay.remove();
           inlineEditActive = false;
           setActiveInlineEditState(null);
+          updateUndoRedoButtons();
         }
       });
     }
@@ -12531,10 +12558,13 @@ ${lines.join('\n')}`;
     function updateUndoRedoButtons() {
       const btnUndo = document.getElementById('btn-undo');
       const btnRedo = document.getElementById('btn-redo');
-      btnUndo.disabled = !directJsonEditDirty
+      const pendingInlineEdit = hasPendingInlineEditorChange();
+      btnUndo.disabled = !pendingInlineEdit
+        && !directJsonEditDirty
         && undoStack.length === 0
         && waveLibraryUndoStack.length === 0;
-      btnRedo.disabled = directJsonEditDirty
+      btnRedo.disabled = pendingInlineEdit
+        || directJsonEditDirty
         || (redoStack.length === 0 && waveLibraryRedoStack.length === 0);
     }
 
@@ -12553,13 +12583,18 @@ ${lines.join('\n')}`;
       return (key === 'z' && e.shiftKey) || key === 'y';
     }
 
+    const handledUndoRedoShortcutEvents = new WeakSet();
+
     function handleUndoRedoShortcut(e) {
+      if (handledUndoRedoShortcutEvents.has(e)) return true;
       if (isUndoShortcut(e)) {
+        handledUndoRedoShortcutEvents.add(e);
         e.preventDefault();
         undo();
         return true;
       }
       if (isRedoShortcut(e)) {
+        handledUndoRedoShortcutEvents.add(e);
         e.preventDefault();
         redo();
         return true;
@@ -12577,7 +12612,26 @@ ${lines.join('\n')}`;
       return getHistorySequence(stack[stack.length - 1]);
     }
 
+    function syncEditingWaveDocumentAfterHistory() {
+      const documentName = editingWaveDocumentName;
+      if (!documentName || !isValidJsonText(editor.value)) return false;
+      const updated = upsertSavedTag(documentName, getCurrentStateSnapshot(), {
+        skipListRefresh: true,
+        skipSort: true
+      });
+      if (!updated) return false;
+      refreshWaveDocumentTitle(documentName, true);
+      refreshWaveDocumentCard(documentName);
+      vwdDebugLog('history', {
+        phase: 'sync-wave-document',
+        documentName,
+        contentLength: editor.value.length
+      });
+      return true;
+    }
+
     function undo() {
+      commitOpenTextEditors('before-undo');
       checkpointDirectJsonEdit('before-undo');
       const editorSequence = getLastHistorySequence(undoStack);
       const librarySequence = getLastHistorySequence(waveLibraryUndoStack);
@@ -12620,6 +12674,7 @@ ${lines.join('\n')}`;
         updateLineNumbers();
         renderWaveform(editor.value);
         saveEditorJsonToStorage(editor.value);
+        syncEditingWaveDocumentAfterHistory();
       } finally {
         isApplyingHistory = false;
       }
@@ -12629,6 +12684,7 @@ ${lines.join('\n')}`;
     }
 
     function redo() {
+      commitOpenTextEditors('before-redo');
       checkpointDirectJsonEdit('before-redo');
       const editorSequence = getNextRedoSequence(redoStack);
       const librarySequence = getNextRedoSequence(waveLibraryRedoStack);
@@ -12671,6 +12727,7 @@ ${lines.join('\n')}`;
         updateLineNumbers();
         renderWaveform(editor.value);
         saveEditorJsonToStorage(editor.value);
+        syncEditingWaveDocumentAfterHistory();
       } finally {
         isApplyingHistory = false;
       }
@@ -12769,6 +12826,7 @@ ${lines.join('\n')}`;
       descriptionEl.innerHTML = '';
       descriptionEl.classList.remove('empty');
       descriptionEl.appendChild(editorBox);
+      trackInlineEditorHistoryState(editorBox, oldValue);
       autoResizeDescriptionOverlay(editorBox, { minHeight: 62, maxHeight: 260 });
       editorBox.focus();
       editorBox.select();
@@ -12785,6 +12843,7 @@ ${lines.join('\n')}`;
         descriptionEl.textContent = value || '暂无波形图说明';
         descriptionEl.classList.toggle('empty', !value);
         descriptionEl.title = '点击编辑波形图说明';
+        updateUndoRedoButtons();
       };
       const commit = (reason) => {
         if (committed) return;
@@ -12810,7 +12869,7 @@ ${lines.join('\n')}`;
           closeEditor(oldValue);
           return;
         }
-        pushUndoBeforeChange();
+        pushUndoBeforeChange(newText);
         // A document description is rendered outside the SVG card, so avoid a
         // costly full WaveDrom redraw for large documents.
         setEditorValue(newText);
@@ -13215,8 +13274,8 @@ ${lines.join('\n')}`;
       const openButton = document.createElement('button');
       openButton.type = 'button';
       openButton.className = 'wave-document-open';
-      openButton.title = singleWaveViewActive ? '返回完整波形库' : '打开此波形图进行编辑';
-      openButton.textContent = singleWaveViewActive ? '返回' : '打开';
+      openButton.title = singleWaveViewActive ? '返回完整波形库' : '编辑此波形图';
+      openButton.textContent = singleWaveViewActive ? '返回' : '编辑';
       openButton.addEventListener('click', () => {
         if (singleWaveViewActive) {
           const params = new URLSearchParams();
