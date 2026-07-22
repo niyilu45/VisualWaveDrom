@@ -254,6 +254,7 @@ function getDefaultJson() {
     let vimHelpReturnFocus = null;
     let vimWaveAreaActive = false;
     let vimWaveScrollFrame = 0;
+    let frozenWaveLabelClipSequence = 0;
     let vimDirectInlineEditActive = false;
     let vimWaveInsertModeActive = false;
     let codeMirrorEditor = null;
@@ -8148,20 +8149,23 @@ ${lines.join('\n')}`;
       const viewHeight = viewBox && viewBox.height > 0
         ? viewBox.height
         : Math.max(1, parseFloat(svg.getAttribute('height') || '1'));
-      const boundaryX = Math.max(viewX + 1, Math.min(...drawBounds.map((bounds) => bounds.x)));
+      const waveStartX = Math.min(...drawBounds.map((bounds) => bounds.x));
       let frozenBackgroundX = viewX;
+      let userUnitsPerPixel = 1;
       try {
         const svgRect = svg.getBoundingClientRect();
         const userWidth = viewBox && viewBox.width > 0
           ? viewBox.width
           : Math.max(1, parseFloat(svg.getAttribute('width') || '1'));
-        const userUnitsPerPixel = svgRect.width > 0 ? userWidth / svgRect.width : 1;
+        userUnitsPerPixel = svgRect.width > 0 ? userWidth / svgRect.width : 1;
         const scrollerStyle = getComputedStyle(scroller);
         const leftPadding = Math.max(0, parseFloat(scrollerStyle.paddingLeft || '0'));
         frozenBackgroundX -= (leftPadding + 1) * userUnitsPerPixel;
       } catch (_e) {
         frozenBackgroundX = viewX;
       }
+      const waveformClearance = Math.max(2, 4 * userUnitsPerPixel);
+      const boundaryX = Math.max(viewX + 1, waveStartX - waveformClearance);
       const groupRoot = svg.querySelector('[id^="groups_"]');
       const verticalBounds = lanes.map(getSvgElementBounds).filter(Boolean);
       const groupBounds = getSvgElementBounds(groupRoot);
@@ -8186,13 +8190,29 @@ ${lines.join('\n')}`;
       background.setAttribute('height', String(Math.max(1, backgroundBottom - backgroundY)));
       layer.appendChild(background);
 
+      const clipId = 'vwd-frozen-label-clip-' + (++frozenWaveLabelClipSequence);
+      const clipPath = document.createElementNS(svgNs, 'clipPath');
+      clipPath.setAttribute('id', clipId);
+      clipPath.setAttribute('clipPathUnits', 'userSpaceOnUse');
+      const clipRect = document.createElementNS(svgNs, 'rect');
+      clipRect.setAttribute('x', String(frozenBackgroundX));
+      clipRect.setAttribute('y', String(backgroundY));
+      clipRect.setAttribute('width', String(Math.max(1, boundaryX - frozenBackgroundX)));
+      clipRect.setAttribute('height', String(Math.max(1, backgroundBottom - backgroundY)));
+      clipPath.appendChild(clipRect);
+      layer.appendChild(clipPath);
+
+      const labelContent = document.createElementNS(svgNs, 'g');
+      labelContent.setAttribute('class', 'vwd-frozen-label-content');
+      labelContent.setAttribute('clip-path', 'url(#' + clipId + ')');
+      layer.appendChild(labelContent);
+
       const divider = document.createElementNS(svgNs, 'line');
       divider.setAttribute('class', 'vwd-frozen-label-divider');
       divider.setAttribute('x1', String(boundaryX));
       divider.setAttribute('x2', String(boundaryX));
       divider.setAttribute('y1', String(backgroundY));
       divider.setAttribute('y2', String(backgroundBottom));
-      layer.appendChild(divider);
 
       if (groupRoot) {
         const groupClone = groupRoot.cloneNode(true);
@@ -8211,7 +8231,7 @@ ${lines.join('\n')}`;
           cloneTarget.setAttribute('pointer-events', 'all');
           cloneTarget.addEventListener('click', (event) => invoke(event, cloneTarget));
         });
-        layer.appendChild(groupClone);
+        labelContent.appendChild(groupClone);
       }
 
       lanes.forEach((lane) => {
@@ -8252,8 +8272,10 @@ ${lines.join('\n')}`;
           }
           row.insertBefore(zoneClone, nameClone);
         }
-        layer.appendChild(row);
+        labelContent.appendChild(row);
       });
+
+      layer.appendChild(divider);
 
       svg.appendChild(layer);
 
@@ -8304,6 +8326,8 @@ ${lines.join('\n')}`;
       vwdDebugLog('wave-scroll', {
         phase: 'freeze-labels-setup',
         boundaryX: Math.round(boundaryX * 100) / 100,
+        waveStartX: Math.round(waveStartX * 100) / 100,
+        clearance: Math.round(waveformClearance * 100) / 100,
         laneCount: lanes.length,
         hasGroups: !!groupRoot,
         scroller: scroller.classList.contains('wave-document-canvas') ? 'document-canvas' : 'wave-panel'
@@ -8798,7 +8822,7 @@ ${lines.join('\n')}`;
       if (!e.shiftKey || e.ctrlKey || e.metaKey) return false;
       const target = e.target;
       if (!target || !(target instanceof Element) || !wavePanel.contains(target)) return false;
-      if (target.closest && target.closest('.wave-text-edit-overlay')) return false;
+      if (target.closest && target.closest('.wave-text-edit-overlay, .wave-document-description-editor')) return false;
 
       const horizontalScroller = target.closest('.wave-document-canvas') || wavePanel;
       const maxLeft = Math.max(0, horizontalScroller.scrollWidth - horizontalScroller.clientWidth);
@@ -8829,7 +8853,7 @@ ${lines.join('\n')}`;
       const target = e.target;
       if (!target || !(target instanceof Element)) return;
       if (!wavePanel.contains(target)) return;
-      if (target.closest && target.closest('.wave-text-edit-overlay')) return;
+      if (target.closest && target.closest('.wave-text-edit-overlay, .wave-document-description-editor')) return;
 
       if (e.ctrlKey || e.metaKey) return;
       e.preventDefault();
@@ -12750,16 +12774,23 @@ ${lines.join('\n')}`;
       editorBox.select();
 
       let committed = false;
+      let outsidePointerHandler = null;
+      const detachOutsidePointerHandler = () => {
+        if (!outsidePointerHandler) return;
+        document.removeEventListener('pointerdown', outsidePointerHandler, true);
+        outsidePointerHandler = null;
+      };
       const closeEditor = (value) => {
+        detachOutsidePointerHandler();
         descriptionEl.textContent = value || '暂无波形图说明';
         descriptionEl.classList.toggle('empty', !value);
         descriptionEl.title = '点击编辑波形图说明';
       };
-      const commit = () => {
+      const commit = (reason) => {
         if (committed) return;
         committed = true;
         const nextValue = editorBox.value;
-        vwdDebugLog('wave-library', { phase: 'commit-description', documentName: tag.name, changed: nextValue !== oldValue, valueLength: nextValue.length });
+        vwdDebugLog('wave-library', { phase: 'commit-description', documentName: tag.name, reason: reason || 'manual', changed: nextValue !== oldValue, valueLength: nextValue.length });
         if (nextValue === oldValue) {
           closeEditor(oldValue);
           return;
@@ -12794,6 +12825,12 @@ ${lines.join('\n')}`;
         setStatus(true, '已保存波形图说明');
       };
       editorBox.__vwdCommit = commit;
+      outsidePointerHandler = (event) => {
+        const target = event && event.target;
+        if (target && descriptionEl.contains(target)) return;
+        commit('outside-pointer');
+      };
+      document.addEventListener('pointerdown', outsidePointerHandler, true);
       const doneButton = document.createElement('button');
       doneButton.type = 'button';
       doneButton.className = 'wave-document-description-done';
@@ -12805,10 +12842,21 @@ ${lines.join('\n')}`;
       });
       doneButton.addEventListener('click', (event) => {
         event.stopPropagation();
-        commit();
+        commit('done-button');
       });
       descriptionEl.appendChild(doneButton);
       editorBox.addEventListener('input', () => autoResizeDescriptionOverlay(editorBox, { minHeight: 62, maxHeight: 260 }));
+      editorBox.addEventListener('blur', () => commit('blur'));
+      editorBox.addEventListener('wheel', (event) => {
+        if (event.ctrlKey || event.metaKey || !event.deltaY) return;
+        const deltaScale = event.deltaMode === 1
+          ? 20
+          : (event.deltaMode === 2 ? Math.max(1, editorBox.clientHeight) : 1);
+        const maxTop = Math.max(0, editorBox.scrollHeight - editorBox.clientHeight);
+        editorBox.scrollTop = Math.max(0, Math.min(maxTop, editorBox.scrollTop + event.deltaY * deltaScale));
+        event.preventDefault();
+        event.stopPropagation();
+      }, { passive: false });
       editorBox.addEventListener('keydown', (event) => {
         event.stopPropagation();
         if (event.key === 'Tab') {
@@ -13581,7 +13629,9 @@ ${lines.join('\n')}`;
         entry.previewQueued = false;
         waveContainer.hidden = false;
         entry.previewHost.replaceChildren(waveContainer);
+        setWavePreviewLoadingState(entry, false);
         syncWaveDocumentDescriptionWidth(waveContainer);
+        setupFrozenWaveLabels(waveContainer);
         return;
       }
 

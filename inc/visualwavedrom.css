@@ -1192,17 +1192,6 @@
       contain: layout paint;
     }
 
-    .wave-document-preview.preview-unloaded::after {
-      content: "";
-      position: absolute;
-      left: 16px;
-      right: 16px;
-      top: 50%;
-      height: 1px;
-      background: #d8e0ea;
-      pointer-events: none;
-    }
-
     .wave-document-preview {
       min-height: 44px;
     }
