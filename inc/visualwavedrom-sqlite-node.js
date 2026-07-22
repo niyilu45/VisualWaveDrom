@@ -9,9 +9,10 @@ const SQLITE_SCHEMA_VERSION = 1;
 const SQLITE_HEADER = Buffer.from('SQLite format 3\0', 'ascii');
 const bundledSqlite = path.join(__dirname, 'sqlite', 'sqlite3.exe');
 const sqliteCommand = process.platform === 'win32' ? bundledSqlite : 'sqlite3';
+const preparedDatabasePaths = new Set();
 
 const schemaSql = `
-PRAGMA journal_mode=WAL;
+PRAGMA journal_mode=DELETE;
 PRAGMA synchronous=NORMAL;
 PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS vwd_library (
@@ -102,6 +103,13 @@ function safeJsonParse(value, fallback) {
 
 function ensureSchema(filePath) {
   execute(filePath, schemaSql);
+  preparedDatabasePaths.add(path.resolve(filePath));
+}
+
+function ensurePortableDatabase(filePath) {
+  const resolvedPath = path.resolve(filePath);
+  if (preparedDatabasePaths.has(resolvedPath)) return;
+  ensureSchema(resolvedPath);
 }
 
 function hasSqliteHeader(filePath) {
@@ -246,13 +254,13 @@ function writeLibrary(filePath, bundle) {
     'DELETE FROM vwd_library;',
     libraryRowSql(library),
     ...library.documents.map(documentInsertSql),
-    'COMMIT;',
-    'PRAGMA wal_checkpoint(TRUNCATE);'
+    'COMMIT;'
   ].join('\n'));
   return library;
 }
 
 function readLibraryRow(filePath) {
+  ensurePortableDatabase(filePath);
   const rows = query(filePath, `SELECT
     kind, version, library_id, updated_at, directories_json, root_documents_json,
     active_document_name, selected_directory_id
@@ -322,6 +330,7 @@ function nextSortOrder(filePath) {
 }
 
 function updateWaveDocument(filePath, payload) {
+  ensurePortableDatabase(filePath);
   const waveId = String(payload.waveId || '');
   const previous = readWaveDocument(filePath, waveId);
   if (!previous) return { status: 404, error: 'Wave document not found' };
@@ -343,8 +352,7 @@ function updateWaveDocument(filePath, payload) {
     'BEGIN IMMEDIATE;',
     documentUpsertSql(document),
     `UPDATE vwd_library SET updated_at=${sqlText(savedAt)} WHERE singleton=1;`,
-    'COMMIT;',
-    'PRAGMA wal_checkpoint(TRUNCATE);'
+    'COMMIT;'
   ].join('\n'));
   return { status: 200, document: documentFromRow({
     name: document.name,
@@ -358,6 +366,7 @@ function updateWaveDocument(filePath, payload) {
 }
 
 function patchLibraryState(filePath, payload) {
+  ensurePortableDatabase(filePath);
   const library = readLibraryRow(filePath);
   const deletedNames = new Set(Array.isArray(payload.deletedDocuments)
     ? payload.deletedDocuments.map((name) => String(name || '')).filter(Boolean)
@@ -410,8 +419,7 @@ function patchLibraryState(filePath, payload) {
     ...Array.from(deletedNames).map((name) => `DELETE FROM vwd_documents WHERE name=${sqlText(name)};`),
     ...preparedDocuments.map(documentUpsertSql),
     libraryRowSql(updated),
-    'COMMIT;',
-    'PRAGMA wal_checkpoint(TRUNCATE);'
+    'COMMIT;'
   ].join('\n'));
   return {
     status: 200,

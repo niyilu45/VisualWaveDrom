@@ -409,18 +409,28 @@
     }
 
     async importBytes(bytes, fileName) {
-      const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || 0);
+      let data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || 0);
       let header = '';
       for (let index = 0; index < Math.min(SQLITE_HEADER.length, data.length); index += 1) {
         header += String.fromCharCode(data[index]);
       }
       if (header !== SQLITE_HEADER) throw new Error('所选文件不是 SQLite 波形库');
+      // Older service builds used WAL mode. A standalone main database has no
+      // companion -wal file, and the browser VFS cannot open its WAL header.
+      // Service writes checkpointed every transaction, so switching the copied
+      // header back to the portable rollback-journal format preserves its data.
+      if (data.length > 19 && (data[18] === 2 || data[19] === 2)) {
+        data = data.slice();
+        data[18] = 1;
+        data[19] = 1;
+      }
       const filePath = this.uniquePath();
       this.sqlite3.capi.sqlite3_js_posix_create_file(filePath, data);
       const imported = new this.sqlite3.oo1.DB(filePath, 'w');
       const previous = this.db;
       this.db = imported;
       try {
+        this.db.exec('PRAGMA journal_mode=DELETE');
         this.validate();
       } catch (error) {
         this.db = previous;

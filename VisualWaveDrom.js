@@ -51,6 +51,7 @@ const configuredLibraryDirectory = path.dirname(configuredLibraryPath);
 const waveDir = configuredLibraryIsFolderDatabase
   ? path.dirname(configuredLibraryDirectory)
   : path.dirname(configuredLibraryPath);
+const serviceStatePath = path.join(waveDir, '.visualwavedrom-state.json');
 const configuredLibraryName = configuredLibraryIsFolderDatabase
   ? path.basename(configuredLibraryDirectory)
   : path.basename(configuredLibraryPath, path.extname(configuredLibraryPath));
@@ -87,6 +88,40 @@ function writeTextAtomically(filePath, text) {
   const tempPath = `${filePath}.${process.pid}.tmp`;
   fs.writeFileSync(tempPath, text, 'utf8');
   fs.renameSync(tempPath, filePath);
+}
+
+function readRecentLibraryName() {
+  try {
+    const state = readJson(serviceStatePath);
+    const name = String(state && state.recentLibrary || '');
+    return name && path.basename(name) === name ? name : '';
+  } catch (_) {
+    return '';
+  }
+}
+
+function rememberLibraryName(name) {
+  const libraryName = String(name || '');
+  if (!libraryName || path.basename(libraryName) !== libraryName) return false;
+  if (readRecentLibraryName() === libraryName) return true;
+  try {
+    writeJsonAtomically(serviceStatePath, {
+      version: 1,
+      recentLibrary: libraryName,
+      updatedAt: new Date().toISOString()
+    });
+    return true;
+  } catch (error) {
+    console.warn(`Could not remember the selected wave library: ${error.message}`);
+    return false;
+  }
+}
+
+function libraryNameFromPath(filePath) {
+  if (path.resolve(filePath) === path.resolve(configuredLibraryPath)) return configuredLibraryName;
+  return /^library\.(?:sqlite|db)$/i.test(path.basename(filePath))
+    ? path.basename(path.dirname(filePath))
+    : path.basename(filePath, path.extname(filePath));
 }
 
 function splitDocumentPath(manifestPath, relativePath) {
@@ -740,8 +775,9 @@ const server = http.createServer(async (req, res) => {
     }
     if (url.pathname === '/api/wave-libraries' && req.method === 'GET') {
       const libraries = listLibraries();
+      const recent = libraries.find((item) => item.name === readRecentLibraryName());
       const configured = libraries.find((item) => item.name === configuredLibraryName);
-      const current = configured || libraries[0] || null;
+      const current = recent || configured || libraries[0] || null;
       sendJson(res, 200, {
         files: libraries.map((item) => item.name),
         libraries,
@@ -757,9 +793,11 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'GET') {
         if (!fs.existsSync(filePath) || !sqliteStore.isLibraryFile(filePath)) { sendJson(res, 404, { error: 'Library not found' }); return; }
         const summaryOnly = url.searchParams.get('summary') === '1';
-        sendJson(res, 200, summaryOnly
+        const library = summaryOnly
           ? sqliteStore.readLibrarySummary(filePath)
-          : sqliteStore.readLibrary(filePath));
+          : sqliteStore.readLibrary(filePath);
+        rememberLibraryName(libraryNameFromPath(filePath));
+        sendJson(res, 200, library);
         return;
       }
       if (req.method === 'POST') {
@@ -802,6 +840,7 @@ const server = http.createServer(async (req, res) => {
         }
         incoming.updatedAt = new Date().toISOString();
         sqliteStore.writeLibrary(filePath, incoming);
+        rememberLibraryName(libraryNameFromPath(filePath));
         sendJson(res, 200, {
           ok: true,
           file: path.basename(path.dirname(filePath)),

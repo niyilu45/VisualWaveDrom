@@ -29,9 +29,10 @@ set "WAVE_LIBRARY_RELATIVE_PATH=Wave\VisualWaveDrom-library\library.sqlite"
 
 - 目录页只查询波形摘要，打开某张图时才读取该图的完整 JSON。
 - 修改波形时只更新对应数据库记录；目录和归属关系使用同一事务保存。
-- SQLite 使用索引、事务和 WAL，单张波形损坏不会阻止其他图读取。
+- SQLite 使用索引和事务；数据库采用可独立复制的单文件日志模式，不依赖额外的 `-wal` 文件。
 - 每次写入保留波形修订号，用于发现完整页面与单图页面之间的同步冲突。
 - 功能菜单中的“导入波形库”用于切换 `Wave` 下不同的波形库文件夹。
+- 服务会记住最后一次成功打开的波形库；下次双击 BAT 时优先恢复该库。记录文件为 `Wave\.visualwavedrom-state.json`，它是本机状态，不需要随工程提交。
 
 这是大型波形库、自动保存和 Word 单图链接的推荐模式。
 
@@ -40,6 +41,7 @@ set "WAVE_LIBRARY_RELATIVE_PATH=Wave\VisualWaveDrom-library\library.sqlite"
 直接双击 `VisualWaveDrom.html` 不需要 Node.js。页面会加载随项目提供的 SQLite WebAssembly 运行文件。
 
 - “导入波形库”可选择 `.sqlite`、`.db`、`.vwdlib`，也兼容旧完整库 `.json`。
+- 旧版服务模式生成的 WAL 格式 `.sqlite` 主文件会在导入时自动转成浏览器可读的单文件格式。
 - “保存波形库”始终下载标准 `.sqlite` 文件。
 - 编辑中的 SQLite 快照保存在浏览器 IndexedDB，刷新页面后会自动恢复。
 - 浏览器安全限制不允许网页静默覆盖用户选择的原文件，因此需要点击“保存波形库”下载更新后的文件。
