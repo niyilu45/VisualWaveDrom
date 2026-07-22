@@ -5473,11 +5473,6 @@ ${lines.join('\n')}`;
         button.disabled = !canChooseLine;
       });
 
-      const input = document.getElementById('connection-label-input');
-      const applyBtn = document.getElementById('btn-apply-edge-label');
-      const labelEnabled = connectionAddSessionActive || selectedEdgeIndex >= 0;
-      if (input) input.disabled = !labelEnabled;
-      if (applyBtn) applyBtn.disabled = !labelEnabled;
     }
 
     function updateConnectionPresetSelection() {
@@ -6860,36 +6855,18 @@ ${lines.join('\n')}`;
       return result;
     }
 
-    function getConnectionLabelInputValue() {
-      const input = document.getElementById('connection-label-input');
-      return input ? input.value.trim() : '';
-    }
-
     function updateEdgeLabelEditUI() {
-      const titleEl = document.getElementById('connection-label-edit-title');
-      const hintEl = document.getElementById('connection-label-edit-hint');
-      const input = document.getElementById('connection-label-input');
-      if (!input) return;
-
       if (selectedEdgeIndex >= 0) {
-        if (titleEl) titleEl.textContent = '已选连接的标签';
-        if (hintEl) hintEl.textContent = '修改箭头、线型或标签会立即更新当前连接';
         try {
           const parsed = JSON.parse(editor.value);
           const edges = parsed.edge || [];
           if (selectedEdgeIndex < edges.length) {
-            input.value = parseEdgeString(edges[selectedEdgeIndex]).label;
             const presentation = getEdgePresentation(edges[selectedEdgeIndex], parsed, selectedEdgeIndex);
             connectionArrowStyle = presentation.arrowStyle;
             connectionLineStyle = presentation.lineStyle;
             connectionLineVariant = presentation.lineVariant;
           }
         } catch (e) { /* ignore */ }
-      } else {
-        if (titleEl) titleEl.textContent = '连接标签';
-        if (hintEl) hintEl.textContent = connectionAddSessionActive
-          ? '标签将在选择连接线样式并生成时使用'
-          : '先点击“新增连接”或进入“选择连接线”模式';
       }
       updateConnectionPropertiesUI();
     }
@@ -7040,6 +7017,9 @@ ${lines.join('\n')}`;
       svg.querySelectorAll('.wave-edge-selected').forEach((el) => {
         el.classList.remove('wave-edge-selected');
       });
+      svg.querySelectorAll('.wave-edge-label-editable').forEach((el) => {
+        el.classList.remove('wave-edge-label-editable');
+      });
       clearEdgeSelectionBlink(svg);
 
       if (selectedEdgeIndex < 0) return;
@@ -7061,8 +7041,179 @@ ${lines.join('\n')}`;
       const gmark = svg.querySelector('#gmark_' + from + '_' + to);
       if (gmark) {
         gmark.classList.add('wave-edge-selected');
+        gmark.classList.add('wave-edge-label-editable');
         applyEdgeSelectionBlink(svg, gmark, label);
       }
+      svg.querySelectorAll('[data-vwd-edge-index="' + selectedEdgeIndex + '"]').forEach((element) => {
+        element.classList.add('wave-edge-label-editable');
+      });
+    }
+
+    function getSelectedEdgeLabelEditAnchor(index) {
+      const svg = waveContainer.querySelector('svg');
+      if (!svg || index < 0) return null;
+      const indexed = svg.querySelector(
+        '.wave-edge-label-text[data-vwd-edge-index="' + index + '"], '
+        + '.wave-edge-hit-target[data-vwd-edge-index="' + index + '"]'
+      );
+      if (indexed) return indexed;
+      try {
+        const edges = JSON.parse(editor.value).edge || [];
+        const edge = parseEdgeString(edges[index] || '');
+        return edge.from && edge.to ? svg.querySelector('#gmark_' + edge.from + '_' + edge.to) : null;
+      } catch (_e) {
+        return null;
+      }
+    }
+
+    function finishVimEdgeLabelEdit() {
+      if (!vimDirectInlineEditActive) return;
+      vimDirectInlineEditActive = false;
+      if (textEditModeActive) {
+        textEditModeActive = false;
+        updateTextEditModeUI();
+      }
+      if (vimController && vimController.getState().enabled) {
+        if (vimController.getState().mode === 'insert') vimController.setMode('normal');
+        setKeyboardInputScope('wave', 'vim-edge-label-finish');
+        requestAnimationFrame(() => {
+          if (!wavePanel) return;
+          try { wavePanel.focus({ preventScroll: true }); } catch (_e) { wavePanel.focus(); }
+        });
+      }
+    }
+
+    function startSelectedEdgeLabelInlineEdit(anchorEl, requestedIndex, options) {
+      const opts = options || {};
+      const index = Number.isFinite(requestedIndex) ? requestedIndex : selectedEdgeIndex;
+      if (index < 0 || selectedEdgeIndex !== index) {
+        setStatus(false, '请先选择需要编辑标签的连接线');
+        vwdDebugLog('connection-label', {
+          phase: 'open-blocked',
+          requestedIndex: index,
+          selectedEdgeIndex
+        });
+        return false;
+      }
+      if (!isTextEditModeActive()) {
+        setStatus(false, '请先开启文本编辑模式');
+        return false;
+      }
+      if (inlineEditActive) return false;
+
+      let edges;
+      try {
+        edges = JSON.parse(editor.value).edge || [];
+      } catch (_e) {
+        setStatus(false, 'JSON 错误，无法编辑连接标签');
+        return false;
+      }
+      if (index >= edges.length) return false;
+      const anchor = anchorEl || getSelectedEdgeLabelEditAnchor(index);
+      if (!anchor || typeof anchor.getBoundingClientRect !== 'function') {
+        setStatus(false, '暂时无法定位所选连接线');
+        return false;
+      }
+
+      const oldValue = String(parseEdgeString(edges[index]).label || '');
+      const rect = anchor.getBoundingClientRect();
+      const centerX = rect.left + rect.width / 2;
+      const centerY = rect.top + rect.height / 2;
+      const overlay = document.createElement('input');
+      overlay.className = 'wave-text-edit-overlay wave-edge-label-overlay';
+      overlay.type = 'text';
+      overlay.value = oldValue;
+      overlay.placeholder = '输入连接标签，留空删除';
+      overlay.autocomplete = 'off';
+      overlay.spellcheck = false;
+      overlay.style.position = 'fixed';
+      overlay.style.top = Math.max(8, Math.min(window.innerHeight - 36, centerY - 14)) + 'px';
+      overlay.style.left = Math.max(8, centerX - 80) + 'px';
+      overlay.style.width = '160px';
+      overlay.style.height = '28px';
+
+      inlineEditActive = true;
+      if (opts.vimDirect) vimDirectInlineEditActive = true;
+      setActiveInlineEditState({ kind: 'edge-label', edgeIndex: index, overlay });
+      document.body.appendChild(overlay);
+      trackInlineEditorHistoryState(overlay, oldValue);
+
+      const resize = () => {
+        const viewportWidth = Math.max(80, window.innerWidth || document.documentElement.clientWidth || 320);
+        const maxWidth = Math.max(80, viewportWidth - 16);
+        const width = Math.max(160, Math.min(maxWidth, measureInlineTextInputWidth(overlay)));
+        const left = Math.max(8, Math.min(viewportWidth - width - 8, centerX - width / 2));
+        overlay.style.width = Math.ceil(width) + 'px';
+        overlay.style.left = Math.round(left) + 'px';
+      };
+      overlay.addEventListener('input', resize);
+      resize();
+      overlay.focus();
+      overlay.select();
+
+      let finished = false;
+      const close = () => {
+        if (overlay.isConnected) overlay.remove();
+        inlineEditActive = false;
+        setActiveInlineEditState(null);
+        finishVimEdgeLabelEdit();
+        updateUndoRedoButtons();
+      };
+      const commit = (reason) => {
+        if (finished) return;
+        finished = true;
+        const label = overlay.value.trim();
+        close();
+        if (label === oldValue) return;
+
+        let currentEdges;
+        try {
+          currentEdges = JSON.parse(editor.value).edge || [];
+        } catch (_e) {
+          setStatus(false, 'JSON 错误，无法更新连接标签');
+          return;
+        }
+        if (index >= currentEdges.length) return;
+        const current = parseEdgeString(currentEdges[index]);
+        const newEdgeStr = formatEdgeFromParts(
+          current.from, current.to, current.prefix, current.arrow, label
+        );
+        const changed = modifyEdgeAtIndex(index, newEdgeStr);
+        if (changed) setStatus(true, label ? ('已更新连接标签: ' + label) : '已清除连接标签');
+        vwdDebugLog('connection-label', {
+          phase: 'commit',
+          reason: reason || '',
+          edgeIndex: index,
+          oldLabel: oldValue,
+          newLabel: label,
+          changed
+        });
+      };
+      const cancel = () => {
+        if (finished) return;
+        finished = true;
+        close();
+        vwdDebugLog('connection-label', { phase: 'cancel', edgeIndex: index });
+      };
+      overlay.__vwdCommit = commit;
+      overlay.addEventListener('blur', () => commit('blur'));
+      overlay.addEventListener('keydown', (event) => {
+        event.stopPropagation();
+        if (event.key === 'Enter' || event.key === 'NumpadEnter') {
+          event.preventDefault();
+          commit('enter');
+        } else if (event.key === 'Escape') {
+          event.preventDefault();
+          cancel();
+        }
+      });
+      vwdDebugLog('connection-label', {
+        phase: 'open',
+        edgeIndex: index,
+        hasLabel: !!oldValue,
+        vimDirect: !!opts.vimDirect
+      });
+      return true;
     }
 
     function modifyEdgeAtIndex(index, newEdgeStr, lineStyle, arrowStyle) {
@@ -7191,41 +7342,6 @@ ${lines.join('\n')}`;
       return false;
     }
 
-    function applyEdgeLabelFromInput() {
-      const label = getConnectionLabelInputValue();
-
-      if (selectedEdgeIndex >= 0) {
-        let parsed;
-        try {
-          parsed = JSON.parse(editor.value);
-        } catch (e) {
-          setStatus(false, '请先在波形上选择起点与终点');
-          return;
-        }
-
-        const edges = parsed.edge || [];
-        if (selectedEdgeIndex >= edges.length) return;
-
-        const current = parseEdgeString(edges[selectedEdgeIndex]);
-        const newEdgeStr = formatEdgeFromParts(
-          current.from, current.to, current.prefix, current.arrow, label
-        );
-
-        if (newEdgeStr === edges[selectedEdgeIndex]) {
-          setStatus(true, '连接标签未变化');
-          return;
-        }
-
-        if (modifyEdgeAtIndex(selectedEdgeIndex, newEdgeStr, connectionLineStyle, connectionArrowStyle)) {
-          setStatus(true, label ? ('已更新连接标签: ' + label) : '已清除连接标签');
-          updateEdgeLabelEditUI();
-        }
-        return;
-      }
-
-      setStatus(true, label ? ('新连接将使用标签: ' + label) : '新连接将不带标签');
-    }
-
     function handleConnectionArrowStyleClick(arrowStyle) {
       if (!CONNECTION_ARROW_STYLES.includes(arrowStyle)) return;
       if (!connectionAddSessionActive && selectedEdgeIndex < 0) {
@@ -7310,8 +7426,6 @@ ${lines.join('\n')}`;
         connectionLineStyle,
         connectionLineVariant
       );
-      const labelInput = document.getElementById('connection-label-input');
-      if (labelInput) labelInput.value = '';
       setConnectionPickActive(true);
       updateEdgeLabelEditUI();
       updateConnectionPointStatusUI();
@@ -7541,8 +7655,7 @@ ${lines.join('\n')}`;
             return;
           }
 
-          const insertLabel = selectedEdgeIndex < 0 ? getConnectionLabelInputValue() : '';
-          const edgeStr = buildEdgeFromTemplate(template, prepared.fromNode, prepared.toNode, insertLabel);
+          const edgeStr = buildEdgeFromTemplate(template, prepared.fromNode, prepared.toNode, '');
           text = applySignalUpdatesInText(text, prepared.updates, sourceMap);
 
           const ensured = ensureEdgeArrayInText(text);
@@ -7924,14 +8037,6 @@ ${lines.join('\n')}`;
         return;
       }
 
-      const focusConnectionLabelTextBox = () => {
-        const input = document.getElementById('connection-label-input');
-        if (!input || input.disabled) return false;
-        input.focus();
-        input.select();
-        return true;
-      };
-
       edges.forEach((edgeStr, index) => {
         const row = document.createElement('div');
         row.className = 'connection-edge-row';
@@ -7944,11 +8049,16 @@ ${lines.join('\n')}`;
 
         row.addEventListener('click', (e) => {
           if (e.target.closest('.connection-edge-delete')) return;
+          const wasSelected = selectedEdgeIndex === index;
           if (!connectionSelectActive) beginEdgeSelectSession();
           selectEdge(index);
           scrollEditorToEdge(editor.value, edgeStr);
           if (isTextEditModeActive() && e.target.closest('.connection-edge-text')) {
-            focusConnectionLabelTextBox();
+            if (wasSelected) {
+              startSelectedEdgeLabelInlineEdit(textEl, index);
+            } else {
+              setStatus(true, '已选中连接线；再次点击可编辑标签');
+            }
           }
         });
 
@@ -7972,23 +8082,25 @@ ${lines.join('\n')}`;
 
     function selectEdgeFromWaveform(index, edgeStr, event) {
       if (inlineEditActive || app.classList.contains('reading-mode')) return;
-      const clickedText = !!(event
-        && event.target
-        && typeof event.target.closest === 'function'
-        && event.target.closest('text'));
-      const editLabel = isTextEditModeActive() && clickedText;
-      if (!connectionSelectActive && !editLabel) return;
-      if (!connectionSelectActive) beginEdgeSelectSession();
+      const editLabel = isTextEditModeActive();
+      if (editLabel) {
+        if (event) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+        if (selectedEdgeIndex !== index) {
+          setStatus(false, '请先选择需要编辑标签的连接线');
+          return;
+        }
+        scrollEditorToEdge(editor.value, edgeStr);
+        const anchor = event && (event.currentTarget || event.target);
+        startSelectedEdgeLabelInlineEdit(anchor, index);
+        return;
+      }
+      if (!connectionSelectActive) return;
       if (event) event.stopPropagation();
       selectEdge(index);
       scrollEditorToEdge(editor.value, edgeStr);
-      if (editLabel) {
-        const input = document.getElementById('connection-label-input');
-        if (input && !input.disabled) {
-          input.focus();
-          input.select();
-        }
-      }
     }
 
     function applyEdgeLineVisual(edgeElement, presentation) {
@@ -14994,13 +15106,16 @@ ${lines.join('\n')}`;
 
     function editVimSelectedText() {
       if (selectedEdgeIndex >= 0) {
+        if (waveEditMode !== 'modify') setWaveEditMode('modify');
         setTextEditMode(true);
-        const input = document.getElementById('connection-label-input');
-        if (input) {
-          input.focus();
-          input.select();
+        if (!isTextEditModeActive()) return false;
+        const anchor = getSelectedEdgeLabelEditAnchor(selectedEdgeIndex);
+        if (startSelectedEdgeLabelInlineEdit(anchor, selectedEdgeIndex, { vimDirect: true })) {
+          setStatus(true, 'TEXT：正在编辑所选连接线标签');
+          return true;
         }
-        return true;
+        vimDirectInlineEditActive = false;
+        return false;
       }
       if (selectedGroupIndex >= 0) {
         setTextEditMode(true);
@@ -15486,13 +15601,6 @@ ${lines.join('\n')}`;
       beginConnectionEndpointEdit('to');
     });
     bindNavControlButtons();
-    document.getElementById('btn-apply-edge-label').addEventListener('click', applyEdgeLabelFromInput);
-    document.getElementById('connection-label-input').addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        applyEdgeLabelFromInput();
-      }
-    });
     if (typeof window !== 'undefined') {
       window.__vwdSetDebugMode = (enabled) => {
         setDebugMode(!!enabled);

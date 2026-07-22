@@ -7,7 +7,7 @@
   <script src="inc/skins/default.js?v=20260712"></script>
   <script src="inc/wavedrom.min.js?v=20260712"></script>
   <link rel="stylesheet" href="inc/codemirror.css?v=5.65.21">
-  <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260723-focus-vim-v1">
+  <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260723-edge-label-v1">
 </head>
 <body>
   <div class="app" id="app">
@@ -280,14 +280,6 @@
               <button type="button" class="connection-line-style-btn" data-line-style="curve"><span class="connection-line-swatch line-curve"></span><span>曲线</span></button>
             </div>
           </div>
-          <div class="connection-label-edit" id="connection-label-edit">
-            <div class="connection-label-edit-label" id="connection-label-edit-title">连接标签</div>
-            <div class="connection-label-edit-row">
-              <input type="text" id="connection-label-input" placeholder="连接线上显示的标签（可选）" spellcheck="false">
-              <button type="button" id="btn-apply-edge-label">应用</button>
-            </div>
-            <div class="connection-label-edit-hint" id="connection-label-edit-hint">新增时先填写标签；选择连接线后可修改</div>
-          </div>
         </div>
       </div>
 
@@ -398,7 +390,7 @@
             <span>y / p / x</span><span>复制、覆盖粘贴、删除选中的波形格</span>
             <span>r + 波形字符</span><span>替换当前位置；<kbd>R</kbd> 连续替换；<kbd>|</kbd> 可直接写入间隔</span>
             <span>i</span><span>进入波形插入模式；数据格插入在已有文本前时，data 自动用 “.” 占位</span>
-            <span>t</span><span>当前选中内容可编辑时，直接打开数据、分组或连接标签输入框</span>
+            <span>t</span><span>当前选中内容可编辑时，直接打开数据、分组或已选连接线的标签输入框</span>
             <span>yy / dd</span><span>复制或删除当前信号行，复制时不包含 node</span>
             <span>o / O</span><span>在当前信号行之后或之前插入空行</span>
             <span>[r / ]r</span><span>上移或下移信号行，可使用数字前缀</span>
@@ -526,6 +518,6 @@
     <script src="inc/codemirror-vim.js?v=5.65.21"></script>
     <script src="inc/visualwavedrom-sqlite-browser.js?v=20260722-sqlite-v2"></script>
     <script src="inc/visualwavedrom-vim.js?v=20260721-vim-pipe-v1"></script>
-    <script src="inc/visualwavedrom-app.js?v=20260723-focus-vim-v1"></script>
+    <script src="inc/visualwavedrom-app.js?v=20260723-edge-label-v1"></script>
 </body>
 </html>

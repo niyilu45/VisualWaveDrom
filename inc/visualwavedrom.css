@@ -889,69 +889,6 @@
       padding: 2px 0;
     }
 
-    .connection-label-edit {
-      padding: 6px 12px 8px;
-      border-top: 1px solid var(--border);
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }
-
-    .connection-label-edit[hidden] {
-      display: none;
-    }
-
-    .connection-label-edit-label {
-      font-size: 0.65rem;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.06em;
-      color: var(--text-muted);
-    }
-
-    .connection-label-edit-row {
-      display: flex;
-      gap: 6px;
-      align-items: center;
-    }
-
-    .connection-label-edit-row input {
-      flex: 1;
-      min-width: 0;
-      padding: 4px 8px;
-      font-size: 0.72rem;
-      font-family: var(--editor-font);
-      background: var(--surface-2);
-      border: 1px solid var(--border);
-      border-radius: 4px;
-      color: var(--text);
-    }
-
-    .connection-label-edit-row input:focus {
-      outline: none;
-      border-color: var(--accent);
-    }
-
-    .connection-label-edit-row button {
-      flex-shrink: 0;
-      padding: 4px 10px;
-      font-size: 0.68rem;
-      background: var(--accent);
-      color: #fff;
-      border: none;
-      border-radius: 4px;
-      cursor: pointer;
-    }
-
-    .connection-label-edit-row button:hover {
-      opacity: 0.9;
-    }
-
-    .connection-label-edit-hint {
-      font-size: 0.62rem;
-      color: var(--text-muted);
-    }
-
     .wave-edge-interactive {
       cursor: default;
       pointer-events: none !important;
@@ -2004,9 +1941,7 @@
     }
 
     .connection-segmented button:disabled,
-    .connection-line-style-btn:disabled,
-    .connection-label-edit-row input:disabled,
-    .connection-label-edit-row button:disabled {
+    .connection-line-style-btn:disabled {
       cursor: not-allowed;
       opacity: 0.45;
     }
@@ -2066,11 +2001,6 @@
       transform: rotate(-10deg);
     }
 
-    .connection-properties .connection-label-edit {
-      padding: 8px;
-      border-top: 0;
-    }
-
     .app.text-edit-mode .wave-lane-interactive text.info,
     .app.text-edit-mode .wave-lane-interactive .wave-name-click-zone,
     .app.text-edit-mode .wave-lane-interactive .wave-data-text,
@@ -2085,12 +2015,23 @@
 
     .app.text-edit-mode .wave-edge-interactive,
     .app.text-edit-mode .wave-edge-interactive *,
-    .app.text-edit-mode .wave-edge-hit-target {
+    .app.text-edit-mode .wave-edge-hit-target,
+    .app.text-edit-mode .wave-edge-label-text {
       pointer-events: none !important;
     }
 
-    .app.text-edit-mode .wave-edge-label-text {
-      pointer-events: all;
+    .app.text-edit-mode .wave-edge-interactive.wave-edge-label-editable,
+    .app.text-edit-mode .wave-edge-interactive.wave-edge-label-editable path,
+    .app.text-edit-mode .wave-edge-interactive.wave-edge-label-editable line,
+    .app.text-edit-mode .wave-edge-interactive.wave-edge-label-editable polyline,
+    .app.text-edit-mode .wave-edge-hit-target.wave-edge-label-editable {
+      cursor: text;
+      pointer-events: stroke !important;
+    }
+
+    .app.text-edit-mode .wave-edge-label-text.wave-edge-label-editable {
+      cursor: text;
+      pointer-events: all !important;
     }
 
     .wave-group-label-hit {
