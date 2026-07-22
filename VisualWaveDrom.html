@@ -7,7 +7,7 @@
   <script src="inc/skins/default.js?v=20260712"></script>
   <script src="inc/wavedrom.min.js?v=20260712"></script>
   <link rel="stylesheet" href="inc/codemirror.css?v=5.65.21">
-  <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260722-single-loading-v1">
+  <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260723-focus-vim-v1">
 </head>
 <body>
   <div class="app" id="app">
@@ -367,7 +367,7 @@
       <div class="vim-help-body">
         <section class="vim-help-section">
           <h3>快速开始</h3>
-          <p>先开启“Vim 模式”，再单击当前正在编辑的波形区域。Vim 仅在该波形区域内接管键盘；单击目录、工具栏、JSON 或说明区后会暂停接管。</p>
+          <p>开启“Vim 模式”后，单击波形区域使用波形命令，单击 JSON 编辑器使用标准 Vim 文本命令。波形触发的 JSON 高亮不会改变键盘区域。</p>
           <div class="vim-help-grid">
             <span>Esc</span><span>退出选择、替换、文本编辑或连接操作，返回 NORMAL</span>
             <span>数字 + 命令</span><span>重复执行，例如 <kbd>5l</kbd>（数字 5 + 小写 L）向右移动 5 格</span>
@@ -381,8 +381,9 @@
             <span>NORMAL</span><span>移动、复制、删除及执行命令</span>
             <span>VISUAL</span><span>选择连续波形格或连续信号行</span>
             <span>INSERT / REPLACE</span><span>连续插入波形或连续替换波形</span>
-            <span>WAVE</span><span>仅当前编辑波形图中的波形区域支持 Vim；无需区域切换组合键</span>
-            <span>WAVE · 未聚焦</span><span>键盘由当前目录、工具栏、JSON 或说明编辑控件正常处理</span>
+            <span>WAVE</span><span>键盘命令作用于当前编辑波形图</span>
+            <span>JSON</span><span>JSON 编辑器使用标准 Vim 的 NORMAL、INSERT 和 VISUAL 模式</span>
+            <span>未聚焦</span><span>键盘由当前目录、工具栏或说明编辑控件正常处理</span>
           </div>
         </section>
 
@@ -419,7 +420,7 @@
           <div class="vim-help-grid">
             <span>u / Ctrl+r</span><span>使用 VisualWaveDrom 的统一历史记录撤销或重做</span>
             <span>.</span><span>重复最近一次可重复的修改</span>
-            <span>JSON 编辑器</span><span>Vim 开启时仅作只读显示；关闭 Vim 后恢复普通编辑</span>
+            <span>JSON 编辑器</span><span>单击后进入 JSON Vim；按 <kbd>i</kbd> 编辑，按 <kbd>Esc</kbd> 返回 NORMAL，支持 <kbd>u</kbd> 和 <kbd>Ctrl+r</kbd></span>
           </div>
         </section>
 
@@ -522,8 +523,9 @@
 
     <script src="inc/codemirror.js?v=5.65.21"></script>
     <script src="inc/codemirror-javascript.js?v=5.65.21"></script>
+    <script src="inc/codemirror-vim.js?v=5.65.21"></script>
     <script src="inc/visualwavedrom-sqlite-browser.js?v=20260722-sqlite-v2"></script>
     <script src="inc/visualwavedrom-vim.js?v=20260721-vim-pipe-v1"></script>
-    <script src="inc/visualwavedrom-app.js?v=20260722-single-loading-v1"></script>
+    <script src="inc/visualwavedrom-app.js?v=20260723-focus-vim-v1"></script>
 </body>
 </html>

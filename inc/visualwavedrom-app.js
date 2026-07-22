@@ -188,6 +188,7 @@ function getDefaultJson() {
     const statusText = document.getElementById('status-text');
     const app = document.getElementById('app');
     const wavePanel = document.getElementById('wave-panel');
+    const editorPanel = document.getElementById('editor-panel');
     const toggleJsonPanelBtn = document.getElementById('btn-toggle-json-panel');
     const toggleJsonPanelLabel = document.getElementById('toggle-json-panel-label');
     const hideJsonPanelBtn = document.getElementById('btn-hide-json-panel');
@@ -260,6 +261,7 @@ function getDefaultJson() {
     let codeMirrorEditor = null;
     let syncingCodeMirror = false;
     let codeMirrorVimMode = 'normal';
+    let keyboardInputScope = 'other';
     let copiedWaveSelection = '';
     let copiedWaveDataSlots = [];
     let copiedWaveRows = [];
@@ -2825,7 +2827,7 @@ ${lines.join('\n')}`;
       if (app.classList.contains('reading-mode')) return;
       const block = findTopLevelKeyBlock(editor.value, field);
       if (!block) return;
-      setEditorSelection(block.start, block.end, true);
+      setEditorSelection(block.start, block.end, false);
       const before = editor.value.slice(0, block.start);
       const line = before.split('\n').length;
       const lineHeight = 13 * 1.6;
@@ -2941,6 +2943,32 @@ ${lines.join('\n')}`;
       if (codeMirrorEditor && opts.clearCodeMirrorHistory) codeMirrorEditor.clearHistory();
     }
 
+    function isJsonEditorTarget(target) {
+      return !!(target && target.closest && (target === editor || target.closest('.CodeMirror')));
+    }
+
+    function setKeyboardInputScope(scope, reason) {
+      const next = scope === 'wave' || scope === 'json' ? scope : 'other';
+      const changed = next !== keyboardInputScope;
+      keyboardInputScope = next;
+      const vimState = vimController && vimController.getState();
+      let waveFocusChanged = false;
+      if (vimState && vimState.enabled) {
+        waveFocusChanged = setVimWaveAreaActive(next === 'wave', reason || 'keyboard-scope');
+        if (changed && !waveFocusChanged) updateVimModeUI(vimState, reason || 'keyboard-scope');
+      }
+      if (changed) {
+        vwdDebugLog('keyboard-focus', {
+          scope: next,
+          reason: reason || '',
+          activeElement: document.activeElement && document.activeElement.id
+            ? document.activeElement.id
+            : String(document.activeElement && document.activeElement.className || '')
+        });
+      }
+      return changed;
+    }
+
     function setEditorSelection(start, end, shouldFocus) {
       const length = editor.value.length;
       const safeStart = Math.max(0, Math.min(length, Number.isFinite(start) ? start : 0));
@@ -2952,13 +2980,18 @@ ${lines.join('\n')}`;
           codeMirrorEditor.posFromIndex(safeStart),
           codeMirrorEditor.posFromIndex(safeEnd)
         );
-        if (shouldFocus) codeMirrorEditor.focus();
+        if (shouldFocus) {
+          setKeyboardInputScope('json', 'editor-selection-focus');
+          codeMirrorEditor.focus();
+        }
       } else if (shouldFocus) {
+        setKeyboardInputScope('json', 'editor-selection-focus');
         editor.focus();
       }
     }
 
     function focusEditor() {
+      setKeyboardInputScope('json', 'editor-focus');
       if (codeMirrorEditor) codeMirrorEditor.focus();
       else editor.focus();
     }
@@ -2971,11 +3004,9 @@ ${lines.join('\n')}`;
 
     function applyEditorChange(newText, selStart, selEnd, options) {
       const opts = options || {};
-      const vimState = vimController && vimController.getState();
-      const preserveNonJsonFocus = !!(vimState && vimState.enabled && vimState.scope !== 'json');
       setEditorValue(newText);
       setEditorHistoryBaseline(newText);
-      setEditorSelection(selStart, selEnd ?? selStart, !opts.skipFocus && !preserveNonJsonFocus);
+      setEditorSelection(selStart, selEnd ?? selStart, !opts.skipFocus && keyboardInputScope === 'json');
       updateLineNumbers();
       syncLineNumberScroll();
       syncColumnNumberButtonFromJson(newText);
@@ -8077,7 +8108,7 @@ ${lines.join('\n')}`;
     function scrollEditorToSignal(entry) {
       if (app.classList.contains('reading-mode')) return;
       const text = editor.value;
-      setEditorSelection(entry.start, entry.end, true);
+      setEditorSelection(entry.start, entry.end, false);
       const before = text.slice(0, entry.start);
       const line = before.split('\n').length;
       const lineHeight = 13 * 1.6;
@@ -8089,7 +8120,7 @@ ${lines.join('\n')}`;
     function scrollEditorToGroup(entry) {
       if (app.classList.contains('reading-mode')) return;
       const text = editor.value;
-      setEditorSelection(entry.start, entry.end, true);
+      setEditorSelection(entry.start, entry.end, false);
       const before = text.slice(0, entry.start);
       const line = before.split('\n').length;
       const lineHeight = 13 * 1.6;
@@ -10643,35 +10674,37 @@ ${lines.join('\n')}`;
       codeMirrorEditor.setGutterMarker(jsonErrorLine - 1, 'vwd-json-error-gutter', marker);
     }
 
-    function setJsonEditorVimDisplayOnly(enabled) {
-      const displayOnly = !!enabled;
-      editor.readOnly = displayOnly;
-      editor.setAttribute('aria-readonly', String(displayOnly));
-      if (editorPanel) editorPanel.setAttribute('aria-readonly', String(displayOnly));
+    function setJsonEditorVimMode(enabled) {
+      const vimEnabled = !!enabled;
+      const vimAvailable = !!(window.CodeMirror && CodeMirror.keyMap && CodeMirror.keyMap.vim);
+      const keyMap = vimEnabled && vimAvailable ? 'vim' : 'default';
+      editor.readOnly = false;
+      editor.setAttribute('aria-readonly', 'false');
+      if (editorPanel) editorPanel.setAttribute('aria-readonly', 'false');
       if (!codeMirrorEditor) return;
 
-      codeMirrorEditor.setOption('keyMap', 'default');
-      codeMirrorEditor.setOption('readOnly', displayOnly ? 'nocursor' : false);
+      codeMirrorEditor.setOption('readOnly', false);
+      codeMirrorEditor.setOption('keyMap', keyMap);
       const wrapper = codeMirrorEditor.getWrapperElement();
-      if (wrapper) wrapper.setAttribute('aria-readonly', String(displayOnly));
-      if (displayOnly) {
-        const cursor = codeMirrorEditor.getCursor('head');
-        codeMirrorEditor.setCursor(cursor);
-        const input = codeMirrorEditor.getInputField();
-        if (input && typeof input.blur === 'function') input.blur();
-      }
+      if (wrapper) wrapper.setAttribute('aria-readonly', 'false');
       codeMirrorVimMode = 'normal';
       codeMirrorEditor.refresh();
-      vwdDebugLog('vim', { phase: 'json-display-only', enabled: displayOnly });
+      vwdDebugLog('vim', {
+        phase: 'json-keymap',
+        enabled: vimEnabled,
+        available: vimAvailable,
+        keyMap
+      });
     }
 
     function initCodeMirrorEditor() {
       if (codeMirrorEditor || !window.CodeMirror || !editor) return false;
-      const vimDisplayOnly = !!(vimController && vimController.getState().enabled);
+      const vimEnabled = !!(vimController && vimController.getState().enabled);
+      const initialKeyMap = vimEnabled && CodeMirror.keyMap && CodeMirror.keyMap.vim ? 'vim' : 'default';
       codeMirrorEditor = CodeMirror.fromTextArea(editor, {
         mode: { name: 'javascript', json: true },
-        keyMap: 'default',
-        readOnly: vimDisplayOnly ? 'nocursor' : false,
+        keyMap: initialKeyMap,
+        readOnly: false,
         lineNumbers: true,
         gutters: ['vwd-json-error-gutter', 'CodeMirror-linenumbers'],
         lineWrapping: false,
@@ -10694,12 +10727,18 @@ ${lines.join('\n')}`;
       });
       codeMirrorEditor.on('cursorActivity', syncNativeSelectionFromCodeMirror);
       codeMirrorEditor.on('focus', () => {
-        setVimWaveAreaActive(false, 'json-focus');
+        setKeyboardInputScope('json', 'json-focus');
       });
       codeMirrorEditor.on('blur', () => {
         checkpointDirectJsonEdit('editor-blur');
       });
-      setJsonEditorVimDisplayOnly(vimDisplayOnly);
+      codeMirrorEditor.on('vim-mode-change', (_cm, state) => {
+        codeMirrorVimMode = String(state && state.mode || 'normal').toLowerCase();
+        if (vimController && vimController.getState().enabled && keyboardInputScope === 'json') {
+          updateVimModeUI(vimController.getState(), 'json-mode');
+        }
+      });
+      setJsonEditorVimMode(vimEnabled);
       updateCodeMirrorErrorMarker();
       return true;
     }
@@ -13952,23 +13991,31 @@ ${lines.join('\n')}`;
       }
       if (vimModeButtonState) vimModeButtonState.textContent = current.enabled ? 'On' : 'Off';
       if (vimStatusBar) vimStatusBar.hidden = !current.enabled;
-      if (vimStatusMode) vimStatusMode.textContent = String(current.mode || 'normal').toUpperCase();
-      if (vimStatusScope) vimStatusScope.textContent = vimWaveAreaActive ? 'WAVE' : 'WAVE · 未聚焦';
+      const jsonScopeActive = !!current.enabled && keyboardInputScope === 'json';
+      const waveScopeActive = !!current.enabled && keyboardInputScope === 'wave' && vimWaveAreaActive;
+      if (vimStatusMode) {
+        vimStatusMode.textContent = String(jsonScopeActive ? codeMirrorVimMode : (current.mode || 'normal')).toUpperCase();
+      }
+      if (vimStatusScope) {
+        vimStatusScope.textContent = jsonScopeActive ? 'JSON' : (waveScopeActive ? 'WAVE' : '未聚焦');
+      }
       if (vimStatusPending) {
         const pendingLabel = current.pending === 'leader' ? '<Space>' : (current.pending || '');
-        vimStatusPending.textContent = (current.count || '') + pendingLabel;
+        vimStatusPending.textContent = jsonScopeActive ? '' : (current.count || '') + pendingLabel;
       }
-      app.classList.toggle('vim-scope-wave', !!current.enabled && vimWaveAreaActive);
+      app.classList.toggle('vim-scope-wave', waveScopeActive);
+      app.classList.toggle('vim-scope-json', jsonScopeActive);
       app.classList.toggle('vim-mode-enabled', !!current.enabled);
-      ['nav', 'edge', 'json'].forEach((scope) => app.classList.remove('vim-scope-' + scope));
+      ['nav', 'edge'].forEach((scope) => app.classList.remove('vim-scope-' + scope));
       if (reason && reason !== 'count') {
         vwdDebugLog('vim', {
           phase: 'state',
           reason,
           enabled: current.enabled,
           mode: current.mode,
-          scope: 'wave',
+          scope: jsonScopeActive ? 'json' : (waveScopeActive ? 'wave' : 'other'),
           waveAreaActive: vimWaveAreaActive,
+          codeMirrorMode: codeMirrorVimMode,
           count: current.count,
           pending: current.pending
         });
@@ -14066,10 +14113,10 @@ ${lines.join('\n')}`;
       }
       vimController.setEnabled(next);
       saveVimModePreference(next);
-      setJsonEditorVimDisplayOnly(next);
+      setJsonEditorVimMode(next);
       if (next) {
         vimController.setScope('wave');
-        setVimWaveAreaActive(true, 'vim-enabled');
+        setKeyboardInputScope('wave', 'vim-enabled');
         ensureVimWaveCursor();
         requestAnimationFrame(() => {
           if (!vimWaveAreaActive || !wavePanel) return;
@@ -14973,7 +15020,7 @@ ${lines.join('\n')}`;
     function setVimScope(scope) {
       if (!vimController || scope !== 'wave') return false;
       vimController.setScope('wave');
-      setVimWaveAreaActive(true, 'scope-wave');
+      setKeyboardInputScope('wave', 'scope-wave');
       ensureVimWaveCursor();
       if (wavePanel && wavePanel.focus) {
         try { wavePanel.focus({ preventScroll: true }); } catch (_e) { wavePanel.focus(); }
@@ -15192,19 +15239,24 @@ ${lines.join('\n')}`;
       scheduleNavTitleRefresh();
     });
 
-    const editorPanel = document.getElementById('editor-panel');
     if (editorPanel) {
       editorPanel.addEventListener('pointerdown', () => exitWavePaintMode('json-panel'));
     }
 
     document.addEventListener('pointerdown', (e) => {
       const target = e.target && e.target.closest ? e.target : null;
-      if (vimController && vimController.getState().enabled) {
-        const insideActiveWave = !!(target && target.closest('#wave-container'));
-        setVimWaveAreaActive(insideActiveWave, insideActiveWave ? 'wave-pointer' : 'outside-wave-pointer');
-        if (insideActiveWave && wavePanel) {
+      const insideJsonEditor = isJsonEditorTarget(target);
+      const insideWaveArea = !!(target && target.closest('#wave-panel'));
+      const interactiveWaveControl = !!(target && target.closest('input, textarea, select, button, [contenteditable="true"]'));
+      if (insideJsonEditor) {
+        setKeyboardInputScope('json', 'json-pointer');
+      } else if (insideWaveArea && !interactiveWaveControl) {
+        setKeyboardInputScope('wave', 'wave-pointer');
+        if (wavePanel) {
           try { wavePanel.focus({ preventScroll: true }); } catch (_e) { wavePanel.focus(); }
         }
+      } else {
+        setKeyboardInputScope('other', 'outside-editor-pointer');
       }
       const keepsWaveClipboardContext = !!(target && (
         target.closest('.wave-lane-interactive')
@@ -15224,6 +15276,17 @@ ${lines.join('\n')}`;
       }
     }, true);
 
+    document.addEventListener('focusin', (e) => {
+      const target = e.target && e.target.closest ? e.target : null;
+      if (isJsonEditorTarget(target)) {
+        setKeyboardInputScope('json', 'json-focusin');
+      } else if (target === wavePanel) {
+        setKeyboardInputScope('wave', 'wave-focusin');
+      } else if (target && target.closest('input, textarea, select, button, [contenteditable="true"]')) {
+        setKeyboardInputScope('other', 'control-focusin');
+      }
+    }, true);
+
     editor.addEventListener('scroll', syncLineNumberScroll);
     editor.addEventListener('blur', () => {
       flushUndoDebounce();
@@ -15234,7 +15297,17 @@ ${lines.join('\n')}`;
       if (vimController && vimController.handleKeydown(e)) return;
       if (handleUndoRedoShortcut(e)) return;
       if (handleWaveClipboardShortcut(e)) return;
-      handleSelectionDeleteShortcut(e);
+      if (handleSelectionDeleteShortcut(e)) return;
+      if (keyboardInputScope !== 'json' && isJsonEditorTarget(e.target)) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        vwdDebugLog('keyboard-focus', {
+          phase: 'blocked-stale-json-key',
+          scope: keyboardInputScope,
+          key: e.key || '',
+          code: e.code || ''
+        });
+      }
     }, true);
     document.addEventListener('copy', handleWaveClipboardEvent, true);
     document.addEventListener('paste', handleWaveClipboardEvent, true);
@@ -15480,6 +15553,7 @@ ${lines.join('\n')}`;
       window.__vwdGetVimState = () => ({
         controller: vimController ? vimController.getState() : null,
         waveAreaActive: vimWaveAreaActive,
+        keyboardScope: keyboardInputScope,
         codeMirrorMode: codeMirrorVimMode,
         register: vimRegister,
         visualCell: [vimVisualCellAnchor, vimVisualCellHead],
