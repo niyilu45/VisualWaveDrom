@@ -1,68 +1,67 @@
 # WaveLibraryConverter
 
-`WaveLibraryConverter.exe` 用于在以下两种 VisualWaveDrom 波形库格式之间转换：
+`WaveLibraryConverter.exe` 用于在 VisualWaveDrom SQLite 波形库与旧完整 JSON 之间双向转换，也能直接升级旧拆分 JSON 波形库。
 
-- **master 单文件库**：全部目录、波形和关系保存在一个 JSON 文件中。
-- **speed 拆分库**：`library.json` 保存目录和索引，`documents/*.json` 每个文件保存一张 WaveDrom 波形。
+## 支持格式
 
-## 最简单的用法
+- 当前格式：`Wave\<库名称>\library.sqlite`。
+- 旧完整库：一个 `.json` 文件包含目录、归属关系和全部波形。
+- 旧拆分库：`library.json` 保存清单，`documents\*.json` 每个文件保存一张波形。
 
-双击 `WaveLibraryConverter.exe`，然后把源 JSON 文件或拆分库目录拖入窗口。
+转换会保留 `libraryId`、多级目录、波形归属、显示顺序、当前选择和每张波形的内部名称。写入前会校验所有波形 JSON。
 
-也可以直接把以下内容拖到 EXE 文件上：
+## 最简单用法
 
-- master 波形库 JSON：自动拆分成 speed 波形库。
-- speed 拆分库目录或其中的 `library.json`：自动合并成 master 波形库。
+双击 `WaveLibraryConverter.exe`，然后拖入源文件或旧拆分库目录；也可以直接把源路径拖到 EXE 图标上。
 
-工具默认不会覆盖已有文件。需要覆盖时，交互窗口会要求输入大写 `YES`。
+- 输入 JSON 或旧拆分目录：自动生成 SQLite。
+- 输入 SQLite：自动导出完整 JSON。
+- 默认不覆盖已有目标；交互模式下输入大写 `YES` 才会覆盖。
+
+转换器需要与项目的 `inc\sqlite\sqlite3.exe` 保持相对位置，不要只把 EXE 单独移走。
 
 ## 命令行
 
 ```bat
-WaveLibraryConverter.exe unpack Wave\old-library.json Wave\new-library
-WaveLibraryConverter.exe pack Wave\new-library Wave\old-library.json
-WaveLibraryConverter.exe verify Wave\new-library
+WaveLibraryConverter.exe to-sqlite <完整库.json|旧拆分库> [输出.sqlite] [--force]
+WaveLibraryConverter.exe to-json <波形库.sqlite> [输出.json] [--force]
+WaveLibraryConverter.exe verify <SQLite|完整JSON|旧拆分库>
 ```
 
-自动化脚本需要覆盖输出时添加 `--force`：
+`--force` 或 `-f` 允许覆盖目标。路径中有空格时需要使用双引号。
+
+旧的 `unpack` 与 `pack` 命令仍保留，用于旧完整 JSON 和旧拆分 JSON 之间转换。
+
+## 双向示例
+
+完整 JSON 转 SQLite：
 
 ```bat
-WaveLibraryConverter.exe unpack source.json target-folder --force
+WaveLibraryConverter.exe to-sqlite "Wave\ProjectA.json" "Wave\ProjectA\library.sqlite"
+WaveLibraryConverter.exe verify "Wave\ProjectA\library.sqlite"
 ```
 
-## speed 拆分库结构
+旧拆分库转 SQLite：
 
-```text
-Wave\VisualWaveDrom-library\
-├─ library.json
-└─ documents\
-   ├─ wave-one-xxxxxxxxxx.json
-   ├─ wave-two-xxxxxxxxxx.json
-   └─ ...
+```bat
+WaveLibraryConverter.exe to-sqlite "Wave\ProjectA" "Wave\ProjectA\library.sqlite"
 ```
 
-波形文件使用内部稳定名称和哈希命名。修改波形 `title` 不会改变文件名。
+SQLite 导出完整 JSON：
 
-`speed` 分支启动时默认读取 `Wave\VisualWaveDrom-library\library.json`。如果该拆分库尚不存在、但同级存在旧的 `Wave\VisualWaveDrom-library.json`，服务会自动生成拆分库，同时保留原文件不变。
-
-`Wave` 下可以放置多个拆分库，每个库必须使用独立的一级文件夹：
-
-```text
-Wave\LibraryA\library.json
-Wave\LibraryA\documents\*.json
-Wave\LibraryB\library.json
-Wave\LibraryB\documents\*.json
+```bat
+WaveLibraryConverter.exe to-json "Wave\ProjectA\library.sqlite" "Wave\ProjectA-export.json"
+WaveLibraryConverter.exe verify "Wave\ProjectA-export.json"
 ```
 
-文件夹名称作为波形库名称显示在选择窗口中。
+## 服务自动迁移
 
-服务启动时也会自动识别 `Wave` 根目录中的旧单文件库，将其复制拆分到同名文件夹；旧文件不会删除或覆盖。
+服务启动时会识别 `Wave\ProjectA.json` 或 `Wave\ProjectA\library.json`，生成 `Wave\ProjectA\library.sqlite`。旧文件不会删除。需要自定义输出路径、反向导出或批量转换时再使用本工具。
 
 ## 安全说明
 
-- 转换前会完整校验所有波形 JSON；任何一张无效都会停止转换。
-- 输出先写入临时位置，完成后再替换目标。
-- 拆分库中的文件路径会进行越界检查。
-- 建议保留原始波形库备份，确认转换结果后再删除旧文件。
+- 输出先写入同目录临时文件，校验成功后再替换目标。
+- 旧拆分库的逐图文件路径会进行越界检查。
+- 建议保留源库备份，确认波形数量和目录关系后再归档旧文件。
 
-转换器源码和编译脚本位于 `tools\WaveLibraryConverter\`。
+源码和构建脚本位于 `tools\WaveLibraryConverter\`。

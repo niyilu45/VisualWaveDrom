@@ -3,6 +3,7 @@ const http = require('http');
 const path = require('path');
 const crypto = require('crypto');
 const { exec, spawnSync } = require('child_process');
+const sqliteStore = require('./inc/visualwavedrom-sqlite-node.js');
 
 function commandLineOption(name) {
   const index = process.argv.indexOf(name);
@@ -20,25 +21,37 @@ if (htmlName !== configuredHtmlName || !/\.html?$/i.test(htmlName)) {
   throw new Error(`Invalid HTML file name: ${configuredHtmlName}`);
 }
 const htmlPath = path.join(rootDir, htmlName);
-const defaultLibraryName = `${path.basename(__filename, '.js')}-library.json`;
+const defaultLibraryName = `${path.basename(__filename, '.js')}-library`;
 const appId = 'VisualWaveDrom';
 const monolithicLibraryKind = 'VisualWaveDromWaveLibrary';
 const splitLibraryKind = 'VisualWaveDromSplitWaveLibrary';
 const protocolScheme = 'visualwavedrom';
 let activeProtocolScheme = protocolScheme;
 const configuredLibraryOption = commandLineOption('--library');
-const configuredLibraryPath = configuredLibraryOption
+const configuredLibraryCandidate = configuredLibraryOption
   ? path.resolve(rootDir, configuredLibraryOption)
-  : path.join(rootDir, 'Wave', defaultLibraryName);
-if (path.extname(configuredLibraryPath).toLowerCase() !== '.json') {
-  throw new Error(`Invalid wave library path: ${configuredLibraryOption}`);
+  : path.join(rootDir, 'Wave', defaultLibraryName, 'library.sqlite');
+const configuredCandidateExtension = path.extname(configuredLibraryCandidate).toLowerCase();
+let configuredLegacyLibraryPath = null;
+let configuredLibraryPath = configuredLibraryCandidate;
+if (configuredCandidateExtension === '.json') {
+  configuredLegacyLibraryPath = configuredLibraryCandidate;
+  configuredLibraryPath = path.basename(configuredLibraryCandidate).toLowerCase() === 'library.json'
+    ? path.join(path.dirname(configuredLibraryCandidate), 'library.sqlite')
+    : path.join(
+      path.dirname(configuredLibraryCandidate),
+      path.basename(configuredLibraryCandidate, configuredCandidateExtension),
+      'library.sqlite'
+    );
+} else if (configuredCandidateExtension !== '.sqlite' && configuredCandidateExtension !== '.db') {
+  throw new Error(`Invalid wave library path: ${configuredLibraryOption || configuredLibraryCandidate}`);
 }
-const configuredLibraryIsSplit = path.basename(configuredLibraryPath).toLowerCase() === 'library.json';
+const configuredLibraryIsFolderDatabase = /^library\.(?:sqlite|db)$/i.test(path.basename(configuredLibraryPath));
 const configuredLibraryDirectory = path.dirname(configuredLibraryPath);
-const waveDir = configuredLibraryIsSplit
+const waveDir = configuredLibraryIsFolderDatabase
   ? path.dirname(configuredLibraryDirectory)
   : path.dirname(configuredLibraryPath);
-const configuredLibraryName = configuredLibraryIsSplit
+const configuredLibraryName = configuredLibraryIsFolderDatabase
   ? path.basename(configuredLibraryDirectory)
   : path.basename(configuredLibraryPath, path.extname(configuredLibraryPath));
 const requestedOpenUrl = commandLineOption('--open-url');
@@ -401,7 +414,7 @@ function patchSplitLibraryState(filePath, payload) {
   };
 }
 
-function isLibraryFile(filePath) {
+function isLegacyLibraryFile(filePath) {
   try {
     readLibraryStorage(filePath, false);
     return true;
@@ -413,17 +426,21 @@ function isLibraryFile(filePath) {
 function ensureWaveDirectory() {
   fs.mkdirSync(waveDir, { recursive: true });
   const defaultPath = configuredLibraryPath;
-  if (fs.existsSync(defaultPath)) return;
+  if (fs.existsSync(defaultPath) && sqliteStore.isLibraryFile(defaultPath)) return;
 
-  if (path.basename(defaultPath).toLowerCase() === 'library.json') {
-    const libraryDirectory = path.dirname(defaultPath);
-    const legacyPath = path.join(path.dirname(libraryDirectory), `${path.basename(libraryDirectory)}.json`);
-    if (fs.existsSync(legacyPath) && isLibraryFile(legacyPath)) {
-      const legacyLibrary = readLibrary(legacyPath, false);
-      writeSplitLibrary(defaultPath, legacyLibrary);
-      console.log(`Migrated monolithic wave library to split storage: ${defaultPath}`);
-      return;
-    }
+  const libraryDirectory = path.dirname(defaultPath);
+  const legacyCandidates = Array.from(new Set([
+    configuredLegacyLibraryPath,
+    path.join(libraryDirectory, 'library.json'),
+    path.join(waveDir, `${configuredLibraryName}.json`)
+  ].filter(Boolean)));
+  for (let index = 0; index < legacyCandidates.length; index += 1) {
+    const legacyPath = legacyCandidates[index];
+    if (!fs.existsSync(legacyPath) || !isLegacyLibraryFile(legacyPath)) continue;
+    const legacyLibrary = readLibrary(legacyPath, false);
+    sqliteStore.writeLibrary(defaultPath, legacyLibrary);
+    console.log(`Migrated JSON wave library to SQLite: ${defaultPath}`);
+    return;
   }
 
   let content = '{\n  "signal": []\n}';
@@ -446,7 +463,7 @@ function ensureWaveDirectory() {
     activeDocumentName: 'default-wave',
     selectedDirectoryId: 'nav-root'
   };
-  writeLibrary(defaultPath, library);
+  sqliteStore.writeLibrary(defaultPath, library);
 }
 
 function migrateRootMonolithicLibraries() {
@@ -455,57 +472,85 @@ function migrateRootMonolithicLibraries() {
     .forEach((entry) => {
       const legacyPath = path.join(waveDir, entry.name);
       const libraryName = path.basename(entry.name, path.extname(entry.name));
-      const manifestPath = path.join(waveDir, libraryName, 'library.json');
-      if (fs.existsSync(manifestPath)) return;
+      const databasePath = path.join(waveDir, libraryName, 'library.sqlite');
+      if (fs.existsSync(databasePath) && sqliteStore.isLibraryFile(databasePath)) return;
       try {
         const storage = readLibraryStorage(legacyPath, false);
         if (storage.format !== 'monolithic') return;
-        writeSplitLibrary(manifestPath, storage.stored);
-        console.log(`Migrated monolithic wave library to folder: ${manifestPath}`);
+        sqliteStore.writeLibrary(databasePath, storage.stored);
+        console.log(`Migrated monolithic wave library to SQLite: ${databasePath}`);
       } catch (_) { /* ordinary WaveDrom JSON files are not libraries */ }
+    });
+}
+
+function migrateSplitLibraries() {
+  fs.readdirSync(waveDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .forEach((entry) => {
+      const libraryDirectory = path.join(waveDir, entry.name);
+      const databasePath = path.join(libraryDirectory, 'library.sqlite');
+      if (fs.existsSync(databasePath) && sqliteStore.isLibraryFile(databasePath)) return;
+      const manifestPath = path.join(libraryDirectory, 'library.json');
+      if (!fs.existsSync(manifestPath) || !isLegacyLibraryFile(manifestPath)) return;
+      try {
+        sqliteStore.writeLibrary(databasePath, readLibrary(manifestPath, false));
+        console.log(`Migrated split wave library to SQLite: ${databasePath}`);
+      } catch (error) {
+        console.warn(`Could not migrate ${manifestPath}: ${error.message}`);
+      }
     });
 }
 
 function listLibraries() {
   ensureWaveDirectory();
   migrateRootMonolithicLibraries();
-  return fs.readdirSync(waveDir, { withFileTypes: true })
+  migrateSplitLibraries();
+  const libraries = fs.readdirSync(waveDir, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
-    .map((entry) => ({ name: entry.name, filePath: path.join(waveDir, entry.name, 'library.json') }))
+    .map((entry) => ({ name: entry.name, filePath: path.join(waveDir, entry.name, 'library.sqlite') }))
     .filter(({ filePath }) => fs.existsSync(filePath))
-    .filter(({ filePath }) => isLibraryFile(filePath))
+    .filter(({ filePath }) => sqliteStore.isLibraryFile(filePath))
     .map(({ name, filePath }) => {
-      const storage = readLibraryStorage(filePath, true);
+      const info = sqliteStore.getLibraryInfo(filePath);
       return {
         name,
-        libraryId: storage.stored.libraryId,
-        documentCount: storage.stored.documents.length,
+        libraryId: info.libraryId,
+        documentCount: info.documentCount,
         mtimeMs: fs.statSync(filePath).mtimeMs
       };
-    })
-    .sort((a, b) => b.mtimeMs - a.mtimeMs);
+    });
+  if (fs.existsSync(configuredLibraryPath)
+      && sqliteStore.isLibraryFile(configuredLibraryPath)
+      && !libraries.some((library) => library.name === configuredLibraryName)) {
+    const info = sqliteStore.getLibraryInfo(configuredLibraryPath);
+    libraries.push({
+      name: configuredLibraryName,
+      libraryId: info.libraryId,
+      documentCount: info.documentCount,
+      mtimeMs: fs.statSync(configuredLibraryPath).mtimeMs
+    });
+  }
+  return libraries.sort((a, b) => b.mtimeMs - a.mtimeMs);
 }
 
 function safeLibraryPath(libraryName) {
   const requested = String(libraryName || '');
-  if (configuredLibraryIsSplit && requested.toLowerCase() === 'library.json') {
-    return configuredLibraryPath;
-  }
   const name = path.basename(requested);
   if (!name || name !== requested || name === '.' || name === '..') return null;
-  return path.join(waveDir, name, 'library.json');
+  if (name === configuredLibraryName) return configuredLibraryPath;
+  return path.join(waveDir, name, 'library.sqlite');
 }
 
 function libraryPathById(libraryId) {
   const id = String(libraryId || '').trim();
   if (!id) return null;
   const item = listLibraries().find((library) => library.libraryId === id);
-  return item ? path.join(waveDir, item.name, 'library.json') : null;
+  return item ? safeLibraryPath(item.name) : null;
 }
 
 function contentType(filePath) {
   const ext = path.extname(filePath).toLowerCase();
-  return ({ '.html': 'text/html; charset=utf-8', '.js': 'application/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon' }[ext] || 'application/octet-stream');
+  return ({ '.html': 'text/html; charset=utf-8', '.js': 'application/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.wasm': 'application/wasm', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon' }[ext] || 'application/octet-stream');
 }
 
 function sendJson(res, status, payload) {
@@ -542,7 +587,7 @@ function registerProtocolHandler(handlerPath) {
     return;
   }
   const command = `"${process.env.ComSpec || 'cmd.exe'}" /d /s /c ""${resolved}" "%1""`;
-  const library = readLibrary(configuredLibraryPath, true);
+  const library = sqliteStore.readLibrarySummary(configuredLibraryPath);
   const librarySuffix = String(library.libraryId || '')
     .toLowerCase()
     .replace(/[^a-z0-9+.-]/g, '-');
@@ -661,7 +706,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (url.pathname === '/api/server-info' && req.method === 'GET') {
-      const library = readLibraryStorage(configuredLibraryPath, true).stored;
+      const library = sqliteStore.readLibrarySummary(configuredLibraryPath);
       sendJson(res, 200, {
         app: appId,
         rootDir,
@@ -710,9 +755,11 @@ const server = http.createServer(async (req, res) => {
       const filePath = resolveRequestLibraryPath(url, true);
       if (!filePath) { sendJson(res, 400, { error: 'Invalid library' }); return; }
       if (req.method === 'GET') {
-        if (!fs.existsSync(filePath) || !isLibraryFile(filePath)) { sendJson(res, 404, { error: 'Library not found' }); return; }
+        if (!fs.existsSync(filePath) || !sqliteStore.isLibraryFile(filePath)) { sendJson(res, 404, { error: 'Library not found' }); return; }
         const summaryOnly = url.searchParams.get('summary') === '1';
-        sendJson(res, 200, summaryOnly ? readLibrarySummary(filePath, true) : readLibrary(filePath, true));
+        sendJson(res, 200, summaryOnly
+          ? sqliteStore.readLibrarySummary(filePath)
+          : sqliteStore.readLibrary(filePath));
         return;
       }
       if (req.method === 'POST') {
@@ -720,7 +767,9 @@ const server = http.createServer(async (req, res) => {
         if (!incoming || incoming.kind !== monolithicLibraryKind || !Array.isArray(incoming.documents)) {
           throw new Error('Invalid library');
         }
-        const existing = fs.existsSync(filePath) && isLibraryFile(filePath) ? readLibrary(filePath, true) : null;
+        const existing = fs.existsSync(filePath) && sqliteStore.isLibraryFile(filePath)
+          ? sqliteStore.readLibrary(filePath)
+          : null;
         if (!incoming.libraryId && existing) incoming.libraryId = existing.libraryId;
         if (existing && incoming.libraryId !== existing.libraryId) {
           sendJson(res, 409, { error: 'Library identity conflict', libraryId: existing.libraryId });
@@ -752,8 +801,12 @@ const server = http.createServer(async (req, res) => {
           }
         }
         incoming.updatedAt = new Date().toISOString();
-        writeLibrary(filePath, incoming);
-        sendJson(res, 200, { ok: true, file: path.basename(filePath), libraryId: incoming.libraryId });
+        sqliteStore.writeLibrary(filePath, incoming);
+        sendJson(res, 200, {
+          ok: true,
+          file: path.basename(path.dirname(filePath)),
+          libraryId: incoming.libraryId
+        });
         return;
       }
     }
@@ -762,79 +815,17 @@ const server = http.createServer(async (req, res) => {
       const libraryId = String(payload.libraryId || '');
       const filePath = libraryPathById(libraryId);
       if (!filePath) { sendJson(res, 404, { error: 'Wave library not found' }); return; }
-      if (readLibraryStorage(filePath, true).format === 'split') {
-        const result = patchSplitLibraryState(filePath, payload);
-        if (result.status === 409) {
-          sendJson(res, 409, { error: result.error, waveId: result.waveId });
-          return;
-        }
-        sendJson(res, 200, {
-          ok: true,
-          libraryId,
-          file: path.basename(filePath),
-          revisions: result.revisions,
-          deletedDocuments: result.deletedDocuments
-        });
+      const result = sqliteStore.patchLibraryState(filePath, payload);
+      if (result.status === 409) {
+        sendJson(res, 409, { error: result.error, waveId: result.waveId });
         return;
       }
-      const library = readLibrary(filePath, true);
-      const deletedNames = new Set(Array.isArray(payload.deletedDocuments)
-        ? payload.deletedDocuments.map((name) => String(name || '')).filter(Boolean)
-        : []);
-      if (deletedNames.size > 0) {
-        library.documents = library.documents.filter((document) => !deletedNames.has(document && document.name));
-      }
-
-      const revisions = [];
-      const incomingDocuments = Array.isArray(payload.documents) ? payload.documents : [];
-      for (let i = 0; i < incomingDocuments.length; i += 1) {
-        const incoming = incomingDocuments[i];
-        const name = incoming && String(incoming.name || '').trim();
-        if (!name || typeof incoming.content !== 'string') throw new Error('Invalid wave document');
-        JSON.parse(incoming.content);
-        const index = library.documents.findIndex((item) => item && item.name === name);
-        const previous = index >= 0 ? library.documents[index] : null;
-        const expectedRevision = Number(incoming.revision);
-        if (previous && Number.isInteger(expectedRevision) && expectedRevision !== previous.revision) {
-          const sameState = incoming.content === previous.content
-            && incoming.hscale === previous.hscale
-            && incoming.waveEditMode === previous.waveEditMode;
-          if (!sameState) {
-            sendJson(res, 409, { error: 'Wave document revision conflict', waveId: name });
-            return;
-          }
-          revisions.push({ name, revision: previous.revision, savedAt: previous.savedAt });
-          continue;
-        }
-        const document = Object.assign({}, previous || {}, incoming, {
-          name,
-          deferred: undefined,
-          titleCache: undefined,
-          descriptionCache: undefined,
-          contentLength: undefined,
-          revision: previous ? previous.revision + 1 : 0,
-          savedAt: new Date().toISOString()
-        });
-        Object.keys(document).forEach((key) => {
-          if (document[key] === undefined) delete document[key];
-        });
-        if (index >= 0) library.documents[index] = document;
-        else library.documents.push(document);
-        revisions.push({ name, revision: document.revision, savedAt: document.savedAt });
-      }
-
-      if (Array.isArray(payload.directories)) library.directories = payload.directories;
-      if (Array.isArray(payload.rootDocuments)) library.rootDocuments = payload.rootDocuments;
-      if (typeof payload.activeDocumentName === 'string') library.activeDocumentName = payload.activeDocumentName;
-      if (typeof payload.selectedDirectoryId === 'string') library.selectedDirectoryId = payload.selectedDirectoryId;
-      library.updatedAt = new Date().toISOString();
-      writeLibrary(filePath, library);
       sendJson(res, 200, {
         ok: true,
-        libraryId: library.libraryId,
-        file: path.basename(filePath),
-        revisions,
-        deletedDocuments: Array.from(deletedNames)
+        libraryId,
+        file: path.basename(path.dirname(filePath)),
+        revisions: result.revisions,
+        deletedDocuments: result.deletedDocuments
       });
       return;
     }
@@ -846,12 +837,12 @@ const server = http.createServer(async (req, res) => {
           sendJson(res, 404, { error: 'Wave document not found' });
           return;
         }
-        const storage = readLibraryStorage(filePath, true);
-        const document = readWaveDocument(filePath, waveId);
+        const library = sqliteStore.readLibrarySummary(filePath);
+        const document = sqliteStore.readWaveDocument(filePath, waveId);
         if (!document) { sendJson(res, 404, { error: 'Wave document not found' }); return; }
         sendJson(res, 200, {
-          libraryId: storage.stored.libraryId,
-          file: path.basename(filePath),
+          libraryId: library.libraryId,
+          file: path.basename(path.dirname(filePath)),
           document
         });
         return;
@@ -865,40 +856,17 @@ const server = http.createServer(async (req, res) => {
           sendJson(res, 404, { error: 'Wave document not found' });
           return;
         }
-        if (readLibraryStorage(filePath, true).format === 'split') {
-          const result = updateSplitWaveDocument(filePath, payload);
-          if (result.status !== 200) {
-            sendJson(res, result.status, { error: result.error, document: result.document });
-            return;
-          }
-          sendJson(res, 200, {
-            ok: true,
-            libraryId,
-            file: path.basename(filePath),
-            document: result.document
-          });
+        const result = sqliteStore.updateWaveDocument(filePath, payload);
+        if (result.status !== 200) {
+          sendJson(res, result.status, { error: result.error, document: result.document });
           return;
         }
-        const library = readLibrary(filePath, true);
-        const index = library.documents.findIndex((item) => item && item.name === waveId);
-        if (index < 0) { sendJson(res, 404, { error: 'Wave document not found' }); return; }
-        const previous = library.documents[index];
-        const expectedRevision = Number(payload.expectedRevision);
-        if (Number.isInteger(expectedRevision) && expectedRevision !== previous.revision) {
-          sendJson(res, 409, { error: 'Wave document revision conflict', document: previous });
-          return;
-        }
-        if (typeof payload.document.content !== 'string') throw new Error('Invalid wave document content');
-        JSON.parse(payload.document.content);
-        const document = Object.assign({}, previous, payload.document, {
-          name: waveId,
-          revision: previous.revision + 1,
-          savedAt: new Date().toISOString()
+        sendJson(res, 200, {
+          ok: true,
+          libraryId,
+          file: path.basename(path.dirname(filePath)),
+          document: result.document
         });
-        library.documents[index] = document;
-        library.updatedAt = new Date().toISOString();
-        writeLibrary(filePath, library);
-        sendJson(res, 200, { ok: true, libraryId: library.libraryId, file: path.basename(filePath), document });
         return;
       }
     }

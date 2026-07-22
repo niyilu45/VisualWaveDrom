@@ -65,11 +65,11 @@
           </svg>
           <span id="toggle-nav-sidebar-label">隐藏目录</span>
         </button>
-        <div class="wave-library-file-status" id="wave-library-file-status">波形库：本地浏览器数据</div>
+        <div class="wave-library-file-status" id="wave-library-file-status">波形库：浏览器 SQLite</div>
         <button class="menu-btn" id="btn-import-wave-library" type="button" title="从 Wave 文件夹选择波形库">
           <span>导入波形库</span>
         </button>
-        <button class="menu-btn" id="btn-save-wave-library" type="button" title="保存完整波形库 JSON 文件">
+        <button class="menu-btn" id="btn-save-wave-library" type="button" title="保存完整 SQLite 波形库文件">
           <span id="save-wave-library-label">保存波形库</span>
         </button>
         <button class="menu-btn column-number-btn" id="btn-column-number" type="button"
@@ -84,7 +84,7 @@
           <span>添加列号</span>
           <span class="shortcut" id="column-number-state">Off</span>
         </button>
-        <input type="file" id="wave-library-import-input" accept="application/json,.json" hidden>
+        <input type="file" id="wave-library-import-input" accept=".sqlite,.db,.vwdlib,application/vnd.sqlite3,application/json,.json" hidden>
         <button class="menu-btn" id="btn-reading-mode" title="阅读模式">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
@@ -522,7 +522,8 @@
 
     <script src="inc/codemirror.js?v=5.65.21"></script>
     <script src="inc/codemirror-javascript.js?v=5.65.21"></script>
+    <script src="inc/visualwavedrom-sqlite-browser.js?v=20260722-sqlite-v1"></script>
     <script src="inc/visualwavedrom-vim.js?v=20260721-vim-pipe-v1"></script>
-    <script src="inc/visualwavedrom-app.js?v=20260722-endpoint-edit-v1"></script>
+    <script src="inc/visualwavedrom-app.js?v=20260722-sqlite-v1"></script>
 </body>
 </html>
