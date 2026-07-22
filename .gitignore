@@ -1,3 +1,5 @@
 temp/
 node_modules/
 Wave/.visualwavedrom-state.json
+inc/node-runtime/*
+!inc/node-runtime/README.txt
