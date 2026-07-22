@@ -809,6 +809,7 @@ ${lines.join('\n')}`;
     let browserWaveLibraryStore = null;
     let browserWaveLibraryReady = false;
     let browserWaveLibrarySaveTimer = null;
+    let waveLibraryInitializationPending = true;
     const pageQuery = new URLSearchParams(window.location.search);
     const requestedLibraryId = String(pageQuery.get('libraryId') || '').trim();
     const requestedWaveDocumentName = String(pageQuery.get('waveId') || '').trim();
@@ -2152,7 +2153,11 @@ ${lines.join('\n')}`;
         setStatus(true, 'JSON 已对齐');
         return true;
       }
-      if (!opts.skipUndo) pushUndoBeforeChange();
+      if (!opts.skipUndo) {
+        pushUndoBeforeChange();
+      } else if (opts.rebaseUndoSource) {
+        rebaseLatestEditorUndoSource(editor.value, formatted, 'auto-format');
+      }
       applyEditorChange(formatted, 0, 0, { skipFocus: !!opts.skipFocus });
       setStatus(true, 'JSON 已格式化对齐');
       return true;
@@ -2259,7 +2264,7 @@ ${lines.join('\n')}`;
       }
       formatAfterWaveChangeRaf = requestAnimationFrame(() => {
         formatAfterWaveChangeRaf = null;
-        formatEditorJson({ skipUndo: true, skipFocus: true });
+        formatEditorJson({ skipUndo: true, skipFocus: true, rebaseUndoSource: true });
         const callbacks = pendingFormatRenderCallbacks;
         pendingFormatRenderCallbacks = [];
         scheduleRenderWaveform(editor.value, callbacks.length
@@ -3302,6 +3307,53 @@ ${lines.join('\n')}`;
       return entry && typeof entry === 'object' && typeof entry.content === 'string'
         ? entry.content
         : String(entry == null ? '' : entry);
+    }
+
+    function replaceEditorHistoryEntryContent(entry, replacement) {
+      delete entry.content;
+      delete entry.patch;
+      if (replacement.patch) entry.patch = replacement.patch;
+      else entry.content = replacement.content;
+    }
+
+    function rebaseLatestEditorUndoSource(sourceContent, nextSourceContent, reason) {
+      const entry = undoStack[undoStack.length - 1];
+      if (!entry) return false;
+      const targetContent = getEditorHistoryContent(entry, sourceContent);
+      if (targetContent === null) {
+        vwdDebugLog('history', {
+          phase: 'undo-source-rebase-failed',
+          reason: reason || 'content-transform',
+          sequence: getHistorySequence(entry),
+          sourceLength: String(sourceContent == null ? '' : sourceContent).length,
+          nextSourceLength: String(nextSourceContent == null ? '' : nextSourceContent).length
+        });
+        return false;
+      }
+      const nextSource = String(nextSourceContent == null ? '' : nextSourceContent);
+      if (targetContent === nextSource) {
+        undoStack.pop();
+        if (pendingEditorHistoryEntry === entry) pendingEditorHistoryEntry = null;
+        updateUndoRedoButtons();
+        return true;
+      }
+      const replacement = createEditorHistoryEntry(
+        targetContent,
+        nextSource,
+        entry.sequence,
+        entry.reason
+      );
+      replaceEditorHistoryEntryContent(entry, replacement);
+      vwdDebugLog('history', {
+        phase: 'undo-source-rebased',
+        reason: reason || 'content-transform',
+        sequence: getHistorySequence(entry),
+        sourceLength: String(sourceContent == null ? '' : sourceContent).length,
+        nextSourceLength: nextSource.length,
+        targetLength: targetContent.length,
+        storage: entry.patch ? 'patch' : 'content'
+      });
+      return true;
     }
 
     function compactPendingEditorHistory(sourceContent) {
@@ -13740,8 +13792,14 @@ ${lines.join('\n')}`;
         mountWaveContainerOutsideLibrary();
         waveContainer.hidden = true;
         const message = document.createElement('div');
-        message.className = 'single-wave-not-found';
-        message.textContent = '链接指定的波形图不存在或已被删除。';
+        message.className = waveLibraryInitializationPending
+          ? 'single-wave-loading'
+          : 'single-wave-not-found';
+        message.setAttribute('role', 'status');
+        message.setAttribute('aria-live', 'polite');
+        message.textContent = waveLibraryInitializationPending
+          ? '波形图加载中…'
+          : '链接指定的波形图不存在或已被删除。';
         waveLibraryContainer.replaceChildren(message);
         waveLibraryContainer.hidden = false;
         return;
@@ -15557,9 +15615,12 @@ ${lines.join('\n')}`;
       updateConnectionPointStatusUI();
       setDebugModeUI(vwdDebugEnabled);
       vwdDebugLog('browser-compat', getBrowserCompatibilityState());
-      setStatus(true, waveEditModeLabel());
+      setStatus(true, singleWaveViewActive ? '波形图加载中' : waveEditModeLabel());
       initWaveLibrarySyncChannel();
-      void initializeWaveLibrary();
+      void initializeWaveLibrary().finally(() => {
+        waveLibraryInitializationPending = false;
+        if (singleWaveViewActive) renderWaveLibrary();
+      });
     });
 
 
