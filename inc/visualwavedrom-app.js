@@ -10020,12 +10020,11 @@ ${lines.join('\n')}`;
           textEditModeActive = false;
           updateTextEditModeUI();
         }
-        if (vimController && vimController.getState().enabled
-            && vimController.getState().mode === 'insert') {
-          vimController.setMode('normal');
-        }
-        if (vimWaveAreaActive && wavePanel) {
+        if (vimController && vimController.getState().enabled) {
+          if (vimController.getState().mode === 'insert') vimController.setMode('normal');
+          setKeyboardInputScope('wave', 'vim-inline-edit-finish');
           requestAnimationFrame(() => {
+            if (!wavePanel) return;
             try { wavePanel.focus({ preventScroll: true }); } catch (_e) { wavePanel.focus(); }
           });
         }
