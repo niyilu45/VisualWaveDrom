@@ -75,6 +75,17 @@ function getDefaultJson() {
     // can be selected and edited immediately.
     const DEFAULT_NEW_SIGNAL_TEMPLATE = {};
 
+    function createNewWaveDocumentTemplate(ordinal) {
+      return {
+        title: '波形图 ' + ordinal,
+        signal: [
+          { name: 'clk', wave: 'p.......' },
+          { name: 'signal', wave: '0.1.....' }
+        ],
+        config: { hscale: 1 }
+      };
+    }
+
     const LEGEND_ITEMS = [
       {
         char: 'p',
@@ -1860,7 +1871,7 @@ ${lines.join('\n')}`;
       });
     }
 
-    function createEmptyWaveDocument() {
+    function createWaveDocumentFromTemplate() {
       if (!ensureNavStateReady()) return;
       if (!saveCurrentWaveDocumentBeforeSwitch()) {
         setStatus(false, '当前波形图自动保存失败');
@@ -1870,10 +1881,7 @@ ${lines.join('\n')}`;
       const target = getNavNodeById(navTreeState, selectedNavNodeId) || navTreeState;
       const ordinal = savedTags.length + 1;
       const documentName = 'wave-document-' + Date.now().toString(36);
-      const content = JSON.stringify({
-        signal: [],
-        head: { text: '波形图 ' + ordinal }
-      }, null, 2);
+      const content = JSON.stringify(createNewWaveDocumentTemplate(ordinal), null, 2);
       if (!upsertSavedTag(documentName, {
         content: content,
         hscale: 1,
@@ -1892,7 +1900,12 @@ ${lines.join('\n')}`;
       openWaveDocumentForEditing(documentName, { immediate: true });
       pushWaveLibraryHistory(before, captureWaveLibrarySnapshot());
       requestAnimationFrame(() => formatEditorJson());
-      vwdDebugLog('wave-library', { phase: 'create-empty-document', documentName: documentName, targetId: target.id });
+      vwdDebugLog('wave-library', {
+        phase: 'create-template-document',
+        documentName: documentName,
+        targetId: target.id,
+        signalCount: 2
+      });
     }
 
     function findNavDirectoryByLabel(node, label) {
@@ -2064,11 +2077,11 @@ ${lines.join('\n')}`;
       }
       if (navAddWaveDocumentBtn) {
         navAddWaveDocumentBtn.addEventListener('click', () => {
-          vwdDebugLog('wave-library', { phase: 'button-event', action: 'create-empty-document' });
+          vwdDebugLog('wave-library', { phase: 'button-event', action: 'create-template-document' });
           try {
-            createEmptyWaveDocument();
+            createWaveDocumentFromTemplate();
           } catch (error) {
-            vwdDebugLog('wave-library', { phase: 'button-error', action: 'create-empty-document', message: error && error.message ? error.message : String(error) });
+            vwdDebugLog('wave-library', { phase: 'button-error', action: 'create-template-document', message: error && error.message ? error.message : String(error) });
             setStatus(false, '新建波形图失败，请复制 Debug 日志');
           }
         });
@@ -14694,6 +14707,53 @@ ${lines.join('\n')}`;
       return true;
     }
 
+    function deleteVimInsertAdjacentWave(direction) {
+      let sourceMap = [];
+      try { sourceMap = buildSignalSourceMap(editor.value); } catch (_e) { return false; }
+      if (!sourceMap.length) return false;
+
+      const rowIndex = selectedSignalIndex >= 0 && selectedSignalIndex < sourceMap.length
+        ? selectedSignalIndex
+        : 0;
+      const entry = sourceMap[rowIndex];
+      const wave = entry && entry.signal ? String(entry.signal.wave || '') : '';
+      const cursorColumn = selectedWaveColumnIndex >= 0
+        ? Math.max(0, Math.floor(selectedWaveColumnIndex))
+        : 0;
+      const deleteColumn = direction === 'left' ? cursorColumn - 1 : cursorColumn;
+
+      if (deleteColumn < 0 || deleteColumn >= wave.length) {
+        setSelectedSignal(rowIndex, cursorColumn);
+        refreshVimWaveSelection();
+        setStatus(
+          true,
+          direction === 'left'
+            ? 'INSERT：光标左侧没有可删除的波形'
+            : 'INSERT：光标右侧没有可删除的波形'
+        );
+        return true;
+      }
+
+      if (!deleteWaveRangeAtColumns(rowIndex, deleteColumn, deleteColumn)) return false;
+      const nextCursor = direction === 'left' ? deleteColumn : cursorColumn;
+      setSelectedSignal(rowIndex, nextCursor);
+      refreshVimWaveSelection('insert-delete');
+      vwdDebugLog('vim', {
+        phase: 'insert-delete-wave',
+        direction,
+        rowIndex,
+        deletedColumn: deleteColumn,
+        cursorColumn: nextCursor
+      });
+      setStatus(
+        true,
+        direction === 'left'
+          ? 'INSERT：已删除光标左侧波形'
+          : 'INSERT：已删除光标右侧波形'
+      );
+      return true;
+    }
+
     function cloneSignalForVimRegister(signal) {
       const copy = JSON.parse(JSON.stringify(signal || {}));
       delete copy.node;
@@ -15306,7 +15366,7 @@ ${lines.join('\n')}`;
         return true;
       }
       if (command === 'new') {
-        createEmptyWaveDocument();
+        createWaveDocumentFromTemplate();
         return true;
       }
       if (command === 'move') return moveCurrentDocumentByVimCommand(argument);
@@ -15353,6 +15413,7 @@ ${lines.join('\n')}`;
           return true;
         case 'insert-start': return startVimWaveInsert(data.position);
         case 'insert-wave': return insertVimWave(data.char, data.count);
+        case 'insert-delete-wave': return deleteVimInsertAdjacentWave(data.direction);
         case 'paste': return pasteVimRegister(data.before, data.count);
         case 'edit-text': return editVimSelectedText();
         case 'group': {

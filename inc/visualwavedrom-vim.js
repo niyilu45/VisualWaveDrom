@@ -18,6 +18,8 @@
     if (event.key === ' ') return '<Space>';
     if (event.key === 'Escape') return '<Esc>';
     if (event.key === 'Enter') return '<Enter>';
+    if (event.key === 'Backspace') return '<Backspace>';
+    if (event.key === 'Delete' || event.key === 'Del') return '<Delete>';
     if (event.key === '｜') return '|';
     if (event.shiftKey && event.code === 'Backslash') return '|';
     if (event.key === '[' && (event.ctrlKey || event.metaKey)) return '<C-[>';
@@ -219,6 +221,14 @@
     }
 
     handleInsertMode(key) {
+      if (key === '<Backspace>' || key === '<Delete>') {
+        this.execute(
+          'insert-delete-wave',
+          { direction: key === '<Backspace>' ? 'left' : 'right' },
+          { noRepeat: true }
+        );
+        return true;
+      }
       if (key && key.length === 1) {
         this.execute('insert-wave', { char: key });
         return true;

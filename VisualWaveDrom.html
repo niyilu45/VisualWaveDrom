@@ -21,7 +21,7 @@
       <div class="menu-section">
         <div class="menu-section-title">波形目录</div>
         <div class="nav-toolbar">
-          <button class="menu-btn nav-btn" id="btn-nav-add-wave-document" type="button" title="在当前标题下新建空波形图">
+          <button class="menu-btn nav-btn" id="btn-nav-add-wave-document" type="button" title="在当前标题下新建带初始模板的波形图">
             <span>新增波形图</span>
           </button>
           <div class="nav-order-row">
@@ -389,7 +389,7 @@
             <span>o</span><span>在 VISUAL 中交换选择起点和终点</span>
             <span>y / p / x</span><span>复制、覆盖粘贴、删除选中的波形格</span>
             <span>r + 波形字符</span><span>替换当前位置；<kbd>R</kbd> 连续替换；<kbd>|</kbd> 可直接写入间隔</span>
-            <span>i / I / A</span><span>从当前格、当前行首或当前行末进入波形插入模式</span>
+            <span>i / I / A</span><span>从当前格、当前行首或当前行末进入波形插入模式；Backspace / Delete 删除光标左侧 / 右侧波形</span>
             <span>t</span><span>当前选中内容可编辑时，直接打开数据、分组或已选连接线的标签输入框</span>
             <span>yy / dd</span><span>复制或删除当前信号行，复制时不包含 node</span>
             <span>o / O</span><span>在当前信号行之后或之前插入空行</span>
@@ -424,7 +424,7 @@
             <span>:w</span><span>保存当前波形库</span>
             <span>:format</span><span>格式化并对齐当前 JSON</span>
             <span>:json / :nav</span><span>显示或隐藏 JSON 面板、波形目录</span>
-            <span>:new</span><span>在当前目录中新建空波形图</span>
+            <span>:new</span><span>在当前目录中新建带初始模板的波形图</span>
             <span>:move 编号</span><span>将当前波形图移动到指定目录</span>
             <span>:debug / :noh</span><span>切换调试模式、清除选择和高亮</span>
             <span>:set vim / :set novim</span><span>开启或关闭 Vim 模式</span>
@@ -517,7 +517,7 @@
     <script src="inc/codemirror-javascript.js?v=5.65.21"></script>
     <script src="inc/codemirror-vim.js?v=5.65.21"></script>
     <script src="inc/visualwavedrom-sqlite-browser.js?v=20260722-sqlite-v2"></script>
-    <script src="inc/visualwavedrom-vim.js?v=20260724-vim-eai-v1"></script>
-    <script src="inc/visualwavedrom-app.js?v=20260724-vim-eai-v1"></script>
+    <script src="inc/visualwavedrom-vim.js?v=20260724-vim-insert-delete-v1"></script>
+    <script src="inc/visualwavedrom-app.js?v=20260724-vim-insert-delete-v1"></script>
 </body>
 </html>
