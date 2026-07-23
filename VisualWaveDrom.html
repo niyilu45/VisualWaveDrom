@@ -383,13 +383,13 @@
           <h3>波形格和信号行</h3>
           <div class="vim-help-grid">
             <span>h / j / k / l（小写 L）</span><span>左、下、上、右移动波形光标</span>
-            <span>w / b</span><span>跳到后一个或前一个波形变化点</span>
+            <span>w / b / e</span><span>跳到后一个、前一个波形变化点，或当前/下一波形段末尾</span>
             <span>0 / $ / gg / G</span><span>跳到行首、行尾、首行、末行</span>
             <span>v / V</span><span>进入波形格选择或信号行选择</span>
             <span>o</span><span>在 VISUAL 中交换选择起点和终点</span>
             <span>y / p / x</span><span>复制、覆盖粘贴、删除选中的波形格</span>
             <span>r + 波形字符</span><span>替换当前位置；<kbd>R</kbd> 连续替换；<kbd>|</kbd> 可直接写入间隔</span>
-            <span>i</span><span>进入波形插入模式；数据格插入在已有文本前时，data 自动用 “.” 占位</span>
+            <span>i / I / A</span><span>从当前格、当前行首或当前行末进入波形插入模式</span>
             <span>t</span><span>当前选中内容可编辑时，直接打开数据、分组或已选连接线的标签输入框</span>
             <span>yy / dd</span><span>复制或删除当前信号行，复制时不包含 node</span>
             <span>o / O</span><span>在当前信号行之后或之前插入空行</span>
@@ -517,7 +517,7 @@
     <script src="inc/codemirror-javascript.js?v=5.65.21"></script>
     <script src="inc/codemirror-vim.js?v=5.65.21"></script>
     <script src="inc/visualwavedrom-sqlite-browser.js?v=20260722-sqlite-v2"></script>
-    <script src="inc/visualwavedrom-vim.js?v=20260721-vim-pipe-v1"></script>
-    <script src="inc/visualwavedrom-app.js?v=20260724-vim-inline-focus-v1"></script>
+    <script src="inc/visualwavedrom-vim.js?v=20260724-vim-eai-v1"></script>
+    <script src="inc/visualwavedrom-app.js?v=20260724-vim-eai-v1"></script>
 </body>
 </html>

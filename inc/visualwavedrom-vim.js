@@ -202,7 +202,15 @@
         return true;
       }
       if (WAVE_CHARACTERS.has(key)) return this.execute('replace-wave', { char: key });
-      const motions = { h: 'left', j: 'down', k: 'up', l: 'right', w: 'next-change', b: 'previous-change' };
+      const motions = {
+        h: 'left',
+        j: 'down',
+        k: 'up',
+        l: 'right',
+        w: 'next-change',
+        b: 'previous-change',
+        e: 'end-change'
+      };
       if (motions[key]) return this.execute('move', { direction: motions[key], extend: false }, { noRepeat: true });
       if (key === '0') return this.execute('move-line-start', {}, { noRepeat: true });
       if (key === '$') return this.execute('move-line-end', {}, { noRepeat: true });
@@ -265,7 +273,15 @@
       }
 
       const extend = this.mode === 'visual';
-      const motions = { h: 'left', j: 'down', k: 'up', l: 'right', w: 'next-change', b: 'previous-change' };
+      const motions = {
+        h: 'left',
+        j: 'down',
+        k: 'up',
+        l: 'right',
+        w: 'next-change',
+        b: 'previous-change',
+        e: 'end-change'
+      };
       let handled = true;
 
       if (motions[key]) {
@@ -327,6 +343,13 @@
         this.execute('edit-text', {}, { noRepeat: true });
       } else if (key === 'i') {
         this.execute('insert-start', {}, { noRepeat: true });
+        this.setMode('insert');
+      } else if (key === 'I' || key === 'A') {
+        this.execute(
+          'insert-start',
+          { position: key === 'I' ? 'line-start' : 'line-append' },
+          { noRepeat: true }
+        );
         this.setMode('insert');
       } else if (key === 'o' || key === 'O') {
         this.execute('new-row', { before: key === 'O' });

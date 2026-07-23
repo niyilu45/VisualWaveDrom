@@ -14451,6 +14451,43 @@ ${lines.join('\n')}`;
       return current;
     }
 
+    function findVimWaveSegmentEndColumn(wave, fromColumn, count, maxColumn) {
+      const text = String(wave || '');
+      const limit = Math.max(0, maxColumn);
+      let current = Math.max(0, Math.min(limit, fromColumn));
+
+      const findExplicit = (start) => {
+        for (let i = Math.max(0, start); i < text.length && i <= limit; i++) {
+          if (text[i] !== '.') return i;
+        }
+        return -1;
+      };
+      const findSegmentStart = (column) => {
+        for (let i = Math.min(column, text.length - 1); i >= 0; i--) {
+          if (text[i] !== '.') return i;
+        }
+        return -1;
+      };
+      const findSegmentEnd = (start) => {
+        const nextStart = findExplicit(start + 1);
+        if (nextStart >= 0) return Math.max(start, nextStart - 1);
+        return Math.max(start, Math.min(limit, Math.max(0, text.length - 1)));
+      };
+
+      for (let step = 0; step < count; step++) {
+        const segmentStart = findSegmentStart(current);
+        const segmentEnd = segmentStart >= 0 ? findSegmentEnd(segmentStart) : -1;
+        if (segmentEnd > current) {
+          current = segmentEnd;
+          continue;
+        }
+
+        const nextStart = findExplicit(current + 1);
+        current = nextStart >= 0 ? findSegmentEnd(nextStart) : limit;
+      }
+      return current;
+    }
+
     function moveVimWaveCursor(direction, count, extend) {
       let sourceMap = [];
       try { sourceMap = buildSignalSourceMap(editor.value); } catch (_e) { return false; }
@@ -14468,6 +14505,8 @@ ${lines.join('\n')}`;
         col = findVimWaveChangeColumn(sourceMap[row].signal.wave || '', col, 1, steps, maxColumn);
       } else if (direction === 'previous-change') {
         col = findVimWaveChangeColumn(sourceMap[row].signal.wave || '', col, -1, steps, maxColumn);
+      } else if (direction === 'end-change') {
+        col = findVimWaveSegmentEndColumn(sourceMap[row].signal.wave || '', col, steps, maxColumn);
       }
 
       const state = vimController ? vimController.getState() : null;
@@ -14511,6 +14550,36 @@ ${lines.join('\n')}`;
         setSelectedSignal(row, col);
       }
       refreshVimWaveSelection('cursor-boundary');
+      return true;
+    }
+
+    function startVimWaveInsert(position) {
+      if (!ensureVimWaveCursor()) return false;
+
+      let sourceMap = [];
+      try { sourceMap = buildSignalSourceMap(editor.value); } catch (_e) { return false; }
+      const entry = sourceMap[selectedSignalIndex];
+      if (!entry) return false;
+
+      let column = Math.max(0, selectedWaveColumnIndex);
+      if (position === 'line-start') column = 0;
+      else if (position === 'line-append') column = String(entry.signal.wave || '').length;
+
+      if (textEditModeActive) setTextEditMode(false);
+      setSelectedSignal(selectedSignalIndex, column);
+      vimWaveInsertModeActive = true;
+      if (!setWaveEditMode('insert')) {
+        vimWaveInsertModeActive = false;
+        return false;
+      }
+      refreshVimWaveSelection('insert-position');
+      vwdDebugLog('vim', {
+        phase: 'insert-start',
+        position: position || 'cursor',
+        rowIndex: selectedSignalIndex,
+        columnIndex: column
+      });
+      setStatus(true, 'INSERT：输入波形字符连续插入，Esc 退出');
       return true;
     }
 
@@ -15282,12 +15351,7 @@ ${lines.join('\n')}`;
           setWavePaintMode(true, 'vim-replace');
           setStatus(true, 'REPLACE：输入波形字符连续替换，Esc 退出');
           return true;
-        case 'insert-start':
-          if (textEditModeActive) setTextEditMode(false);
-          vimWaveInsertModeActive = true;
-          setWaveEditMode('insert');
-          setStatus(true, 'INSERT：输入波形字符连续插入，Esc 退出');
-          return true;
+        case 'insert-start': return startVimWaveInsert(data.position);
         case 'insert-wave': return insertVimWave(data.char, data.count);
         case 'paste': return pasteVimRegister(data.before, data.count);
         case 'edit-text': return editVimSelectedText();
