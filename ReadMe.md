@@ -27,9 +27,9 @@ set "WAVE_LIBRARY_RELATIVE_PATH=Wave\VisualWaveDrom-library\library.sqlite"
 
 路径以 BAT 所在目录为基准。工程整体复制到其他磁盘或电脑后，只要内部相对路径不变，就不需要修改绝对路径。关闭全部页面后，本地服务和 BAT 窗口会自动退出。
 
-## 傻瓜版完整示例：从模板做一张 SPI 波形图
+## 简洁示例：从模板做一张 SPI 波形图
 
-下面用一张 `SPI 写时序` 波形图演示最常用的完整流程。每张 GIF 都会先显示操作前的界面，再停留在操作后的结果；看不清文字时可以点击下面的“高清静态图”。
+下面用一张 `SPI 写时序` 波形图演示最常用的完整流程。每张 GIF 都由多个关键画面组成，依次标出入口、点击位置、操作过程和最终结果；看不清文字时可以点击下面的“高清静态图”。
 
 ### 第 1 步：启动 VisualWaveDrom
 
@@ -399,6 +399,7 @@ inc/node-runtime/        BAT 自动下载的便携 Node.js 运行环境（Git �
 inc/sqlite/              SQLite 官方 Windows 与 WebAssembly 运行文件
 inc/visualwavedrom-vim.js Vim 键盘控制器
 Wave/                    多个 SQLite 波形库
+tools/GenerateReadMeGifs.py README 示例动画生成脚本
 tools/InstallNodeRuntime.ps1 便携 Node.js 下载与 SHA-256 校验脚本
 ```
 
