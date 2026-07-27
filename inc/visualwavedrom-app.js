@@ -1,5 +1,4 @@
-﻿    const DEFAULT_WAVE_JSON_PATH = 'Wave/default.json';
-const FALLBACK_DEFAULT_JSON = `{
+﻿const FALLBACK_DEFAULT_JSON = `{
   "signal": [
     { "name": "clk", "wave": "p.....|", "node": ".a....|" },
     { "name": "dat", "wave": "x.345x|=", "data": ["head", "body", "tail", "data"], "node": "....b..." },
@@ -17,24 +16,9 @@ const FALLBACK_DEFAULT_JSON = `{
 let defaultJsonCache = null;
 
 function getDefaultJson() {
-  if (defaultJsonCache != null) return defaultJsonCache;
-  if (typeof window !== 'undefined'
-      && window.location
-      && !/^https?:$/.test(window.location.protocol)) {
+  if (defaultJsonCache == null) {
     defaultJsonCache = FALLBACK_DEFAULT_JSON;
-    return defaultJsonCache;
   }
-  try {
-    const req = new XMLHttpRequest();
-    req.open('GET', DEFAULT_WAVE_JSON_PATH, false);
-    req.overrideMimeType && req.overrideMimeType('application/json');
-    req.send(null);
-    if ((req.status === 0 || (req.status >= 200 && req.status < 300)) && req.responseText && req.responseText.trim()) {
-      defaultJsonCache = req.responseText;
-      return defaultJsonCache;
-    }
-  } catch (e) { /* local file access may be blocked */ }
-  defaultJsonCache = FALLBACK_DEFAULT_JSON;
   return defaultJsonCache;
 }
 
@@ -785,7 +769,6 @@ ${lines.join('\n')}`;
     const WAVE_DOCUMENTS_KEY = 'vwd-wave-documents';
     const WAVE_DOCUMENTS_LOADED_CACHE_KEY = 'vwd-wave-documents-loaded-cache-v1';
     const WAVE_LIBRARY_PENDING_SAVE_KEY = 'vwd-wave-library-pending-save-v1';
-    const LEGACY_SAVED_TAGS_KEY = 'vwd-saved-tags';
     const NAV_COPY_SEED_KEY = 'vwd-nav-copy-seed-2222-51515-v2';
     const PERSIST_DEBOUNCE_MS = 500;
     const SAVED_TAGS_PERSIST_DEBOUNCE_MS = 1200;
@@ -10931,8 +10914,7 @@ ${lines.join('\n')}`;
 
     function normalizeSavedTag(raw) {
       if (!raw || typeof raw.name !== 'string') return null;
-      const content = typeof raw.content === 'string' ? raw.content
-        : (typeof raw.json === 'string' ? raw.json : null);
+      const content = typeof raw.content === 'string' ? raw.content : null;
       const deferred = raw.deferred === true && content == null;
       if (content == null && !deferred) return null;
       return {
@@ -11083,21 +11065,11 @@ ${lines.join('\n')}`;
 
     function loadSavedTagsFromStorage() {
       try {
-        let raw = localStorage.getItem(WAVE_DOCUMENTS_KEY);
-        let isLegacy = false;
-        if (!raw) {
-          raw = localStorage.getItem(LEGACY_SAVED_TAGS_KEY);
-          isLegacy = !!raw;
-        }
+        const raw = localStorage.getItem(WAVE_DOCUMENTS_KEY);
         if (!raw) return [];
         const parsed = JSON.parse(raw);
         if (!Array.isArray(parsed)) return [];
-        const documents = parsed.map(normalizeSavedTag).filter(Boolean);
-        if (isLegacy) {
-          localStorage.setItem(WAVE_DOCUMENTS_KEY, JSON.stringify(documents));
-          vwdDebugLog('wave-library', { phase: 'migrate-legacy-tags', documentCount: documents.length });
-        }
-        return documents;
+        return parsed.map(normalizeSavedTag).filter(Boolean);
       } catch (e) {
         return [];
       }
@@ -11686,7 +11658,6 @@ ${lines.join('\n')}`;
         try {
           localStorage.removeItem(WAVE_DOCUMENTS_KEY);
           localStorage.removeItem(WAVE_DOCUMENTS_LOADED_CACHE_KEY);
-          localStorage.removeItem(LEGACY_SAVED_TAGS_KEY);
         } catch (_e) { /* SQLite remains authoritative */ }
         vwdDebugLog('persistence', {
           phase: 'browser-sqlite-save',
@@ -11782,7 +11753,7 @@ ${lines.join('\n')}`;
       const link = document.createElement('a');
       link.href = url;
       const libraryBaseName = String(currentWaveLibraryFile || 'VisualWaveDrom-library')
-        .replace(/\.(?:json|sqlite|db|vwdlib)$/i, '');
+        .replace(/\.sqlite$/i, '');
       link.download = libraryBaseName + '.sqlite';
       document.body.appendChild(link);
       link.click();
@@ -11802,17 +11773,8 @@ ${lines.join('\n')}`;
         for (let index = 0; index < Math.min(sqliteHeader.length, bytes.length); index += 1) {
           header += String.fromCharCode(bytes[index]);
         }
-        let summary;
-        if (header === sqliteHeader) {
-          summary = await store.importBytes(bytes, file.name);
-        } else {
-          const text = new TextDecoder('utf-8').decode(bytes);
-          const bundle = JSON.parse(text);
-          const sqliteName = String(file.name || 'VisualWaveDrom-library.json')
-            .replace(/\.json$/i, '') + '.sqlite';
-          store.fileName = sqliteName;
-          summary = store.writeBundle(bundle);
-        }
+        if (header !== sqliteHeader) throw new Error('所选文件不是 SQLite 波形库');
+        const summary = await store.importBytes(bytes, file.name);
         await store.persist();
         browserWaveLibraryReady = true;
         currentWaveLibraryFile = store.fileName;
@@ -11870,7 +11832,6 @@ ${lines.join('\n')}`;
         try {
           localStorage.removeItem(WAVE_DOCUMENTS_KEY);
           localStorage.removeItem(WAVE_DOCUMENTS_LOADED_CACHE_KEY);
-          localStorage.removeItem(LEGACY_SAVED_TAGS_KEY);
         } catch (_e) { /* SQLite remains authoritative */ }
         updateWaveLibraryFileStatus();
         vwdDebugLog('persistence', {
