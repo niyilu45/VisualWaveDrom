@@ -979,6 +979,104 @@
       position: relative;
     }
 
+    .wave-container.vwd-big-wave-window {
+      overflow-x: hidden;
+    }
+
+    .vwd-big-wave-navigator {
+      box-sizing: border-box;
+      position: sticky;
+      left: 0;
+      width: 100%;
+      min-width: 280px;
+      margin-top: 8px;
+      padding: 6px 8px 5px;
+      border-top: 1px solid #d8e0ea;
+      border-bottom: 1px solid #d8e0ea;
+      background: #f8fafc;
+      color: #475569;
+      z-index: 8;
+    }
+
+    .vwd-big-wave-controls {
+      min-height: 26px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .vwd-big-wave-controls button {
+      width: 26px;
+      height: 24px;
+      flex: 0 0 auto;
+      padding: 0;
+      border: 1px solid #cbd5e1;
+      border-radius: 4px;
+      background: #fff;
+      color: #315b87;
+      font-size: 20px;
+      line-height: 20px;
+      cursor: pointer;
+    }
+
+    .vwd-big-wave-controls button:hover:not(:disabled) {
+      border-color: #3b82f6;
+      color: #1d4ed8;
+      background: #eff6ff;
+    }
+
+    .vwd-big-wave-controls button:disabled {
+      cursor: default;
+      opacity: 0.4;
+    }
+
+    .vwd-big-wave-range {
+      min-width: 0;
+      flex: 1;
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .vwd-big-wave-crossing {
+      flex: 0 0 auto;
+      color: #64748b;
+      font-size: 11px;
+      white-space: nowrap;
+    }
+
+    .vwd-big-wave-crossing:empty {
+      display: none;
+    }
+
+    .vwd-big-wave-scroll {
+      width: 100%;
+      height: 17px;
+      overflow-x: scroll;
+      overflow-y: hidden;
+      scrollbar-color: #94a3b8 #e2e8f0;
+      scrollbar-width: auto;
+      overscroll-behavior-x: contain;
+    }
+
+    .vwd-big-wave-scroll-spacer {
+      height: 1px;
+      pointer-events: none;
+    }
+
+    .wave-screenshot-range-fields {
+      display: grid;
+      grid-template-columns: minmax(70px, auto) minmax(0, 1fr);
+      gap: 10px 12px;
+      align-items: center;
+    }
+
+    .wave-screenshot-range-fields .modal-field-label {
+      margin: 0;
+    }
+
     .wave-library-container {
       width: 100%;
       display: grid;
@@ -1122,6 +1220,10 @@
       min-height: 70px;
       padding: 12px;
       overflow: auto;
+    }
+
+    .wave-document-canvas.vwd-big-wave-active {
+      overflow-x: hidden;
     }
 
     .wave-document-preview.preview-unloaded {

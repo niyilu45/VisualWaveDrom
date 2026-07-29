@@ -513,11 +513,31 @@
     </div>
   </div>
 
+  <div class="modal-overlay" id="wave-screenshot-range-modal" hidden>
+    <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="wave-screenshot-range-title">
+      <div class="modal-header" id="wave-screenshot-range-title">选择截图列范围</div>
+      <div class="modal-body">
+        <div class="wave-screenshot-range-fields">
+          <label class="modal-field-label" for="wave-screenshot-start-column">起始列</label>
+          <input type="number" class="modal-input" id="wave-screenshot-start-column" min="1" step="1" value="1" inputmode="numeric">
+          <label class="modal-field-label" for="wave-screenshot-end-column">结束列</label>
+          <input type="number" class="modal-input" id="wave-screenshot-end-column" min="1" step="1" value="200" inputmode="numeric">
+        </div>
+        <div class="modal-hint" id="wave-screenshot-range-hint" aria-live="polite"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="modal-btn" id="wave-screenshot-range-cancel">取消</button>
+        <button type="button" class="modal-btn modal-btn-primary" id="wave-screenshot-range-confirm">确定</button>
+      </div>
+    </div>
+  </div>
+
     <script src="inc/codemirror.js?v=5.65.21"></script>
     <script src="inc/codemirror-javascript.js?v=5.65.21"></script>
     <script src="inc/codemirror-vim.js?v=5.65.21"></script>
     <script src="inc/visualwavedrom-sqlite-browser.js?v=20260722-sqlite-v2"></script>
     <script src="inc/visualwavedrom-vim.js?v=20260724-vim-insert-delete-v1"></script>
-    <script src="inc/visualwavedrom-app.js?v=20260724-vim-insert-delete-v1"></script>
+    <script src="inc/visualwavedrom-bigdata.js?v=20260729-bigdata-v1"></script>
+    <script src="inc/visualwavedrom-app.js?v=20260729-bigdata-v1"></script>
 </body>
 </html>

@@ -31,6 +31,11 @@ function getDefaultJson() {
     const EMPTY_WAVE_FILL_CHAR = 'x';
     const SIGNAL_DESCRIPTION_X_OFFSET = 0;
     const SIGNAL_DESCRIPTION_OVERLAY_OFFSET = 0;
+    const BIG_WAVE_COLUMN_THRESHOLD = 2000;
+    const BIG_WAVE_MIN_WINDOW_COLUMNS = 24;
+    const BIG_WAVE_MAX_WINDOW_COLUMNS = 320;
+    const BIG_WAVE_WINDOW_PADDING_PX = 190;
+    const BIG_WAVE_SCROLL_DEBOUNCE_MS = 48;
 
     const CONNECTION_ARROW_STYLES = ['start', 'end', 'both'];
     const CONNECTION_LINE_STYLES = ['straight', 'dashed', 'orthogonal', 'curve'];
@@ -276,6 +281,20 @@ function getDefaultJson() {
     let waveDocumentOpenSequence = 0;
     let lastRenderedWaveText = null;
     let lastRenderedWaveSource = null;
+    let bigWaveViewportState = {
+      enabled: false,
+      documentKey: '',
+      fullSource: null,
+      metrics: null,
+      window: null,
+      start: 0,
+      size: 0,
+      pendingStart: -1,
+      renderTimer: null,
+      navigator: null,
+      syncingNavigator: false,
+      resizeObserver: null
+    };
     let pendingFormatRenderCallbacks = [];
     let groupPickActive = false;
     let groupPickStartIndex = -1;
@@ -337,15 +356,26 @@ function getDefaultJson() {
       const userAgent = String(navigator.userAgent || '');
       const family = /Edg\//.test(userAgent)
         ? 'edge'
-        : (/Chrome\//.test(userAgent) ? 'chrome' : 'chromium-compatible');
+        : (/Firefox\//.test(userAgent)
+          ? 'firefox'
+          : (/Chrome\//.test(userAgent) ? 'chrome' : 'other'));
+      const versionMatch = family === 'firefox'
+        ? userAgent.match(/Firefox\/(\d+(?:\.\d+)?)/)
+        : (family === 'edge'
+          ? userAgent.match(/Edg\/(\d+(?:\.\d+)?)/)
+          : userAgent.match(/Chrome\/(\d+(?:\.\d+)?)/));
       const elementPrototype = typeof Element === 'function' ? Element.prototype : null;
       return {
         family,
+        version: versionMatch ? Number.parseFloat(versionMatch[1]) : 0,
         userAgent,
         protocol: window.location.protocol,
         secureContext: window.isSecureContext === true,
         pointerEvents: typeof window.PointerEvent === 'function',
         pointerCapture: !!(elementPrototype && elementPrototype.setPointerCapture),
+        indexedDb: typeof window.indexedDB !== 'undefined',
+        webAssembly: typeof window.WebAssembly === 'object',
+        worker: typeof window.Worker === 'function',
         clipboardText: !!(navigator.clipboard && navigator.clipboard.writeText),
         clipboardImage: typeof window.ClipboardItem === 'function'
           && !!(navigator.clipboard && navigator.clipboard.write)
@@ -780,7 +810,7 @@ ${lines.join('\n')}`;
     const WAVE_PREVIEW_WORKER_PARSE_THRESHOLD = 50000;
     const WAVE_PREVIEW_CANVAS_CELL_THRESHOLD = 12000;
     const WAVE_PREVIEW_CANVAS_COLUMN_THRESHOLD = 1500;
-    const WAVE_ANALYSIS_WORKER_URL = 'inc/visualwavedrom-worker.js?v=20260722-speed-v2';
+    const WAVE_ANALYSIS_WORKER_URL = 'inc/visualwavedrom-worker.js?v=20260729-bigdata-v1';
     const DRAG_THRESHOLD = 5;
     let backBtnDrag = null;
     let waveEditMode = 'modify';
@@ -847,6 +877,13 @@ ${lines.join('\n')}`;
     const waveLibraryPickerOptions = document.getElementById('wave-library-picker-options');
     const waveCopyModal = document.getElementById('wave-copy-modal');
     const waveCopyCancel = document.getElementById('wave-copy-cancel');
+    const waveScreenshotRangeModal = document.getElementById('wave-screenshot-range-modal');
+    const waveScreenshotStartColumn = document.getElementById('wave-screenshot-start-column');
+    const waveScreenshotEndColumn = document.getElementById('wave-screenshot-end-column');
+    const waveScreenshotRangeHint = document.getElementById('wave-screenshot-range-hint');
+    const waveScreenshotRangeCancel = document.getElementById('wave-screenshot-range-cancel');
+    const waveScreenshotRangeConfirm = document.getElementById('wave-screenshot-range-confirm');
+    let pendingWaveScreenshotRangeRequest = null;
 
     function escapeRegex(str) {
       return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -2260,7 +2297,7 @@ ${lines.join('\n')}`;
         scheduledRenderAnalysis = null;
         scheduledRenderCallbacks = null;
       }
-      formatAfterWaveChangeRaf = requestAnimationFrame(() => {
+      const runFormat = () => {
         formatAfterWaveChangeRaf = null;
         formatEditorJson({ skipUndo: true, skipFocus: true, rebaseUndoSource: true });
         const callbacks = pendingFormatRenderCallbacks;
@@ -2270,7 +2307,12 @@ ${lines.join('\n')}`;
               try { callback(ok); } catch (_e) { /* ignore */ }
             })
           : null);
-      });
+      };
+      const useIdleFormat = (bigWaveViewportState.enabled || editor.value.length >= 250000)
+        && typeof window.requestIdleCallback === 'function';
+      formatAfterWaveChangeRaf = useIdleFormat
+        ? window.requestIdleCallback(runFormat, { timeout: 350 })
+        : requestAnimationFrame(runFormat);
     }
     function buildSignalSourceMap(jsonText) {
       const bounds = findSignalArrayBounds(jsonText);
@@ -3190,6 +3232,354 @@ ${lines.join('\n')}`;
     function getWaveUnitWidth(jsonText, parsedSource) {
       const hscale = parsedSource ? readHscaleFromSource(parsedSource) : readHscaleFromJsonText(jsonText);
       return WAVE_UNIT_WIDTH * hscale;
+    }
+
+    function getBigWaveApi() {
+      return window.VisualWaveDromBigData
+        && typeof window.VisualWaveDromBigData.createRenderWindow === 'function'
+        ? window.VisualWaveDromBigData
+        : null;
+    }
+
+    function getBigWaveDocumentKey() {
+      return editingWaveDocumentName || activeTagName || '__standalone-wave__';
+    }
+
+    function getBigWaveHost() {
+      return waveContainer.closest('.wave-document-canvas') || wavePanel;
+    }
+
+    function clearBigWaveRenderTimer() {
+      if (bigWaveViewportState.renderTimer !== null) {
+        clearTimeout(bigWaveViewportState.renderTimer);
+        bigWaveViewportState.renderTimer = null;
+      }
+    }
+
+    function removeBigWaveNavigator() {
+      clearBigWaveRenderTimer();
+      if (bigWaveViewportState.resizeObserver) {
+        bigWaveViewportState.resizeObserver.disconnect();
+        bigWaveViewportState.resizeObserver = null;
+      }
+      const navigatorEl = bigWaveViewportState.navigator;
+      const previousHost = navigatorEl && navigatorEl.closest
+        ? navigatorEl.closest('.wave-document-canvas')
+        : null;
+      if (navigatorEl && navigatorEl.isConnected) navigatorEl.remove();
+      if (previousHost) previousHost.classList.remove('vwd-big-wave-active');
+      const currentHost = waveContainer.closest('.wave-document-canvas');
+      if (currentHost) currentHost.classList.remove('vwd-big-wave-active');
+      waveContainer.classList.remove('vwd-big-wave-window');
+      bigWaveViewportState.navigator = null;
+    }
+
+    function resetBigWaveViewport(reason) {
+      const wasEnabled = bigWaveViewportState.enabled;
+      removeBigWaveNavigator();
+      bigWaveViewportState.enabled = false;
+      bigWaveViewportState.documentKey = '';
+      bigWaveViewportState.fullSource = null;
+      bigWaveViewportState.metrics = null;
+      bigWaveViewportState.window = null;
+      bigWaveViewportState.start = 0;
+      bigWaveViewportState.size = 0;
+      bigWaveViewportState.pendingStart = -1;
+      if (wasEnabled) {
+        vwdDebugLog('big-wave', { phase: 'disabled', reason: reason || '' });
+      }
+    }
+
+    function calculateBigWaveWindowSize(source, totalColumns) {
+      const host = getBigWaveHost();
+      const hostWidth = Math.max(320, host && host.clientWidth ? host.clientWidth : 960);
+      const columnWidth = Math.max(1, getWaveColumnWidth(getWaveUnitWidth(editor.value, source)));
+      const visibleColumns = Math.ceil(Math.max(120, hostWidth - BIG_WAVE_WINDOW_PADDING_PX) / columnWidth);
+      return Math.min(
+        Math.max(1, totalColumns),
+        Math.max(BIG_WAVE_MIN_WINDOW_COLUMNS, Math.min(BIG_WAVE_MAX_WINDOW_COLUMNS, visibleColumns + 8))
+      );
+    }
+
+    function prepareBigWaveRender(fullSource, suppliedMetrics) {
+      const api = getBigWaveApi();
+      if (!api || !fullSource || typeof fullSource !== 'object') {
+        resetBigWaveViewport('module-unavailable');
+        return null;
+      }
+      const metrics = suppliedMetrics || api.measureSource(fullSource);
+      const totalColumns = Math.max(0, Number(metrics && metrics.maxWaveLength) || 0);
+      if (totalColumns < BIG_WAVE_COLUMN_THRESHOLD) {
+        resetBigWaveViewport('below-threshold');
+        return null;
+      }
+
+      const documentKey = getBigWaveDocumentKey();
+      const documentChanged = bigWaveViewportState.documentKey !== documentKey;
+      const size = calculateBigWaveWindowSize(fullSource, totalColumns);
+      if (documentChanged) {
+        bigWaveViewportState.start = 0;
+        bigWaveViewportState.pendingStart = -1;
+      }
+      const maxStart = Math.max(0, totalColumns - size);
+      bigWaveViewportState.start = Math.max(0, Math.min(maxStart, bigWaveViewportState.start));
+      bigWaveViewportState.enabled = true;
+      bigWaveViewportState.documentKey = documentKey;
+      bigWaveViewportState.fullSource = fullSource;
+      bigWaveViewportState.metrics = metrics;
+      bigWaveViewportState.size = size;
+      bigWaveViewportState.window = api.createRenderWindow(fullSource, {
+        start: bigWaveViewportState.start,
+        size,
+        metrics
+      });
+      bigWaveViewportState.start = bigWaveViewportState.window.start;
+      vwdDebugLog('big-wave', {
+        phase: 'window-prepared',
+        documentKey,
+        totalColumns,
+        start: bigWaveViewportState.window.start,
+        end: bigWaveViewportState.window.end,
+        renderedColumns: bigWaveViewportState.window.size,
+        signalCount: metrics.signalCount,
+        crossingEdges: bigWaveViewportState.window.crossingEdges.length
+      });
+      return bigWaveViewportState.window;
+    }
+
+    function updateBigWaveNavigatorReadout(startOverride) {
+      const navigatorEl = bigWaveViewportState.navigator;
+      const windowMeta = bigWaveViewportState.window;
+      if (!navigatorEl || !windowMeta) return;
+      const start = Math.max(0, Math.min(windowMeta.maxStart, Number.isFinite(startOverride)
+        ? startOverride
+        : bigWaveViewportState.start));
+      const end = Math.min(windowMeta.totalColumns, start + bigWaveViewportState.size);
+      const readout = navigatorEl.querySelector('.vwd-big-wave-range');
+      if (readout) {
+        readout.textContent = '第 ' + (start + 1) + '-' + end + ' / ' + windowMeta.totalColumns + ' 列';
+      }
+      const previous = navigatorEl.querySelector('[data-big-wave-action="previous"]');
+      const next = navigatorEl.querySelector('[data-big-wave-action="next"]');
+      if (previous) previous.disabled = start <= 0;
+      if (next) next.disabled = start >= windowMeta.maxStart;
+    }
+
+    function scheduleBigWaveViewportStart(nextStart, reason, immediate) {
+      if (!bigWaveViewportState.enabled || !bigWaveViewportState.window) return false;
+      const maxStart = bigWaveViewportState.window.maxStart;
+      const start = Math.max(0, Math.min(maxStart, Math.round(Number(nextStart) || 0)));
+      const currentTarget = bigWaveViewportState.pendingStart >= 0
+        ? bigWaveViewportState.pendingStart
+        : bigWaveViewportState.start;
+      if (start === currentTarget) return false;
+
+      bigWaveViewportState.pendingStart = start;
+      updateBigWaveNavigatorReadout(start);
+      clearBigWaveRenderTimer();
+      const applyStart = function () {
+        bigWaveViewportState.renderTimer = null;
+        if (!bigWaveViewportState.enabled || bigWaveViewportState.pendingStart < 0) return;
+        const requestedStart = bigWaveViewportState.pendingStart;
+        bigWaveViewportState.pendingStart = -1;
+        if (requestedStart === bigWaveViewportState.start) return;
+        bigWaveViewportState.start = requestedStart;
+        lastRenderedWaveText = null;
+        const text = editor.value;
+        const analysis = bigWaveViewportState.fullSource ? {
+          text,
+          ok: true,
+          source: bigWaveViewportState.fullSource,
+          metrics: bigWaveViewportState.metrics
+        } : null;
+        vwdDebugLog('big-wave', {
+          phase: 'window-change',
+          reason: reason || '',
+          start: requestedStart,
+          size: bigWaveViewportState.size
+        });
+        scheduleRenderWaveform(text, null, analysis);
+      };
+      if (immediate) applyStart();
+      else bigWaveViewportState.renderTimer = setTimeout(applyStart, BIG_WAVE_SCROLL_DEBOUNCE_MS);
+      return true;
+    }
+
+    function ensureBigWaveColumnVisible(columnIndex, reason) {
+      if (!bigWaveViewportState.enabled || !bigWaveViewportState.window || columnIndex < 0) return false;
+      const start = bigWaveViewportState.start;
+      const end = start + bigWaveViewportState.size;
+      const margin = Math.max(2, Math.min(12, Math.floor(bigWaveViewportState.size * 0.12)));
+      if (columnIndex >= start + margin && columnIndex < end - margin) return false;
+      const nextStart = columnIndex < start + margin
+        ? columnIndex - margin
+        : columnIndex - bigWaveViewportState.size + margin + 1;
+      return scheduleBigWaveViewportStart(nextStart, reason || 'ensure-column-visible', true);
+    }
+
+    function renderBigWaveNavigator() {
+      removeBigWaveNavigator();
+      if (!bigWaveViewportState.enabled || !bigWaveViewportState.window) return;
+      const windowMeta = bigWaveViewportState.window;
+      const host = getBigWaveHost();
+      if (host && host.classList.contains('wave-document-canvas')) {
+        host.classList.add('vwd-big-wave-active');
+      }
+      waveContainer.classList.add('vwd-big-wave-window');
+
+      const navigatorEl = document.createElement('div');
+      navigatorEl.className = 'vwd-big-wave-navigator';
+      navigatorEl.setAttribute('role', 'group');
+      navigatorEl.setAttribute('aria-label', '大波形列窗口');
+
+      const controls = document.createElement('div');
+      controls.className = 'vwd-big-wave-controls';
+      const previous = document.createElement('button');
+      previous.type = 'button';
+      previous.dataset.bigWaveAction = 'previous';
+      previous.textContent = '‹';
+      previous.title = '向前移动一个窗口';
+      previous.setAttribute('aria-label', '向前移动一个窗口');
+      const range = document.createElement('span');
+      range.className = 'vwd-big-wave-range';
+      const crossing = document.createElement('span');
+      crossing.className = 'vwd-big-wave-crossing';
+      crossing.textContent = windowMeta.crossingEdges.length
+        ? ('跨窗口连接 ' + windowMeta.crossingEdges.length)
+        : '';
+      const next = document.createElement('button');
+      next.type = 'button';
+      next.dataset.bigWaveAction = 'next';
+      next.textContent = '›';
+      next.title = '向后移动一个窗口';
+      next.setAttribute('aria-label', '向后移动一个窗口');
+      controls.append(previous, range, crossing, next);
+
+      const scroller = document.createElement('div');
+      scroller.className = 'vwd-big-wave-scroll';
+      scroller.setAttribute('role', 'scrollbar');
+      scroller.setAttribute('aria-orientation', 'horizontal');
+      scroller.setAttribute('aria-valuemin', '0');
+      scroller.setAttribute('aria-valuemax', String(windowMeta.maxStart));
+      scroller.setAttribute('aria-valuenow', String(windowMeta.start));
+      const spacer = document.createElement('div');
+      spacer.className = 'vwd-big-wave-scroll-spacer';
+      const virtualWidth = Math.min(8000000, Math.max(640, windowMeta.totalColumns * 4));
+      spacer.style.width = virtualWidth + 'px';
+      scroller.appendChild(spacer);
+      navigatorEl.append(controls, scroller);
+      waveContainer.appendChild(navigatorEl);
+      bigWaveViewportState.navigator = navigatorEl;
+      updateBigWaveNavigatorReadout();
+
+      previous.addEventListener('click', function () {
+        scheduleBigWaveViewportStart(
+          bigWaveViewportState.start - bigWaveViewportState.size,
+          'previous-window',
+          true
+        );
+      });
+      next.addEventListener('click', function () {
+        scheduleBigWaveViewportStart(
+          bigWaveViewportState.start + bigWaveViewportState.size,
+          'next-window',
+          true
+        );
+      });
+      scroller.addEventListener('scroll', function () {
+        if (bigWaveViewportState.syncingNavigator || !bigWaveViewportState.window) return;
+        const maxScroll = Math.max(1, scroller.scrollWidth - scroller.clientWidth);
+        const ratio = Math.max(0, Math.min(1, scroller.scrollLeft / maxScroll));
+        const nextStart = Math.round(ratio * bigWaveViewportState.window.maxStart);
+        scroller.setAttribute('aria-valuenow', String(nextStart));
+        scheduleBigWaveViewportStart(nextStart, 'virtual-scroll', false);
+      }, { passive: true });
+
+      requestAnimationFrame(function () {
+        if (!scroller.isConnected || !bigWaveViewportState.window) return;
+        const maxScroll = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
+        const ratio = bigWaveViewportState.window.maxStart > 0
+          ? bigWaveViewportState.start / bigWaveViewportState.window.maxStart
+          : 0;
+        bigWaveViewportState.syncingNavigator = true;
+        scroller.scrollLeft = maxScroll * ratio;
+        scroller.setAttribute('aria-valuenow', String(bigWaveViewportState.start));
+        requestAnimationFrame(function () {
+          bigWaveViewportState.syncingNavigator = false;
+        });
+      });
+
+      if (typeof ResizeObserver === 'function' && host) {
+        let previousWidth = host.clientWidth;
+        bigWaveViewportState.resizeObserver = new ResizeObserver(function () {
+          if (!bigWaveViewportState.enabled || !bigWaveViewportState.fullSource) return;
+          const currentWidth = host.clientWidth;
+          if (Math.abs(currentWidth - previousWidth) < 24) return;
+          previousWidth = currentWidth;
+          const nextSize = calculateBigWaveWindowSize(
+            bigWaveViewportState.fullSource,
+            windowMeta.totalColumns
+          );
+          if (nextSize === bigWaveViewportState.size) return;
+          bigWaveViewportState.size = nextSize;
+          bigWaveViewportState.start = Math.min(
+            bigWaveViewportState.start,
+            Math.max(0, windowMeta.totalColumns - nextSize)
+          );
+          lastRenderedWaveText = null;
+          scheduleRenderWaveform(editor.value, null, {
+            text: editor.value,
+            ok: true,
+            source: bigWaveViewportState.fullSource,
+            metrics: bigWaveViewportState.metrics
+          });
+        });
+        bigWaveViewportState.resizeObserver.observe(host);
+      }
+    }
+
+    function getBigWaveRowRenderContext(rowIndex, fullWave) {
+      if (!bigWaveViewportState.enabled || !bigWaveViewportState.window) {
+        return {
+          start: 0,
+          end: String(fullWave || '').length,
+          wave: String(fullWave || ''),
+          dataIndices: null
+        };
+      }
+      const row = bigWaveViewportState.window.rows[rowIndex] || null;
+      return {
+        start: bigWaveViewportState.window.start,
+        end: bigWaveViewportState.window.end,
+        wave: row ? row.wave : String(fullWave || '').slice(
+          bigWaveViewportState.window.start,
+          bigWaveViewportState.window.end
+        ),
+        dataIndices: row ? row.dataIndices : null
+      };
+    }
+
+    function getBigWaveVisibleRange(startColumn, endColumn) {
+      const first = Math.min(startColumn, endColumn);
+      const last = Math.max(startColumn, endColumn);
+      if (!bigWaveViewportState.enabled || !bigWaveViewportState.window) {
+        return { start: first, end: last };
+      }
+      const windowStart = bigWaveViewportState.window.start;
+      const windowEnd = bigWaveViewportState.window.end - 1;
+      if (last < windowStart || first > windowEnd) return null;
+      return {
+        start: Math.max(first, windowStart) - windowStart,
+        end: Math.min(last, windowEnd) - windowStart
+      };
+    }
+
+    function getBigWaveVisibleBoundaryColumn(columnIndex) {
+      if (!bigWaveViewportState.enabled || !bigWaveViewportState.window) return columnIndex;
+      const windowStart = bigWaveViewportState.window.start;
+      const windowEnd = bigWaveViewportState.window.end;
+      if (columnIndex < windowStart || columnIndex > windowEnd) return null;
+      return columnIndex - windowStart;
     }
 
     function updateHscaleInSource(text, newHscale) {
@@ -5552,10 +5942,15 @@ ${lines.join('\n')}`;
     function updateConnectionPointHighlights(lanes, sourceMap) {
       const unitWidth = getWaveUnitWidth(editor.value);
       const maxBoundaryIndex = getConnectionPickBoundaryIndex(sourceMap);
+      const renderedBoundaryIndex = bigWaveViewportState.enabled && bigWaveViewportState.window
+        ? bigWaveViewportState.window.size
+        : maxBoundaryIndex;
       lanes.forEach((lane, idx) => {
         const drawGroup = lane.querySelector('[id^="wavelane_draw_"]');
         if (!sourceMap[idx]) return;
-        const wave = sourceMap[idx].signal.wave || '';
+        const fullWave = sourceMap[idx].signal.wave || '';
+        const renderContext = getBigWaveRowRenderContext(idx, fullWave);
+        const wave = renderContext.wave;
 
         const isFrom = connectionFromPoint && connectionFromPoint.rowIndex === idx;
         const isTo = connectionToPoint && connectionToPoint.rowIndex === idx;
@@ -5567,18 +5962,47 @@ ${lines.join('\n')}`;
           .forEach(el => el.remove());
 
         if (isFrom) {
-          if (drawGroup) appendColumnHighlight(drawGroup, wave, connectionFromPoint.colIndex, unitWidth, 'wave-col-highlight-from', maxBoundaryIndex);
-          else appendVirtualLaneHighlight(lane, connectionFromPoint.colIndex, unitWidth, 'wave-col-highlight-from');
+          const localColumn = getBigWaveVisibleBoundaryColumn(connectionFromPoint.colIndex);
+          if (localColumn !== null) {
+            if (drawGroup) {
+              appendColumnHighlight(
+                drawGroup,
+                wave,
+                localColumn,
+                unitWidth,
+                'wave-col-highlight-from',
+                renderedBoundaryIndex
+              );
+            } else {
+              appendVirtualLaneHighlight(lane, localColumn, unitWidth, 'wave-col-highlight-from');
+            }
+          }
         }
         if (isTo) {
-          if (drawGroup) appendColumnHighlight(drawGroup, wave, connectionToPoint.colIndex, unitWidth, 'wave-col-highlight-to', maxBoundaryIndex);
-          else appendVirtualLaneHighlight(lane, connectionToPoint.colIndex, unitWidth, 'wave-col-highlight-to');
+          const localColumn = getBigWaveVisibleBoundaryColumn(connectionToPoint.colIndex);
+          if (localColumn !== null) {
+            if (drawGroup) {
+              appendColumnHighlight(
+                drawGroup,
+                wave,
+                localColumn,
+                unitWidth,
+                'wave-col-highlight-to',
+                renderedBoundaryIndex
+              );
+            } else {
+              appendVirtualLaneHighlight(lane, localColumn, unitWidth, 'wave-col-highlight-to');
+            }
+          }
         }
         if (isSelected && selectedRange && !isFrom && !isTo) {
-          if (drawGroup) {
-            appendColumnRangeHighlight(drawGroup, wave, selectedRange.start, selectedRange.end, unitWidth);
-          } else {
-            appendVirtualLaneRangeHighlight(lane, selectedRange.start, selectedRange.end, unitWidth);
+          const localRange = getBigWaveVisibleRange(selectedRange.start, selectedRange.end);
+          if (localRange) {
+            if (drawGroup) {
+              appendColumnRangeHighlight(drawGroup, wave, localRange.start, localRange.end, unitWidth);
+            } else {
+              appendVirtualLaneRangeHighlight(lane, localRange.start, localRange.end, unitWidth);
+            }
           }
         }
       });
@@ -7512,11 +7936,23 @@ ${lines.join('\n')}`;
       if (!coordinateGroup.getCTM) return null;
 
       const signal = sourceMap && sourceMap[point.rowIndex] && sourceMap[point.rowIndex].signal;
-      const wave = signal ? (signal.wave || '') : '';
+      const fullWave = signal ? (signal.wave || '') : '';
+      const renderContext = getBigWaveRowRenderContext(point.rowIndex, fullWave);
+      const localColumn = bigWaveViewportState.enabled && bigWaveViewportState.window
+        ? Math.max(0, Math.min(bigWaveViewportState.window.size, point.colIndex - renderContext.start))
+        : point.colIndex;
       const unitWidth = getWaveUnitWidth(editor.value);
       const x = drawGroup
-        ? getBoundaryXForColumn(drawGroup, wave, point.colIndex, unitWidth, getConnectionPickBoundaryIndex(sourceMap))
-        : point.colIndex * getWaveColumnWidth(unitWidth);
+        ? getBoundaryXForColumn(
+          drawGroup,
+          renderContext.wave,
+          localColumn,
+          unitWidth,
+          bigWaveViewportState.enabled && bigWaveViewportState.window
+            ? bigWaveViewportState.window.size
+            : getConnectionPickBoundaryIndex(sourceMap)
+        )
+        : localColumn * getWaveColumnWidth(unitWidth);
 
       let y = 10;
       try {
@@ -8741,9 +9177,33 @@ ${lines.join('\n')}`;
       };
     }
 
-    function attachDataLabelTextEditHandler(drawGroup, entry, svg) {
+    function attachDataLabelTextEditHandler(drawGroup, entry, svg, renderContext) {
       if (drawGroup.dataset.vwdDataTextEditBound === '1') return;
       drawGroup.dataset.vwdDataTextEditBound = '1';
+      const fullWave = entry.signal.wave || '';
+      const context = renderContext || {
+        start: 0,
+        wave: fullWave,
+        dataIndices: null
+      };
+      const renderedWave = context.wave || '';
+
+      function getRenderedDataSlot(fullDataIndex) {
+        const renderedSlots = getWaveDataSlots(renderedWave);
+        if (Array.isArray(context.dataIndices)) {
+          const localDataIndex = context.dataIndices.indexOf(fullDataIndex);
+          if (localDataIndex >= 0 && renderedSlots[localDataIndex]) {
+            return renderedSlots[localDataIndex];
+          }
+        }
+        const fullSlot = getWaveDataSlots(fullWave)[fullDataIndex];
+        if (!fullSlot) return null;
+        return {
+          dataIdx: fullDataIndex,
+          col: Math.max(0, fullSlot.col - context.start)
+        };
+      }
+
       drawGroup.addEventListener('click', (e) => {
         if (!isTextEditModeActive()) return;
         const targetText = e.target && typeof e.target.closest === 'function'
@@ -8753,10 +9213,9 @@ ${lines.join('\n')}`;
         if (Number.isInteger(explicitDataIdx) && explicitDataIdx >= 0) {
           e.stopPropagation();
           e.preventDefault();
-          const wave = entry.signal.wave || '';
-          const slot = getWaveDataSlots(wave)[explicitDataIdx];
+          const slot = getRenderedDataSlot(explicitDataIdx);
           const anchor = slot
-            ? createWaveDataSlotEditAnchor(drawGroup, wave, slot, svg, targetText, e.clientX)
+            ? createWaveDataSlotEditAnchor(drawGroup, renderedWave, slot, svg, targetText, e.clientX)
             : targetText;
           vwdDebugLog('data-label', {
             phase: 'open-editor-by-index',
@@ -8767,16 +9226,22 @@ ${lines.join('\n')}`;
           startInlineEdit(targetText, entry, 'data', explicitDataIdx, anchor);
           return;
         }
-        const wave = entry.signal.wave || '';
-        const col = columnIndexFromClick(drawGroup, wave, svg, e.clientX, getWaveUnitWidth(editor.value));
-        const slot = getWaveDataSlotAtColumn(wave, col);
-        const data = Array.isArray(entry.signal.data) ? entry.signal.data : [];
+        const localColumn = columnIndexFromClick(
+          drawGroup,
+          renderedWave,
+          svg,
+          e.clientX,
+          getWaveUnitWidth(editor.value)
+        );
+        const col = localColumn + context.start;
+        const slot = getWaveDataSlotAtColumn(fullWave, col);
+        const data = normalizeWaveDataValues(entry.signal.data);
         const isEmpty = !!slot && (data[slot.dataIdx] === undefined || data[slot.dataIdx] === '');
         vwdDebugLog('data-label', {
           phase: 'draw-text-edit-click',
           signal: entry.signal.name || '',
           col,
-          waveChar: wave[col] || '',
+          waveChar: fullWave[col] || '',
           slotStart: slot ? slot.col : -1,
           dataIdx: slot ? slot.dataIdx : -1,
           isEmpty,
@@ -8788,7 +9253,18 @@ ${lines.join('\n')}`;
         const dataText = drawGroup.querySelector(
           'text.wave-data-text[data-vwd-data-index="' + slot.dataIdx + '"]'
         );
-        const anchor = createWaveDataSlotEditAnchor(drawGroup, wave, slot, svg, dataText, e.clientX);
+        const renderedSlot = getRenderedDataSlot(slot.dataIdx) || {
+          dataIdx: slot.dataIdx,
+          col: Math.max(0, slot.col - context.start)
+        };
+        const anchor = createWaveDataSlotEditAnchor(
+          drawGroup,
+          renderedWave,
+          renderedSlot,
+          svg,
+          dataText,
+          e.clientX
+        );
         vwdDebugLog('data-label', {
           phase: 'open-editor',
           dataIdx: slot.dataIdx,
@@ -9033,6 +9509,25 @@ ${lines.join('\n')}`;
       const target = e.target;
       if (!target || !(target instanceof Element) || !wavePanel.contains(target)) return false;
       if (target.closest && target.closest('.wave-text-edit-overlay, .wave-document-description-editor')) return false;
+      if (bigWaveViewportState.enabled
+          && bigWaveViewportState.window
+          && target.closest('.wave-container') === waveContainer) {
+        const rawDelta = Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
+        if (!rawDelta) return false;
+        const deltaScale = e.deltaMode === 1
+          ? 3
+          : (e.deltaMode === 2 ? Math.max(8, Math.floor(bigWaveViewportState.size * 0.8)) : 0.12);
+        const columnDelta = Math.sign(rawDelta) * Math.max(1, Math.round(Math.abs(rawDelta) * deltaScale));
+        e.preventDefault();
+        scheduleBigWaveViewportStart(
+          (bigWaveViewportState.pendingStart >= 0
+            ? bigWaveViewportState.pendingStart
+            : bigWaveViewportState.start) + columnDelta,
+          'shift-wheel',
+          false
+        );
+        return true;
+      }
 
       const horizontalScroller = target.closest('.wave-document-canvas') || wavePanel;
       const maxLeft = Math.max(0, horizontalScroller.scrollWidth - horizontalScroller.clientWidth);
@@ -9907,8 +10402,9 @@ ${lines.join('\n')}`;
       if (field === 'name') {
         oldValue = entry.signal.name || '';
       } else if (field === 'data') {
-        oldValue = (entry.signal.data && entry.signal.data[dataIdx] !== undefined
-          ? entry.signal.data[dataIdx]
+        const dataValues = normalizeWaveDataValues(entry.signal.data);
+        oldValue = (dataValues[dataIdx] !== undefined
+          ? dataValues[dataIdx]
           : textEl.textContent);
       } else if (field === 'description') {
         oldValue = getSignalDescribeOldValue(entry.signal);
@@ -10366,6 +10862,12 @@ ${lines.join('\n')}`;
       const unitWidth = getWaveUnitWidth(jsonText, parsedSource);
       const maxBoundaryIndex = getConnectionPickBoundaryIndex(sourceMap);
       const maxWaveColumnCount = Math.max(1, getMaxWaveBoundaryIndex(sourceMap));
+      const renderedBoundaryIndex = bigWaveViewportState.enabled && bigWaveViewportState.window
+        ? bigWaveViewportState.window.size
+        : maxBoundaryIndex;
+      const renderedWaveColumnCount = bigWaveViewportState.enabled && bigWaveViewportState.window
+        ? Math.max(1, bigWaveViewportState.window.size)
+        : maxWaveColumnCount;
       const visibleSet = getNavVisibleRowSet();
       const hasFilter = isNavFilteringActive();
 
@@ -10378,24 +10880,50 @@ ${lines.join('\n')}`;
         if (!visible) return;
 
         lane.classList.add('wave-lane-interactive');
-        addLaneHoverRect(lane, maxBoundaryIndex, unitWidth);
+        addLaneHoverRect(lane, renderedBoundaryIndex, unitWidth);
+        const fullWave = entry.signal.wave || '';
+        const renderContext = getBigWaveRowRenderContext(idx, fullWave);
+        const renderedWave = renderContext.wave;
 
         function resolveLaneColumnIndex(clientX, inPickFlow) {
           const drawGroup = lane.querySelector('[id^="wavelane_draw_"]');
-          const wave = entry.signal.wave || '';
-          const pickMaxBoundaryIndex = inPickFlow ? maxBoundaryIndex : 0;
+          const localPickMaxBoundaryIndex = inPickFlow ? renderedBoundaryIndex : 0;
+          let localIndex;
           if (drawGroup) {
-            return inPickFlow
-              ? boundaryIndexFromClick(drawGroup, wave, svg, clientX, unitWidth, pickMaxBoundaryIndex)
-              : paintColumnIndexFromClick(drawGroup, wave, svg, clientX, unitWidth, maxWaveColumnCount);
+            localIndex = inPickFlow
+              ? boundaryIndexFromClick(
+                drawGroup,
+                renderedWave,
+                svg,
+                clientX,
+                unitWidth,
+                localPickMaxBoundaryIndex
+              )
+              : paintColumnIndexFromClick(
+                drawGroup,
+                renderedWave,
+                svg,
+                clientX,
+                unitWidth,
+                renderedWaveColumnCount
+              );
+          } else {
+            localIndex = virtualLaneIndexFromClick(
+              lane,
+              svg,
+              clientX,
+              unitWidth,
+              inPickFlow ? localPickMaxBoundaryIndex : renderedWaveColumnCount,
+              inPickFlow
+            );
           }
-          return virtualLaneIndexFromClick(
-            lane,
-            svg,
-            clientX,
-            unitWidth,
-            inPickFlow ? pickMaxBoundaryIndex : maxWaveColumnCount,
-            inPickFlow
+          const absoluteIndex = localIndex + renderContext.start;
+          const absoluteMaximum = inPickFlow
+            ? maxBoundaryIndex
+            : Math.max(0, maxWaveColumnCount - 1);
+          return Math.max(
+            0,
+            Math.min(absoluteMaximum, absoluteIndex)
           );
         }
 
@@ -10421,9 +10949,8 @@ ${lines.join('\n')}`;
           }
 
           const drawGroup = lane.querySelector('[id^="wavelane_draw_"]');
-          const wave = entry.signal.wave || '';
+          const wave = fullWave;
           const inPickFlow = isConnectionPickFlow();
-          const pickMaxBoundaryIndex = inPickFlow ? maxBoundaryIndex : 0;
           const colIndex = resolveLaneColumnIndex(e.clientX, inPickFlow);
           setSelectedSignal(idx, colIndex);
           lanes.forEach((l, i) => l.classList.toggle('wave-lane-selected', i === idx));
@@ -10444,8 +10971,14 @@ ${lines.join('\n')}`;
             if (coordinateGroup && svg && coordinateGroup.getScreenCTM && svg.getScreenCTM) {
               try {
                 const boundaryX = drawGroup
-                  ? getBoundaryXForColumn(drawGroup, wave, colIndex, unitWidth, pickMaxBoundaryIndex)
-                  : colIndex * getWaveColumnWidth(unitWidth);
+                  ? getBoundaryXForColumn(
+                    drawGroup,
+                    renderedWave,
+                    colIndex - renderContext.start,
+                    unitWidth,
+                    renderedBoundaryIndex
+                  )
+                  : (colIndex - renderContext.start) * getWaveColumnWidth(unitWidth);
                 let boundaryY = 0;
                 try {
                   const coordinateBox = coordinateGroup.getBBox();
@@ -10648,7 +11181,11 @@ ${lines.join('\n')}`;
           dataTexts.forEach((textEl, dataIdx) => {
             if (textEl.dataset.vwdDataBound === '1') return;
             textEl.dataset.vwdDataBound = '1';
-            textEl.dataset.vwdDataIndex = String(dataIdx);
+            const fullDataIndex = renderContext.dataIndices
+              && Number.isInteger(renderContext.dataIndices[dataIdx])
+              ? renderContext.dataIndices[dataIdx]
+              : dataIdx;
+            textEl.dataset.vwdDataIndex = String(fullDataIndex);
             textEl.classList.add('wave-data-text');
             textEl.addEventListener('click', (e) => {
               if (isTextEditModeActive()) return;
@@ -10657,7 +11194,7 @@ ${lines.join('\n')}`;
               handleLanePointSelect(e);
             });
           });
-          attachDataLabelTextEditHandler(drawGroup, entry, svg);
+          attachDataLabelTextEditHandler(drawGroup, entry, svg, renderContext);
         }
       });
 
@@ -12618,6 +13155,7 @@ ${lines.join('\n')}`;
         syncHscaleInputFromJson(jsonText, lastRenderedWaveSource);
         applyNavVisibilityToWave();
         renderConnectionEdgeList(lastRenderedWaveSource);
+        if (bigWaveViewportState.enabled) updateBigWaveNavigatorReadout();
         vwdDebugLog('performance', { phase: 'active-render-cache-hit', textLength: jsonText.length });
         return true;
       }
@@ -12660,11 +13198,21 @@ ${lines.join('\n')}`;
           setJsonErrorLine(-1);
           if (!navTreeState) rebuildNavTreeStateFromJson(jsonText);
         } catch (e) {
+          resetBigWaveViewport('parse-error');
           setJsonErrorLine(getJsonErrorLine(jsonText, e));
           showWaveError(waveContainer, '波形渲染错误: ' + e.message);
           setStatus(false, '请先在波形区点击选中一行');
           return false;
         }
+
+        const fullSource = source;
+        const bigWaveWindow = prepareBigWaveRender(
+          fullSource,
+          preparedAnalysis && preparedAnalysis.text === jsonText
+            ? preparedAnalysis.metrics
+            : null
+        );
+        const renderSource = bigWaveWindow ? bigWaveWindow.source : fullSource;
 
         const displayDiv = document.createElement('div');
         displayDiv.id = 'wave-display-0';
@@ -12677,20 +13225,21 @@ ${lines.join('\n')}`;
           if (!displayDiv.isConnected) {
             throw new Error('波形渲染容器未挂载到页面');
           }
-          WaveDrom.RenderWaveForm(0, source, 'wave-display-', false);
+          WaveDrom.RenderWaveForm(0, renderSource, 'wave-display-', false);
           if (!displayDiv.querySelector('svg')) {
             showWaveError(waveContainer, '波形渲染失败: 未生成 SVG');
             setStatus(false, '渲染错误');
             return false;
           }
-          syncHscaleInputFromJson(jsonText, source);
-          attachWaveInteractivity(jsonText, source);
+          syncHscaleInputFromJson(jsonText, fullSource);
+          attachWaveInteractivity(jsonText, fullSource);
           applyNavVisibilityToWave();
-          renderConnectionEdgeList(source);
+          renderConnectionEdgeList(fullSource);
           fitWaveSvgToContent();
           setupFrozenWaveLabels(waveContainer);
+          renderBigWaveNavigator();
           lastRenderedWaveText = jsonText;
-          lastRenderedWaveSource = source;
+          lastRenderedWaveSource = fullSource;
           vwdMark('renderWaveform:done');
           if (!isInsertingEdge && !waveformRenderingBusy) {
             setStatus(true, '波形已更新');
@@ -13274,6 +13823,18 @@ ${lines.join('\n')}`;
         .replace(/>/g, '&gt;');
     }
 
+    function downloadBlobFile(blob, fileName) {
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = String(fileName || 'VisualWaveDrom.png');
+      link.style.display = 'none';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
     async function copyWaveDocumentLink(documentName) {
       const link = getWaveDocumentDeepLink(documentName);
       if (!link) {
@@ -13286,7 +13847,7 @@ ${lines.join('\n')}`;
         vwdDebugLog('wave-screenshot', { phase: 'link-copied', documentName, link });
         return true;
       } catch (error) {
-        setStatus(false, '复制链接失败，请检查 Chrome 或 Edge 的剪贴板权限');
+        setStatus(false, '复制链接失败，请检查浏览器剪贴板权限');
         vwdDebugLog('wave-screenshot', {
           phase: 'link-copy-error',
           documentName,
@@ -13312,6 +13873,158 @@ ${lines.join('\n')}`;
       vwdDebugLog('wave-screenshot', { phase: 'chooser-open', documentName });
     }
 
+    function closeWaveScreenshotRangeModal(result) {
+      if (waveScreenshotRangeModal) waveScreenshotRangeModal.hidden = true;
+      const request = pendingWaveScreenshotRangeRequest;
+      pendingWaveScreenshotRangeRequest = null;
+      if (request) request.resolve(result || null);
+    }
+
+    function confirmWaveScreenshotRange() {
+      const request = pendingWaveScreenshotRangeRequest;
+      if (!request) return;
+      const start = Math.floor(Number(waveScreenshotStartColumn && waveScreenshotStartColumn.value));
+      const end = Math.floor(Number(waveScreenshotEndColumn && waveScreenshotEndColumn.value));
+      if (!Number.isInteger(start) || !Number.isInteger(end)
+          || start < 1 || end < start || end > request.totalColumns) {
+        if (waveScreenshotRangeHint) {
+          waveScreenshotRangeHint.textContent = '请输入 1 至 ' + request.totalColumns + ' 之间的有效列范围';
+        }
+        return;
+      }
+      closeWaveScreenshotRangeModal({
+        start: start - 1,
+        end,
+        size: end - start + 1
+      });
+    }
+
+    function getCurrentScreenWaveColumnRange(documentName, totalColumns) {
+      if (documentName === editingWaveDocumentName
+          && bigWaveViewportState.enabled
+          && bigWaveViewportState.window) {
+        return {
+          start: bigWaveViewportState.window.start,
+          end: bigWaveViewportState.window.end
+        };
+      }
+      const entry = waveLibraryCardCache.get(documentName);
+      const svg = entry && entry.previewHost ? entry.previewHost.querySelector('svg') : null;
+      const drawGroup = svg && svg.querySelector('[id^="wavelane_draw_"]');
+      const host = entry && entry.canvas;
+      if (!svg || !drawGroup || !host || typeof svg.createSVGPoint !== 'function') return null;
+      const matrix = drawGroup.getScreenCTM && drawGroup.getScreenCTM();
+      if (!matrix) return null;
+      try {
+        const hostRect = host.getBoundingClientRect();
+        const leftPoint = svg.createSVGPoint();
+        leftPoint.x = hostRect.left;
+        leftPoint.y = 0;
+        const rightPoint = svg.createSVGPoint();
+        rightPoint.x = hostRect.right;
+        rightPoint.y = 0;
+        const inverse = matrix.inverse();
+        const localLeft = leftPoint.matrixTransform(inverse).x;
+        const localRight = rightPoint.matrixTransform(inverse).x;
+        const tag = getSavedTagByName(documentName);
+        const unitWidth = getWaveUnitWidth(tag ? tag.content : editor.value);
+        const columnWidth = getWaveColumnWidth(unitWidth);
+        const start = Math.max(0, Math.min(
+          totalColumns - 1,
+          Math.floor(Math.max(0, localLeft) / columnWidth)
+        ));
+        const end = Math.max(start + 1, Math.min(
+          totalColumns,
+          Math.ceil(Math.max(localLeft, localRight, 0) / columnWidth)
+        ));
+        return { start, end };
+      } catch (_e) {
+        return null;
+      }
+    }
+
+    function requestWaveScreenshotRange(totalColumns, documentName) {
+      if (totalColumns < 200 || !waveScreenshotRangeModal) {
+        return Promise.resolve({ start: 0, end: totalColumns, size: totalColumns });
+      }
+      if (pendingWaveScreenshotRangeRequest) {
+        closeWaveScreenshotRangeModal(null);
+      }
+      let initialStart = 0;
+      let initialEnd = Math.min(totalColumns, 200);
+      const screenRange = getCurrentScreenWaveColumnRange(documentName, totalColumns);
+      const selectedRange = documentName === editingWaveDocumentName
+        ? getSelectedWaveRange()
+        : null;
+      if (screenRange) {
+        initialStart = screenRange.start;
+        initialEnd = screenRange.end;
+      } else if (selectedRange && selectedSignalIndex >= 0) {
+        initialStart = Math.max(0, Math.min(totalColumns - 1, selectedRange.start));
+        initialEnd = Math.max(initialStart + 1, Math.min(totalColumns, selectedRange.end + 1));
+      }
+      waveScreenshotStartColumn.min = '1';
+      waveScreenshotStartColumn.max = String(totalColumns);
+      waveScreenshotStartColumn.value = String(initialStart + 1);
+      waveScreenshotEndColumn.min = '1';
+      waveScreenshotEndColumn.max = String(totalColumns);
+      waveScreenshotEndColumn.value = String(initialEnd);
+      if (waveScreenshotRangeHint) {
+        waveScreenshotRangeHint.textContent = '当前波形共 ' + totalColumns + ' 列';
+      }
+      return new Promise(function (resolve) {
+        pendingWaveScreenshotRangeRequest = { resolve, totalColumns };
+        waveScreenshotRangeModal.hidden = false;
+        requestAnimationFrame(function () {
+          waveScreenshotStartColumn.focus();
+          waveScreenshotStartColumn.select();
+        });
+        vwdDebugLog('wave-screenshot', {
+          phase: 'range-open',
+          totalColumns,
+          initialStart,
+          initialEnd
+        });
+      });
+    }
+
+    function renderWaveScreenshotRange(source, metrics, range) {
+      const api = getBigWaveApi();
+      if (!api) throw new Error('大波形截图模块不可用');
+      const renderWindow = api.createRenderWindow(source, {
+        start: range.start,
+        size: range.size,
+        metrics
+      });
+      const host = document.createElement('div');
+      const sequence = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+      const prefix = 'wave-screenshot-range-' + sequence + '-';
+      const display = document.createElement('div');
+      display.id = prefix + '0';
+      host.className = 'wave-screenshot-render-host';
+      host.style.position = 'fixed';
+      host.style.left = '-100000px';
+      host.style.top = '0';
+      host.style.opacity = '0';
+      host.style.pointerEvents = 'none';
+      host.appendChild(display);
+      document.body.appendChild(host);
+      try {
+        WaveDrom.RenderWaveForm(0, renderWindow.source, prefix, false);
+        const svg = display.querySelector('svg');
+        if (!svg) throw new Error('所选列范围未生成 SVG');
+        return {
+          svg,
+          start: renderWindow.start,
+          end: renderWindow.end,
+          cleanup: function () { host.remove(); }
+        };
+      } catch (error) {
+        host.remove();
+        throw error;
+      }
+    }
+
     async function copyWaveDocumentScreenshot(documentName, button, copyMode) {
       const mode = copyMode || 'image';
       if (mode === 'link') return copyWaveDocumentLink(documentName);
@@ -13326,51 +14039,90 @@ ${lines.join('\n')}`;
         tag = await ensureWaveDocumentLoaded(documentName);
         if (!tag) return false;
       }
-
-      if (!window.ClipboardItem
-          || !navigator.clipboard
-          || typeof navigator.clipboard.write !== 'function') {
-        setStatus(false, '当前浏览器不支持图片剪贴板，请使用新版 Chrome 或 Edge 的服务模式');
-        vwdDebugLog('wave-screenshot', {
-          phase: 'unsupported',
-          documentName,
-          hasClipboardItem: typeof window.ClipboardItem === 'function',
-          hasClipboardWrite: !!(navigator.clipboard && navigator.clipboard.write)
-        });
+      const browserCompatibility = getBrowserCompatibilityState();
+      const canWriteImageClipboard = browserCompatibility.family !== 'firefox'
+        && typeof window.ClipboardItem === 'function'
+        && !!navigator.clipboard
+        && typeof navigator.clipboard.write === 'function';
+      let screenshotSource;
+      let screenshotMetrics;
+      try {
+        screenshotSource = getWaveRenderSource(JSON.parse(tag.content));
+        screenshotMetrics = getBigWaveApi()
+          ? getBigWaveApi().measureSource(screenshotSource)
+          : { maxWaveLength: 0 };
+      } catch (error) {
+        setStatus(false, '波形 JSON 无法解析，不能截图');
         return false;
       }
-
-      if (documentName !== editingWaveDocumentName && !entry.previewHost.querySelector('svg')) {
-        renderWaveDocumentPreview(entry, tag, null, { forceSvg: true });
+      const screenshotRange = await requestWaveScreenshotRange(
+        screenshotMetrics.maxWaveLength,
+        documentName
+      );
+      if (!screenshotRange) {
+        vwdDebugLog('wave-screenshot', { phase: 'range-cancel', documentName });
+        return false;
       }
-      const svg = entry.previewHost.querySelector('svg');
-      if (!svg) {
-        setStatus(false, '当前波形图未成功渲染，无法截图');
-        vwdDebugLog('wave-screenshot', {
-          phase: 'missing-svg',
-          documentName,
-          isEditingDocument: documentName === editingWaveDocumentName
-        });
+      const originalTitle = button.title;
+      const deepLink = mode === 'linked-image' ? getWaveDocumentDeepLink(documentName) : '';
+      if (mode === 'linked-image' && !deepLink) {
+        setStatus(false, '带链接截图仅支持服务模式，并且需要已加载波形库');
         return false;
       }
 
       button.dataset.copying = '1';
       button.disabled = true;
       button.classList.add('copying');
-      const originalTitle = button.title;
-      button.title = '正在复制波形图截图';
-      const deepLink = mode === 'linked-image' ? getWaveDocumentDeepLink(documentName) : '';
-      if (mode === 'linked-image' && !deepLink) {
-        delete button.dataset.copying;
-        button.disabled = false;
-        button.classList.remove('copying');
-        button.title = originalTitle;
-        setStatus(false, '带链接截图仅支持服务模式，并且需要已加载波形库');
-        return false;
-      }
-      vwdDebugLog('wave-screenshot', { phase: 'start', documentName, mode });
+      button.title = '正在生成波形图截图';
+      let temporaryScreenshot = null;
+      vwdDebugLog('wave-screenshot', {
+        phase: 'start',
+        documentName,
+        mode,
+        start: screenshotRange.start,
+        end: screenshotRange.end,
+        totalColumns: screenshotMetrics.maxWaveLength
+      });
       try {
+        let svg;
+        if (screenshotMetrics.maxWaveLength >= 200) {
+          temporaryScreenshot = renderWaveScreenshotRange(
+            screenshotSource,
+            screenshotMetrics,
+            screenshotRange
+          );
+          svg = temporaryScreenshot.svg;
+        } else {
+          if (documentName !== editingWaveDocumentName && !entry.previewHost.querySelector('svg')) {
+            renderWaveDocumentPreview(entry, tag, null, { forceSvg: true });
+          }
+          svg = entry.previewHost.querySelector('svg');
+        }
+        if (!svg) throw new Error('当前波形图未成功渲染，无法截图');
         const renderPromise = renderWaveSvgScreenshot(svg);
+        if (!canWriteImageClipboard) {
+          const result = await renderPromise;
+          const titleText = getSavedTagTitle(tag) || 'VisualWaveDrom';
+          const safeTitle = titleText.replace(/[\\/:*?"<>|]+/g, '_').slice(0, 96) || 'VisualWaveDrom';
+          const browserName = browserCompatibility.family === 'firefox'
+            ? '当前 Firefox'
+            : '当前浏览器';
+          downloadBlobFile(result.blob, safeTitle + '.png');
+          if (mode === 'linked-image' && deepLink) await copyTextWithFallback(deepLink);
+          setStatus(true, mode === 'linked-image'
+            ? (browserName + ' 已下载 PNG，并已复制单图链接')
+            : (browserName + ' 不支持图片剪贴板，PNG 已自动下载'));
+          vwdDebugLog('wave-screenshot', {
+            phase: 'download-fallback',
+            documentName,
+            mode,
+            browser: browserCompatibility.family,
+            width: result.width,
+            height: result.height,
+            blobSize: result.blob.size
+          });
+          return true;
+        }
         const blobPromise = renderPromise.then((result) => result.blob);
         const clipboardData = { 'image/png': blobPromise };
         if (mode === 'linked-image') {
@@ -13413,10 +14165,15 @@ ${lines.join('\n')}`;
         return true;
       } catch (error) {
         const message = error && error.message ? error.message : String(error);
-        setStatus(false, '复制波形图截图失败，请检查浏览器剪贴板权限');
+        setStatus(false, canWriteImageClipboard
+          ? '复制波形图截图失败，请检查浏览器剪贴板权限'
+          : '生成波形图 PNG 失败');
         vwdDebugLog('wave-screenshot', { phase: 'error', documentName, message });
         return false;
       } finally {
+        if (temporaryScreenshot && typeof temporaryScreenshot.cleanup === 'function') {
+          temporaryScreenshot.cleanup();
+        }
         delete button.dataset.copying;
         button.disabled = false;
         button.classList.remove('copying');
@@ -14220,9 +14977,16 @@ ${lines.join('\n')}`;
         ? vimVisualCellHead
         : selectedWaveColumnIndex;
       if (cursorColumn < 0) return null;
+      const fullWave = sourceEntry.signal.wave || '';
+      const renderContext = getBigWaveRowRenderContext(selectedSignalIndex, fullWave);
+      const renderedCursorColumn = cursorColumn - renderContext.start;
+      if (renderedCursorColumn < 0
+          || (bigWaveViewportState.enabled && renderedCursorColumn >= bigWaveViewportState.size)) {
+        return null;
+      }
 
       const highlight = lane.querySelector('.wave-col-highlight');
-      if (highlight && selectedRange) {
+      if (highlight && selectedRange && !bigWaveViewportState.enabled) {
         const rect = highlight.getBoundingClientRect();
         const cellCount = Math.max(1, selectedRange.end - selectedRange.start + 1);
         const cellWidth = rect.width / cellCount;
@@ -14243,11 +15007,11 @@ ${lines.join('\n')}`;
 
       const unitWidth = getWaveUnitWidth(editor.value);
       const step = getWaveColumnWidth(unitWidth);
-      let x0 = cursorColumn * step;
-      let x1 = (cursorColumn + 1) * step;
+      let x0 = renderedCursorColumn * step;
+      let x1 = (renderedCursorColumn + 1) * step;
       if (drawGroup) {
-        const columns = buildWaveColumnMap(drawGroup, sourceEntry.signal.wave || '', unitWidth);
-        const column = columns[cursorColumn];
+        const columns = buildWaveColumnMap(drawGroup, renderContext.wave, unitWidth);
+        const column = columns[renderedCursorColumn];
         if (column && column.x1 > column.x0) {
           x0 = column.x0;
           x1 = column.x1;
@@ -14279,6 +15043,10 @@ ${lines.join('\n')}`;
         vimWaveScrollFrame = 0;
         const currentState = vimController && vimController.getState();
         if (!currentState || !currentState.enabled || !vimWaveAreaActive) return;
+        const cursorColumn = vimVisualCellHead >= 0
+          ? vimVisualCellHead
+          : selectedWaveColumnIndex;
+        if (ensureBigWaveColumnVisible(cursorColumn, reason || 'vim-cursor')) return;
 
         const svg = waveContainer.querySelector('svg');
         if (!svg || selectedSignalIndex < 0) return;
@@ -15166,16 +15934,31 @@ ${lines.join('\n')}`;
       const dataText = drawGroup.querySelector(
         'text.wave-data-text[data-vwd-data-index="' + slot.dataIdx + '"]'
       );
+      const renderContext = getBigWaveRowRenderContext(
+        selectedSignalIndex,
+        entry.signal.wave || ''
+      );
+      const renderedSlots = getWaveDataSlots(renderContext.wave);
+      const localDataIndex = Array.isArray(renderContext.dataIndices)
+        ? renderContext.dataIndices.indexOf(slot.dataIdx)
+        : slot.dataIdx;
+      const renderedSlot = localDataIndex >= 0 && renderedSlots[localDataIndex]
+        ? renderedSlots[localDataIndex]
+        : {
+          dataIdx: slot.dataIdx,
+          col: Math.max(0, slot.col - renderContext.start)
+        };
       const anchor = createWaveDataSlotEditAnchor(
         drawGroup,
-        entry.signal.wave || '',
-        slot,
+        renderContext.wave,
+        renderedSlot,
         svg,
         dataText,
         Number.NaN
       );
-      const value = Array.isArray(entry.signal.data) && entry.signal.data[slot.dataIdx] !== undefined
-        ? String(entry.signal.data[slot.dataIdx])
+      const dataValues = normalizeWaveDataValues(entry.signal.data);
+      const value = dataValues[slot.dataIdx] !== undefined
+        ? String(dataValues[slot.dataIdx])
         : '';
       vimDirectInlineEditActive = true;
       startInlineEdit(dataText || { textContent: value }, entry, 'data', slot.dataIdx, anchor);
@@ -15621,6 +16404,21 @@ ${lines.join('\n')}`;
       });
     }
     if (waveCopyCancel) waveCopyCancel.addEventListener('click', closeWaveCopyModal);
+    if (waveScreenshotRangeCancel) {
+      waveScreenshotRangeCancel.addEventListener('click', () => closeWaveScreenshotRangeModal(null));
+    }
+    if (waveScreenshotRangeConfirm) {
+      waveScreenshotRangeConfirm.addEventListener('click', confirmWaveScreenshotRange);
+    }
+    [waveScreenshotStartColumn, waveScreenshotEndColumn].forEach((input) => {
+      if (!input) return;
+      input.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          confirmWaveScreenshotRange();
+        }
+      });
+    });
     if (waveCopyModal) {
       waveCopyModal.addEventListener('click', (event) => {
         if (event.target === waveCopyModal) {
@@ -15642,6 +16440,13 @@ ${lines.join('\n')}`;
       if (event.key === 'Escape' && waveCopyModal && !waveCopyModal.hidden) {
         event.preventDefault();
         closeWaveCopyModal();
+        return;
+      }
+      if (event.key === 'Escape'
+          && waveScreenshotRangeModal
+          && !waveScreenshotRangeModal.hidden) {
+        event.preventDefault();
+        closeWaveScreenshotRangeModal(null);
       }
     }, true);
     document.getElementById('btn-undo').addEventListener('click', undo);
@@ -15743,6 +16548,21 @@ ${lines.join('\n')}`;
       window.__vwdFindPresetIndexForEdge = findPresetIndexForEdge;
       window.__vwdGetPerf = () => vwdPerfMarks.slice();
       window.__vwdClearPerf = () => { vwdPerfMarks.length = 0; };
+      window.__vwdGetBigWaveState = () => {
+        const current = bigWaveViewportState.window;
+        return {
+          enabled: bigWaveViewportState.enabled,
+          documentKey: bigWaveViewportState.documentKey,
+          start: bigWaveViewportState.start,
+          end: current ? current.end : 0,
+          size: bigWaveViewportState.size,
+          totalColumns: current ? current.totalColumns : 0,
+          crossingEdges: current ? current.crossingEdges.slice() : []
+        };
+      };
+      window.__vwdSetBigWaveStart = (columnIndex) => (
+        scheduleBigWaveViewportStart(columnIndex, 'debug-api', true)
+      );
       window.__vwdGetVimState = () => ({
         controller: vimController ? vimController.getState() : null,
         waveAreaActive: vimWaveAreaActive,

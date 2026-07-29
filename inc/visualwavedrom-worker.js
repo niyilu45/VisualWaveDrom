@@ -10,10 +10,16 @@ function flattenSignalMetrics(signals, metrics) {
       continue;
     }
     if (!signal || typeof signal !== 'object') continue;
-    metrics.signalCount += 1;
-    const waveLength = typeof signal.wave === 'string' ? signal.wave.length : 0;
-    if (waveLength > metrics.maxWaveLength) metrics.maxWaveLength = waveLength;
-    metrics.cellCount += waveLength;
+    const hasChildren = Array.isArray(signal.children);
+    const hasSignalField = ['name', 'wave', 'node', 'data', 'period', 'phase']
+      .some((key) => Object.prototype.hasOwnProperty.call(signal, key));
+    if (!hasChildren || hasSignalField) {
+      metrics.signalCount += 1;
+      const waveLength = typeof signal.wave === 'string' ? signal.wave.length : 0;
+      if (waveLength > metrics.maxWaveLength) metrics.maxWaveLength = waveLength;
+      metrics.cellCount += waveLength;
+    }
+    if (hasChildren) flattenSignalMetrics(signal.children, metrics);
   }
 }
 
