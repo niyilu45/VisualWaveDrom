@@ -220,6 +220,7 @@ function getDefaultJson() {
     const toggleNavSidebarLabel = document.getElementById('toggle-nav-sidebar-label');
     const waveLibraryFileStatus = document.getElementById('wave-library-file-status');
     const importWaveLibraryBtn = document.getElementById('btn-import-wave-library');
+    const importWaveDataBtn = document.getElementById('btn-import-wave-data');
     const saveWaveLibraryBtn = document.getElementById('btn-save-wave-library');
     const saveWaveLibraryLabel = document.getElementById('save-wave-library-label');
     const waveLibraryImportInput = document.getElementById('wave-library-import-input');
@@ -913,7 +914,10 @@ ${lines.join('\n')}`;
     const pageQuery = new URLSearchParams(window.location.search);
     const requestedLibraryId = String(pageQuery.get('libraryId') || '').trim();
     const requestedWaveDocumentName = String(pageQuery.get('waveId') || '').trim();
+    const requestedScopeToken = String(pageQuery.get('scopeToken') || '').trim();
     const singleWaveViewActive = pageQuery.get('view') === 'single' && !!requestedWaveDocumentName;
+    const scopeWaveViewActive = pageQuery.get('view') === 'scope' && !!requestedWaveDocumentName;
+    const focusedWaveViewActive = singleWaveViewActive || scopeWaveViewActive;
     const waveLibraryClientId = 'client-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
     let currentWaveLibraryFile = '';
     let currentWaveLibraryId = '';
@@ -933,9 +937,11 @@ ${lines.join('\n')}`;
     let pendingWaveCopyDocumentName = '';
     let pendingWaveCopyButton = null;
     let waveLibrarySyncChannel = null;
+    const scopeWindowOpenStates = new Map();
     let pageExitStateFlushed = false;
 
     document.body.classList.toggle('single-wave-view', singleWaveViewActive);
+    document.body.classList.toggle('scope-wave-view', scopeWaveViewActive);
 
     const savedTagsListEl = document.getElementById('saved-tags-list');
     const savedTagsEmptyEl = document.getElementById('saved-tags-empty');
@@ -952,6 +958,18 @@ ${lines.join('\n')}`;
     const rowImportSchemeModal = document.getElementById('row-import-scheme-modal');
     const rowImportSchemeOptions = document.getElementById('row-import-scheme-options');
     const rowImportSchemeHint = document.getElementById('row-import-scheme-hint');
+    const rowImportFileInput = document.getElementById('row-import-file-input');
+    const rowImportFileName = document.getElementById('row-import-file-name');
+    const rowImportFileMeta = document.getElementById('row-import-file-meta');
+    const rowImportChangeFileBtn = document.getElementById('row-import-change-file');
+    const rowImportSample = document.getElementById('row-import-sample');
+    const rowImportAnalysisText = document.getElementById('row-import-analysis');
+    const rowImportSignalName = document.getElementById('row-import-signal-name');
+    const rowImportPreviewShell = document.getElementById('row-import-preview-shell');
+    const rowImportPreviewSummary = document.getElementById('row-import-preview-summary');
+    const rowImportPreview = document.getElementById('row-import-preview');
+    const rowImportPreviewBtn = document.getElementById('row-import-preview-button');
+    const rowImportConfirmBtn = document.getElementById('row-import-confirm-button');
     const waveCopyModal = document.getElementById('wave-copy-modal');
     const waveCopyCancel = document.getElementById('wave-copy-cancel');
     const waveScreenshotRangeModal = document.getElementById('wave-screenshot-range-modal');
@@ -963,6 +981,12 @@ ${lines.join('\n')}`;
     let pendingWaveScreenshotRangeRequest = null;
     let rowImportSchemeBusy = false;
     let rowImportSchemeCatalog = [];
+    let rowImportSelectedFile = null;
+    let rowImportAnalysis = null;
+    let rowImportSelectedSchemeId = '';
+    let rowImportSelectedMappingIndex = -1;
+    let rowImportPreviewPayload = null;
+    let rowImportAnalysisRequestId = 0;
 
     function escapeRegex(str) {
       return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -12591,6 +12615,264 @@ ${lines.join('\n')}`;
       return url.href;
     }
 
+    function getWaveDocumentScopeViewParams(documentName, scopeToken) {
+      if (!documentName) return null;
+      const params = new URLSearchParams({
+        waveId: documentName,
+        view: 'scope'
+      });
+      if (currentWaveLibraryId) params.set('libraryId', currentWaveLibraryId);
+      if (scopeToken) params.set('scopeToken', scopeToken);
+      return params;
+    }
+
+    function getWaveDocumentScopeViewUrl(documentName, scopeToken) {
+      const params = getWaveDocumentScopeViewParams(documentName, scopeToken);
+      if (!params) return '';
+      if (waveLibraryServerMode) {
+        return new URL('/open?' + params.toString(), window.location.origin).href;
+      }
+      const url = new URL(window.location.href);
+      url.search = params.toString();
+      url.hash = '';
+      return url.href;
+    }
+
+    async function openWaveDocumentInScopeWindow(documentName) {
+      if (documentName === editingWaveDocumentName && !saveCurrentWaveDocumentBeforeSwitch()) {
+        setStatus(false, '当前波形图自动保存失败');
+        return false;
+      }
+      flushPersistSavedTags();
+      const scopeToken = 'scope-' + Date.now().toString(36)
+        + '-' + Math.random().toString(36).slice(2, 9);
+      const url = getWaveDocumentScopeViewUrl(documentName, scopeToken);
+      if (!url) {
+        setStatus(false, '无法生成示波器窗口地址');
+        return false;
+      }
+      const width = Math.max(960, Math.min(1500, (window.screen && window.screen.availWidth || 1400) - 80));
+      const height = Math.max(650, Math.min(980, (window.screen && window.screen.availHeight || 900) - 80));
+      const opened = window.open(
+        url,
+        '_blank',
+        'popup=yes,resizable=yes,scrollbars=yes,width=' + width + ',height=' + height
+      );
+      if (!opened) {
+        setStatus(false, '浏览器阻止了示波器窗口，请允许此页面打开弹出式窗口');
+        vwdDebugLog('scope-view', { phase: 'open-blocked', documentName, url });
+        return false;
+      }
+      const savePromise = (async () => {
+        let stored = getSavedTagByName(documentName);
+        if (stored && stored.deferred) stored = await ensureWaveDocumentLoaded(documentName);
+        if (!stored) throw new Error('波形图尚未载入');
+        if (waveLibraryServerMode) await flushScheduledWaveLibraryServerSave();
+        else await flushBrowserWaveLibrarySave({ force: true });
+        stored = getSavedTagByName(documentName);
+        return getWaveDocumentServerSnapshot(stored, documentName === editingWaveDocumentName);
+      })();
+      scopeWindowOpenStates.set(scopeToken, { documentName, promise: savePromise });
+      setTimeout(() => scopeWindowOpenStates.delete(scopeToken), 60000);
+      savePromise.catch((error) => {
+        setStatus(false, '打开示波器失败：' + (error && error.message ? error.message : String(error)));
+        vwdDebugLog('scope-view', {
+          phase: 'source-save-error',
+          documentName,
+          message: error && error.message ? error.message : String(error)
+        });
+      });
+      const tag = getSavedTagByName(documentName);
+      setStatus(true, '已打开示波器：' + getSavedTagTitle(tag || { name: documentName, content: '{}' }));
+      vwdDebugLog('scope-view', { phase: 'open-window', documentName, scopeToken, url });
+      return true;
+    }
+
+    function getScopeDocumentTitle(content, fallback) {
+      try {
+        const parsed = JSON.parse(String(content || '{}'));
+        return String(
+          parsed.title
+          || (parsed.head && parsed.head.text)
+          || fallback
+          || '展示实例'
+        );
+      } catch (_error) {
+        return String(fallback || '展示实例');
+      }
+    }
+
+    function notifyScopeOpener(documentSnapshot, sourceWaveId, isNewInstance) {
+      notifyWaveDocumentSync(documentSnapshot);
+      try {
+        if (window.opener && !window.opener.closed) {
+          window.opener.postMessage({
+            type: 'visualwavedrom-scope-document-saved',
+            libraryId: currentWaveLibraryId,
+            sourceWaveId: sourceWaveId || '',
+            isNewInstance: !!isNewInstance,
+            document: documentSnapshot
+          }, '*');
+        }
+      } catch (_error) { /* opener may have been closed */ }
+    }
+
+    async function flushScopeWaveLibraryChanges() {
+      flushPersistSavedTags();
+      if (waveLibraryServerMode) {
+        const saved = await flushScheduledWaveLibraryServerSave();
+        if (!saved) throw new Error('波形库服务保存失败');
+      } else {
+        const saved = await flushBrowserWaveLibrarySave({ force: true });
+        if (!saved) throw new Error('浏览器 SQLite 保存失败');
+      }
+    }
+
+    async function saveScopeDisplayInstance(payload) {
+      const sourceWaveId = String(payload && payload.sourceWaveId || requestedWaveDocumentName || '');
+      const content = String(payload && payload.content || '');
+      JSON.parse(content);
+      const title = getScopeDocumentTitle(content, payload && payload.title);
+      const before = captureWaveLibrarySnapshot();
+      const documentName = 'scope-instance-' + Date.now().toString(36)
+        + '-' + Math.random().toString(36).slice(2, 8);
+      const sourceParent = findNavDocumentParent(navTreeState, sourceWaveId) || navTreeState;
+      if (!upsertSavedTag(documentName, {
+        content,
+        hscale: 1,
+        waveEditMode: 'modify',
+        savedAt: new Date().toISOString()
+      }, { skipSort: true, skipListRefresh: true })) {
+        throw new Error('无法建立展示实例');
+      }
+      sourceParent.documents = Array.isArray(sourceParent.documents) ? sourceParent.documents : [];
+      if (!sourceParent.documents.includes(documentName)) sourceParent.documents.push(documentName);
+      sourceParent.expanded = true;
+      saveNavCustomNodesFromTree();
+      pushWaveLibraryHistory(before, captureWaveLibrarySnapshot());
+      await flushScopeWaveLibraryChanges();
+      const stored = getSavedTagByName(documentName);
+      const snapshot = getWaveDocumentServerSnapshot(stored, false);
+      notifyScopeOpener(snapshot, sourceWaveId, true);
+      vwdDebugLog('scope-save', {
+        phase: 'instance-persisted',
+        sourceWaveId,
+        documentName,
+        title,
+        pointCount: payload && payload.columns ? payload.columns.length : undefined
+      });
+      return {
+        name: documentName,
+        title,
+        revision: stored && stored.revision || 0,
+        savedAt: stored && stored.savedAt
+      };
+    }
+
+    async function overwriteScopeSourceDocument(payload) {
+      const documentName = requestedWaveDocumentName || editingWaveDocumentName;
+      const existing = getSavedTagByName(documentName);
+      if (!existing) throw new Error('原波形不存在');
+      const content = String(payload && payload.content || '');
+      JSON.parse(content);
+      const before = captureWaveLibrarySnapshot();
+      if (!upsertSavedTag(documentName, {
+        content,
+        hscale: existing.hscale || 1,
+        waveEditMode: existing.waveEditMode || 'modify',
+        savedAt: new Date().toISOString()
+      }, { skipSort: true, skipListRefresh: true })) {
+        throw new Error('无法更新原波形');
+      }
+      editingWaveDocumentName = documentName;
+      activeTagName = documentName;
+      setEditorValue(content, { clearCodeMirrorHistory: true });
+      setEditorHistoryBaseline(content);
+      pushWaveLibraryHistory(before, captureWaveLibrarySnapshot());
+      await flushScopeWaveLibraryChanges();
+      const stored = getSavedTagByName(documentName);
+      const snapshot = getWaveDocumentServerSnapshot(stored, false);
+      notifyScopeOpener(snapshot, documentName, false);
+      vwdDebugLog('scope-save', {
+        phase: 'source-overwritten',
+        documentName,
+        revision: stored && stored.revision
+      });
+      return Object.assign({}, snapshot);
+    }
+
+    function requestScopeSourceFromOpener() {
+      if (!requestedScopeToken || !window.opener || window.opener.closed) {
+        return Promise.resolve(null);
+      }
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        const finish = (error, documentSnapshot) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          window.removeEventListener('message', onMessage);
+          if (error) reject(error);
+          else resolve(documentSnapshot || null);
+        };
+        const onMessage = (event) => {
+          const message = event.data || {};
+          if (message.type !== 'visualwavedrom-scope-source-response'
+              || message.scopeToken !== requestedScopeToken) return;
+          if (message.error) finish(new Error(message.error));
+          else finish(null, message.document);
+        };
+        const timeout = setTimeout(() => finish(null, null), 10000);
+        window.addEventListener('message', onMessage);
+        try {
+          window.opener.postMessage({
+            type: 'visualwavedrom-scope-source-request',
+            scopeToken: requestedScopeToken,
+            waveId: requestedWaveDocumentName
+          }, '*');
+        } catch (error) {
+          finish(error);
+        }
+      });
+    }
+
+    async function initializeScopeWaveView() {
+      if (!scopeWaveViewActive) return false;
+      if (!window.VisualWaveDromScope || typeof window.VisualWaveDromScope.mount !== 'function') {
+        throw new Error('示波器窗口模块未加载');
+      }
+      const openerDocument = await requestScopeSourceFromOpener();
+      if (openerDocument) {
+        const incoming = normalizeSavedTag(openerDocument);
+        if (incoming) {
+          const index = findSavedTagIndex(incoming.name);
+          if (index >= 0) savedTags[index] = incoming;
+          else savedTags.push(incoming);
+          rebuildSavedTagIndex();
+        }
+      }
+      const tag = await ensureWaveDocumentLoaded(requestedWaveDocumentName);
+      if (!tag) throw new Error('链接指定的波形图不存在或已被删除');
+      editingWaveDocumentName = tag.name;
+      activeTagName = tag.name;
+      setEditorValue(tag.content, { clearCodeMirrorHistory: true });
+      setEditorHistoryBaseline(tag.content);
+      await window.VisualWaveDromScope.mount({
+        libraryName: currentWaveLibraryFile || 'SQLite 波形库',
+        getDocument: async () => Object.assign({}, getSavedTagByName(tag.name)),
+        saveInstance: saveScopeDisplayInstance,
+        saveSource: overwriteScopeSourceDocument,
+        openNormalView: () => {
+          const params = getWaveDocumentSingleViewParams(tag.name);
+          window.location.href = waveLibraryServerMode
+            ? new URL('/open?' + params.toString(), window.location.origin).href
+            : getWaveDocumentSingleViewUrl(tag.name);
+        },
+        log: vwdDebugLog
+      });
+      return true;
+    }
+
     function openWaveDocumentInSingleWindow(documentName) {
       const url = getWaveDocumentSingleViewUrl(documentName);
       if (!url) {
@@ -12993,11 +13275,11 @@ ${lines.join('\n')}`;
         selectedNavDocumentName = null;
         editingWaveDocumentName = null;
         activeTagName = null;
-        const preferredName = singleWaveViewActive
+        const preferredName = focusedWaveViewActive
           ? requestedWaveDocumentName
           : (bundle.activeDocumentName || (savedTags[0] && savedTags[0].name));
-        const preferred = getSavedTagByName(preferredName) || (singleWaveViewActive ? null : savedTags[0]);
-        lastSingleWaveSyncedSignature = singleWaveViewActive && preferred && !preferred.deferred
+        const preferred = getSavedTagByName(preferredName) || (focusedWaveViewActive ? null : savedTags[0]);
+        lastSingleWaveSyncedSignature = focusedWaveViewActive && preferred && !preferred.deferred
           ? singleWaveSyncSignature(preferred)
           : '';
         if (preferred && !preferred.deferred) {
@@ -13008,13 +13290,18 @@ ${lines.join('\n')}`;
           setEditorHistoryBaseline(editor.value);
         }
         rebuildNavTreeStateFromJson(editor.value || getDefaultJson());
-        if (preferred) openWaveDocumentForEditing(preferred.name, { immediate: true });
+        if (scopeWaveViewActive && preferred) {
+          editingWaveDocumentName = preferred.name;
+          activeTagName = preferred.name;
+        } else if (preferred) openWaveDocumentForEditing(preferred.name, { immediate: true });
         else {
-          renderNavTree();
-          renderWaveLibrary();
+          if (!scopeWaveViewActive) {
+            renderNavTree();
+            renderWaveLibrary();
+          }
         }
         updateWaveLibraryFileStatus();
-        setStatus(!!preferred || !singleWaveViewActive, preferred
+        setStatus(!!preferred || !focusedWaveViewActive, preferred
           ? ('已导入波形库：' + (currentWaveLibraryFile || '未命名'))
           : '链接指定的波形图不存在或已被删除');
         return true;
@@ -13216,6 +13503,77 @@ ${lines.join('\n')}`;
       });
     }
 
+    function initScopeWindowSync() {
+      window.addEventListener('message', (event) => {
+        const message = event.data || {};
+        if (message.type === 'visualwavedrom-scope-source-request') {
+          const state = scopeWindowOpenStates.get(String(message.scopeToken || ''));
+          if (!state || state.documentName !== String(message.waveId || '') || !event.source) return;
+          state.promise.then((documentSnapshot) => {
+            event.source.postMessage({
+              type: 'visualwavedrom-scope-source-response',
+              scopeToken: message.scopeToken,
+              libraryId: currentWaveLibraryId,
+              document: documentSnapshot
+            }, '*');
+          }).catch((error) => {
+            event.source.postMessage({
+              type: 'visualwavedrom-scope-source-response',
+              scopeToken: message.scopeToken,
+              error: error && error.message ? error.message : String(error)
+            }, '*');
+          });
+          return;
+        }
+        if (message.type !== 'visualwavedrom-scope-document-saved' || !message.document) return;
+        if (currentWaveLibraryId && message.libraryId
+            && message.libraryId !== currentWaveLibraryId) return;
+        const remote = normalizeSavedTag(message.document);
+        if (!remote) return;
+        const local = getSavedTagByName(remote.name);
+        if (local && remote.name === editingWaveDocumentName && !currentStateMatchesTag(local)) {
+          setStatus(false, '同步冲突：主窗口和示波器窗口同时修改了当前波形');
+          vwdDebugLog('scope-sync', { phase: 'conflict', documentName: remote.name });
+          return;
+        }
+
+        if (waveLibraryServerMode) {
+          const index = findSavedTagIndex(remote.name);
+          if (index >= 0) savedTags[index] = remote;
+          else savedTags.push(remote);
+          rebuildSavedTagIndex();
+        } else {
+          upsertSavedTag(remote.name, remote, { skipSort: true, skipListRefresh: true });
+        }
+
+        if (message.isNewInstance) {
+          const parent = findNavDocumentParent(navTreeState, message.sourceWaveId) || navTreeState;
+          parent.documents = Array.isArray(parent.documents) ? parent.documents : [];
+          if (!parent.documents.includes(remote.name)) parent.documents.push(remote.name);
+          parent.expanded = true;
+          if (!waveLibraryServerMode) saveNavCustomNodesFromTree();
+        }
+
+        if (remote.name === editingWaveDocumentName) {
+          setEditorValue(remote.content, { clearCodeMirrorHistory: true });
+          setEditorHistoryBaseline(remote.content);
+          renderWaveform(remote.content);
+        }
+        renderNavTree();
+        renderWaveLibrary();
+        refreshWaveDocumentTitle(remote.name, true);
+        if (!waveLibraryServerMode) flushPersistSavedTags();
+        setStatus(true, message.isNewInstance
+          ? '示波器展示实例已同步到主窗口'
+          : '示波器修改已同步到主窗口');
+        vwdDebugLog('scope-sync', {
+          phase: 'applied',
+          documentName: remote.name,
+          isNewInstance: !!message.isNewInstance
+        });
+      });
+    }
+
     async function changeServerWaveLibrary() {
       try {
         const response = await fetch('/api/wave-libraries');
@@ -13268,6 +13626,15 @@ ${lines.join('\n')}`;
     function closeRowImportSchemeModal() {
       if (rowImportSchemeBusy) return;
       if (rowImportSchemeModal) rowImportSchemeModal.hidden = true;
+      rowImportAnalysisRequestId += 1;
+      rowImportSelectedFile = null;
+      rowImportAnalysis = null;
+      rowImportSelectedSchemeId = '';
+      rowImportSelectedMappingIndex = -1;
+      rowImportPreviewPayload = null;
+      if (rowImportFileInput) rowImportFileInput.value = '';
+      if (rowImportPreview) rowImportPreview.innerHTML = '';
+      if (rowImportPreviewShell) rowImportPreviewShell.hidden = true;
       setRowImportSchemeHint('', false);
     }
 
@@ -13301,9 +13668,10 @@ ${lines.join('\n')}`;
       };
     }
 
-    function applyImportedWaveRows(payload) {
+    function applyImportedWaveRows(payload, importOptions) {
       const updates = payload && Array.isArray(payload.updates) ? payload.updates : [];
       if (!updates.length) throw new Error('导入方案没有返回任何信号行');
+      const allowCreateMissing = !!(importOptions && importOptions.createMissing);
 
       let parsed;
       try {
@@ -13325,6 +13693,7 @@ ${lines.join('\n')}`;
 
       const prepared = [];
       const updateNames = new Set();
+      let createdCount = 0;
       updates.forEach((update) => {
         const signalName = String(update && update.signal || '').trim();
         if (!signalName || updateNames.has(signalName)) {
@@ -13333,7 +13702,15 @@ ${lines.join('\n')}`;
             : '导入方案包含空信号名');
         }
         updateNames.add(signalName);
-        const matches = signalsByName.get(signalName) || [];
+        let matches = signalsByName.get(signalName) || [];
+        if (matches.length === 0 && (allowCreateMissing || update.createIfMissing)) {
+          const signal = { name: signalName };
+          parsed.signal.push(signal);
+          const target = { signal, index: signals.length + createdCount };
+          matches = [target];
+          signalsByName.set(signalName, matches);
+          createdCount += 1;
+        }
         if (matches.length === 0) throw new Error('当前波形图中找不到信号：' + signalName);
         if (matches.length > 1) throw new Error('当前波形图中有多个同名信号，无法确定目标：' + signalName);
         if (typeof update.wave !== 'string' || !Array.isArray(update.data)) {
@@ -13343,7 +13720,17 @@ ${lines.join('\n')}`;
           target: matches[0],
           update,
           wave: update.wave,
-          data: update.data.map((value) => String(value == null ? '' : value))
+          data: update.data.map((value) => String(value == null ? '' : value)),
+          sampleKind: /^(digital|bus|analog)$/.test(String(update.sampleKind || ''))
+            ? String(update.sampleKind)
+            : '',
+          samples: Array.isArray(update.samples)
+            ? update.samples.map((value) => {
+              if (value == null) return null;
+              const number = Number(value);
+              return Number.isFinite(number) ? number : null;
+            })
+            : []
         });
       });
 
@@ -13354,11 +13741,18 @@ ${lines.join('\n')}`;
         extendedColumns += aligned.extendedColumns;
         if (item.data.length) item.target.signal.data = item.data;
         else delete item.target.signal.data;
+        if (item.sampleKind) {
+          item.target.signal.scope = Object.assign({}, item.target.signal.scope || {}, {
+            mode: item.sampleKind
+          });
+          if (item.samples.length) item.target.signal.scope.samples = item.samples;
+          else delete item.target.signal.scope.samples;
+        }
       });
 
       const newText = JSON.stringify(parsed, null, 2);
       if (newText === editor.value) {
-        return { changed: false, count: prepared.length, extendedColumns };
+        return { changed: false, count: prepared.length, createdCount, extendedColumns };
       }
       const selectionStart = editor.selectionStart;
       const selectionEnd = editor.selectionEnd;
@@ -13366,7 +13760,7 @@ ${lines.join('\n')}`;
       pushUndoBeforeChange(newText);
       applyEditorChange(newText, selectionStart, selectionEnd, { skipFocus: true });
       scheduleFormatAfterWaveChange();
-      return { changed: true, count: prepared.length, extendedColumns };
+      return { changed: true, count: prepared.length, createdCount, extendedColumns };
     }
 
     async function executeRowImportScheme(scheme) {
@@ -13433,87 +13827,447 @@ ${lines.join('\n')}`;
       }
     }
 
-    async function openRowImportSchemeModal() {
-      if (!waveLibraryServerMode) {
-        setStatus(false, '行波形文件导入需要服务模式，请通过 BAT 或 SH 启动');
-        vwdDebugLog('row-import', { phase: 'open-blocked', reason: 'direct-html-mode' });
+    function formatRowImportFileSize(byteLength) {
+      const bytes = Math.max(0, Number(byteLength) || 0);
+      if (bytes < 1024) return bytes + ' B';
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+      return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    }
+
+    function suggestedRowImportSignalName(file) {
+      try {
+        const source = JSON.parse(editor.value);
+        const signals = flattenSignals(source && source.signal);
+        const selected = signals[selectedSignalIndex];
+        const selectedName = String(selected && selected.name || '').trim();
+        if (selectedName) return selectedName;
+      } catch (_error) {
+        // Fall back to the file name.
+      }
+      const fileName = String(file && file.name || 'signal');
+      return fileName.replace(/\.[^.]*$/, '').trim() || 'signal';
+    }
+
+    function selectedRowImportScheme() {
+      return rowImportSchemeCatalog.find((scheme) => scheme.id === rowImportSelectedSchemeId) || null;
+    }
+
+    function invalidateRowImportPreview(reason) {
+      const hadPreview = !!rowImportPreviewPayload;
+      rowImportPreviewPayload = null;
+      if (rowImportPreview) rowImportPreview.innerHTML = '';
+      if (rowImportPreviewSummary) rowImportPreviewSummary.textContent = '';
+      if (rowImportPreviewShell) rowImportPreviewShell.hidden = true;
+      if (hadPreview || reason) {
+        vwdDebugLog('row-import', { phase: 'preview-invalidated', reason: reason || 'changed' });
+      }
+    }
+
+    function updateRowImportActionState() {
+      const signalName = String(rowImportSignalName && rowImportSignalName.value || '').trim();
+      const canPreview = !!rowImportSelectedFile
+        && !!selectedRowImportScheme()
+        && rowImportSelectedMappingIndex >= 0
+        && !!signalName
+        && !rowImportSchemeBusy;
+      if (rowImportPreviewBtn) rowImportPreviewBtn.disabled = !canPreview;
+      if (rowImportConfirmBtn) {
+        rowImportConfirmBtn.disabled = rowImportSchemeBusy
+          || !rowImportPreviewPayload
+          || !signalName;
+      }
+      if (rowImportChangeFileBtn) rowImportChangeFileBtn.disabled = rowImportSchemeBusy;
+      if (rowImportSignalName) rowImportSignalName.disabled = rowImportSchemeBusy;
+      if (rowImportSchemeOptions) {
+        rowImportSchemeOptions.querySelectorAll('button').forEach((button) => {
+          button.disabled = rowImportSchemeBusy
+            || !(rowImportAnalysis && rowImportAnalysis.python
+              && rowImportAnalysis.python.available);
+        });
+      }
+    }
+
+    function chooseRowImportScheme(schemeId, mappingIndex) {
+      const scheme = rowImportSchemeCatalog.find((item) => item.id === schemeId);
+      const mapping = scheme && (scheme.mappings || []).find((item, index) => (
+        Number(item.mappingIndex == null ? index : item.mappingIndex) === Number(mappingIndex)
+      ));
+      if (!scheme || !mapping) return;
+      const changed = rowImportSelectedSchemeId !== scheme.id
+        || rowImportSelectedMappingIndex !== Number(mappingIndex);
+      rowImportSelectedSchemeId = scheme.id;
+      rowImportSelectedMappingIndex = Number(mappingIndex);
+      rowImportSchemeOptions.querySelectorAll('[data-scheme-id]').forEach((button) => {
+        const selected = button.dataset.schemeId === scheme.id
+          && Number(button.dataset.mappingIndex) === rowImportSelectedMappingIndex;
+        button.classList.toggle('selected', selected);
+        button.setAttribute('aria-pressed', selected ? 'true' : 'false');
+      });
+      if (changed) invalidateRowImportPreview('scheme-change');
+      updateRowImportActionState();
+      vwdDebugLog('row-import', {
+        phase: 'scheme-selected',
+        schemeId: scheme.id,
+        mappingIndex: rowImportSelectedMappingIndex,
+        parser: mapping.parser
+      });
+    }
+
+    function renderRowImportSchemeCatalog(payload) {
+      rowImportSchemeCatalog = Array.isArray(payload && payload.schemes)
+        ? payload.schemes
+        : [];
+      rowImportSchemeOptions.innerHTML = '';
+      const recommended = payload && payload.recommended;
+      const analysis = payload && payload.analysis;
+      const pythonAvailable = !!(payload && payload.python && payload.python.available);
+
+      rowImportSchemeCatalog.forEach((scheme) => {
+        const mappings = Array.isArray(scheme.mappings) ? scheme.mappings : [];
+        let mapping = null;
+        if (recommended && recommended.schemeId === scheme.id) {
+          mapping = mappings.find((item, index) => (
+            Number(item.mappingIndex == null ? index : item.mappingIndex)
+              === Number(recommended.mappingIndex)
+          ));
+        }
+        if (!mapping && analysis) {
+          mapping = mappings.find((item) => item.parser === analysis.recommendedParser);
+        }
+        if (!mapping) mapping = mappings[0];
+        if (!mapping) return;
+        const mappingIndex = Number(mapping.mappingIndex == null
+          ? mappings.indexOf(mapping)
+          : mapping.mappingIndex);
+        const isRecommended = !!(recommended
+          && recommended.schemeId === scheme.id
+          && Number(recommended.mappingIndex) === mappingIndex);
+        const option = document.createElement('button');
+        option.type = 'button';
+        option.className = 'nav-move-option row-import-scheme-option';
+        option.dataset.schemeId = scheme.id;
+        option.dataset.mappingIndex = String(mappingIndex);
+        option.setAttribute('aria-pressed', 'false');
+        option.disabled = !pythonAvailable;
+
+        const titleRow = document.createElement('span');
+        titleRow.className = 'row-import-scheme-title-row';
+        const title = document.createElement('strong');
+        title.textContent = scheme.name || scheme.id;
+        titleRow.appendChild(title);
+        if (isRecommended) {
+          const badge = document.createElement('span');
+          badge.className = 'row-import-recommended-badge';
+          badge.textContent = '推荐';
+          titleRow.appendChild(badge);
+        }
+        option.appendChild(titleRow);
+        if (scheme.description) {
+          const description = document.createElement('span');
+          description.textContent = scheme.description;
+          option.appendChild(description);
+        }
+        const parser = document.createElement('span');
+        parser.textContent = '处理函数：' + mapping.parser;
+        option.appendChild(parser);
+        option.addEventListener('click', () => {
+          chooseRowImportScheme(scheme.id, mappingIndex);
+        });
+        rowImportSchemeOptions.appendChild(option);
+      });
+
+      if (!rowImportSchemeOptions.childElementCount) {
+        const empty = document.createElement('div');
+        empty.className = 'modal-empty-state';
+        empty.textContent = 'import/Scheme 中没有可用的 JSON 预设';
+        rowImportSchemeOptions.appendChild(empty);
         return;
       }
-      if (!rowImportSchemeModal || !rowImportSchemeOptions) return;
-      rowImportSchemeModal.hidden = false;
+
+      const automatic = recommended
+        && rowImportSchemeCatalog.find((scheme) => scheme.id === recommended.schemeId);
+      const fallback = rowImportSchemeCatalog[0];
+      const selectedScheme = automatic || fallback;
+      const selectedMappings = selectedScheme && selectedScheme.mappings || [];
+      const selectedMapping = automatic
+        ? selectedMappings.find((item, index) => (
+          Number(item.mappingIndex == null ? index : item.mappingIndex)
+            === Number(recommended.mappingIndex)
+        ))
+        : selectedMappings[0];
+      if (selectedScheme && selectedMapping) {
+        chooseRowImportScheme(
+          selectedScheme.id,
+          Number(selectedMapping.mappingIndex == null
+            ? selectedMappings.indexOf(selectedMapping)
+            : selectedMapping.mappingIndex)
+        );
+      }
+    }
+
+    function renderRowImportPreview(payload) {
+      if (!rowImportPreview || !rowImportPreviewShell) return;
+      rowImportPreview.innerHTML = '';
+      const update = payload && Array.isArray(payload.updates) ? payload.updates[0] : null;
+      if (!update || typeof update.wave !== 'string') {
+        throw new Error('预览结果没有有效波形');
+      }
+      const previewColumnLimit = 200;
+      const previewWave = update.wave.slice(0, previewColumnLimit);
+      const dataSymbolCount = Array.from(previewWave)
+        .filter((symbol) => '=23456789'.includes(symbol)).length;
+      const previewSignal = {
+        name: String(update.signal || ''),
+        wave: previewWave
+      };
+      if (Array.isArray(update.data) && dataSymbolCount > 0) {
+        previewSignal.data = update.data.slice(0, dataSymbolCount);
+      }
+      const displayDiv = document.createElement('div');
+      displayDiv.id = 'row-import-preview-display-0';
+      rowImportPreview.appendChild(displayDiv);
+      if (!isWaveDromReady()) throw new Error('WaveDrom 尚未加载完成');
+      WaveDrom.RenderWaveForm(0, {
+        signal: [previewSignal],
+        config: { hscale: 1 }
+      }, 'row-import-preview-display-', false);
+      if (!displayDiv.querySelector('svg')) throw new Error('未生成波形预览');
+      rowImportPreviewShell.hidden = false;
+      if (rowImportPreviewSummary) {
+        const truncated = update.wave.length > previewColumnLimit
+          ? '；效果图显示前 ' + previewColumnLimit + ' 列'
+          : '';
+        rowImportPreviewSummary.textContent = update.wave.length + ' 列，'
+          + Number(update.pointCount || 0) + ' 个数据点' + truncated;
+      }
+    }
+
+    async function requestRowImportPreview() {
+      if (rowImportSchemeBusy || !rowImportSelectedFile) return;
+      const scheme = selectedRowImportScheme();
+      const signalName = String(rowImportSignalName && rowImportSignalName.value || '').trim();
+      if (!scheme || rowImportSelectedMappingIndex < 0) {
+        setRowImportSchemeHint('请选择文件处理预设', true);
+        return;
+      }
+      if (!signalName) {
+        setRowImportSchemeHint('请输入导入后的信号名', true);
+        if (rowImportSignalName) rowImportSignalName.focus();
+        return;
+      }
+      rowImportSchemeBusy = true;
+      invalidateRowImportPreview('preview-start');
+      updateRowImportActionState();
+      setRowImportSchemeHint('正在解析文件并生成效果图…', false);
+      const file = rowImportSelectedFile;
+      const sourceDocumentName = editingWaveDocumentName;
+      const sourceLibraryId = currentWaveLibraryId;
+      vwdDebugLog('row-import', {
+        phase: 'preview-start',
+        fileName: file.name,
+        fileSize: file.size,
+        schemeId: scheme.id,
+        mappingIndex: rowImportSelectedMappingIndex,
+        signalName
+      });
+      try {
+        const query = new URLSearchParams({
+          schemeId: scheme.id,
+          mappingIndex: String(rowImportSelectedMappingIndex),
+          signalName,
+          fileName: file.name
+        });
+        const response = await fetch('/api/import-wave-preview?' + query.toString(), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/octet-stream' },
+          body: file
+        });
+        let payload = null;
+        try { payload = await response.json(); } catch (_error) { /* handled below */ }
+        if (!response.ok) throw rowImportResponseError(response, payload);
+        if (editingWaveDocumentName !== sourceDocumentName
+            || currentWaveLibraryId !== sourceLibraryId
+            || rowImportSelectedFile !== file) {
+          throw new Error('解析期间波形图、波形库或文件已切换，请重新生成预览');
+        }
+        rowImportPreviewPayload = payload;
+        renderRowImportPreview(payload);
+        setRowImportSchemeHint('效果图已生成，确认无误后点击“确认导入”', false);
+        setStatus(true, '波形数据预览已生成');
+        vwdDebugLog('row-import', {
+          phase: 'preview-complete',
+          parser: payload.parser,
+          waveLength: payload.updates && payload.updates[0]
+            ? payload.updates[0].wave.length
+            : 0,
+          pointCount: payload.updates && payload.updates[0]
+            ? payload.updates[0].pointCount
+            : 0
+        });
+      } catch (error) {
+        invalidateRowImportPreview('preview-error');
+        const message = error && error.message ? error.message : String(error);
+        setRowImportSchemeHint(message, true);
+        setStatus(false, '生成波形数据预览失败：' + message);
+        vwdDebugLog('row-import', { phase: 'preview-error', message });
+      } finally {
+        rowImportSchemeBusy = false;
+        updateRowImportActionState();
+      }
+    }
+
+    function confirmRowImportPreview() {
+      if (rowImportSchemeBusy || !rowImportPreviewPayload) return;
+      const signalName = String(rowImportSignalName && rowImportSignalName.value || '').trim();
+      const update = rowImportPreviewPayload.updates && rowImportPreviewPayload.updates[0];
+      if (!update || signalName !== String(update.signal || '')) {
+        invalidateRowImportPreview('signal-name-mismatch');
+        setRowImportSchemeHint('信号名已变化，请重新生成效果图', true);
+        updateRowImportActionState();
+        return;
+      }
+      try {
+        const result = applyImportedWaveRows(rowImportPreviewPayload, { createMissing: true });
+        const createdMessage = result.createdCount
+          ? '，其中新增 ' + result.createdCount + ' 行'
+          : '';
+        const nodeMessage = result.extendedColumns
+          ? '；为保留连接端点补了 ' + result.extendedColumns + ' 列未知态'
+          : '';
+        setStatus(
+          true,
+          (result.changed ? '已导入 ' : '导入内容未变化：')
+            + result.count + ' 个信号行' + createdMessage + nodeMessage
+        );
+        vwdDebugLog('row-import', {
+          phase: 'confirm-complete',
+          signalName,
+          changed: result.changed,
+          createdCount: result.createdCount,
+          extendedColumns: result.extendedColumns
+        });
+        closeRowImportSchemeModal();
+      } catch (error) {
+        const message = error && error.message ? error.message : String(error);
+        setRowImportSchemeHint(message, true);
+        setStatus(false, '导入波形数据失败：' + message);
+        vwdDebugLog('row-import', { phase: 'confirm-error', message });
+      }
+    }
+
+    async function handleRowImportFileSelected(file) {
+      if (!file) return;
+      if (file.size > 128 * 1024 * 1024) {
+        setStatus(false, '波形数据文件不能超过 128 MB');
+        return;
+      }
+      const requestId = ++rowImportAnalysisRequestId;
+      rowImportSelectedFile = file;
+      rowImportAnalysis = null;
+      rowImportSchemeCatalog = [];
+      rowImportSelectedSchemeId = '';
+      rowImportSelectedMappingIndex = -1;
+      invalidateRowImportPreview('file-change');
+      if (rowImportSchemeModal) rowImportSchemeModal.hidden = false;
+      if (rowImportFileName) rowImportFileName.textContent = file.name;
+      if (rowImportFileMeta) {
+        rowImportFileMeta.textContent = formatRowImportFileSize(file.size)
+          + (file.lastModified ? '；修改于 ' + new Date(file.lastModified).toLocaleString() : '');
+      }
+      if (rowImportSignalName) rowImportSignalName.value = suggestedRowImportSignalName(file);
+      if (rowImportSample) rowImportSample.textContent = '正在读取文件前 5 行…';
+      if (rowImportAnalysisText) rowImportAnalysisText.textContent = '正在分析适合的文件处理函数…';
       rowImportSchemeOptions.innerHTML = '';
       const loading = document.createElement('div');
       loading.className = 'modal-empty-state';
-      loading.textContent = '正在读取 import/Scheme…';
+      loading.textContent = '正在读取 import/Scheme 并计算推荐预设…';
       rowImportSchemeOptions.appendChild(loading);
       setRowImportSchemeHint('', false);
-      vwdDebugLog('row-import', { phase: 'catalog-load-start' });
+      updateRowImportActionState();
+      vwdDebugLog('row-import', {
+        phase: 'file-selected',
+        fileName: file.name,
+        fileSize: file.size,
+        fileType: file.type || ''
+      });
       try {
-        const response = await fetch('/api/import-schemes', { cache: 'no-store' });
-        let catalog = null;
-        try { catalog = await response.json(); } catch (_error) { /* handled below */ }
-        if (!response.ok) throw rowImportResponseError(response, catalog);
-        rowImportSchemeCatalog = Array.isArray(catalog.schemes) ? catalog.schemes : [];
-        rowImportSchemeOptions.innerHTML = '';
-        const pythonAvailable = !!(catalog.python && catalog.python.available);
-        rowImportSchemeCatalog.forEach((scheme) => {
-          const option = document.createElement('button');
-          option.type = 'button';
-          option.className = 'nav-move-option row-import-scheme-option';
-          option.disabled = !pythonAvailable;
-          const title = document.createElement('strong');
-          title.textContent = scheme.name || scheme.id;
-          const mappings = document.createElement('span');
-          mappings.textContent = (scheme.mappings || []).map((mapping) => (
-            mapping.file + ' → ' + mapping.signal + '（' + mapping.parser + '）'
-          )).join('；');
-          option.appendChild(title);
-          if (scheme.description) {
-            const description = document.createElement('span');
-            description.textContent = scheme.description;
-            option.appendChild(description);
-          }
-          option.appendChild(mappings);
-          option.addEventListener('click', () => { void executeRowImportScheme(scheme); });
-          rowImportSchemeOptions.appendChild(option);
-        });
-        if (!rowImportSchemeOptions.childElementCount) {
-          const empty = document.createElement('div');
-          empty.className = 'modal-empty-state';
-          empty.textContent = 'import/Scheme 中没有可用的 JSON 方案';
-          rowImportSchemeOptions.appendChild(empty);
+        const sampleText = await file.slice(0, 64 * 1024).text();
+        const sampleLines = sampleText.split(/\r\n|\n|\r/).slice(0, 5);
+        if (requestId !== rowImportAnalysisRequestId || rowImportSelectedFile !== file) return;
+        if (rowImportSample) {
+          rowImportSample.textContent = sampleLines.map((line, index) => (
+            String(index + 1).padStart(2, ' ') + ' │ ' + line
+          )).join('\n');
         }
-        if (!pythonAvailable) {
+        const response = await fetch('/api/import-wave-analyze', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fileName: file.name, sampleLines })
+        });
+        let payload = null;
+        try { payload = await response.json(); } catch (_error) { /* handled below */ }
+        if (!response.ok) throw rowImportResponseError(response, payload);
+        if (requestId !== rowImportAnalysisRequestId || rowImportSelectedFile !== file) return;
+        rowImportAnalysis = payload;
+        if (rowImportAnalysisText) {
+          const recommendation = payload.recommended
+            ? '；推荐预设：' + payload.recommended.schemeName
+            : '';
+          rowImportAnalysisText.textContent = (payload.analysis && payload.analysis.reason
+            ? payload.analysis.reason
+            : '未能自动判断处理函数') + recommendation;
+        }
+        renderRowImportSchemeCatalog(payload);
+        if (!(payload.python && payload.python.available)) {
           setRowImportSchemeHint(
-            (catalog.python && catalog.python.error) || '未找到 Python 3.6 或更高版本',
+            (payload.python && payload.python.error) || '未找到 Python 3.6 或更高版本',
             true
           );
-        } else if (Array.isArray(catalog.invalid) && catalog.invalid.length) {
+        } else if (Array.isArray(payload.invalid) && payload.invalid.length) {
           setRowImportSchemeHint(
-            catalog.invalid.length + ' 个方案无效，可在 Debug Mode 中查看详情',
+            '已自动选择推荐预设；另有 ' + payload.invalid.length + ' 个无效预设',
             true
           );
         } else {
-          setRowImportSchemeHint('Python ' + catalog.python.version + '；单击方案即可导入', false);
+          setRowImportSchemeHint('已自动选择推荐预设；填写信号名后生成效果图', false);
         }
         vwdDebugLog('row-import', {
-          phase: 'catalog-load-complete',
+          phase: 'analysis-complete',
+          analysis: payload.analysis || null,
+          recommended: payload.recommended || null,
           schemeCount: rowImportSchemeCatalog.length,
-          invalid: catalog.invalid || [],
-          python: catalog.python || null
+          invalid: payload.invalid || [],
+          python: payload.python || null
         });
       } catch (error) {
+        if (requestId !== rowImportAnalysisRequestId) return;
+        rowImportAnalysis = null;
         rowImportSchemeCatalog = [];
         rowImportSchemeOptions.innerHTML = '';
         const empty = document.createElement('div');
         empty.className = 'modal-empty-state';
-        empty.textContent = '无法读取导入方案';
+        empty.textContent = '无法分析文件或读取导入预设';
         rowImportSchemeOptions.appendChild(empty);
         const message = error && error.message ? error.message : String(error);
+        if (rowImportAnalysisText) rowImportAnalysisText.textContent = '文件分析失败';
         setRowImportSchemeHint(message, true);
-        setStatus(false, '读取行波形导入方案失败');
-        vwdDebugLog('row-import', { phase: 'catalog-load-error', message });
+        setStatus(false, '分析波形数据文件失败：' + message);
+        vwdDebugLog('row-import', { phase: 'analysis-error', message });
+      } finally {
+        updateRowImportActionState();
       }
+    }
+
+    function openRowImportSchemeModal() {
+      if (!waveLibraryServerMode) {
+        setStatus(false, '波形数据文件导入需要服务模式，请通过 BAT 或 SH 启动');
+        vwdDebugLog('row-import', { phase: 'open-blocked', reason: 'direct-html-mode' });
+        return;
+      }
+      if (!rowImportFileInput) return;
+      rowImportFileInput.value = '';
+      rowImportFileInput.click();
+      vwdDebugLog('row-import', { phase: 'file-picker-open' });
     }
 
     function formatTagSavedTime(iso) {
@@ -15264,6 +16018,14 @@ ${lines.join('\n')}`;
       screenshotButton.addEventListener('click', () => {
         openWaveCopyModal(documentName, screenshotButton);
       });
+      const scopeButton = document.createElement('button');
+      scopeButton.type = 'button';
+      scopeButton.className = 'wave-document-scope';
+      scopeButton.title = '在独立窗口中精细显示、简化并编辑此波形';
+      scopeButton.textContent = '示波器';
+      scopeButton.addEventListener('click', () => {
+        void openWaveDocumentInScopeWindow(documentName);
+      });
       const openButton = document.createElement('button');
       openButton.type = 'button';
       openButton.className = 'wave-document-open';
@@ -15301,6 +16063,7 @@ ${lines.join('\n')}`;
       });
       header.appendChild(title);
       header.appendChild(screenshotButton);
+      header.appendChild(scopeButton);
       header.appendChild(openButton);
       if (!singleWaveViewActive) header.appendChild(singleOpenButton);
       header.appendChild(deleteButton);
@@ -17570,8 +18333,11 @@ ${lines.join('\n')}`;
     });
     document.getElementById('btn-add-signal').addEventListener('click', () => insertNewSignalRow());
     document.getElementById('btn-copy-signal').addEventListener('click', () => copySelectedSignalRow());
-    document.getElementById('btn-import-wave-row').addEventListener('click', () => {
-      void openRowImportSchemeModal();
+    [importWaveDataBtn, document.getElementById('btn-import-wave-row')].forEach((button) => {
+      if (!button) return;
+      button.addEventListener('click', () => {
+        void openRowImportSchemeModal();
+      });
     });
     document.getElementById('btn-copy-wave-selection').addEventListener('click', copySelectedWaveRange);
     document.getElementById('btn-paste-wave-selection').addEventListener('click', pasteCopiedWaveRange);
@@ -17652,6 +18418,18 @@ ${lines.join('\n')}`;
         serviceMode: waveLibraryServerMode,
         busy: rowImportSchemeBusy,
         modalOpen: !!(rowImportSchemeModal && !rowImportSchemeModal.hidden),
+        fileName: rowImportSelectedFile ? rowImportSelectedFile.name : '',
+        fileSize: rowImportSelectedFile ? rowImportSelectedFile.size : 0,
+        analysis: rowImportAnalysis && rowImportAnalysis.analysis
+          ? Object.assign({}, rowImportAnalysis.analysis)
+          : null,
+        recommended: rowImportAnalysis && rowImportAnalysis.recommended
+          ? Object.assign({}, rowImportAnalysis.recommended)
+          : null,
+        selectedSchemeId: rowImportSelectedSchemeId,
+        selectedMappingIndex: rowImportSelectedMappingIndex,
+        signalName: String(rowImportSignalName && rowImportSignalName.value || ''),
+        previewReady: !!rowImportPreviewPayload,
         schemes: rowImportSchemeCatalog.slice()
       });
       window.__vwdGetPresetHighlightIndex = () => {
@@ -17788,6 +18566,35 @@ ${lines.join('\n')}`;
     if (rowImportSchemeCancelBtn) {
       rowImportSchemeCancelBtn.addEventListener('click', closeRowImportSchemeModal);
     }
+    if (rowImportFileInput) {
+      rowImportFileInput.addEventListener('change', () => {
+        const file = rowImportFileInput.files && rowImportFileInput.files[0];
+        if (file) void handleRowImportFileSelected(file);
+      });
+    }
+    if (rowImportChangeFileBtn) {
+      rowImportChangeFileBtn.addEventListener('click', () => {
+        if (!rowImportFileInput || rowImportSchemeBusy) return;
+        rowImportFileInput.value = '';
+        rowImportFileInput.click();
+        vwdDebugLog('row-import', { phase: 'file-picker-reopen' });
+      });
+    }
+    if (rowImportSignalName) {
+      rowImportSignalName.addEventListener('input', () => {
+        invalidateRowImportPreview('signal-name-change');
+        setRowImportSchemeHint('', false);
+        updateRowImportActionState();
+      });
+    }
+    if (rowImportPreviewBtn) {
+      rowImportPreviewBtn.addEventListener('click', () => {
+        void requestRowImportPreview();
+      });
+    }
+    if (rowImportConfirmBtn) {
+      rowImportConfirmBtn.addEventListener('click', confirmRowImportPreview);
+    }
     if (rowImportSchemeModal) {
       rowImportSchemeModal.addEventListener('click', (e) => {
         if (e.target === rowImportSchemeModal) closeRowImportSchemeModal();
@@ -17835,6 +18642,33 @@ ${lines.join('\n')}`;
     initNavSidebarResize();
 
     window.addEventListener('load', () => {
+      initScopeWindowSync();
+      if (scopeWaveViewActive) {
+        setStatus(true, '示波器加载中');
+        initWaveLibrarySyncChannel();
+        void initializeWaveLibrary()
+          .then(() => initializeScopeWaveView())
+          .catch((error) => {
+            setStatus(false, '示波器加载失败');
+            vwdDebugLog('scope-view', {
+              phase: 'initialize-error',
+              message: error && error.message ? error.message : String(error)
+            });
+            if (window.VisualWaveDromScope && typeof window.VisualWaveDromScope.mount === 'function') {
+              return window.VisualWaveDromScope.mount({
+                getDocument: async () => {
+                  throw error;
+                },
+                log: vwdDebugLog
+              }).catch(() => {});
+            }
+            return null;
+          })
+          .finally(() => {
+            waveLibraryInitializationPending = false;
+          });
+        return;
+      }
       migrateSessionStorageToLocal(WAVE_EDIT_MODE_KEY);
       migrateSessionStorageToLocal(BACK_BTN_POS_KEY);
       migrateSessionStorageToLocal(NAV_SIDEBAR_WIDTH_KEY);

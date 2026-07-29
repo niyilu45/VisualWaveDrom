@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "name": "TSV 序号数据导入",
+  "description": "适用于 Tab 分隔的两列文件：第一列为序号，第二列为波形状态或数据文本。",
+  "mappings": [
+    {
+      "file": "Data/basic-signal.tsv",
+      "signal": "signal",
+      "parser": "parse_tsv_index_data",
+      "options": {
+        "encoding": "utf-8-sig"
+      }
+    }
+  ]
+}

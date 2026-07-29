@@ -1,0 +1,1410 @@
+(function (global) {
+  'use strict';
+
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260730-scope-v3';
+  const ROW_HEIGHT = 84;
+  const AXIS_HEIGHT = 38;
+  const OVERVIEW_HEIGHT = 76;
+  const MAX_HISTORY = 100;
+  const COLORS = ['#07853d', '#0097a7', '#d66b00', '#cf2f7b', '#b3261e', '#536dfe'];
+
+  function clamp(value, min, max) {
+    return Math.max(min, Math.min(max, value));
+  }
+
+  function escapeHtml(value) {
+    return String(value == null ? '' : value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function clone(value) {
+    return JSON.parse(JSON.stringify(value));
+  }
+
+  function debounce(callback, delay) {
+    let timer = null;
+    return function debounced() {
+      const args = arguments;
+      clearTimeout(timer);
+      timer = setTimeout(() => callback.apply(null, args), delay);
+    };
+  }
+
+  function niceStep(value) {
+    const safe = Math.max(1e-12, value);
+    const power = Math.pow(10, Math.floor(Math.log(safe) / Math.LN10));
+    const normalized = safe / power;
+    const factor = normalized <= 1 ? 1 : (normalized <= 2 ? 2 : (normalized <= 5 ? 5 : 10));
+    return factor * power;
+  }
+
+  class ScopeWorkerClient {
+    constructor(log) {
+      this.log = typeof log === 'function' ? log : function () {};
+      this.sequence = 0;
+      this.pending = new Map();
+      this.worker = null;
+      this.fallback = global.VisualWaveDromScopeWorkerCore || null;
+      try {
+        this.worker = new Worker(WORKER_URL);
+        this.worker.addEventListener('message', (event) => this.handleResponse(event.data || {}));
+        this.worker.addEventListener('error', (event) => {
+          this.log('scope-worker', {
+            phase: 'worker-error',
+            message: event && event.message ? event.message : 'worker failed'
+          });
+        });
+      } catch (error) {
+        this.worker = null;
+        this.log('scope-worker', {
+          phase: 'worker-fallback',
+          message: error && error.message ? error.message : String(error)
+        });
+      }
+    }
+
+    handleResponse(response) {
+      const pending = this.pending.get(response.requestId);
+      if (!pending) return;
+      this.pending.delete(response.requestId);
+      if (response.ok) pending.resolve(response.result);
+      else pending.reject(new Error(response.error || 'Scope worker failed'));
+    }
+
+    call(type, payload) {
+      const requestId = ++this.sequence;
+      const request = Object.assign({}, payload || {}, { type, requestId });
+      if (this.worker) {
+        return new Promise((resolve, reject) => {
+          this.pending.set(requestId, { resolve, reject });
+          this.worker.postMessage(request);
+        });
+      }
+      const core = this.fallback || global.VisualWaveDromScopeWorkerCore;
+      if (!core || typeof core.handleRequest !== 'function') {
+        return Promise.reject(new Error('示波器计算模块不可用'));
+      }
+      return new Promise((resolve, reject) => {
+        setTimeout(() => {
+          const response = core.handleRequest(request);
+          if (response.ok) resolve(response.result);
+          else reject(new Error(response.error || 'Scope worker failed'));
+        }, 0);
+      });
+    }
+
+    close() {
+      if (this.worker) this.worker.terminate();
+      this.pending.forEach((item) => item.reject(new Error('Scope window closed')));
+      this.pending.clear();
+    }
+  }
+
+  class ScopeView {
+    constructor(adapter) {
+      this.adapter = adapter;
+      this.log = adapter && typeof adapter.log === 'function'
+        ? adapter.log
+        : function () {};
+      this.worker = new ScopeWorkerClient(this.log);
+      this.document = null;
+      this.meta = null;
+      this.modes = {};
+      this.windowData = null;
+      this.simplified = null;
+      this.outputContent = '';
+      this.viewStart = 0;
+      this.viewEnd = 1;
+      this.cursorA = null;
+      this.cursorB = null;
+      this.cursorNext = 'A';
+      this.cursorMode = false;
+      this.selectedPoint = null;
+      this.lockedColumns = new Set();
+      this.undoStack = [];
+      this.redoStack = [];
+      this.windowRequestSequence = 0;
+      this.buildSequence = 0;
+      this.drag = null;
+      this.rowStart = 0;
+      this.rowEnd = 0;
+      this.resizeObserver = null;
+      this.scheduleWindowRequest = debounce(() => this.requestWindow(), 24);
+      this.scheduleBuild = debounce(() => this.rebuildOutput(), 80);
+    }
+
+    async mount() {
+      document.body.classList.add('scope-wave-view');
+      this.buildShell();
+      this.bindEvents();
+      this.setStatus('正在加载波形数据');
+      this.document = await this.adapter.getDocument();
+      if (!this.document || typeof this.document.content !== 'string') {
+        throw new Error('指定的波形图不存在或尚未载入');
+      }
+      this.meta = await this.worker.call('prepare', { content: this.document.content });
+      this.meta.rows.forEach((row) => {
+        this.modes[row.index] = row.mode;
+      });
+      this.viewStart = 0;
+      this.viewEnd = this.meta.totalColumns;
+      this.titleEl.textContent = this.meta.title;
+      document.title = this.meta.title + ' - 示波器';
+      this.targetInput.max = String(Math.max(2, this.meta.totalColumns));
+      this.targetInput.value = String(Math.min(100, Math.max(2, this.meta.totalColumns)));
+      this.rangeStartInput.value = '1';
+      this.rangeEndInput.value = String(this.meta.totalColumns);
+      this.renderSignalRows();
+      this.updateLayout();
+      await this.requestWindow();
+      await this.runSimplify(false);
+      this.setStatus('示波器数据已就绪');
+      this.log('scope-view', {
+        phase: 'ready',
+        waveId: this.document.name,
+        rows: this.meta.rows.length,
+        totalColumns: this.meta.totalColumns
+      });
+    }
+
+    buildShell() {
+      const normalApp = document.getElementById('app');
+      if (normalApp) normalApp.setAttribute('aria-hidden', 'true');
+      const root = document.createElement('div');
+      root.className = 'scope-app';
+      root.id = 'scope-app';
+      root.innerHTML = `
+        <header class="scope-toolbar">
+          <div class="scope-title-block">
+            <strong id="scope-title">示波器</strong>
+            <span id="scope-library-name"></span>
+          </div>
+          <div class="scope-toolbar-group" aria-label="视图控制">
+            <button type="button" class="scope-icon-btn" id="scope-zoom-in" title="放大">+</button>
+            <button type="button" class="scope-icon-btn" id="scope-zoom-out" title="缩小">−</button>
+            <button type="button" class="scope-command-btn" id="scope-fit">适应窗口</button>
+            <button type="button" class="scope-command-btn" id="scope-cursors">游标测量</button>
+          </div>
+          <div class="scope-toolbar-group scope-simplify-controls">
+            <label>方法
+              <select id="scope-method">
+                <option value="event-preserving">事件与峰谷保留</option>
+                <option value="transitions">跳变优先</option>
+                <option value="uniform">均匀采样</option>
+                <option value="lttb">趋势与峰值</option>
+              </select>
+            </label>
+            <label>目标点数
+              <input type="number" id="scope-target-points" min="2" step="1" value="100">
+            </label>
+            <label>起始列
+              <input type="number" id="scope-range-start" min="1" step="1" value="1">
+            </label>
+            <label>结束列
+              <input type="number" id="scope-range-end" min="1" step="1" value="1">
+            </label>
+            <button type="button" class="scope-command-btn" id="scope-use-view">使用当前窗口</button>
+            <button type="button" class="scope-command-btn scope-primary" id="scope-simplify">生成简化实例</button>
+          </div>
+          <div class="scope-toolbar-group scope-save-controls">
+            <label class="scope-title-input-label">实例标题
+              <input type="text" id="scope-output-title">
+            </label>
+            <button type="button" class="scope-command-btn scope-primary" id="scope-save-instance">保存为展示实例</button>
+            <button type="button" class="scope-command-btn scope-danger" id="scope-overwrite-source">覆盖原波形</button>
+            <button type="button" class="scope-command-btn" id="scope-open-normal">普通编辑</button>
+          </div>
+        </header>
+        <main class="scope-workspace">
+          <aside class="scope-signal-column">
+            <div class="scope-signal-heading">
+              <span>信号</span>
+              <span>显示</span>
+            </div>
+            <div class="scope-signal-scroll" id="scope-signal-scroll">
+              <div id="scope-signal-list"></div>
+            </div>
+            <div class="scope-overview-label">
+              <strong>全局预览</strong>
+              <span>拖动定位</span>
+            </div>
+          </aside>
+          <section class="scope-plot-column">
+            <canvas class="scope-axis" id="scope-axis" aria-label="时间轴"></canvas>
+            <div class="scope-plot-viewport" id="scope-plot-viewport">
+              <div class="scope-plot-spacer" id="scope-plot-spacer"></div>
+              <canvas class="scope-plot" id="scope-plot" tabindex="0" aria-label="示波器波形区域"></canvas>
+            </div>
+            <canvas class="scope-overview" id="scope-overview" aria-label="全局波形预览"></canvas>
+          </section>
+        </main>
+        <section class="scope-editor-strip">
+          <div class="scope-point-editor" id="scope-point-editor">
+            <strong>简化点编辑</strong>
+            <span id="scope-point-position">单击下半行的简化波形选择数据点</span>
+            <label>数值
+              <input type="text" id="scope-point-value" disabled>
+            </label>
+            <label>标签
+              <input type="text" id="scope-point-label" disabled>
+            </label>
+            <button type="button" class="scope-command-btn" id="scope-point-apply" disabled>应用</button>
+            <button type="button" class="scope-command-btn" id="scope-point-insert" disabled>插入点</button>
+            <button type="button" class="scope-command-btn" id="scope-point-delete" disabled>删除点</button>
+            <button type="button" class="scope-command-btn" id="scope-point-lock" disabled>保留关键点</button>
+            <button type="button" class="scope-icon-btn" id="scope-undo" title="撤销" disabled>↶</button>
+            <button type="button" class="scope-icon-btn" id="scope-redo" title="重做" disabled>↷</button>
+          </div>
+          <div class="scope-measurements" id="scope-measurements">
+            <span>A：未设置</span>
+            <span>B：未设置</span>
+            <strong>Δt：--</strong>
+          </div>
+        </section>
+        <footer class="scope-statusbar">
+          <span id="scope-status">初始化</span>
+          <span id="scope-metrics"></span>
+        </footer>
+      `;
+      document.body.appendChild(root);
+
+      this.root = root;
+      this.titleEl = root.querySelector('#scope-title');
+      this.libraryNameEl = root.querySelector('#scope-library-name');
+      this.signalScroll = root.querySelector('#scope-signal-scroll');
+      this.signalList = root.querySelector('#scope-signal-list');
+      this.plotViewport = root.querySelector('#scope-plot-viewport');
+      this.plotSpacer = root.querySelector('#scope-plot-spacer');
+      this.axisCanvas = root.querySelector('#scope-axis');
+      this.plotCanvas = root.querySelector('#scope-plot');
+      this.overviewCanvas = root.querySelector('#scope-overview');
+      this.methodSelect = root.querySelector('#scope-method');
+      this.targetInput = root.querySelector('#scope-target-points');
+      this.rangeStartInput = root.querySelector('#scope-range-start');
+      this.rangeEndInput = root.querySelector('#scope-range-end');
+      this.outputTitleInput = root.querySelector('#scope-output-title');
+      this.cursorButton = root.querySelector('#scope-cursors');
+      this.statusEl = root.querySelector('#scope-status');
+      this.metricsEl = root.querySelector('#scope-metrics');
+      this.measurementsEl = root.querySelector('#scope-measurements');
+      this.pointPositionEl = root.querySelector('#scope-point-position');
+      this.pointValueInput = root.querySelector('#scope-point-value');
+      this.pointLabelInput = root.querySelector('#scope-point-label');
+      this.pointApplyButton = root.querySelector('#scope-point-apply');
+      this.pointInsertButton = root.querySelector('#scope-point-insert');
+      this.pointDeleteButton = root.querySelector('#scope-point-delete');
+      this.pointLockButton = root.querySelector('#scope-point-lock');
+      this.undoButton = root.querySelector('#scope-undo');
+      this.redoButton = root.querySelector('#scope-redo');
+      this.libraryNameEl.textContent = this.adapter.libraryName || '';
+    }
+
+    bindEvents() {
+      this.root.querySelector('#scope-zoom-in').addEventListener('click', () => this.zoom(0.5));
+      this.root.querySelector('#scope-zoom-out').addEventListener('click', () => this.zoom(2));
+      this.root.querySelector('#scope-fit').addEventListener('click', () => this.fit());
+      this.cursorButton.addEventListener('click', () => this.toggleCursorMode());
+      this.root.querySelector('#scope-use-view').addEventListener('click', () => this.useCurrentViewRange());
+      this.root.querySelector('#scope-simplify').addEventListener('click', () => this.runSimplify(true));
+      this.root.querySelector('#scope-save-instance').addEventListener('click', () => this.saveInstance());
+      this.root.querySelector('#scope-overwrite-source').addEventListener('click', () => this.overwriteSource());
+      this.root.querySelector('#scope-open-normal').addEventListener('click', () => this.adapter.openNormalView());
+      this.pointApplyButton.addEventListener('click', () => this.applySelectedPoint());
+      this.pointInsertButton.addEventListener('click', () => this.insertSelectedPoint());
+      this.pointDeleteButton.addEventListener('click', () => this.deleteSelectedPoint());
+      this.pointLockButton.addEventListener('click', () => this.toggleSelectedPointLock());
+      this.undoButton.addEventListener('click', () => this.undo());
+      this.redoButton.addEventListener('click', () => this.redo());
+
+      this.signalList.addEventListener('change', (event) => {
+        const select = event.target.closest('[data-scope-mode-row]');
+        if (!select) return;
+        const rowIndex = Number(select.dataset.scopeModeRow);
+        const nextMode = select.value;
+        if (this.modes[rowIndex] === nextMode) return;
+        if (this.simplified && this.simplified.model.rows[rowIndex]) {
+          this.pushHistory();
+          this.simplified.model.rows[rowIndex].mode = nextMode;
+          this.scheduleBuild();
+        }
+        this.modes[rowIndex] = nextMode;
+        this.scheduleWindowRequest();
+        this.draw();
+      });
+
+      this.plotViewport.addEventListener('scroll', () => {
+        this.signalScroll.scrollTop = this.plotViewport.scrollTop;
+        this.positionPlotCanvas();
+        this.scheduleWindowRequest();
+      }, { passive: true });
+      this.signalScroll.addEventListener('scroll', () => {
+        if (Math.abs(this.plotViewport.scrollTop - this.signalScroll.scrollTop) > 1) {
+          this.plotViewport.scrollTop = this.signalScroll.scrollTop;
+        }
+      }, { passive: true });
+
+      this.plotCanvas.addEventListener('pointerdown', (event) => this.onPlotPointerDown(event));
+      this.plotCanvas.addEventListener('pointermove', (event) => this.onPlotPointerMove(event));
+      this.plotCanvas.addEventListener('pointerup', (event) => this.onPlotPointerUp(event));
+      this.plotCanvas.addEventListener('pointercancel', () => { this.drag = null; });
+      this.plotCanvas.addEventListener('wheel', (event) => this.onPlotWheel(event), { passive: false });
+      this.overviewCanvas.addEventListener('pointerdown', (event) => this.onOverviewPointer(event));
+      this.outputTitleInput.addEventListener('input', () => this.scheduleBuild());
+
+      global.addEventListener('keydown', (event) => {
+        const target = event.target;
+        const editingText = target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName);
+        if (editingText) return;
+        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
+          event.preventDefault();
+          if (event.shiftKey) this.redo();
+          else this.undo();
+        } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'y') {
+          event.preventDefault();
+          this.redo();
+        } else if (event.key === 'Delete' && this.selectedPoint) {
+          event.preventDefault();
+          this.deleteSelectedPoint();
+        }
+      });
+
+      if (typeof ResizeObserver === 'function') {
+        this.resizeObserver = new ResizeObserver(() => this.updateLayout());
+        this.resizeObserver.observe(this.plotViewport);
+      } else {
+        global.addEventListener('resize', () => this.updateLayout());
+      }
+      global.addEventListener('pagehide', () => this.worker.close(), { once: true });
+    }
+
+    setStatus(message, error) {
+      if (!this.statusEl) return;
+      this.statusEl.textContent = String(message || '');
+      this.statusEl.classList.toggle('error', !!error);
+    }
+
+    renderSignalRows() {
+      this.signalList.innerHTML = this.meta.rows.map((row) => {
+        const group = row.groups && row.groups.length ? row.groups.join(' / ') : '';
+        return `
+          <div class="scope-signal-row" data-row-index="${row.index}" style="height:${ROW_HEIGHT}px">
+            <span class="scope-swatch" style="background:${COLORS[row.index % COLORS.length]}"></span>
+            <span class="scope-signal-name" title="${escapeHtml(row.name)}">
+              ${group ? `<small>${escapeHtml(group)}</small>` : ''}
+              <strong>${escapeHtml(row.name)}</strong>
+              <em>${escapeHtml(String(row.sampleCount || 0))} 点${row.unit ? ` · ${escapeHtml(row.unit)}` : ''}</em>
+            </span>
+            <select data-scope-mode-row="${row.index}" aria-label="${escapeHtml(row.name)} 显示模式">
+              <option value="digital"${this.modes[row.index] === 'digital' ? ' selected' : ''}>数字</option>
+              <option value="bus"${this.modes[row.index] === 'bus' ? ' selected' : ''}>总线</option>
+              <option value="analog"${this.modes[row.index] === 'analog' ? ' selected' : ''}>模拟</option>
+            </select>
+          </div>
+        `;
+      }).join('');
+      this.plotSpacer.style.height = (this.meta.rows.length * ROW_HEIGHT) + 'px';
+    }
+
+    resizeCanvas(canvas, width, height) {
+      const dpr = Math.max(1, Math.min(2, global.devicePixelRatio || 1));
+      const cssWidth = Math.max(1, Math.floor(width));
+      const cssHeight = Math.max(1, Math.floor(height));
+      if (canvas.width !== Math.floor(cssWidth * dpr)
+          || canvas.height !== Math.floor(cssHeight * dpr)) {
+        canvas.width = Math.floor(cssWidth * dpr);
+        canvas.height = Math.floor(cssHeight * dpr);
+        canvas.style.width = cssWidth + 'px';
+        canvas.style.height = cssHeight + 'px';
+      }
+      const context = canvas.getContext('2d');
+      context.setTransform(dpr, 0, 0, dpr, 0, 0);
+      return { context, width: cssWidth, height: cssHeight, dpr };
+    }
+
+    updateLayout() {
+      if (!this.meta || !this.plotViewport.clientWidth) return;
+      this.resizeCanvas(this.axisCanvas, this.plotViewport.clientWidth, AXIS_HEIGHT);
+      this.resizeCanvas(
+        this.plotCanvas,
+        this.plotViewport.clientWidth,
+        Math.max(1, this.plotViewport.clientHeight)
+      );
+      this.resizeCanvas(this.overviewCanvas, this.plotViewport.clientWidth, OVERVIEW_HEIGHT);
+      this.positionPlotCanvas();
+      this.scheduleWindowRequest();
+      this.draw();
+    }
+
+    positionPlotCanvas() {
+      this.plotCanvas.style.transform = 'translateY(' + this.plotViewport.scrollTop + 'px)';
+    }
+
+    visibleRows() {
+      const scrollTop = this.plotViewport.scrollTop;
+      const height = Math.max(1, this.plotViewport.clientHeight);
+      const start = clamp(Math.floor(scrollTop / ROW_HEIGHT), 0, this.meta.rows.length);
+      const end = clamp(Math.ceil((scrollTop + height) / ROW_HEIGHT) + 1, start, this.meta.rows.length);
+      return { start, end };
+    }
+
+    async requestWindow() {
+      if (!this.meta || !this.plotViewport.clientWidth) return;
+      const visible = this.visibleRows();
+      const sequence = ++this.windowRequestSequence;
+      try {
+        const result = await this.worker.call('window', {
+          start: this.viewStart,
+          end: this.viewEnd,
+          width: this.plotViewport.clientWidth,
+          rowStart: visible.start,
+          rowEnd: visible.end,
+          modes: this.modes
+        });
+        if (sequence !== this.windowRequestSequence) return;
+        this.rowStart = result.rowStart;
+        this.rowEnd = result.rowEnd;
+        this.windowData = result;
+        this.draw();
+      } catch (error) {
+        if (sequence !== this.windowRequestSequence) return;
+        this.setStatus(error.message || String(error), true);
+        this.log('scope-view', { phase: 'window-error', message: error.message || String(error) });
+      }
+    }
+
+    xForColumn(column, width) {
+      return (column - this.viewStart) / Math.max(1e-9, this.viewEnd - this.viewStart) * width;
+    }
+
+    columnForX(x, width) {
+      return this.viewStart + clamp(x / Math.max(1, width), 0, 1) * (this.viewEnd - this.viewStart);
+    }
+
+    formatTime(column) {
+      const value = column * this.meta.samplePeriod;
+      const rounded = Math.abs(value) >= 1000
+        ? Math.round(value)
+        : Math.round(value * 1000) / 1000;
+      return rounded + ' ' + this.meta.timeUnit;
+    }
+
+    drawAxis() {
+      const resized = this.resizeCanvas(this.axisCanvas, this.plotViewport.clientWidth, AXIS_HEIGHT);
+      const context = resized.context;
+      const width = resized.width;
+      const height = resized.height;
+      context.clearRect(0, 0, width, height);
+      context.fillStyle = '#f7f8fa';
+      context.fillRect(0, 0, width, height);
+      context.strokeStyle = '#c8ccd2';
+      context.beginPath();
+      context.moveTo(0, height - 0.5);
+      context.lineTo(width, height - 0.5);
+      context.stroke();
+      const span = this.viewEnd - this.viewStart;
+      const step = niceStep(span / Math.max(2, Math.floor(width / 120)));
+      const first = Math.ceil(this.viewStart / step) * step;
+      context.font = '12px "Segoe UI", sans-serif';
+      context.fillStyle = '#30343a';
+      context.textAlign = 'center';
+      context.textBaseline = 'top';
+      for (let column = first; column <= this.viewEnd + step * 0.1; column += step) {
+        const x = this.xForColumn(column, width);
+        context.strokeStyle = '#8f959e';
+        context.beginPath();
+        context.moveTo(x + 0.5, height - 8);
+        context.lineTo(x + 0.5, height);
+        context.stroke();
+        context.fillText(this.formatTime(column), x, 5);
+      }
+    }
+
+    drawGrid(context, width, height) {
+      context.fillStyle = '#ffffff';
+      context.fillRect(0, 0, width, height);
+      const span = this.viewEnd - this.viewStart;
+      const minor = niceStep(span / Math.max(4, Math.floor(width / 42)));
+      const major = minor * 5;
+      let first = Math.ceil(this.viewStart / minor) * minor;
+      for (let column = first; column <= this.viewEnd + minor * 0.1; column += minor) {
+        const x = this.xForColumn(column, width);
+        const isMajor = Math.abs(column / major - Math.round(column / major)) < 1e-7;
+        context.strokeStyle = isMajor ? '#d4d8dd' : '#eef0f2';
+        context.beginPath();
+        context.moveTo(Math.round(x) + 0.5, 0);
+        context.lineTo(Math.round(x) + 0.5, height);
+        context.stroke();
+      }
+    }
+
+    drawSegments(context, rowResult, rowIndex, yTop, yBottom, width, color) {
+      const data = rowResult.data;
+      const mode = rowResult.mode;
+      if (data.kind === 'points' || data.kind === 'envelope') {
+        this.drawAnalog(context, data, yTop, yBottom, width, color);
+        return;
+      }
+      if (data.kind === 'buckets') {
+        data.items.forEach((bucket) => {
+          const x1 = this.xForColumn(bucket.start, width);
+          const x2 = this.xForColumn(bucket.end, width);
+          if (bucket.bus) {
+            context.fillStyle = 'rgba(0, 151, 167, 0.12)';
+            context.fillRect(x1, yTop + 3, Math.max(1, x2 - x1), yBottom - yTop - 6);
+            context.strokeStyle = color;
+            context.strokeRect(x1, yTop + 3, Math.max(1, x2 - x1), yBottom - yTop - 6);
+          } else {
+            const highY = yTop + 5;
+            const lowY = yBottom - 5;
+            context.strokeStyle = bucket.unknown ? '#7b818a' : color;
+            context.beginPath();
+            if (bucket.high) {
+              context.moveTo(x1, highY);
+              context.lineTo(x2, highY);
+            }
+            if (bucket.low) {
+              context.moveTo(x1, lowY);
+              context.lineTo(x2, lowY);
+            }
+            if (bucket.high && bucket.low) {
+              context.moveTo((x1 + x2) / 2, highY);
+              context.lineTo((x1 + x2) / 2, lowY);
+            }
+            context.stroke();
+          }
+        });
+        return;
+      }
+      let previousY = null;
+      data.items.forEach((segment) => {
+        const x1 = this.xForColumn(segment.start, width);
+        const x2 = this.xForColumn(segment.end, width);
+        if (segment.kind === 'bus' || mode === 'bus') {
+          const top = yTop + 5;
+          const bottom = yBottom - 5;
+          context.fillStyle = 'rgba(0, 151, 167, 0.08)';
+          context.fillRect(x1, top, Math.max(1, x2 - x1), bottom - top);
+          context.strokeStyle = color;
+          context.beginPath();
+          context.moveTo(x1, (top + bottom) / 2);
+          context.lineTo(x1 + 4, top);
+          context.lineTo(Math.max(x1 + 4, x2 - 4), top);
+          context.lineTo(x2, (top + bottom) / 2);
+          context.lineTo(Math.max(x1 + 4, x2 - 4), bottom);
+          context.lineTo(x1 + 4, bottom);
+          context.closePath();
+          context.stroke();
+          if (x2 - x1 > 38) {
+            context.fillStyle = '#165d68';
+            context.font = '11px "Segoe UI", sans-serif';
+            context.textAlign = 'center';
+            context.textBaseline = 'middle';
+            const label = String(segment.value == null ? '' : segment.value);
+            context.fillText(label.length > 18 ? label.slice(0, 17) + '…' : label, (x1 + x2) / 2, (top + bottom) / 2);
+          }
+          previousY = null;
+          return;
+        }
+        const y = segment.state === '1'
+          ? yTop + 5
+          : (segment.state === '0' ? yBottom - 5 : (yTop + yBottom) / 2);
+        context.strokeStyle = segment.state === 'x' || segment.state === 'z' ? '#6f7680' : color;
+        context.lineWidth = 1.5;
+        context.beginPath();
+        if (previousY != null && Math.abs(previousY - y) > 0.5) {
+          context.moveTo(x1, previousY);
+          context.lineTo(x1, y);
+        }
+        context.moveTo(x1, y);
+        context.lineTo(x2, y);
+        context.stroke();
+        if (segment.state === 'x' || segment.state === 'z') {
+          context.fillStyle = 'rgba(111, 118, 128, 0.12)';
+          context.fillRect(x1, yTop + 4, Math.max(1, x2 - x1), yBottom - yTop - 8);
+        }
+        previousY = y;
+      });
+    }
+
+    drawAnalog(context, data, yTop, yBottom, width, color) {
+      const range = data.range || { min: -1, max: 1 };
+      const scale = Math.max(1e-12, range.max - range.min);
+      const yFor = (value) => yBottom - 4
+        - (value - range.min) / scale * Math.max(1, yBottom - yTop - 8);
+      context.strokeStyle = color;
+      context.lineWidth = 1.25;
+      if (data.kind === 'envelope') {
+        context.beginPath();
+        data.items.forEach((item) => {
+          const x = this.xForColumn(item[0], width);
+          context.moveTo(x, yFor(item[1]));
+          context.lineTo(x, yFor(item[2]));
+        });
+        context.stroke();
+      } else {
+        context.beginPath();
+        let started = false;
+        data.items.forEach((item) => {
+          const x = this.xForColumn(item[0], width);
+          const y = yFor(item[1]);
+          if (!started) {
+            context.moveTo(x, y);
+            started = true;
+          } else {
+            context.lineTo(x, y);
+          }
+        });
+        context.stroke();
+      }
+      context.strokeStyle = '#cfd3d8';
+      context.setLineDash([3, 3]);
+      context.beginPath();
+      context.moveTo(0, (yTop + yBottom) / 2);
+      context.lineTo(width, (yTop + yBottom) / 2);
+      context.stroke();
+      context.setLineDash([]);
+    }
+
+    drawSimplifiedRow(context, rowIndex, yTop, yBottom, width, color) {
+      if (!this.simplified || !this.simplified.model.rows[rowIndex]) return;
+      const row = this.simplified.model.rows[rowIndex];
+      const columns = this.simplified.model.columns;
+      if (!columns.length) return;
+      const visible = [];
+      for (let index = 0; index < columns.length; index += 1) {
+        if (columns[index] < this.viewStart || columns[index] > this.viewEnd) continue;
+        visible.push(index);
+      }
+      if (!visible.length) return;
+      if (row.mode === 'analog') {
+        let min = Number.POSITIVE_INFINITY;
+        let max = Number.NEGATIVE_INFINITY;
+        row.values.forEach((value) => {
+          const number = Number(value);
+          if (!Number.isFinite(number)) return;
+          min = Math.min(min, number);
+          max = Math.max(max, number);
+        });
+        if (!Number.isFinite(min) || !Number.isFinite(max)) return;
+        if (Math.abs(max - min) < 1e-12) {
+          min -= 1;
+          max += 1;
+        }
+        context.strokeStyle = color;
+        context.lineWidth = 1.7;
+        context.beginPath();
+        visible.forEach((pointIndex, index) => {
+          const x = this.xForColumn(columns[pointIndex], width);
+          const value = Number(row.values[pointIndex]);
+          const y = yBottom - 4 - (value - min) / (max - min) * (yBottom - yTop - 8);
+          if (!index) context.moveTo(x, y);
+          else context.lineTo(x, y);
+        });
+        context.stroke();
+      } else if (row.mode === 'bus') {
+        visible.forEach((pointIndex, index) => {
+          const x1 = this.xForColumn(columns[pointIndex], width);
+          const nextPoint = visible[index + 1];
+          const x2 = nextPoint == null ? width : this.xForColumn(columns[nextPoint], width);
+          context.fillStyle = 'rgba(0, 151, 167, 0.1)';
+          context.fillRect(x1, yTop + 5, Math.max(1, x2 - x1), yBottom - yTop - 10);
+          context.strokeStyle = color;
+          context.strokeRect(x1, yTop + 5, Math.max(1, x2 - x1), yBottom - yTop - 10);
+          if (x2 - x1 > 42) {
+            context.fillStyle = '#165d68';
+            context.font = '11px "Segoe UI", sans-serif';
+            context.textAlign = 'center';
+            context.textBaseline = 'middle';
+            const value = row.labels && row.labels[pointIndex] != null
+              ? row.labels[pointIndex]
+              : row.values[pointIndex];
+            context.fillText(String(value).slice(0, 16), (x1 + x2) / 2, (yTop + yBottom) / 2);
+          }
+        });
+      } else {
+        let previousY = null;
+        visible.forEach((pointIndex, index) => {
+          const x1 = this.xForColumn(columns[pointIndex], width);
+          const nextPoint = visible[index + 1];
+          const x2 = nextPoint == null ? width : this.xForColumn(columns[nextPoint], width);
+          const state = String(row.values[pointIndex] || 'x').toLowerCase();
+          const y = state === '1'
+            ? yTop + 5
+            : (state === '0' ? yBottom - 5 : (yTop + yBottom) / 2);
+          context.strokeStyle = state === 'x' || state === 'z' ? '#6f7680' : color;
+          context.lineWidth = 1.7;
+          context.beginPath();
+          if (previousY != null && Math.abs(previousY - y) > 0.5) {
+            context.moveTo(x1, previousY);
+            context.lineTo(x1, y);
+          }
+          context.moveTo(x1, y);
+          context.lineTo(x2, y);
+          context.stroke();
+          previousY = y;
+          if (!index && x1 > 0) {
+            context.beginPath();
+            context.moveTo(0, y);
+            context.lineTo(x1, y);
+            context.stroke();
+          }
+        });
+      }
+      if (this.selectedPoint && this.selectedPoint.rowIndex === rowIndex) {
+        const pointIndex = this.selectedPoint.pointIndex;
+        const column = columns[pointIndex];
+        if (column >= this.viewStart && column <= this.viewEnd) {
+          const x = this.xForColumn(column, width);
+          context.fillStyle = '#ffffff';
+          context.strokeStyle = '#b3261e';
+          context.lineWidth = 2;
+          context.beginPath();
+          context.arc(x, (yTop + yBottom) / 2, 5, 0, Math.PI * 2);
+          context.fill();
+          context.stroke();
+        }
+      }
+    }
+
+    drawCursors(context, width, height) {
+      [
+        { name: 'A', column: this.cursorA, color: '#1f68d5' },
+        { name: 'B', column: this.cursorB, color: '#d93025' }
+      ].forEach((cursor) => {
+        if (cursor.column == null || cursor.column < this.viewStart || cursor.column > this.viewEnd) return;
+        const x = this.xForColumn(cursor.column, width);
+        context.strokeStyle = cursor.color;
+        context.lineWidth = 1.5;
+        context.beginPath();
+        context.moveTo(x, 0);
+        context.lineTo(x, height);
+        context.stroke();
+        context.fillStyle = cursor.color;
+        context.fillRect(x - 9, 0, 18, 17);
+        context.fillStyle = '#ffffff';
+        context.font = 'bold 11px "Segoe UI", sans-serif';
+        context.textAlign = 'center';
+        context.textBaseline = 'middle';
+        context.fillText(cursor.name, x, 8.5);
+      });
+    }
+
+    draw() {
+      if (!this.meta || !this.plotViewport.clientWidth) return;
+      this.drawAxis();
+      const resized = this.resizeCanvas(
+        this.plotCanvas,
+        this.plotViewport.clientWidth,
+        Math.max(1, this.plotViewport.clientHeight)
+      );
+      const context = resized.context;
+      const width = resized.width;
+      const height = resized.height;
+      this.drawGrid(context, width, height);
+      const scrollTop = this.plotViewport.scrollTop;
+      if (this.windowData) {
+        this.windowData.rows.forEach((rowResult) => {
+          const rowIndex = rowResult.index;
+          const rowTop = rowIndex * ROW_HEIGHT - scrollTop;
+          if (rowTop > height || rowTop + ROW_HEIGHT < 0) return;
+          const color = COLORS[rowIndex % COLORS.length];
+          context.strokeStyle = '#dfe2e6';
+          context.beginPath();
+          context.moveTo(0, rowTop + ROW_HEIGHT - 0.5);
+          context.lineTo(width, rowTop + ROW_HEIGHT - 0.5);
+          context.stroke();
+          context.fillStyle = '#777d86';
+          context.font = '10px "Segoe UI", sans-serif';
+          context.textAlign = 'left';
+          context.textBaseline = 'top';
+          context.fillText('原', 4, rowTop + 3);
+          context.fillText('简', 4, rowTop + ROW_HEIGHT / 2 + 3);
+          this.drawSegments(
+            context,
+            rowResult,
+            rowIndex,
+            rowTop + 2,
+            rowTop + ROW_HEIGHT / 2 - 2,
+            width,
+            color
+          );
+          this.drawSimplifiedRow(
+            context,
+            rowIndex,
+            rowTop + ROW_HEIGHT / 2 + 2,
+            rowTop + ROW_HEIGHT - 3,
+            width,
+            color
+          );
+        });
+      }
+      this.drawCursors(context, width, height);
+      this.drawOverview();
+    }
+
+    drawOverview() {
+      if (!this.meta || !this.overviewCanvas.clientWidth) return;
+      const resized = this.resizeCanvas(this.overviewCanvas, this.plotViewport.clientWidth, OVERVIEW_HEIGHT);
+      const context = resized.context;
+      const width = resized.width;
+      const height = resized.height;
+      context.clearRect(0, 0, width, height);
+      context.fillStyle = '#f8f9fa';
+      context.fillRect(0, 0, width, height);
+      const rows = this.simplified ? this.simplified.model.rows.slice(0, 8) : [];
+      rows.forEach((row, rowIndex) => {
+        const yTop = 5 + rowIndex * Math.max(6, (height - 10) / Math.max(1, rows.length));
+        const yBottom = yTop + Math.max(4, (height - 14) / Math.max(1, rows.length) - 2);
+        const color = COLORS[rowIndex % COLORS.length];
+        context.strokeStyle = color;
+        context.lineWidth = 1;
+        context.beginPath();
+        row.values.forEach((value, pointIndex) => {
+          const column = this.simplified.model.columns[pointIndex];
+          const x = column / Math.max(1, this.meta.totalColumns - 1) * width;
+          let y = (yTop + yBottom) / 2;
+          if (row.mode === 'digital') y = String(value) === '1' ? yTop : yBottom;
+          else if (row.mode === 'analog') {
+            const number = Number(value);
+            y = Number.isFinite(number) ? yBottom - clamp((number + 1) / 2, 0, 1) * (yBottom - yTop) : y;
+          }
+          if (!pointIndex) context.moveTo(x, y);
+          else context.lineTo(x, y);
+        });
+        context.stroke();
+      });
+      const x1 = this.viewStart / this.meta.totalColumns * width;
+      const x2 = this.viewEnd / this.meta.totalColumns * width;
+      context.fillStyle = 'rgba(31, 104, 213, 0.1)';
+      context.fillRect(x1, 0, Math.max(2, x2 - x1), height);
+      context.strokeStyle = '#1f68d5';
+      context.lineWidth = 1.5;
+      context.strokeRect(x1 + 0.5, 0.5, Math.max(1, x2 - x1 - 1), height - 1);
+    }
+
+    fit() {
+      this.viewStart = 0;
+      this.viewEnd = this.meta.totalColumns;
+      this.scheduleWindowRequest();
+      this.draw();
+    }
+
+    zoom(factor, anchorColumn) {
+      const span = this.viewEnd - this.viewStart;
+      const minimum = Math.min(1, this.meta.totalColumns);
+      const nextSpan = clamp(span * factor, minimum, this.meta.totalColumns);
+      const anchor = anchorColumn == null ? (this.viewStart + this.viewEnd) / 2 : anchorColumn;
+      const ratio = span > 0 ? (anchor - this.viewStart) / span : 0.5;
+      let start = anchor - nextSpan * ratio;
+      start = clamp(start, 0, Math.max(0, this.meta.totalColumns - nextSpan));
+      this.viewStart = start;
+      this.viewEnd = start + nextSpan;
+      this.scheduleWindowRequest();
+      this.draw();
+    }
+
+    pan(deltaColumns) {
+      const span = this.viewEnd - this.viewStart;
+      const start = clamp(
+        this.viewStart + deltaColumns,
+        0,
+        Math.max(0, this.meta.totalColumns - span)
+      );
+      this.viewStart = start;
+      this.viewEnd = start + span;
+      this.scheduleWindowRequest();
+      this.draw();
+    }
+
+    onPlotWheel(event) {
+      if (event.ctrlKey || event.metaKey) {
+        event.preventDefault();
+        const rect = this.plotCanvas.getBoundingClientRect();
+        const anchor = this.columnForX(event.clientX - rect.left, rect.width);
+        this.zoom(event.deltaY < 0 ? 0.8 : 1.25, anchor);
+        return;
+      }
+      if (event.shiftKey) {
+        event.preventDefault();
+        this.pan(event.deltaY / Math.max(1, this.plotCanvas.clientWidth) * (this.viewEnd - this.viewStart));
+      }
+    }
+
+    onPlotPointerDown(event) {
+      this.plotCanvas.focus({ preventScroll: true });
+      const rect = this.plotCanvas.getBoundingClientRect();
+      const x = event.clientX - rect.left;
+      const y = event.clientY - rect.top;
+      const column = this.columnForX(x, rect.width);
+      if (this.cursorMode) {
+        if (this.cursorNext === 'A') {
+          this.cursorA = column;
+          this.cursorNext = 'B';
+        } else {
+          this.cursorB = column;
+          this.cursorNext = 'A';
+        }
+        this.updateMeasurements();
+        this.draw();
+        return;
+      }
+      const absoluteY = y + this.plotViewport.scrollTop;
+      const rowIndex = clamp(Math.floor(absoluteY / ROW_HEIGHT), 0, this.meta.rows.length - 1);
+      const rowLocalY = absoluteY - rowIndex * ROW_HEIGHT;
+      if (this.simplified && rowLocalY >= ROW_HEIGHT / 2) {
+        this.selectNearestPoint(rowIndex, column);
+        return;
+      }
+      this.drag = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        viewStart: this.viewStart,
+        moved: false
+      };
+      this.plotCanvas.setPointerCapture(event.pointerId);
+    }
+
+    onPlotPointerMove(event) {
+      if (!this.drag || this.drag.pointerId !== event.pointerId) return;
+      const delta = event.clientX - this.drag.startX;
+      if (Math.abs(delta) > 3) this.drag.moved = true;
+      const span = this.viewEnd - this.viewStart;
+      const start = clamp(
+        this.drag.viewStart - delta / Math.max(1, this.plotCanvas.clientWidth) * span,
+        0,
+        Math.max(0, this.meta.totalColumns - span)
+      );
+      this.viewStart = start;
+      this.viewEnd = start + span;
+      this.scheduleWindowRequest();
+      this.draw();
+    }
+
+    onPlotPointerUp(event) {
+      if (!this.drag || this.drag.pointerId !== event.pointerId) return;
+      try { this.plotCanvas.releasePointerCapture(event.pointerId); } catch (_error) {}
+      this.drag = null;
+    }
+
+    onOverviewPointer(event) {
+      const rect = this.overviewCanvas.getBoundingClientRect();
+      const ratio = clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
+      const span = this.viewEnd - this.viewStart;
+      const center = ratio * this.meta.totalColumns;
+      const start = clamp(center - span / 2, 0, Math.max(0, this.meta.totalColumns - span));
+      this.viewStart = start;
+      this.viewEnd = start + span;
+      this.scheduleWindowRequest();
+      this.draw();
+    }
+
+    toggleCursorMode() {
+      this.cursorMode = !this.cursorMode;
+      this.cursorButton.classList.toggle('active', this.cursorMode);
+      this.cursorButton.textContent = this.cursorMode ? '退出游标测量' : '游标测量';
+      this.setStatus(this.cursorMode ? '游标测量：依次单击设置 A、B' : '已退出游标测量');
+    }
+
+    updateMeasurements() {
+      const aText = this.cursorA == null ? 'A：未设置' : 'A：' + this.formatTime(this.cursorA);
+      const bText = this.cursorB == null ? 'B：未设置' : 'B：' + this.formatTime(this.cursorB);
+      let deltaText = 'Δt：--';
+      let frequencyText = '';
+      if (this.cursorA != null && this.cursorB != null) {
+        const delta = Math.abs(this.cursorB - this.cursorA) * this.meta.samplePeriod;
+        deltaText = 'Δt：' + (Math.round(delta * 1000000) / 1000000) + ' ' + this.meta.timeUnit;
+        if (delta > 0) frequencyText = ' · 1/Δt：' + (Math.round(1000000 / delta) / 1000000);
+      }
+      this.measurementsEl.innerHTML = `
+        <span>${escapeHtml(aText)}</span>
+        <span>${escapeHtml(bText)}</span>
+        <strong>${escapeHtml(deltaText + frequencyText)}</strong>
+      `;
+    }
+
+    useCurrentViewRange() {
+      this.rangeStartInput.value = String(Math.max(1, Math.floor(this.viewStart) + 1));
+      this.rangeEndInput.value = String(Math.min(this.meta.totalColumns, Math.ceil(this.viewEnd)));
+      this.setStatus('简化范围已设为当前窗口');
+    }
+
+    getSimplifyOptions() {
+      const target = clamp(
+        Math.floor(Number(this.targetInput.value) || 100),
+        2,
+        Math.max(2, this.meta.totalColumns)
+      );
+      const start = clamp(
+        Math.floor(Number(this.rangeStartInput.value) || 1) - 1,
+        0,
+        this.meta.totalColumns - 1
+      );
+      const end = clamp(
+        Math.floor(Number(this.rangeEndInput.value) || this.meta.totalColumns),
+        start + 1,
+        this.meta.totalColumns
+      );
+      this.targetInput.value = String(target);
+      this.rangeStartInput.value = String(start + 1);
+      this.rangeEndInput.value = String(end);
+      return {
+        targetPoints: Math.min(target, Math.max(2, end - start)),
+        rangeStart: start,
+        rangeEnd: end,
+        method: this.methodSelect.value,
+        modes: this.modes,
+        lockedColumns: Array.from(this.lockedColumns),
+        outputTitle: this.outputTitleInput.value.trim() || (this.meta.title + ' - 展示实例'),
+        sourceWaveId: this.document.name,
+        sourceRevision: this.document.revision || 0
+      };
+    }
+
+    async runSimplify(recordHistory) {
+      if (!this.meta) return;
+      if (recordHistory && this.simplified) this.pushHistory();
+      this.setStatus('正在生成简化实例');
+      try {
+        const options = this.getSimplifyOptions();
+        const result = await this.worker.call('simplify', options);
+        this.simplified = result;
+        this.outputContent = result.content;
+        this.outputTitleInput.value = result.model.title;
+        this.selectedPoint = null;
+        this.updatePointEditor();
+        this.updateMetrics(result.metrics);
+        this.redoStack = [];
+        this.updateHistoryButtons();
+        this.draw();
+        this.setStatus('简化实例已生成，可单击下半行继续编辑');
+        this.log('scope-simplify', Object.assign({
+          phase: 'complete',
+          method: options.method
+        }, result.metrics));
+      } catch (error) {
+        this.setStatus('生成简化实例失败：' + (error.message || String(error)), true);
+        this.log('scope-simplify', { phase: 'error', message: error.message || String(error) });
+      }
+    }
+
+    updateMetrics(metrics) {
+      if (!metrics) {
+        this.metricsEl.textContent = '';
+        return;
+      }
+      const ratio = metrics.originalPoints
+        ? (100 * metrics.simplifiedPoints / metrics.originalPoints)
+        : 100;
+      const parts = [
+        '原始 ' + metrics.originalPoints + ' 点',
+        '简化 ' + metrics.simplifiedPoints + ' 点',
+        '保留 ' + (Math.round(ratio * 100) / 100) + '%'
+      ];
+      if (metrics.digitalTransitions != null) parts.push('数字跳变 ' + metrics.digitalTransitions);
+      if (metrics.busTransitions != null) parts.push('总线变化 ' + metrics.busTransitions);
+      if (metrics.analogMaxError != null) parts.push('模拟最大误差 ' + metrics.analogMaxError);
+      this.metricsEl.textContent = parts.join(' · ');
+    }
+
+    selectNearestPoint(rowIndex, column) {
+      const columns = this.simplified.model.columns;
+      if (!columns.length) return;
+      let low = 0;
+      let high = columns.length - 1;
+      while (low < high) {
+        const middle = Math.floor((low + high) / 2);
+        if (columns[middle] < column) low = middle + 1;
+        else high = middle;
+      }
+      let pointIndex = low;
+      if (pointIndex > 0
+          && Math.abs(columns[pointIndex - 1] - column) < Math.abs(columns[pointIndex] - column)) {
+        pointIndex -= 1;
+      }
+      this.selectedPoint = { rowIndex, pointIndex };
+      this.updatePointEditor();
+      this.draw();
+    }
+
+    updatePointEditor() {
+      const selected = this.selectedPoint;
+      const enabled = !!(selected && this.simplified);
+      [
+        this.pointValueInput,
+        this.pointLabelInput,
+        this.pointApplyButton,
+        this.pointInsertButton,
+        this.pointDeleteButton,
+        this.pointLockButton
+      ].forEach((element) => { element.disabled = !enabled; });
+      if (!enabled) {
+        this.pointPositionEl.textContent = '单击下半行的简化波形选择数据点';
+        this.pointValueInput.value = '';
+        this.pointLabelInput.value = '';
+        return;
+      }
+      const row = this.simplified.model.rows[selected.rowIndex];
+      const column = this.simplified.model.columns[selected.pointIndex];
+      this.pointPositionEl.textContent = row.name + ' · 第 ' + (selected.pointIndex + 1)
+        + ' 点 · 来源列 ' + (Math.round(column * 1000) / 1000 + 1);
+      this.pointValueInput.value = row.values[selected.pointIndex] == null
+        ? ''
+        : String(row.values[selected.pointIndex]);
+      this.pointLabelInput.value = row.labels && row.labels[selected.pointIndex] != null
+        ? String(row.labels[selected.pointIndex])
+        : '';
+      const locked = this.lockedColumns.has(column);
+      this.pointLockButton.classList.toggle('active', locked);
+      this.pointLockButton.textContent = locked ? '取消关键点' : '保留关键点';
+    }
+
+    snapshot() {
+      if (!this.simplified) return null;
+      return {
+        simplified: clone(this.simplified),
+        outputContent: this.outputContent,
+        modes: Object.assign({}, this.modes),
+        lockedColumns: Array.from(this.lockedColumns),
+        selectedPoint: this.selectedPoint ? Object.assign({}, this.selectedPoint) : null,
+        outputTitle: this.outputTitleInput.value
+      };
+    }
+
+    restoreSnapshot(snapshot) {
+      if (!snapshot) return;
+      this.simplified = clone(snapshot.simplified);
+      this.outputContent = snapshot.outputContent;
+      this.modes = Object.assign({}, snapshot.modes || this.modes);
+      this.lockedColumns = new Set(snapshot.lockedColumns || []);
+      this.selectedPoint = snapshot.selectedPoint ? Object.assign({}, snapshot.selectedPoint) : null;
+      this.outputTitleInput.value = snapshot.outputTitle || this.simplified.model.title;
+      const scrollTop = this.plotViewport.scrollTop;
+      this.renderSignalRows();
+      this.signalScroll.scrollTop = scrollTop;
+      this.updatePointEditor();
+      this.updateMetrics(this.simplified.metrics);
+      this.updateHistoryButtons();
+      this.scheduleWindowRequest();
+      this.draw();
+    }
+
+    pushHistory() {
+      const snapshot = this.snapshot();
+      if (!snapshot) return;
+      this.undoStack.push(snapshot);
+      if (this.undoStack.length > MAX_HISTORY) this.undoStack.shift();
+      this.redoStack = [];
+      this.updateHistoryButtons();
+    }
+
+    undo() {
+      if (!this.undoStack.length) return;
+      const current = this.snapshot();
+      if (current) this.redoStack.push(current);
+      this.restoreSnapshot(this.undoStack.pop());
+      this.setStatus('已撤销示波器编辑');
+    }
+
+    redo() {
+      if (!this.redoStack.length) return;
+      const current = this.snapshot();
+      if (current) this.undoStack.push(current);
+      this.restoreSnapshot(this.redoStack.pop());
+      this.setStatus('已重做示波器编辑');
+    }
+
+    updateHistoryButtons() {
+      this.undoButton.disabled = this.undoStack.length === 0;
+      this.redoButton.disabled = this.redoStack.length === 0;
+    }
+
+    applySelectedPoint() {
+      if (!this.selectedPoint || !this.simplified) return;
+      const selected = this.selectedPoint;
+      const row = this.simplified.model.rows[selected.rowIndex];
+      let value = this.pointValueInput.value;
+      if (row.mode === 'analog') {
+        const number = Number(value);
+        if (!Number.isFinite(number)) {
+          this.setStatus('模拟波形数值必须是有效数字', true);
+          return;
+        }
+        value = number;
+      } else if (row.mode === 'digital') {
+        value = String(value || '').trim().toLowerCase();
+        if (!/^[01xz]$/.test(value)) {
+          this.setStatus('数字波形只支持 0、1、x、z', true);
+          return;
+        }
+      }
+      this.pushHistory();
+      row.values[selected.pointIndex] = value;
+      if (row.mode === 'bus') {
+        row.labels = row.labels || [];
+        row.labels[selected.pointIndex] = this.pointLabelInput.value;
+        row.values[selected.pointIndex] = this.pointLabelInput.value || value;
+      }
+      this.scheduleBuild();
+      this.draw();
+      this.setStatus('简化点已修改');
+    }
+
+    insertSelectedPoint() {
+      if (!this.selectedPoint || !this.simplified) return;
+      this.pushHistory();
+      const pointIndex = this.selectedPoint.pointIndex;
+      const columns = this.simplified.model.columns;
+      const current = columns[pointIndex];
+      const next = pointIndex + 1 < columns.length ? columns[pointIndex + 1] : current + 1;
+      columns.splice(pointIndex + 1, 0, current + Math.max(0.001, (next - current) / 2));
+      this.simplified.model.rows.forEach((row) => {
+        row.values.splice(pointIndex + 1, 0, row.values[pointIndex]);
+        if (row.labels) row.labels.splice(pointIndex + 1, 0, row.labels[pointIndex] || '');
+      });
+      this.selectedPoint.pointIndex += 1;
+      this.scheduleBuild();
+      this.updatePointEditor();
+      this.draw();
+      this.setStatus('已插入简化点');
+    }
+
+    deleteSelectedPoint() {
+      if (!this.selectedPoint || !this.simplified) return;
+      const columns = this.simplified.model.columns;
+      if (columns.length <= 2) {
+        this.setStatus('简化实例至少需要保留两个点', true);
+        return;
+      }
+      this.pushHistory();
+      const pointIndex = this.selectedPoint.pointIndex;
+      const removedColumn = columns[pointIndex];
+      columns.splice(pointIndex, 1);
+      this.simplified.model.rows.forEach((row) => {
+        row.values.splice(pointIndex, 1);
+        if (row.labels) row.labels.splice(pointIndex, 1);
+      });
+      this.lockedColumns.delete(removedColumn);
+      this.selectedPoint.pointIndex = Math.min(pointIndex, columns.length - 1);
+      this.scheduleBuild();
+      this.updatePointEditor();
+      this.draw();
+      this.setStatus('已删除简化点');
+    }
+
+    toggleSelectedPointLock() {
+      if (!this.selectedPoint || !this.simplified) return;
+      const column = this.simplified.model.columns[this.selectedPoint.pointIndex];
+      if (this.lockedColumns.has(column)) this.lockedColumns.delete(column);
+      else this.lockedColumns.add(column);
+      this.updatePointEditor();
+      this.setStatus(this.lockedColumns.has(column) ? '关键点将在重新简化时保留' : '已取消关键点');
+    }
+
+    async rebuildOutput() {
+      if (!this.simplified) return;
+      const sequence = ++this.buildSequence;
+      try {
+        const options = this.getSimplifyOptions();
+        this.simplified.model.title = options.outputTitle;
+        const result = await this.worker.call('build', Object.assign({}, options, {
+          model: this.simplified.model
+        }));
+        if (sequence !== this.buildSequence) return;
+        this.outputContent = result.content;
+        this.simplified.content = result.content;
+        this.simplified.metrics = Object.assign({}, this.simplified.metrics, {
+          simplifiedPoints: this.simplified.model.columns.length
+        });
+        this.updateMetrics(this.simplified.metrics);
+      } catch (error) {
+        if (sequence !== this.buildSequence) return;
+        this.setStatus('构建展示实例失败：' + (error.message || String(error)), true);
+      }
+    }
+
+    async ensureOutputBuilt() {
+      if (!this.simplified) throw new Error('请先生成简化实例');
+      this.buildSequence += 1;
+      const options = this.getSimplifyOptions();
+      this.simplified.model.title = options.outputTitle;
+      const result = await this.worker.call('build', Object.assign({}, options, {
+        model: this.simplified.model
+      }));
+      this.outputContent = result.content;
+      this.simplified.content = result.content;
+      return result.content;
+    }
+
+    async saveInstance() {
+      try {
+        this.setStatus('正在保存展示实例');
+        const content = await this.ensureOutputBuilt();
+        const title = this.outputTitleInput.value.trim() || (this.meta.title + ' - 展示实例');
+        const saved = await this.adapter.saveInstance({
+          sourceWaveId: this.document.name,
+          title,
+          content,
+          metrics: this.simplified.metrics,
+          columns: this.simplified.model.columns
+        });
+        this.setStatus('展示实例已保存：' + (saved.title || title));
+        this.log('scope-save', {
+          phase: 'instance-saved',
+          sourceWaveId: this.document.name,
+          waveId: saved.name
+        });
+      } catch (error) {
+        this.setStatus('保存展示实例失败：' + (error.message || String(error)), true);
+        this.log('scope-save', { phase: 'instance-error', message: error.message || String(error) });
+      }
+    }
+
+    async overwriteSource() {
+      if (!global.confirm('覆盖会用当前简化结果替换原波形。确认继续吗？')) return;
+      try {
+        this.setStatus('正在覆盖原波形');
+        const content = await this.ensureOutputBuilt();
+        const saved = await this.adapter.saveSource({ content });
+        this.document = saved;
+        this.meta = await this.worker.call('prepare', { content: saved.content });
+        this.modes = {};
+        this.meta.rows.forEach((row) => {
+          this.modes[row.index] = row.mode;
+        });
+        this.viewStart = 0;
+        this.viewEnd = this.meta.totalColumns;
+        this.renderSignalRows();
+        this.updateLayout();
+        await this.requestWindow();
+        this.setStatus('原波形已被简化结果覆盖');
+      } catch (error) {
+        this.setStatus('覆盖原波形失败：' + (error.message || String(error)), true);
+      }
+    }
+  }
+
+  async function mount(adapter) {
+    const view = new ScopeView(adapter || {});
+    try {
+      await view.mount();
+      global.__visualWaveDromScopeView = view;
+      return view;
+    } catch (error) {
+      document.body.classList.add('scope-wave-view');
+      const root = document.getElementById('scope-app') || document.body;
+      const failure = document.createElement('div');
+      failure.className = 'scope-fatal-error';
+      failure.textContent = '示波器窗口加载失败：' + (error.message || String(error));
+      root.appendChild(failure);
+      if (adapter && typeof adapter.log === 'function') {
+        adapter.log('scope-view', { phase: 'fatal', message: error.message || String(error) });
+      }
+      throw error;
+    }
+  }
+
+  global.VisualWaveDromScope = { mount };
+})(window);

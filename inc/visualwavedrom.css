@@ -1195,6 +1195,20 @@
       white-space: nowrap;
     }
 
+    .wave-document-scope {
+      min-width: 54px;
+      height: 26px;
+      flex: 0 0 auto;
+      padding: 0 8px;
+      border: 1px solid #9bc8ae;
+      border-radius: 4px;
+      background: #f5fbf7;
+      color: #176b3a;
+      cursor: pointer;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
     .wave-document-delete {
       width: 26px;
       height: 26px;
@@ -1213,7 +1227,8 @@
     }
 
     .wave-document-open:hover,
-    .wave-document-open-single:hover {
+    .wave-document-open-single:hover,
+    .wave-document-scope:hover {
       border-color: #3b82f6;
       color: #1d4ed8;
     }
@@ -1757,6 +1772,169 @@
 
     .row-import-scheme-hint.is-info {
       color: var(--text-muted);
+    }
+
+    .row-import-dialog {
+      width: min(100%, 880px);
+      max-height: calc(100vh - 32px);
+      display: flex;
+      flex-direction: column;
+    }
+
+    .row-import-body {
+      min-height: 0;
+      overflow-y: auto;
+    }
+
+    .row-import-file-row,
+    .row-import-preview-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .row-import-file-text {
+      min-width: 0;
+      display: grid;
+      gap: 3px;
+    }
+
+    .row-import-file-text strong,
+    .row-import-file-text span {
+      overflow-wrap: anywhere;
+    }
+
+    .row-import-file-text strong {
+      font-size: 0.86rem;
+    }
+
+    .row-import-file-text span,
+    .row-import-preview-header span {
+      color: var(--text-muted);
+      font-size: 0.72rem;
+    }
+
+    .row-import-section {
+      display: grid;
+      gap: 6px;
+    }
+
+    .row-import-section-title,
+    .row-import-signal-field > span {
+      color: var(--text);
+      font-size: 0.78rem;
+      font-weight: 600;
+    }
+
+    .row-import-sample {
+      min-height: 74px;
+      max-height: 132px;
+      margin: 0;
+      padding: 8px 10px;
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      background: var(--surface-2);
+      color: var(--text);
+      font: 0.75rem/1.5 Consolas, "Courier New", monospace;
+      white-space: pre;
+      tab-size: 4;
+    }
+
+    .row-import-analysis {
+      min-height: 1.2em;
+      padding-left: 8px;
+      border-left: 3px solid var(--accent);
+      color: var(--text-muted);
+      font-size: 0.75rem;
+      line-height: 1.5;
+    }
+
+    .row-import-signal-field {
+      display: grid;
+      grid-template-columns: minmax(110px, auto) minmax(180px, 1fr);
+      align-items: center;
+      gap: 10px;
+    }
+
+    .row-import-dialog .nav-move-options {
+      max-height: min(28vh, 220px);
+    }
+
+    .row-import-scheme-option.selected {
+      border-color: var(--accent);
+      background: rgba(37, 99, 235, 0.1);
+      box-shadow: inset 3px 0 0 var(--accent);
+    }
+
+    .row-import-scheme-option .row-import-scheme-title-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .row-import-scheme-option .row-import-recommended-badge {
+      width: auto;
+      display: inline-flex;
+      flex: none;
+      padding: 2px 6px;
+      border-radius: 4px;
+      background: var(--accent);
+      color: #fff;
+      font-size: 0.68rem;
+      font-weight: 600;
+    }
+
+    .row-import-preview-shell {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+
+    .row-import-preview-shell[hidden] {
+      display: none;
+    }
+
+    .row-import-preview-header {
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface-2);
+    }
+
+    .row-import-preview-header strong {
+      font-size: 0.78rem;
+    }
+
+    .row-import-preview {
+      min-height: 132px;
+      max-height: 310px;
+      padding: 10px;
+      overflow: auto;
+      background: var(--surface);
+    }
+
+    .row-import-preview > div {
+      width: max-content;
+      min-width: 100%;
+    }
+
+    .row-import-preview svg {
+      display: block;
+      max-width: none;
+    }
+
+    @media (max-width: 620px) {
+      .row-import-file-row {
+        align-items: stretch;
+        flex-direction: column;
+      }
+
+      .row-import-signal-field {
+        grid-template-columns: 1fr;
+        gap: 6px;
+      }
     }
 
     .modal-empty-state {

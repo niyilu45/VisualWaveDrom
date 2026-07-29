@@ -21,6 +21,8 @@ const importSchemeDir = path.join(importRootDir, 'Scheme');
 const importFileProcPath = path.join(importRootDir, 'inc', 'fileProc.py');
 const importMaxOutputBytes = 64 * 1024 * 1024;
 const importMaxWaveColumns = 10 * 1000 * 1000;
+const importMaxUploadBytes = 128 * 1024 * 1024;
+const importSampleLineLimit = 5;
 const defaultHtmlName = `${path.basename(__filename, '.js')}.html`;
 const configuredHtmlName = commandLineOption('--html') || defaultHtmlName;
 const htmlName = path.basename(configuredHtmlName);
@@ -259,6 +261,37 @@ function readRequestBody(req, maxBytes) {
     });
     req.on('end', () => resolve(body));
     req.on('error', reject);
+  });
+}
+
+function readRequestBuffer(req, maxBytes) {
+  return new Promise((resolve, reject) => {
+    const declaredLength = Number(req.headers['content-length'] || 0);
+    if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+      reject(new Error('Uploaded waveform data file is too large'));
+      return;
+    }
+    const chunks = [];
+    let totalBytes = 0;
+    let settled = false;
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      if (error) reject(error);
+      else resolve(value);
+    };
+    req.on('data', (part) => {
+      const chunk = Buffer.isBuffer(part) ? part : Buffer.from(part);
+      totalBytes += chunk.length;
+      if (totalBytes > maxBytes) {
+        finish(new Error('Uploaded waveform data file is too large'));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => finish(null, Buffer.concat(chunks, totalBytes)));
+    req.on('error', (error) => finish(error));
   });
 }
 
@@ -710,10 +743,12 @@ function publicImportScheme(scheme) {
     version: scheme.version,
     name: scheme.name,
     description: scheme.description,
-    mappings: scheme.mappings.map((mapping) => ({
+    mappings: scheme.mappings.map((mapping, mappingIndex) => ({
+      mappingIndex,
       file: mapping.displayPath,
       signal: mapping.signal,
-      parser: mapping.parser
+      parser: mapping.parser,
+      options: Object.assign({}, mapping.options)
     }))
   };
 }
@@ -733,6 +768,198 @@ function listImportSchemes() {
       }
     });
   return { schemes, invalid };
+}
+
+function countDelimitedColumns(line, delimiter) {
+  if (!delimiter) return 1;
+  let count = 1;
+  let quoted = false;
+  for (let index = 0; index < line.length; index++) {
+    const char = line[index];
+    if (char === '"') {
+      if (quoted && line[index + 1] === '"') index += 1;
+      else quoted = !quoted;
+    } else if (!quoted && char === delimiter) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+function splitImportSampleColumns(line, delimiterKind) {
+  const text = String(line || '').trim();
+  if (delimiterKind === 'tab') return text.split('\t').map((value) => value.trim());
+  if (delimiterKind === 'comma') {
+    const columns = [];
+    let value = '';
+    let quoted = false;
+    for (let index = 0; index < text.length; index++) {
+      const char = text[index];
+      if (char === '"') {
+        if (quoted && text[index + 1] === '"') {
+          value += '"';
+          index += 1;
+        } else {
+          quoted = !quoted;
+        }
+      } else if (!quoted && char === ',') {
+        columns.push(value.trim());
+        value = '';
+      } else {
+        value += char;
+      }
+    }
+    columns.push(value.trim());
+    return columns;
+  }
+  if (delimiterKind === 'whitespace') return text.split(/\s+/);
+  return [text];
+}
+
+function normalizeImportSampleLines(payload) {
+  const supplied = payload && Array.isArray(payload.sampleLines)
+    ? payload.sampleLines
+    : String(payload && payload.sampleText || '').split(/\r?\n/);
+  return supplied
+    .slice(0, importSampleLineLimit)
+    .map((line) => String(line == null ? '' : line).slice(0, 4096));
+}
+
+function analyzeImportSample(fileName, suppliedLines) {
+  const firstLines = suppliedLines.slice(0, importSampleLineLimit);
+  const meaningfulLines = firstLines
+    .map((line) => String(line || '').trim())
+    .filter((line) => line && !line.startsWith('#') && !line.startsWith('//'));
+  if (!meaningfulLines.length) {
+    return {
+      firstLines,
+      meaningfulLineCount: 0,
+      delimiter: 'unknown',
+      delimiterLabel: '无法判断',
+      columnCount: 0,
+      explicitIndex: false,
+      headerLikely: false,
+      recommendedParser: 'parse_index_data',
+      reason: '前 5 行没有可分析的数据，建议先尝试通用序号/数据解析函数'
+    };
+  }
+
+  const extension = path.extname(String(fileName || '')).toLowerCase();
+  const tabColumns = meaningfulLines.map((line) => countDelimitedColumns(line, '\t'));
+  const commaColumns = meaningfulLines.map((line) => countDelimitedColumns(line, ','));
+  let delimiter = 'single';
+  if (tabColumns.some((count) => count > 1)
+      && tabColumns.filter((count) => count > 1).length
+        >= commaColumns.filter((count) => count > 1).length) {
+    delimiter = 'tab';
+  } else if (commaColumns.some((count) => count > 1)) {
+    delimiter = 'comma';
+  } else if (meaningfulLines.some((line) => /\s+/.test(line.trim()))) {
+    delimiter = 'whitespace';
+  } else if (extension === '.csv') {
+    delimiter = 'comma';
+  } else if (extension === '.tsv') {
+    delimiter = 'tab';
+  }
+
+  const rows = meaningfulLines.map((line) => splitImportSampleColumns(line, delimiter));
+  const columnCount = rows.reduce((maximum, columns) => Math.max(maximum, columns.length), 0);
+  const isIndex = (value) => /^\+?\d+$/.test(String(value || '').trim());
+  const headerLikely = rows.length > 1
+    && rows[0].length > 1
+    && !isIndex(rows[0][0])
+    && rows.slice(1).every((columns) => columns.length > 1 && isIndex(columns[0]));
+  const dataRows = headerLikely ? rows.slice(1) : rows;
+  let previousIndex = -1;
+  const explicitIndex = columnCount > 1
+    && dataRows.length > 0
+    && dataRows.every((columns) => {
+      if (columns.length < 2 || !isIndex(columns[0])) return false;
+      const index = Number(columns[0]);
+      if (index <= previousIndex) return false;
+      previousIndex = index;
+      return true;
+    });
+
+  let recommendedParser = 'parse_index_data';
+  if (columnCount <= 1) recommendedParser = 'parse_single_column';
+  else if (delimiter === 'comma') recommendedParser = 'parse_csv_index_data';
+  else if (delimiter === 'tab') recommendedParser = 'parse_tsv_index_data';
+
+  const delimiterLabels = {
+    single: '单列',
+    comma: '逗号分隔',
+    tab: 'Tab 分隔',
+    whitespace: '空白分隔'
+  };
+  const details = [
+    delimiterLabels[delimiter] || '未知格式',
+    columnCount + ' 列'
+  ];
+  if (explicitIndex) details.push('第一列为递增序号');
+  else if (columnCount > 1) details.push('第一列未完全匹配递增序号');
+  if (headerLikely) details.push('首行可能是表头');
+
+  return {
+    firstLines,
+    meaningfulLineCount: meaningfulLines.length,
+    delimiter,
+    delimiterLabel: delimiterLabels[delimiter] || '未知格式',
+    columnCount,
+    explicitIndex,
+    headerLikely,
+    recommendedParser,
+    reason: '检测到' + details.join('，') + '，建议使用 ' + recommendedParser
+  };
+}
+
+function importParserCompatibilityScore(parser, analysis) {
+  if (parser === analysis.recommendedParser) return 100;
+  if (parser === 'parse_index_data') return 75;
+  if (analysis.recommendedParser === 'parse_index_data'
+      && (parser === 'parse_csv_index_data' || parser === 'parse_tsv_index_data')) {
+    return 45;
+  }
+  return 10;
+}
+
+function recommendImportScheme(schemes, analysis) {
+  let recommended = null;
+  schemes.forEach((scheme) => {
+    (scheme.mappings || []).forEach((mapping, mappingIndex) => {
+      let score = importParserCompatibilityScore(mapping.parser, analysis);
+      const options = mapping.options || {};
+      if (analysis.headerLikely && Number(options.skipRows || 0) > 0) score += 8;
+      if (analysis.delimiter === 'comma' && options.delimiter === 'comma') score += 5;
+      if (analysis.delimiter === 'tab' && options.delimiter === 'tab') score += 5;
+      if (!recommended || score > recommended.score) {
+        recommended = {
+          schemeId: scheme.id,
+          schemeName: scheme.name,
+          mappingIndex: Number.isInteger(mapping.mappingIndex)
+            ? mapping.mappingIndex
+            : mappingIndex,
+          parser: mapping.parser,
+          score
+        };
+      }
+    });
+  });
+  return recommended;
+}
+
+function analyzeImportFileRequest(payload) {
+  const catalog = listImportSchemes();
+  const analysis = analyzeImportSample(
+    String(payload && payload.fileName || ''),
+    normalizeImportSampleLines(payload)
+  );
+  return {
+    analysis,
+    recommended: recommendImportScheme(catalog.schemes, analysis),
+    schemes: catalog.schemes,
+    invalid: catalog.invalid
+  };
 }
 
 function runImportParser(mapping, runtime) {
@@ -830,7 +1057,9 @@ async function runImportScheme(schemeId) {
       pointCount: Number(result.pointCount || 0),
       firstIndex: Number(result.firstIndex || 0),
       lastIndex: Number(result.lastIndex || 0),
-      explicitIndex: !!result.explicitIndex
+      explicitIndex: !!result.explicitIndex,
+      sampleKind: String(result.sampleKind || ''),
+      samples: Array.isArray(result.samples) ? result.samples : []
     });
   }
   return {
@@ -838,6 +1067,90 @@ async function runImportScheme(schemeId) {
     pythonVersion: runtime.version,
     updates
   };
+}
+
+function safeUploadedImportName(fileName) {
+  const baseName = path.basename(String(fileName || 'waveform-data.txt'))
+    .replace(/[\u0000-\u001f<>:"/\\|?*]/g, '_')
+    .slice(0, 180);
+  return baseName && baseName !== '.' && baseName !== '..'
+    ? baseName
+    : 'waveform-data.txt';
+}
+
+function normalizeImportedSignalName(value) {
+  const signalName = String(value || '').trim();
+  if (!signalName) throw new Error('Signal name is required');
+  if (signalName.length > 256 || /[\u0000-\u001f]/.test(signalName)) {
+    throw new Error('Signal name is invalid');
+  }
+  return signalName;
+}
+
+async function runUploadedImport(options, fileBuffer) {
+  const runtime = getPythonRuntimeInfo();
+  if (!runtime.available) throw new Error(runtime.error);
+  if (!Buffer.isBuffer(fileBuffer) || fileBuffer.length === 0) {
+    throw new Error('Uploaded waveform data file is empty');
+  }
+  const scheme = loadImportScheme(options && options.schemeId);
+  const mappingIndex = Number(options && options.mappingIndex);
+  if (!Number.isInteger(mappingIndex)
+      || mappingIndex < 0
+      || mappingIndex >= scheme.mappings.length) {
+    throw new Error('Invalid import scheme mapping');
+  }
+  const signalName = normalizeImportedSignalName(options && options.signalName);
+  const uploadedFileName = safeUploadedImportName(options && options.fileName);
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'visualwavedrom-import-'));
+  const temporaryFilePath = path.join(temporaryDirectory, uploadedFileName);
+  try {
+    fs.writeFileSync(temporaryFilePath, fileBuffer);
+    const sourceMapping = scheme.mappings[mappingIndex];
+    const sampleText = fileBuffer.subarray(0, Math.min(fileBuffer.length, 64 * 1024))
+      .toString('utf8');
+    const analysis = analyzeImportSample(
+      uploadedFileName,
+      sampleText.split(/\r?\n/).slice(0, importSampleLineLimit)
+    );
+    const effectiveOptions = Object.assign({}, sourceMapping.options);
+    if (analysis.headerLikely
+        && !Object.prototype.hasOwnProperty.call(effectiveOptions, 'skipRows')) {
+      effectiveOptions.skipRows = 1;
+    }
+    const result = await runImportParser(Object.assign({}, sourceMapping, {
+      sourcePath: temporaryFilePath,
+      displayPath: uploadedFileName,
+      options: effectiveOptions
+    }), runtime);
+    return {
+      scheme: publicImportScheme(scheme),
+      mappingIndex,
+      parser: sourceMapping.parser,
+      pythonVersion: runtime.version,
+      analysis,
+      updates: [{
+        signal: signalName,
+        wave: result.wave,
+        data: result.data,
+        sourceFile: uploadedFileName,
+        parser: sourceMapping.parser,
+        pointCount: Number(result.pointCount || 0),
+        firstIndex: Number(result.firstIndex || 0),
+        lastIndex: Number(result.lastIndex || 0),
+        explicitIndex: !!result.explicitIndex,
+        sampleKind: String(result.sampleKind || ''),
+        samples: Array.isArray(result.samples) ? result.samples : [],
+        createIfMissing: true
+      }]
+    };
+  } finally {
+    try {
+      fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+    } catch (_error) {
+      // Temporary upload cleanup is best effort.
+    }
+  }
 }
 
 function serveStatic(req, res, pathname) {
@@ -920,6 +1233,30 @@ const server = http.createServer(async (req, res) => {
           error: python.error || ''
         }
       });
+      return;
+    }
+    if (url.pathname === '/api/import-wave-analyze' && req.method === 'POST') {
+      const payload = JSON.parse(await readRequestBody(req, 64 * 1024));
+      const python = getPythonRuntimeInfo();
+      sendJson(res, 200, Object.assign({
+        ok: true,
+        python: {
+          available: python.available,
+          version: python.version || '',
+          error: python.error || ''
+        }
+      }, analyzeImportFileRequest(payload)));
+      return;
+    }
+    if (url.pathname === '/api/import-wave-preview' && req.method === 'POST') {
+      const fileBuffer = await readRequestBuffer(req, importMaxUploadBytes);
+      const result = await runUploadedImport({
+        schemeId: url.searchParams.get('schemeId'),
+        mappingIndex: url.searchParams.get('mappingIndex'),
+        signalName: url.searchParams.get('signalName'),
+        fileName: url.searchParams.get('fileName')
+      }, fileBuffer);
+      sendJson(res, 200, Object.assign({ ok: true }, result));
       return;
     }
     if (url.pathname === '/api/import-wave-row' && req.method === 'POST') {

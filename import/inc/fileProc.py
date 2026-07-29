@@ -250,23 +250,45 @@ def complete_previous_value(parsed_signal, options=None):
 
     wave_parts = []
     data_values = []
+    numeric_values = []
+    all_numeric = True
+    for point in points:
+        try:
+            number = float(point["value"])
+            if number != number or number in (float("inf"), float("-inf")):
+                raise ValueError("non-finite number")
+            if number.is_integer():
+                number = int(number)
+            numeric_values.append(number)
+        except (TypeError, ValueError):
+            all_numeric = False
+            numeric_values = []
+            break
+
+    samples = []
     cursor = 0
     has_previous_value = False
-    for point in points:
+    previous_numeric_value = None
+    for point_number, point in enumerate(points):
         index = point["index"]
         while cursor < index:
             wave_parts.append(fill_gap if has_previous_value else fill_leading)
+            if all_numeric:
+                samples.append(previous_numeric_value if has_previous_value else None)
             cursor += 1
         wave_symbol, data_label = _normalize_value(point["value"], opts)
         wave_parts.append(wave_symbol)
         if wave_symbol in DATA_SYMBOLS:
             data_values.append(data_label)
+        if all_numeric:
+            previous_numeric_value = numeric_values[point_number]
+            samples.append(previous_numeric_value)
         cursor = index + 1
         has_previous_value = True
 
     if not any(value != "" for value in data_values):
         data_values = []
-    return {
+    result = {
         "wave": "".join(wave_parts),
         "data": data_values,
         "pointCount": len(points),
@@ -274,6 +296,23 @@ def complete_previous_value(parsed_signal, options=None):
         "lastIndex": points[-1]["index"],
         "explicitIndex": bool(parsed_signal.get("explicitIndex"))
     }
+    if all_numeric:
+        numeric_states = set(value for value in numeric_values)
+        result["samples"] = samples
+        result["sampleKind"] = (
+            "digital"
+            if numeric_states.issubset(set([0, 1]))
+            and str(opts.get("valueMode") or "auto").lower() != "data"
+            else "analog"
+        )
+    else:
+        symbols_only = all(
+            len(str(point["value"])) == 1
+            and str(point["value"]) in WAVE_SYMBOLS
+            for point in points
+        )
+        result["sampleKind"] = "digital" if symbols_only else "bus"
+    return result
 
 
 FILE_PARSERS = {

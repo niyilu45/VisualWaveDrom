@@ -7,7 +7,8 @@
   <script src="inc/skins/default.js?v=20260712"></script>
   <script src="inc/wavedrom.min.js?v=20260712"></script>
   <link rel="stylesheet" href="inc/codemirror.css?v=5.65.21">
-  <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260729-json-bigdata-v5">
+  <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260730-scope-v3">
+  <link rel="stylesheet" href="inc/visualwavedrom-scope.css?v=20260730-scope-v3">
 </head>
 <body>
   <div class="app" id="app">
@@ -72,6 +73,14 @@
         <button class="menu-btn" id="btn-save-wave-library" type="button" title="保存完整 SQLite 波形库文件">
           <span id="save-wave-library-label">保存波形库</span>
         </button>
+        <button class="menu-btn" id="btn-import-wave-data" type="button" title="按 import/Scheme 中的预设方案导入一个或多个信号行">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path d="M12 3v12"/>
+            <polyline points="7 10 12 15 17 10"/>
+            <path d="M5 21h14"/>
+          </svg>
+          <span>导入波形数据</span>
+        </button>
         <button class="menu-btn column-number-btn" id="btn-column-number" type="button"
           aria-pressed="false" data-mode="off"
           title="添加列号：点击使用 tick，再次点击切换为 tock">
@@ -85,6 +94,9 @@
           <span class="shortcut" id="column-number-state">Off</span>
         </button>
         <input type="file" id="wave-library-import-input" accept=".sqlite,application/vnd.sqlite3" hidden>
+        <input type="file" id="row-import-file-input"
+          accept=".txt,.csv,.tsv,.dat,.log,text/plain,text/csv,text/tab-separated-values"
+          hidden>
         <button class="menu-btn" id="btn-reading-mode" title="阅读模式">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
@@ -560,14 +572,43 @@
   </div>
 
   <div class="modal-overlay" id="row-import-scheme-modal" hidden>
-    <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="row-import-scheme-title">
-      <div class="modal-header" id="row-import-scheme-title">选择行波形导入方案</div>
-      <div class="modal-body">
+    <div class="modal-dialog row-import-dialog" role="dialog" aria-modal="true" aria-labelledby="row-import-scheme-title">
+      <div class="modal-header" id="row-import-scheme-title">导入波形数据</div>
+      <div class="modal-body row-import-body">
+        <div class="row-import-file-row">
+          <div class="row-import-file-text">
+            <strong id="row-import-file-name">尚未选择文件</strong>
+            <span id="row-import-file-meta"></span>
+          </div>
+          <button type="button" class="modal-btn" id="row-import-change-file">重新选择</button>
+        </div>
+        <div class="row-import-section">
+          <div class="row-import-section-title">文件前 5 行</div>
+          <pre class="row-import-sample" id="row-import-sample"></pre>
+          <div class="row-import-analysis" id="row-import-analysis" aria-live="polite"></div>
+        </div>
+        <label class="row-import-signal-field" for="row-import-signal-name">
+          <span>导入后的信号名</span>
+          <input type="text" class="modal-input" id="row-import-signal-name"
+            maxlength="256" autocomplete="off" placeholder="请输入信号名">
+        </label>
+        <div class="row-import-section">
+          <div class="row-import-section-title">选择文件处理预设</div>
+        </div>
         <div class="nav-move-options" id="row-import-scheme-options"></div>
+        <div class="row-import-preview-shell" id="row-import-preview-shell" hidden>
+          <div class="row-import-preview-header">
+            <strong>波形效果预览</strong>
+            <span id="row-import-preview-summary"></span>
+          </div>
+          <div class="row-import-preview" id="row-import-preview"></div>
+        </div>
         <div class="modal-hint row-import-scheme-hint" id="row-import-scheme-hint" aria-live="polite"></div>
       </div>
       <div class="modal-footer">
         <button type="button" class="modal-btn" id="row-import-scheme-cancel">取消</button>
+        <button type="button" class="modal-btn" id="row-import-preview-button" disabled>生成预览</button>
+        <button type="button" class="modal-btn modal-btn-primary" id="row-import-confirm-button" disabled>确认导入</button>
       </div>
     </div>
   </div>
@@ -598,6 +639,8 @@
     <script src="inc/visualwavedrom-vim.js?v=20260724-vim-insert-delete-v1"></script>
     <script src="inc/visualwavedrom-bigdata.js?v=20260729-bigdata-v1"></script>
     <script src="inc/visualwavedrom-json-bigdata.js?v=20260729-json-bigdata-v5"></script>
-    <script src="inc/visualwavedrom-app.js?v=20260729-json-bigdata-v5"></script>
+    <script src="inc/visualwavedrom-scope-worker.js?v=20260730-scope-v3"></script>
+    <script src="inc/visualwavedrom-scope.js?v=20260730-scope-v3"></script>
+    <script src="inc/visualwavedrom-app.js?v=20260730-scope-v3"></script>
 </body>
 </html>

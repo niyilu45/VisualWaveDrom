@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "name": "单列数据导入",
+  "description": "适用于只有数据值、没有显式序号的文件；程序按文件行顺序从第 0 列开始编号。",
+  "mappings": [
+    {
+      "file": "Data/single-column-signal.txt",
+      "signal": "signal",
+      "parser": "parse_single_column",
+      "options": {
+        "encoding": "utf-8-sig"
+      }
+    }
+  ]
+}
