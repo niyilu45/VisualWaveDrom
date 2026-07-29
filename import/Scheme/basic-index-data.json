@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "name": "基础序号数据导入",
+  "description": "将示例文件导入到名称为 signal 的信号行；起始缺口补 x，中间缺口延续上一个值。",
+  "mappings": [
+    {
+      "file": "Data/basic-signal.txt",
+      "signal": "signal",
+      "parser": "parse_index_data",
+      "options": {
+        "delimiter": "auto",
+        "encoding": "utf-8-sig"
+      }
+    }
+  ]
+}

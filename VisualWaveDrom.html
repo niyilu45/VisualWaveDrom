@@ -7,7 +7,7 @@
   <script src="inc/skins/default.js?v=20260712"></script>
   <script src="inc/wavedrom.min.js?v=20260712"></script>
   <link rel="stylesheet" href="inc/codemirror.css?v=5.65.21">
-  <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260723-edge-label-v1">
+  <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260729-json-bigdata-v5">
 </head>
 <body>
   <div class="app" id="app">
@@ -160,6 +160,14 @@
             </svg>
             复制行
           </button>
+          <button class="menu-btn wave-copy-signal-btn" id="btn-import-wave-row" type="button" title="按 import/Scheme 中的预设方案导入一个或多个信号行">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path d="M12 3v12"/>
+              <polyline points="7 10 12 15 17 10"/>
+              <path d="M5 21h14"/>
+            </svg>
+            导入行波形
+          </button>
         </div>
         <div class="wave-selection-clipboard-row">
           <button class="menu-btn wave-selection-clipboard-btn" id="btn-copy-wave-selection" type="button" disabled aria-keyshortcuts="Control+C Meta+C" title="请先点击或拖动选择波形格 (Ctrl+C)">
@@ -300,8 +308,29 @@
 
       <div class="editor-panel" id="editor-panel">
         <div class="editor-header">
-          <span>WaveDrom JSON</span>
+          <div class="editor-heading">
+            <span>WaveDrom JSON</span>
+            <span class="json-view-info" id="json-view-info">完整</span>
+          </div>
           <div class="editor-header-actions">
+            <div class="json-view-switch" role="group" aria-label="JSON 显示范围">
+              <button type="button" class="json-view-btn" id="btn-json-view-summary" data-json-view-mode="summary" title="仅显示波形摘要">摘要</button>
+              <button type="button" class="json-view-btn" id="btn-json-view-window" data-json-view-mode="window" title="显示并编辑当前可见列">窗口</button>
+              <button type="button" class="json-view-btn active" id="btn-json-view-full" data-json-view-mode="full" title="显示完整 JSON">完整</button>
+            </div>
+            <button type="button" class="editor-copy-btn json-window-apply-btn" id="btn-apply-json-window" title="将窗口 JSON 修改合并到完整波形" hidden disabled>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                <polyline points="20 6 9 17 4 12"/>
+              </svg>
+              <span>应用窗口</span>
+            </button>
+            <button type="button" class="editor-copy-btn" id="btn-unlock-json-full" title="允许编辑完整的大型 JSON" hidden>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                <rect x="3" y="11" width="18" height="10" rx="2"/>
+                <path d="M7 11V7a5 5 0 0 1 9.9-1"/>
+              </svg>
+              <span id="json-full-edit-label">编辑完整 JSON</span>
+            </button>
             <button type="button" class="editor-copy-btn" id="btn-format-json" title="格式化并对齐当前 JSON">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                 <line x1="8" y1="6" x2="21" y2="6"/>
@@ -320,6 +349,23 @@
                 <line x1="12" y1="3" x2="12" y2="15"/>
               </svg>
               <span>导出</span>
+            </button>
+            <button type="button" class="editor-copy-btn" id="btn-json-compact-mode" title="开启 JSON 紧凑模式" aria-pressed="false">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                <line x1="4" y1="7" x2="20" y2="7"/>
+                <line x1="4" y1="12" x2="20" y2="12"/>
+                <line x1="4" y1="17" x2="20" y2="17"/>
+              </svg>
+              <span>紧凑</span>
+            </button>
+            <button type="button" class="editor-copy-btn" id="btn-json-fullscreen" title="全屏显示 WaveDrom JSON" aria-pressed="false">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                <polyline points="8 3 3 3 3 8"/>
+                <polyline points="16 3 21 3 21 8"/>
+                <polyline points="21 16 21 21 16 21"/>
+                <polyline points="3 16 3 21 8 21"/>
+              </svg>
+              <span id="json-fullscreen-label">全屏</span>
             </button>
             <button type="button" class="editor-copy-btn" id="btn-hide-json-panel" title="隐藏 WaveDrom JSON 窗口">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
@@ -513,6 +559,19 @@
     </div>
   </div>
 
+  <div class="modal-overlay" id="row-import-scheme-modal" hidden>
+    <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="row-import-scheme-title">
+      <div class="modal-header" id="row-import-scheme-title">选择行波形导入方案</div>
+      <div class="modal-body">
+        <div class="nav-move-options" id="row-import-scheme-options"></div>
+        <div class="modal-hint row-import-scheme-hint" id="row-import-scheme-hint" aria-live="polite"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="modal-btn" id="row-import-scheme-cancel">取消</button>
+      </div>
+    </div>
+  </div>
+
   <div class="modal-overlay" id="wave-screenshot-range-modal" hidden>
     <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="wave-screenshot-range-title">
       <div class="modal-header" id="wave-screenshot-range-title">选择截图列范围</div>
@@ -535,9 +594,10 @@
     <script src="inc/codemirror.js?v=5.65.21"></script>
     <script src="inc/codemirror-javascript.js?v=5.65.21"></script>
     <script src="inc/codemirror-vim.js?v=5.65.21"></script>
-    <script src="inc/visualwavedrom-sqlite-browser.js?v=20260722-sqlite-v2"></script>
+    <script src="inc/visualwavedrom-sqlite-browser.js?v=20260729-sqlite-chunks-v1"></script>
     <script src="inc/visualwavedrom-vim.js?v=20260724-vim-insert-delete-v1"></script>
     <script src="inc/visualwavedrom-bigdata.js?v=20260729-bigdata-v1"></script>
-    <script src="inc/visualwavedrom-app.js?v=20260729-bigdata-v1"></script>
+    <script src="inc/visualwavedrom-json-bigdata.js?v=20260729-json-bigdata-v5"></script>
+    <script src="inc/visualwavedrom-app.js?v=20260729-json-bigdata-v5"></script>
 </body>
 </html>

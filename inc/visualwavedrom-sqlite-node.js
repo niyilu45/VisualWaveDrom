@@ -5,11 +5,27 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 
 const LIBRARY_KIND = 'VisualWaveDromWaveLibrary';
-const SQLITE_SCHEMA_VERSION = 1;
+const SQLITE_SCHEMA_VERSION = 2;
+const DOCUMENT_CHUNK_THRESHOLD = 256 * 1024;
+const DOCUMENT_CHUNK_SIZE = 64 * 1024;
 const SQLITE_HEADER = Buffer.from('SQLite format 3\0', 'ascii');
-const bundledSqlite = path.join(__dirname, 'sqlite', 'sqlite3.exe');
-const sqliteCommand = process.platform === 'win32' ? bundledSqlite : 'sqlite3';
+const bundledWindowsSqlite = path.join(__dirname, 'sqlite', 'sqlite3.exe');
+const bundledUnixSqlite = path.join(__dirname, 'sqlite', 'sqlite3');
+const bundledUnixSqliteAvailable = (() => {
+  try {
+    fs.accessSync(bundledUnixSqlite, fs.constants.X_OK);
+    return true;
+  } catch (_) {
+    return false;
+  }
+})();
+const configuredSqliteCommand = String(process.env.VWD_SQLITE_EXE || '').trim();
+const sqliteCommand = configuredSqliteCommand
+  || (process.platform === 'win32'
+    ? bundledWindowsSqlite
+    : (bundledUnixSqliteAvailable ? bundledUnixSqlite : 'sqlite3'));
 const preparedDatabasePaths = new Set();
+let sqliteRuntimeInfo = null;
 
 const schemaSql = `
 PRAGMA journal_mode=DELETE;
@@ -41,17 +57,87 @@ CREATE TABLE IF NOT EXISTS vwd_documents (
 );
 CREATE INDEX IF NOT EXISTS vwd_documents_sort_order
   ON vwd_documents(sort_order, name);
+CREATE TABLE IF NOT EXISTS vwd_document_chunks (
+  document_name TEXT NOT NULL,
+  chunk_index INTEGER NOT NULL,
+  content_chunk TEXT NOT NULL,
+  PRIMARY KEY (document_name, chunk_index),
+  FOREIGN KEY (document_name) REFERENCES vwd_documents(name) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS vwd_document_chunks_document
+  ON vwd_document_chunks(document_name, chunk_index);
 PRAGMA user_version=${SQLITE_SCHEMA_VERSION};
 `;
 
-function runSqlite(filePath, sql, query) {
-  if (process.platform === 'win32' && !fs.existsSync(sqliteCommand)) {
-    throw new Error(`SQLite runtime not found: ${sqliteCommand}`);
+function sqliteInstallHint() {
+  if (process.platform === 'linux') {
+    return 'Install SQLite 3.33 or newer (for example: sudo apt install sqlite3), '
+      + 'or set VWD_SQLITE_EXE to the sqlite3 executable.';
   }
+  if (process.platform === 'darwin') {
+    return 'Install SQLite 3.33 or newer, or set VWD_SQLITE_EXE to the sqlite3 executable.';
+  }
+  return `SQLite runtime not found: ${sqliteCommand}`;
+}
+
+function getRuntimeInfo() {
+  if (sqliteRuntimeInfo) return Object.assign({}, sqliteRuntimeInfo);
+  const versionResult = spawnSync(sqliteCommand, ['--version'], {
+    encoding: 'utf8',
+    windowsHide: true,
+    timeout: 5000,
+    maxBuffer: 1024 * 1024
+  });
+  if (versionResult.error) {
+    throw new Error(`${sqliteInstallHint()} (${versionResult.error.message})`);
+  }
+  if (versionResult.status !== 0) {
+    const detail = String(versionResult.stderr || versionResult.stdout || '').trim();
+    throw new Error(`${sqliteInstallHint()}${detail ? ` (${detail})` : ''}`);
+  }
+
+  const probe = spawnSync(sqliteCommand, ['-batch', ':memory:'], {
+    input: '.bail on\n.mode json\nSELECT 1 AS ok;\n',
+    encoding: 'utf8',
+    windowsHide: true,
+    timeout: 5000,
+    maxBuffer: 1024 * 1024
+  });
+  const probeOutput = String(probe.stdout || '').trim();
+  let jsonModeSupported = false;
+  if (!probe.error && probe.status === 0 && probeOutput) {
+    try {
+      const rows = JSON.parse(probeOutput);
+      jsonModeSupported = !!(Array.isArray(rows) && rows[0] && Number(rows[0].ok) === 1);
+    } catch (_) {
+      jsonModeSupported = false;
+    }
+  }
+  if (!jsonModeSupported) {
+    const detail = probe.error
+      ? probe.error.message
+      : String(probe.stderr || probe.stdout || '').trim();
+    throw new Error(
+      `SQLite 3.33 or newer with JSON output support is required`
+      + `${detail ? ` (${detail})` : ''}`
+    );
+  }
+
+  const versionText = String(versionResult.stdout || '').trim().split(/\s+/)[0] || 'unknown';
+  sqliteRuntimeInfo = {
+    command: sqliteCommand,
+    version: versionText
+  };
+  return Object.assign({}, sqliteRuntimeInfo);
+}
+
+function runSqlite(filePath, sql, query) {
+  getRuntimeInfo();
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const script = [
     '.bail on',
     '.timeout 5000',
+    'PRAGMA foreign_keys=ON;',
     query ? '.mode json' : '',
     sql,
     ''
@@ -147,6 +233,32 @@ function documentContentMetadata(content, fallbackName) {
   };
 }
 
+function safeChunkEnd(text, start, requestedEnd) {
+  let end = Math.min(text.length, requestedEnd);
+  if (end > start && end < text.length) {
+    const previous = text.charCodeAt(end - 1);
+    const next = text.charCodeAt(end);
+    if (previous >= 0xD800 && previous <= 0xDBFF && next >= 0xDC00 && next <= 0xDFFF) {
+      end -= 1;
+    }
+  }
+  return end;
+}
+
+function splitDocumentContent(content) {
+  const text = String(content == null ? '' : content);
+  if (text.length < DOCUMENT_CHUNK_THRESHOLD) return [];
+  const chunks = [];
+  let start = 0;
+  while (start < text.length) {
+    let end = safeChunkEnd(text, start, start + DOCUMENT_CHUNK_SIZE);
+    if (end <= start) end = Math.min(text.length, start + DOCUMENT_CHUNK_SIZE);
+    chunks.push(text.slice(start, end));
+    start = end;
+  }
+  return chunks;
+}
+
 const knownDocumentFields = new Set([
   'name', 'content', 'json', 'hscale', 'waveEditMode', 'revision', 'savedAt',
   'deferred', 'titleCache', 'descriptionCache', 'contentLength', 'sortOrder'
@@ -159,6 +271,7 @@ function prepareDocument(document, sortOrder) {
   const name = document.name.trim();
   if (!name) throw new Error('Invalid wave document name');
   const metadata = documentContentMetadata(document.content, name);
+  const contentChunks = splitDocumentContent(document.content);
   const extra = {};
   Object.keys(document).forEach((key) => {
     if (!knownDocumentFields.has(key) && document[key] !== undefined) extra[key] = document[key];
@@ -167,6 +280,8 @@ function prepareDocument(document, sortOrder) {
     name,
     sortOrder: Number.isInteger(sortOrder) ? sortOrder : Number(document.sortOrder || 0),
     content: document.content,
+    inlineContent: contentChunks.length ? '' : document.content,
+    contentChunks,
     hscale: Number.isFinite(Number(document.hscale)) ? Number(document.hscale) : 1,
     waveEditMode: document.waveEditMode === 'insert' ? 'insert' : 'modify',
     revision: Number.isInteger(document.revision) && document.revision >= 0 ? document.revision : 0,
@@ -183,7 +298,7 @@ function documentInsertSql(document) {
     name, sort_order, content, hscale, wave_edit_mode, revision, saved_at,
     title_cache, description_cache, content_length, extra_json
   ) VALUES (
-    ${sqlText(document.name)}, ${sqlNumber(document.sortOrder, 0)}, ${sqlText(document.content)},
+    ${sqlText(document.name)}, ${sqlNumber(document.sortOrder, 0)}, ${sqlText(document.inlineContent)},
     ${sqlNumber(document.hscale, 1)}, ${sqlText(document.waveEditMode)}, ${sqlNumber(document.revision, 0)},
     ${sqlText(document.savedAt)}, ${sqlText(document.titleCache)}, ${sqlText(document.descriptionCache)},
     ${sqlNumber(document.contentLength, 0)}, ${sqlText(document.extraJson)}
@@ -203,6 +318,25 @@ function documentUpsertSql(document) {
     description_cache=excluded.description_cache,
     content_length=excluded.content_length,
     extra_json=excluded.extra_json;`;
+}
+
+function documentChunkSql(document) {
+  const statements = [
+    `DELETE FROM vwd_document_chunks WHERE document_name=${sqlText(document.name)};`
+  ];
+  document.contentChunks.forEach((chunk, index) => {
+    statements.push(`INSERT INTO vwd_document_chunks (
+      document_name, chunk_index, content_chunk
+    ) VALUES (${sqlText(document.name)}, ${index}, ${sqlText(chunk)});`);
+  });
+  return statements;
+}
+
+function documentWriteSql(document, insertOnly) {
+  return [
+    insertOnly ? documentInsertSql(document) : documentUpsertSql(document),
+    ...documentChunkSql(document)
+  ];
 }
 
 function normalizeBundle(bundle) {
@@ -253,7 +387,7 @@ function writeLibrary(filePath, bundle) {
     'DELETE FROM vwd_documents;',
     'DELETE FROM vwd_library;',
     libraryRowSql(library),
-    ...library.documents.map(documentInsertSql),
+    ...library.documents.flatMap((document) => documentWriteSql(document, true)),
     'COMMIT;'
   ].join('\n'));
   return library;
@@ -279,7 +413,7 @@ function readLibraryRow(filePath) {
   };
 }
 
-function documentFromRow(row, summaryOnly) {
+function documentFromRow(row, summaryOnly, chunkContent) {
   const extra = safeJsonParse(row.extra_json, {});
   const document = Object.assign({}, extra, {
     name: String(row.name || ''),
@@ -294,9 +428,28 @@ function documentFromRow(row, summaryOnly) {
     document.descriptionCache = String(row.description_cache || '');
     document.contentLength = Number(row.content_length) || 0;
   } else {
-    document.content = String(row.content || '');
+    document.content = chunkContent === undefined
+      ? String(row.content || '')
+      : String(chunkContent);
   }
   return document;
+}
+
+function readDocumentChunkMap(filePath, documentName) {
+  const where = documentName == null
+    ? ''
+    : ` WHERE document_name=${sqlText(documentName)}`;
+  const rows = query(filePath, `SELECT document_name, chunk_index, content_chunk
+    FROM vwd_document_chunks${where} ORDER BY document_name, chunk_index;`);
+  const chunks = new Map();
+  rows.forEach((row) => {
+    const name = String(row.document_name || '');
+    if (!chunks.has(name)) chunks.set(name, []);
+    chunks.get(name).push(String(row.content_chunk || ''));
+  });
+  const content = new Map();
+  chunks.forEach((parts, name) => content.set(name, parts.join('')));
+  return content;
 }
 
 function readLibrarySummary(filePath) {
@@ -310,18 +463,30 @@ function readLibrarySummary(filePath) {
 
 function readLibrary(filePath) {
   const library = readLibraryRow(filePath);
+  const chunkContent = readDocumentChunkMap(filePath);
   const rows = query(filePath, `SELECT name, content, hscale, wave_edit_mode, revision, saved_at,
     title_cache, description_cache, content_length, extra_json
     FROM vwd_documents ORDER BY sort_order, name;`);
-  library.documents = rows.map((row) => documentFromRow(row, false));
+  library.documents = rows.map((row) => documentFromRow(
+    row,
+    false,
+    chunkContent.has(String(row.name || '')) ? chunkContent.get(String(row.name || '')) : undefined
+  ));
   return library;
 }
 
 function readWaveDocument(filePath, waveId) {
+  ensurePortableDatabase(filePath);
   const rows = query(filePath, `SELECT name, content, hscale, wave_edit_mode, revision, saved_at,
     title_cache, description_cache, content_length, extra_json
     FROM vwd_documents WHERE name=${sqlText(waveId)} LIMIT 1;`);
-  return rows[0] ? documentFromRow(rows[0], false) : null;
+  if (!rows[0]) return null;
+  const chunks = readDocumentChunkMap(filePath, waveId);
+  return documentFromRow(
+    rows[0],
+    false,
+    chunks.has(String(rows[0].name || '')) ? chunks.get(String(rows[0].name || '')) : undefined
+  );
 }
 
 function nextSortOrder(filePath) {
@@ -350,7 +515,7 @@ function updateWaveDocument(filePath, payload) {
   }), Number(sortRows[0] && sortRows[0].sort_order) || 0);
   execute(filePath, [
     'BEGIN IMMEDIATE;',
-    documentUpsertSql(document),
+    ...documentWriteSql(document, false),
     `UPDATE vwd_library SET updated_at=${sqlText(savedAt)} WHERE singleton=1;`,
     'COMMIT;'
   ].join('\n'));
@@ -417,7 +582,7 @@ function patchLibraryState(filePath, payload) {
   execute(filePath, [
     'BEGIN IMMEDIATE;',
     ...Array.from(deletedNames).map((name) => `DELETE FROM vwd_documents WHERE name=${sqlText(name)};`),
-    ...preparedDocuments.map(documentUpsertSql),
+    ...preparedDocuments.flatMap((document) => documentWriteSql(document, false)),
     libraryRowSql(updated),
     'COMMIT;'
   ].join('\n'));
@@ -441,7 +606,10 @@ function getLibraryInfo(filePath) {
 module.exports = {
   LIBRARY_KIND,
   SQLITE_SCHEMA_VERSION,
+  DOCUMENT_CHUNK_SIZE,
+  DOCUMENT_CHUNK_THRESHOLD,
   ensureSchema,
+  getRuntimeInfo,
   getLibraryInfo,
   isLibraryFile,
   patchLibraryState,

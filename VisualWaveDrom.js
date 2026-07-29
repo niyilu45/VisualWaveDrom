@@ -1,5 +1,6 @@
 const fs = require('fs');
 const http = require('http');
+const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { spawn, spawnSync } = require('child_process');
@@ -14,6 +15,12 @@ function commandLineOption(name) {
 }
 
 const rootDir = __dirname;
+const rootRealDir = fs.realpathSync(rootDir);
+const importRootDir = path.join(rootDir, 'import');
+const importSchemeDir = path.join(importRootDir, 'Scheme');
+const importFileProcPath = path.join(importRootDir, 'inc', 'fileProc.py');
+const importMaxOutputBytes = 64 * 1024 * 1024;
+const importMaxWaveColumns = 10 * 1000 * 1000;
 const defaultHtmlName = `${path.basename(__filename, '.js')}.html`;
 const configuredHtmlName = commandLineOption('--html') || defaultHtmlName;
 const htmlName = path.basename(configuredHtmlName);
@@ -24,6 +31,7 @@ const htmlPath = path.join(rootDir, htmlName);
 const defaultLibraryName = `${path.basename(__filename, '.js')}-library`;
 const appId = 'VisualWaveDrom';
 const libraryKind = sqliteStore.LIBRARY_KIND;
+const maxWaveLibraryRequestBytes = 256 * 1024 * 1024;
 const protocolScheme = 'visualwavedrom';
 let activeProtocolScheme = protocolScheme;
 const configuredLibraryOption = commandLineOption('--library');
@@ -55,6 +63,9 @@ const noOpen = process.argv.includes('--no-open');
 let shutdownTimer = null;
 let requestedPort = preferredPort;
 let selectingFallbackPort = false;
+let sqliteRuntimeInfo = null;
+let pythonRuntimeInfo = null;
+let pythonRuntimeChecked = false;
 const connectedClients = new Set();
 const defaultWaveDocument = `${JSON.stringify({
   signal: [
@@ -82,6 +93,13 @@ function writeJsonAtomically(filePath, value) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const tempPath = `${filePath}.${process.pid}.tmp`;
   fs.writeFileSync(tempPath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+  fs.renameSync(tempPath, filePath);
+}
+
+function writeTextAtomically(filePath, value, mode) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const tempPath = `${filePath}.${process.pid}.tmp`;
+  fs.writeFileSync(tempPath, String(value), { encoding: 'utf8', mode: mode || 0o644 });
   fs.renameSync(tempPath, filePath);
 }
 
@@ -202,7 +220,11 @@ function listLibraries() {
 function safeLibraryPath(libraryName) {
   const requested = String(libraryName || '');
   const name = path.basename(requested);
-  if (!name || name !== requested || name === '.' || name === '..') return null;
+  if (!name
+      || name !== requested
+      || name === '.'
+      || name === '..'
+      || /[\\/\u0000-\u001f]/.test(name)) return null;
   if (name === configuredLibraryName) return configuredLibraryPath;
   return path.join(waveDir, name, 'library.sqlite');
 }
@@ -251,10 +273,16 @@ function quoteWindowsCommandArgument(value) {
   return `"${text}"`;
 }
 
-function registerProtocolHandler(handlerPath) {
-  if (process.platform !== 'win32' || !handlerPath) return;
-  const resolved = path.resolve(handlerPath);
-  if (!fs.existsSync(resolved) || path.extname(resolved).toLowerCase() !== '.bat') {
+function refreshActiveProtocolScheme() {
+  const library = sqliteStore.readLibrarySummary(configuredLibraryPath);
+  const librarySuffix = String(library.libraryId || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9+.-]/g, '-');
+  activeProtocolScheme = librarySuffix ? `${protocolScheme}-${librarySuffix}` : protocolScheme;
+}
+
+function registerWindowsProtocolHandler(resolved) {
+  if (path.extname(resolved).toLowerCase() !== '.bat') {
     console.warn(`Protocol handler BAT not found: ${resolved}`);
     return;
   }
@@ -270,11 +298,6 @@ function registerProtocolHandler(handlerPath) {
     '--open-url',
     '"%1"'
   ].join(' ');
-  const library = sqliteStore.readLibrarySummary(configuredLibraryPath);
-  const librarySuffix = String(library.libraryId || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9+.-]/g, '-');
-  activeProtocolScheme = librarySuffix ? `${protocolScheme}-${librarySuffix}` : protocolScheme;
   const schemes = Array.from(new Set([activeProtocolScheme, protocolScheme]));
   const commands = schemes.flatMap((scheme) => {
     const key = `HKCU\\Software\\Classes\\${scheme}`;
@@ -288,6 +311,116 @@ function registerProtocolHandler(handlerPath) {
   const results = commands.map((args) => spawnSync('reg.exe', args, { stdio: 'ignore' }));
   const failed = results.some((result) => result.status !== 0);
   if (failed) console.warn('Could not register the VisualWaveDrom URL protocol.');
+}
+
+function quoteDesktopExecArgument(value) {
+  const text = String(value == null ? '' : value)
+    .replace(/\\/g, '\\\\\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/`/g, '\\`')
+    .replace(/\$/g, '\\$')
+    .replace(/%/g, '%%');
+  return `"${text}"`;
+}
+
+function escapeDesktopString(value) {
+  return String(value == null ? '' : value)
+    .replace(/\\/g, '\\\\')
+    .replace(/[\r\n\t]+/g, ' ')
+    .trim();
+}
+
+function registerLinuxProtocolHandler(resolved) {
+  if (path.extname(resolved).toLowerCase() !== '.sh') {
+    console.warn(`Protocol handler shell script not found: ${resolved}`);
+    return;
+  }
+  if (/[\u0000\r\n]/.test(resolved)) {
+    console.warn('Protocol handler path contains unsupported control characters.');
+    return;
+  }
+  const configuredHome = String(process.env.HOME || '').trim();
+  const detectedHome = String(os.homedir() || '').trim();
+  const homeDirectory = path.isAbsolute(configuredHome)
+    ? configuredHome
+    : (path.isAbsolute(detectedHome) ? detectedHome : '');
+  if (!homeDirectory) {
+    console.warn('Could not register the VisualWaveDrom URL protocol: HOME is not set.');
+    return;
+  }
+  const configuredDataHome = String(process.env.XDG_DATA_HOME || '').trim();
+  const dataHome = path.isAbsolute(configuredDataHome)
+    ? configuredDataHome
+    : path.join(homeDirectory, '.local', 'share');
+  const applicationsDirectory = path.join(dataHome, 'applications');
+  const desktopFileName = `${activeProtocolScheme.replace(/[^a-z0-9+.-]/g, '-')}.desktop`;
+  const desktopPath = path.join(applicationsDirectory, desktopFileName);
+  const schemes = Array.from(new Set([activeProtocolScheme, protocolScheme]));
+  const displayName = escapeDesktopString(configuredLibraryName);
+  const desktopEntry = [
+    '[Desktop Entry]',
+    'Version=1.0',
+    'Type=Application',
+    `Name=VisualWaveDrom${displayName ? ` - ${displayName}` : ''}`,
+    `Exec=bash ${quoteDesktopExecArgument(resolved)} %u`,
+    'Terminal=true',
+    'NoDisplay=true',
+    'StartupNotify=false',
+    'Categories=Development;Utility;',
+    `MimeType=${schemes.map((scheme) => `x-scheme-handler/${scheme};`).join('')}`,
+    ''
+  ].join('\n');
+
+  try {
+    writeTextAtomically(desktopPath, desktopEntry, 0o644);
+  } catch (error) {
+    console.warn(`Could not write the VisualWaveDrom desktop entry: ${error.message}`);
+    return;
+  }
+  if (!process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
+    console.log('Linux URL protocol registration will finish on the next desktop-session launch.');
+    return;
+  }
+
+  const desktopDatabaseUpdate = spawnSync(
+    'update-desktop-database',
+    [applicationsDirectory],
+    { stdio: 'ignore', timeout: 5000 }
+  );
+  if (desktopDatabaseUpdate.error && desktopDatabaseUpdate.error.code !== 'ENOENT') {
+    console.warn(`Could not refresh desktop entries: ${desktopDatabaseUpdate.error.message}`);
+  }
+  const registrations = schemes.map((scheme) => spawnSync(
+    'xdg-mime',
+    ['default', desktopFileName, `x-scheme-handler/${scheme}`],
+    { stdio: 'ignore', timeout: 5000 }
+  ));
+  const missingXdgMime = registrations.some(
+    (result) => result.error && result.error.code === 'ENOENT'
+  );
+  const failed = registrations.some((result) => result.error || result.status !== 0);
+  if (missingXdgMime) {
+    console.warn('xdg-mime is unavailable; automatic VisualWaveDrom links were not registered.');
+    return;
+  }
+  if (failed) {
+    console.warn('Could not register the VisualWaveDrom URL protocol with xdg-mime.');
+  }
+}
+
+function registerProtocolHandler(handlerPath) {
+  refreshActiveProtocolScheme();
+  if (!handlerPath) return;
+  const resolved = path.resolve(handlerPath);
+  if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
+    console.warn(`Protocol handler not found: ${resolved}`);
+    return;
+  }
+  if (process.platform === 'win32') {
+    registerWindowsProtocolHandler(resolved);
+  } else if (process.platform === 'linux') {
+    registerLinuxProtocolHandler(resolved);
+  }
 }
 
 function requestedPagePath(rawUrl) {
@@ -355,6 +488,12 @@ function pageAddress(port, rawUrl) {
 
 function openAddress(address) {
   if (noOpen) return;
+  if (process.platform === 'linux'
+      && !process.env.DISPLAY
+      && !process.env.WAYLAND_DISPLAY) {
+    console.log('No Linux desktop session was detected; open the printed URL manually.');
+    return;
+  }
   let target;
   try {
     target = new URL(address);
@@ -366,39 +505,353 @@ function openAddress(address) {
     return;
   }
 
-  let command;
-  let args;
+  let openers;
   if (process.platform === 'win32') {
-    command = 'rundll32.exe';
-    args = ['url.dll,FileProtocolHandler', target.href];
+    openers = [['rundll32.exe', ['url.dll,FileProtocolHandler', target.href]]];
   } else if (process.platform === 'darwin') {
-    command = 'open';
-    args = [target.href];
+    openers = [['open', [target.href]]];
   } else {
-    command = 'xdg-open';
-    args = [target.href];
+    openers = [
+      ['xdg-open', [target.href]],
+      ['gio', ['open', target.href]],
+      ['sensible-browser', [target.href]]
+    ];
   }
 
-  const opener = spawn(command, args, {
-    detached: true,
-    stdio: 'ignore',
-    windowsHide: true,
-    shell: false
+  const launchOpener = (index) => {
+    if (index >= openers.length) {
+      console.warn('Could not open the browser automatically; open the printed URL manually.');
+      return;
+    }
+    const [command, args] = openers[index];
+    const opener = spawn(command, args, {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+      shell: false
+    });
+    opener.once('error', () => launchOpener(index + 1));
+    opener.unref();
+  };
+  launchOpener(0);
+}
+
+function pathIsInsideRoot(rootPath, targetPath) {
+  const relative = path.relative(rootPath, targetPath);
+  return relative === ''
+    || (relative !== '..'
+      && !relative.startsWith(`..${path.sep}`)
+      && !path.isAbsolute(relative));
+}
+
+function probePythonCandidate(command, prefixArgs) {
+  const result = spawnSync(
+    command,
+    (prefixArgs || []).concat(['-c', 'import sys; print("%d.%d.%d" % sys.version_info[:3])']),
+    {
+      encoding: 'utf8',
+      timeout: 5000,
+      windowsHide: true,
+      shell: false
+    }
+  );
+  if (result.error || result.status !== 0) return null;
+  const match = String(result.stdout || '').trim().match(/^(\d+)\.(\d+)\.(\d+)/);
+  if (!match) return null;
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  if (major < 3 || (major === 3 && minor < 6)) return null;
+  return {
+    available: true,
+    command,
+    prefixArgs: (prefixArgs || []).slice(),
+    version: `${match[1]}.${match[2]}.${match[3]}`
+  };
+}
+
+function getPythonRuntimeInfo() {
+  if (pythonRuntimeChecked) return pythonRuntimeInfo;
+  pythonRuntimeChecked = true;
+  const candidates = [];
+  const configuredPython = String(process.env.VWD_PYTHON_EXE || '').trim();
+  if (configuredPython) candidates.push({ command: configuredPython, prefixArgs: [] });
+  if (process.platform === 'win32') {
+    candidates.push(
+      { command: path.join(importRootDir, 'python-runtime', 'python.exe'), prefixArgs: [] },
+      { command: 'py.exe', prefixArgs: ['-3'] },
+      { command: 'python.exe', prefixArgs: [] },
+      { command: 'python3.exe', prefixArgs: [] }
+    );
+  } else {
+    candidates.push(
+      { command: path.join(importRootDir, 'python-runtime', 'bin', 'python3'), prefixArgs: [] },
+      { command: 'python3', prefixArgs: [] },
+      { command: 'python', prefixArgs: [] }
+    );
+  }
+  for (const candidate of candidates) {
+    if (path.isAbsolute(candidate.command) && !fs.existsSync(candidate.command)) continue;
+    const runtime = probePythonCandidate(candidate.command, candidate.prefixArgs);
+    if (runtime) {
+      pythonRuntimeInfo = runtime;
+      return pythonRuntimeInfo;
+    }
+  }
+  pythonRuntimeInfo = {
+    available: false,
+    version: '',
+    error: 'Python 3.6 or newer was not found'
+  };
+  return pythonRuntimeInfo;
+}
+
+function resolveImportSourcePath(fileName) {
+  const sourceName = String(fileName || '').trim();
+  if (!sourceName || path.isAbsolute(sourceName) || /[\u0000\r\n]/.test(sourceName)) {
+    throw new Error(`Invalid import source file: ${sourceName || '(empty)'}`);
+  }
+  const slashPath = sourceName.replace(/\\/g, '/').replace(/^\.\/+/, '');
+  const relativePath = slashPath.toLowerCase().startsWith('import/')
+    ? slashPath.slice('import/'.length)
+    : slashPath;
+  const resolved = path.resolve(importRootDir, relativePath);
+  if (!pathIsInsideRoot(importRootDir, resolved)) {
+    throw new Error(`Import source must stay inside the import folder: ${sourceName}`);
+  }
+  if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
+    throw new Error(`Import source file not found: ${sourceName}`);
+  }
+  const importRealDir = fs.realpathSync(importRootDir);
+  const realSource = fs.realpathSync(resolved);
+  if (!pathIsInsideRoot(importRealDir, realSource)) {
+    throw new Error(`Import source must stay inside the import folder: ${sourceName}`);
+  }
+  return realSource;
+}
+
+function normalizeImportScheme(rawScheme, schemeId) {
+  if (!rawScheme || typeof rawScheme !== 'object' || Array.isArray(rawScheme)) {
+    throw new Error('Import scheme must contain a JSON object');
+  }
+  const rawMappings = Array.isArray(rawScheme.mappings)
+    ? rawScheme.mappings
+    : (Array.isArray(rawScheme.imports)
+      ? rawScheme.imports
+      : (Array.isArray(rawScheme.entries) ? rawScheme.entries : null));
+  if (!rawMappings || rawMappings.length === 0) {
+    throw new Error('Import scheme must contain at least one mapping');
+  }
+  const seenSignals = new Set();
+  const mappings = rawMappings.map((rawMapping, index) => {
+    if (!rawMapping || typeof rawMapping !== 'object' || Array.isArray(rawMapping)) {
+      throw new Error(`Mapping ${index + 1} must be an object`);
+    }
+    const signal = String(rawMapping.signal || '').trim();
+    const parser = String(rawMapping.parser || rawMapping.function || '').trim();
+    const file = String(rawMapping.file || '').trim();
+    if (!signal) throw new Error(`Mapping ${index + 1} is missing signal`);
+    if (seenSignals.has(signal)) throw new Error(`Signal is mapped more than once: ${signal}`);
+    seenSignals.add(signal);
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(parser)) {
+      throw new Error(`Mapping ${index + 1} has an invalid parser function`);
+    }
+    const options = rawMapping.options == null ? {} : rawMapping.options;
+    if (!options || typeof options !== 'object' || Array.isArray(options)) {
+      throw new Error(`Mapping ${index + 1} options must be an object`);
+    }
+    const sourcePath = resolveImportSourcePath(file);
+    return {
+      file,
+      signal,
+      parser,
+      options,
+      sourcePath,
+      displayPath: path.relative(rootDir, sourcePath).split(path.sep).join('/')
+    };
   });
-  opener.once('error', (error) => {
-    console.warn(`Could not open the browser automatically: ${error.message}`);
+  return {
+    id: schemeId,
+    version: Number.isInteger(rawScheme.version) ? rawScheme.version : 1,
+    name: String(rawScheme.name || path.basename(schemeId, path.extname(schemeId))).trim(),
+    description: String(rawScheme.description || '').trim(),
+    mappings
+  };
+}
+
+function safeImportSchemePath(schemeId) {
+  const requested = String(schemeId || '').trim();
+  const fileName = path.basename(requested);
+  if (!requested
+      || requested !== fileName
+      || !/\.json$/i.test(fileName)
+      || /[\u0000-\u001f]/.test(fileName)) {
+    throw new Error('Invalid import scheme id');
+  }
+  const schemePath = path.join(importSchemeDir, fileName);
+  if (!fs.existsSync(schemePath) || !fs.statSync(schemePath).isFile()) {
+    throw new Error(`Import scheme not found: ${fileName}`);
+  }
+  const schemeRealDir = fs.realpathSync(importSchemeDir);
+  const realSchemePath = fs.realpathSync(schemePath);
+  if (!pathIsInsideRoot(schemeRealDir, realSchemePath)) {
+    throw new Error(`Import scheme must stay inside import/Scheme: ${fileName}`);
+  }
+  return realSchemePath;
+}
+
+function loadImportScheme(schemeId) {
+  const schemePath = safeImportSchemePath(schemeId);
+  return normalizeImportScheme(readJson(schemePath), path.basename(schemePath));
+}
+
+function publicImportScheme(scheme) {
+  return {
+    id: scheme.id,
+    version: scheme.version,
+    name: scheme.name,
+    description: scheme.description,
+    mappings: scheme.mappings.map((mapping) => ({
+      file: mapping.displayPath,
+      signal: mapping.signal,
+      parser: mapping.parser
+    }))
+  };
+}
+
+function listImportSchemes() {
+  if (!fs.existsSync(importSchemeDir)) return { schemes: [], invalid: [] };
+  const schemes = [];
+  const invalid = [];
+  fs.readdirSync(importSchemeDir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && /\.json$/i.test(entry.name))
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .forEach((entry) => {
+      try {
+        schemes.push(publicImportScheme(loadImportScheme(entry.name)));
+      } catch (error) {
+        invalid.push({ id: entry.name, error: error.message });
+      }
+    });
+  return { schemes, invalid };
+}
+
+function runImportParser(mapping, runtime) {
+  return new Promise((resolve, reject) => {
+    if (!fs.existsSync(importFileProcPath)) {
+      reject(new Error('import/inc/fileProc.py was not found'));
+      return;
+    }
+    const args = runtime.prefixArgs.concat([
+      importFileProcPath,
+      '--parser', mapping.parser,
+      '--file', mapping.sourcePath,
+      '--options-json', JSON.stringify(mapping.options)
+    ]);
+    const child = spawn(runtime.command, args, {
+      cwd: rootDir,
+      windowsHide: true,
+      shell: false,
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    let stdout = '';
+    let stderr = '';
+    let outputTooLarge = false;
+    let settled = false;
+    let outputBytes = 0;
+    let timeout = null;
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (error) reject(error);
+      else resolve(value);
+    };
+    const appendOutput = (current, chunk) => {
+      const text = String(chunk);
+      outputBytes += Buffer.byteLength(text, 'utf8');
+      if (outputBytes > importMaxOutputBytes) {
+        outputTooLarge = true;
+        child.kill();
+      }
+      return current + text;
+    };
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => { stdout = appendOutput(stdout, chunk); });
+    child.stderr.on('data', (chunk) => { stderr = appendOutput(stderr, chunk); });
+    child.once('error', (error) => finish(new Error(`Could not start Python: ${error.message}`)));
+    child.once('close', (code) => {
+      if (outputTooLarge) {
+        finish(new Error(`Import output is larger than ${importMaxOutputBytes} bytes`));
+        return;
+      }
+      if (code !== 0) {
+        finish(new Error(String(stderr || stdout || `Python parser exited with code ${code}`).trim()));
+        return;
+      }
+      let result;
+      try {
+        result = JSON.parse(stdout);
+      } catch (error) {
+        finish(new Error(`Python parser returned invalid JSON: ${error.message}`));
+        return;
+      }
+      if (!result || typeof result.wave !== 'string' || !Array.isArray(result.data)) {
+        finish(new Error('Python parser result must contain wave and data'));
+        return;
+      }
+      if (result.wave.length > importMaxWaveColumns) {
+        finish(new Error(`Imported waveform exceeds ${importMaxWaveColumns} columns`));
+        return;
+      }
+      result.data = result.data.map((value) => String(value == null ? '' : value));
+      finish(null, result);
+    });
+    timeout = setTimeout(() => {
+      child.kill();
+      finish(new Error('Python parser timed out after 60 seconds'));
+    }, 60000);
   });
-  opener.unref();
+}
+
+async function runImportScheme(schemeId) {
+  const runtime = getPythonRuntimeInfo();
+  if (!runtime.available) throw new Error(runtime.error);
+  const scheme = loadImportScheme(schemeId);
+  const updates = [];
+  for (const mapping of scheme.mappings) {
+    const result = await runImportParser(mapping, runtime);
+    updates.push({
+      signal: mapping.signal,
+      wave: result.wave,
+      data: result.data,
+      sourceFile: mapping.displayPath,
+      parser: mapping.parser,
+      pointCount: Number(result.pointCount || 0),
+      firstIndex: Number(result.firstIndex || 0),
+      lastIndex: Number(result.lastIndex || 0),
+      explicitIndex: !!result.explicitIndex
+    });
+  }
+  return {
+    scheme: publicImportScheme(scheme),
+    pythonVersion: runtime.version,
+    updates
+  };
 }
 
 function serveStatic(req, res, pathname) {
   const relative = pathname === '/' ? htmlName : decodeURIComponent(pathname).replace(/^\/+/, '');
   const target = path.resolve(rootDir, relative);
-  if (!target.startsWith(rootDir) || !fs.existsSync(target) || fs.statSync(target).isDirectory()) {
+  if (!pathIsInsideRoot(rootDir, target) || !fs.existsSync(target) || fs.statSync(target).isDirectory()) {
     res.writeHead(404); res.end('Not found'); return;
   }
-  res.writeHead(200, { 'Content-Type': contentType(target) });
-  fs.createReadStream(target).pipe(res);
+  const realTarget = fs.realpathSync(target);
+  if (!pathIsInsideRoot(rootRealDir, realTarget)) {
+    res.writeHead(404); res.end('Not found'); return;
+  }
+  res.writeHead(200, { 'Content-Type': contentType(realTarget) });
+  fs.createReadStream(realTarget).pipe(res);
 }
 
 function resolveRequestLibraryPath(url, useConfiguredDefault) {
@@ -425,6 +878,9 @@ const server = http.createServer(async (req, res) => {
         app: appId,
         rootDir,
         htmlName,
+        platform: process.platform,
+        nodeVersion: process.versions.node,
+        sqliteVersion: sqliteRuntimeInfo && sqliteRuntimeInfo.version,
         protocolScheme: activeProtocolScheme,
         libraryDir: waveDir,
         currentLibrary: configuredLibraryName,
@@ -450,6 +906,26 @@ const server = http.createServer(async (req, res) => {
         }, 1800);
       }
       sendJson(res, 200, { ok: true, clients: connectedClients.size });
+      return;
+    }
+    if (url.pathname === '/api/import-schemes' && req.method === 'GET') {
+      const catalog = listImportSchemes();
+      const python = getPythonRuntimeInfo();
+      sendJson(res, 200, {
+        schemes: catalog.schemes,
+        invalid: catalog.invalid,
+        python: {
+          available: python.available,
+          version: python.version || '',
+          error: python.error || ''
+        }
+      });
+      return;
+    }
+    if (url.pathname === '/api/import-wave-row' && req.method === 'POST') {
+      const payload = JSON.parse(await readRequestBody(req, 128 * 1024));
+      const result = await runImportScheme(payload && payload.schemeId);
+      sendJson(res, 200, Object.assign({ ok: true }, result));
       return;
     }
     if (url.pathname === '/api/wave-libraries' && req.method === 'GET') {
@@ -480,7 +956,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       if (req.method === 'POST') {
-        const incoming = JSON.parse(await readRequestBody(req, 20 * 1024 * 1024));
+        const incoming = JSON.parse(await readRequestBody(req, maxWaveLibraryRequestBytes));
         if (!incoming || incoming.kind !== libraryKind || !Array.isArray(incoming.documents)) {
           throw new Error('Invalid library');
         }
@@ -529,7 +1005,7 @@ const server = http.createServer(async (req, res) => {
       }
     }
     if (url.pathname === '/api/wave-library-state' && req.method === 'PATCH') {
-      const payload = JSON.parse(await readRequestBody(req, 20 * 1024 * 1024));
+      const payload = JSON.parse(await readRequestBody(req, maxWaveLibraryRequestBytes));
       const libraryId = String(payload.libraryId || '');
       const filePath = libraryPathById(libraryId);
       if (!filePath) { sendJson(res, 404, { error: 'Wave library not found' }); return; }
@@ -566,7 +1042,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       if (req.method === 'PATCH') {
-        const payload = JSON.parse(await readRequestBody(req, 4 * 1024 * 1024));
+        const payload = JSON.parse(await readRequestBody(req, maxWaveLibraryRequestBytes));
         const libraryId = String(payload.libraryId || '');
         const waveId = String(payload.waveId || '');
         const filePath = libraryPathById(libraryId);
@@ -595,10 +1071,16 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-ensureWaveDirectory();
-registerProtocolHandler(protocolHandlerPath);
 if (!fs.existsSync(htmlPath) || !fs.statSync(htmlPath).isFile()) {
   console.error(`HTML file not found: ${htmlPath}`);
+  process.exit(1);
+}
+try {
+  sqliteRuntimeInfo = sqliteStore.getRuntimeInfo();
+  ensureWaveDirectory();
+  registerProtocolHandler(protocolHandlerPath);
+} catch (error) {
+  console.error(`VisualWaveDrom startup failed: ${error.message}`);
   process.exit(1);
 }
 server.on('listening', () => {
@@ -608,6 +1090,10 @@ server.on('listening', () => {
   if (activePort !== preferredPort) {
     console.log(`Port ${preferredPort} is in use; using available port ${activePort}.`);
   }
+  console.log(
+    `Runtime: ${process.platform} / Node ${process.versions.node}`
+    + ` / SQLite ${sqliteRuntimeInfo ? sqliteRuntimeInfo.version : 'unknown'}`
+  );
   console.log(`VisualWaveDrom is running at ${address}`);
   openAddress(address);
 });

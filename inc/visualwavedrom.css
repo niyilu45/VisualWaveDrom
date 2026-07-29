@@ -12,7 +12,8 @@
       --success: #22c55e;
       --error: #ef4444;
       --line-num-bg: #151c28;
-      --editor-font: "Cascadia Code", "Fira Code", Consolas, "Courier New", monospace;
+      --editor-font: "Cascadia Code", "Fira Code", "Noto Sans Mono CJK SC",
+        "Noto Sans Mono", "Liberation Mono", Consolas, "Courier New", monospace;
       --editor-line-height: 20px;
     }
 
@@ -20,7 +21,8 @@
 
     html, body {
       height: 100%;
-      font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+      font-family: "Segoe UI", "Noto Sans CJK SC", "Noto Sans", system-ui,
+        -apple-system, sans-serif;
       background: var(--bg);
       color: var(--text);
       overflow: hidden;
@@ -1352,6 +1354,44 @@
       border-top: 2px solid var(--border);
     }
 
+    body.json-panel-fullscreen-active {
+      overflow: hidden;
+    }
+
+    .app.json-panel-fullscreen .editor-panel {
+      position: fixed;
+      inset: 0;
+      z-index: 1500;
+      width: 100vw;
+      height: 100vh;
+      height: 100dvh;
+      min-width: 0;
+      min-height: 0;
+      display: flex;
+      border: 0;
+      background: var(--bg);
+      overscroll-behavior: contain;
+    }
+
+    .app.json-panel-fullscreen.vim-mode-enabled .editor-panel {
+      bottom: 24px;
+      height: calc(100vh - 24px);
+      height: calc(100dvh - 24px);
+    }
+
+    .app.json-panel-fullscreen .vim-status-bar:not([hidden]) {
+      position: fixed;
+      z-index: 1501;
+      right: 0;
+      bottom: 0;
+      left: 0;
+    }
+
+    .app.json-panel-fullscreen .vim-command-bar:not([hidden]) {
+      position: fixed;
+      z-index: 1502;
+    }
+
     .app.json-panel-hidden .editor-panel {
       display: none;
     }
@@ -1364,6 +1404,8 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
+      gap: 8px;
+      min-width: 0;
       padding: 6px 12px;
       background: var(--surface);
       border-bottom: 1px solid var(--border);
@@ -1374,7 +1416,73 @@
     .editor-header-actions {
       display: flex;
       align-items: center;
-      gap: 10px;
+      justify-content: flex-end;
+      min-width: 0;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .editor-header [hidden] {
+      display: none !important;
+    }
+
+    .editor-heading {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+      white-space: nowrap;
+    }
+
+    .json-view-info {
+      padding: 1px 5px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text-muted);
+      font-size: 0.6875rem;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .json-view-switch {
+      display: inline-flex;
+      align-items: stretch;
+      min-width: 0;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+
+    .json-view-btn {
+      min-height: 26px;
+      padding: 3px 7px;
+      border: 0;
+      border-right: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text-muted);
+      font: inherit;
+      font-size: 0.6875rem;
+      letter-spacing: 0;
+      cursor: pointer;
+    }
+
+    .json-view-btn:last-child {
+      border-right: 0;
+    }
+
+    .json-view-btn:hover {
+      background: var(--border);
+      color: var(--text);
+    }
+
+    .json-view-btn.active,
+    .json-view-btn[aria-pressed="true"] {
+      background: rgba(37, 99, 235, 0.2);
+      color: #dbeafe;
+    }
+
+    .json-window-apply-btn.json-window-dirty {
+      border-color: var(--warning);
+      color: #fde68a;
     }
 
     .editor-copy-btn {
@@ -1403,6 +1511,13 @@
     .editor-copy-btn.copied {
       border-color: var(--success);
       color: var(--success);
+    }
+
+    .editor-copy-btn.active,
+    .editor-copy-btn[aria-pressed="true"] {
+      border-color: var(--accent);
+      background: rgba(37, 99, 235, 0.16);
+      color: #dbeafe;
     }
 
     .editor-copy-btn svg {
@@ -1613,6 +1728,37 @@
       box-shadow: inset 3px 0 0 var(--accent);
     }
 
+    .row-import-scheme-option {
+      display: grid;
+      gap: 3px;
+    }
+
+    .row-import-scheme-option strong,
+    .row-import-scheme-option span {
+      display: block;
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .row-import-scheme-option span {
+      color: var(--text-muted);
+      font-size: 0.72rem;
+      line-height: 1.45;
+    }
+
+    .row-import-scheme-option:disabled {
+      opacity: 0.55;
+      cursor: wait;
+    }
+
+    .row-import-scheme-hint {
+      margin-top: 8px;
+    }
+
+    .row-import-scheme-hint.is-info {
+      color: var(--text-muted);
+    }
+
     .modal-empty-state {
       padding: 12px 10px;
       color: var(--text-muted);
@@ -1809,6 +1955,58 @@
       scrollbar-gutter: stable;
       overflow: auto;
       white-space: pre;
+    }
+
+    .app.json-compact-mode .editor-header {
+      padding: 3px 8px;
+      font-size: 0.6875rem;
+    }
+
+    .app.json-compact-mode .editor-header-actions {
+      gap: 4px;
+    }
+
+    .app.json-compact-mode .editor-copy-btn {
+      gap: 3px;
+      min-height: 24px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 0.6875rem;
+    }
+
+    .app.json-compact-mode .editor-copy-btn svg {
+      width: 12px;
+      height: 12px;
+    }
+
+    .app.json-compact-mode .editor-status {
+      gap: 5px;
+      font-size: 0.6875rem;
+      white-space: nowrap;
+    }
+
+    .app.json-compact-mode .editor-wrapper:not(.codemirror-active) .line-numbers {
+      display: none;
+    }
+
+    .app.json-compact-mode .editor-panel,
+    .app.json-compact-mode .editor-wrapper,
+    .app.json-compact-mode .editor-wrapper .CodeMirror {
+      min-width: 0;
+      max-width: 100%;
+      overflow-x: hidden;
+    }
+
+    .app.json-compact-mode .code-editor {
+      padding: 6px 8px;
+      overflow-x: hidden;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+      overflow-wrap: anywhere;
+      word-break: break-all;
+      font-size: 12px;
+      line-height: 1.35;
     }
 
     /* Reading mode */
@@ -2503,6 +2701,56 @@
 
     .editor-wrapper .CodeMirror-selected {
       background: rgba(59, 130, 246, 0.32);
+    }
+
+    .app.json-compact-mode .editor-wrapper .CodeMirror {
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    .app.json-compact-mode .editor-wrapper .CodeMirror-lines {
+      padding: 3px 0;
+    }
+
+    .app.json-compact-mode .editor-wrapper .CodeMirror pre.CodeMirror-line,
+    .app.json-compact-mode .editor-wrapper .CodeMirror pre.CodeMirror-line-like {
+      padding: 0 5px;
+    }
+
+    .app.json-compact-mode .editor-wrapper .CodeMirror-wrap pre.CodeMirror-line,
+    .app.json-compact-mode .editor-wrapper .CodeMirror-wrap pre.CodeMirror-line-like {
+      word-wrap: break-word;
+      overflow-wrap: anywhere;
+      word-break: break-all;
+    }
+
+    .app.json-compact-mode .editor-wrapper .CodeMirror-linenumber {
+      padding: 0 3px 0 2px;
+      font-size: 11px;
+    }
+
+    .app.json-compact-mode .editor-wrapper .CodeMirror-hscrollbar,
+    .app.json-compact-mode .editor-wrapper .CodeMirror-scrollbar-filler {
+      display: none !important;
+      height: 0 !important;
+    }
+
+    .app.json-wrap-forced-off .editor-wrapper .CodeMirror-hscrollbar {
+      display: block !important;
+      height: 10px !important;
+    }
+
+    .app.json-wrap-forced-off .editor-wrapper .CodeMirror-scrollbar-filler {
+      display: block !important;
+      height: 10px !important;
+    }
+
+    .app.json-view-readonly .editor-wrapper .CodeMirror {
+      background: color-mix(in srgb, var(--bg) 92%, #475569 8%);
+    }
+
+    .app.json-view-readonly .editor-wrapper .CodeMirror-cursor {
+      display: none;
     }
 
     .app.vim-mode-enabled.vim-scope-wave .editor-wrapper .CodeMirror,

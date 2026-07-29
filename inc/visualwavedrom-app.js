@@ -36,6 +36,11 @@ function getDefaultJson() {
     const BIG_WAVE_MAX_WINDOW_COLUMNS = 320;
     const BIG_WAVE_WINDOW_PADDING_PX = 190;
     const BIG_WAVE_SCROLL_DEBOUNCE_MS = 48;
+    const JSON_WRAP_DISABLE_COLUMN_THRESHOLD = 200;
+    const JSON_LARGE_TEXT_THRESHOLD = 250000;
+    const JSON_EDITOR_SYNC_DEBOUNCE_MS = 360;
+    const JSON_EDITOR_RENDER_DEBOUNCE_MS = 700;
+    const JSON_EDITOR_NORMAL_RENDER_DEBOUNCE_MS = 300;
 
     const CONNECTION_ARROW_STYLES = ['start', 'end', 'both'];
     const CONNECTION_LINE_STYLES = ['straight', 'dashed', 'orthogonal', 'curve'];
@@ -192,6 +197,16 @@ function getDefaultJson() {
     const toggleJsonPanelBtn = document.getElementById('btn-toggle-json-panel');
     const toggleJsonPanelLabel = document.getElementById('toggle-json-panel-label');
     const hideJsonPanelBtn = document.getElementById('btn-hide-json-panel');
+    const jsonCompactModeBtn = document.getElementById('btn-json-compact-mode');
+    const jsonFullscreenBtn = document.getElementById('btn-json-fullscreen');
+    const jsonFullscreenLabel = document.getElementById('json-fullscreen-label');
+    const jsonViewInfo = document.getElementById('json-view-info');
+    const jsonViewSummaryBtn = document.getElementById('btn-json-view-summary');
+    const jsonViewWindowBtn = document.getElementById('btn-json-view-window');
+    const jsonViewFullBtn = document.getElementById('btn-json-view-full');
+    const applyJsonWindowBtn = document.getElementById('btn-apply-json-window');
+    const unlockJsonFullBtn = document.getElementById('btn-unlock-json-full');
+    const jsonFullEditLabel = document.getElementById('json-full-edit-label');
     const backBtn = document.getElementById('btn-back');
     const hscaleInput = document.getElementById('input-hscale');
     const columnNumberBtn = document.getElementById('btn-column-number');
@@ -261,6 +276,31 @@ function getDefaultJson() {
     let codeMirrorEditor = null;
     let syncingCodeMirror = false;
     let codeMirrorVimMode = 'normal';
+    let codeMirrorSyncTimer = null;
+    let codeMirrorSyncPending = false;
+    let codeMirrorPendingChanges = [];
+    let codeMirrorBeforeChange = null;
+    let directJsonOperations = [];
+    let directJsonOperationBaseLength = -1;
+    let jsonDocumentViewMode = 'full';
+    let jsonDocumentMetrics = null;
+    let jsonDocumentSource = null;
+    let jsonViewDocumentKey = '';
+    let jsonViewModeExplicitForDocument = '';
+    let jsonWindowView = null;
+    let jsonWindowViewDirty = false;
+    let jsonNativeWindowRange = null;
+    let jsonNativeWindowTimer = null;
+    let jsonFullEditUnlocked = false;
+    let refreshingJsonDocumentView = false;
+    let jsonEditorReadOnlyState = null;
+    let jsonEditorPerformanceState = {
+      lineWrapping: null,
+      viewportMargin: null,
+      maxHighlightLength: null,
+      crudeMeasuringFrom: null,
+      mode: ''
+    };
     let keyboardInputScope = 'other';
     let copiedWaveSelection = '';
     let copiedWaveDataSlots = [];
@@ -325,6 +365,9 @@ function getDefaultJson() {
     let scheduledRenderCallbacks = null;
     let waveAnalysisWorker = null;
     let waveAnalysisWorkerUnavailable = false;
+    let activeWaveAnalysisWorker = null;
+    let activeWaveAnalysisResolve = null;
+    let activeWaveAnalysisRequestId = 0;
     let waveAnalysisRequestSequence = 0;
     let waveAnalysisGeneration = 0;
     const pendingWaveAnalysisRequests = new Map();
@@ -369,6 +412,12 @@ function getDefaultJson() {
         family,
         version: versionMatch ? Number.parseFloat(versionMatch[1]) : 0,
         userAgent,
+        platform: String(
+          (navigator.userAgentData && navigator.userAgentData.platform)
+          || navigator.platform
+          || ''
+        ),
+        language: String(navigator.language || ''),
         protocol: window.location.protocol,
         secureContext: window.isSecureContext === true,
         pointerEvents: typeof window.PointerEvent === 'function',
@@ -376,9 +425,31 @@ function getDefaultJson() {
         indexedDb: typeof window.indexedDB !== 'undefined',
         webAssembly: typeof window.WebAssembly === 'object',
         worker: typeof window.Worker === 'function',
+        intersectionObserver: typeof window.IntersectionObserver === 'function',
+        resizeObserver: typeof window.ResizeObserver === 'function',
+        broadcastChannel: typeof window.BroadcastChannel === 'function',
+        sendBeacon: typeof navigator.sendBeacon === 'function',
         clipboardText: !!(navigator.clipboard && navigator.clipboard.writeText),
-        clipboardImage: typeof window.ClipboardItem === 'function'
-          && !!(navigator.clipboard && navigator.clipboard.write)
+        clipboardImage: !!(
+          typeof window.ClipboardItem === 'function'
+          && navigator.clipboard
+          && navigator.clipboard.write
+        ),
+        dynamicViewportUnits: !!(
+          window.CSS
+          && typeof window.CSS.supports === 'function'
+          && window.CSS.supports('height', '100dvh')
+        ),
+        overflowWrapAnywhere: !!(
+          window.CSS
+          && typeof window.CSS.supports === 'function'
+          && window.CSS.supports('overflow-wrap', 'anywhere')
+        ),
+        contentVisibilityAuto: !!(
+          window.CSS
+          && typeof window.CSS.supports === 'function'
+          && window.CSS.supports('content-visibility', 'auto')
+        )
       };
     }
 
@@ -481,6 +552,7 @@ function getDefaultJson() {
       setStatus(true, 'Debug mode: ' + (vwdDebugEnabled ? 'on' : 'off'));
       if (vwdDebugEnabled && typeof vwdDebugLog === 'function') {
         vwdDebugLog('mode', { enabled: true });
+        vwdDebugLog('browser-compat', getBrowserCompatibilityState());
       }
     }
 
@@ -794,6 +866,8 @@ ${lines.join('\n')}`;
     const NAV_SIDEBAR_HIDDEN_KEY = 'vwd-nav-sidebar-hidden';
     const WAVE_EDIT_MODE_KEY = 'vwd-wave-edit-mode';
     const JSON_PANEL_HIDDEN_KEY = 'vwd-json-panel-hidden';
+    const JSON_COMPACT_MODE_KEY = 'vwd-json-compact-mode';
+    const JSON_VIEW_MODE_KEY = 'vwd-json-view-mode';
     const EDITOR_JSON_KEY = 'vwd-editor-json';
     const EDITOR_JSON_VALID_KEY = 'vwd-editor-json-valid';
     const WAVE_DOCUMENTS_KEY = 'vwd-wave-documents';
@@ -810,7 +884,7 @@ ${lines.join('\n')}`;
     const WAVE_PREVIEW_WORKER_PARSE_THRESHOLD = 50000;
     const WAVE_PREVIEW_CANVAS_CELL_THRESHOLD = 12000;
     const WAVE_PREVIEW_CANVAS_COLUMN_THRESHOLD = 1500;
-    const WAVE_ANALYSIS_WORKER_URL = 'inc/visualwavedrom-worker.js?v=20260729-bigdata-v1';
+    const WAVE_ANALYSIS_WORKER_URL = 'inc/visualwavedrom-worker.js?v=20260729-json-bigdata-v1';
     const DRAG_THRESHOLD = 5;
     let backBtnDrag = null;
     let waveEditMode = 'modify';
@@ -875,6 +949,9 @@ ${lines.join('\n')}`;
     const moveDistanceHint = document.getElementById('move-distance-hint');
     const waveLibraryPickerModal = document.getElementById('wave-library-picker-modal');
     const waveLibraryPickerOptions = document.getElementById('wave-library-picker-options');
+    const rowImportSchemeModal = document.getElementById('row-import-scheme-modal');
+    const rowImportSchemeOptions = document.getElementById('row-import-scheme-options');
+    const rowImportSchemeHint = document.getElementById('row-import-scheme-hint');
     const waveCopyModal = document.getElementById('wave-copy-modal');
     const waveCopyCancel = document.getElementById('wave-copy-cancel');
     const waveScreenshotRangeModal = document.getElementById('wave-screenshot-range-modal');
@@ -884,6 +961,8 @@ ${lines.join('\n')}`;
     const waveScreenshotRangeCancel = document.getElementById('wave-screenshot-range-cancel');
     const waveScreenshotRangeConfirm = document.getElementById('wave-screenshot-range-confirm');
     let pendingWaveScreenshotRangeRequest = null;
+    let rowImportSchemeBusy = false;
+    let rowImportSchemeCatalog = [];
 
     function escapeRegex(str) {
       return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -2177,6 +2256,8 @@ ${lines.join('\n')}`;
 
     function formatEditorJson(options) {
       const opts = options || {};
+      flushCodeMirrorToTextarea('format-json');
+      if (jsonDocumentViewMode === 'window' && !commitJsonWindowEdits('format-json')) return false;
       let formatted;
       try {
         formatted = JSON.stringify(JSON.parse(editor.value), null, 2);
@@ -2198,8 +2279,547 @@ ${lines.join('\n')}`;
       return true;
     }
 
+    function refreshJsonEditorLayout(focusEditor) {
+      requestAnimationFrame(() => {
+        if (codeMirrorEditor) {
+          codeMirrorEditor.refresh();
+          if (focusEditor) codeMirrorEditor.focus();
+          return;
+        }
+        if (focusEditor && editor) editor.focus();
+      });
+    }
+
+    function setJsonCompactMode(compact, persist) {
+      const enabled = !!compact;
+      const forceNoWrap = shouldForceJsonNoWrap();
+      app.classList.toggle('json-compact-mode', enabled);
+      app.classList.toggle('json-wrap-forced-off', forceNoWrap);
+      if (jsonCompactModeBtn) {
+        jsonCompactModeBtn.classList.toggle('active', enabled);
+        jsonCompactModeBtn.setAttribute('aria-pressed', String(enabled));
+        jsonCompactModeBtn.setAttribute(
+          'aria-label',
+          enabled ? '关闭 JSON 紧凑模式' : '开启 JSON 紧凑模式'
+        );
+        jsonCompactModeBtn.title = forceNoWrap
+          ? '当前波形超过 200 列，紧凑模式保留小字号但关闭自动换行'
+          : (enabled
+            ? '关闭 JSON 紧凑模式'
+            : '开启 JSON 紧凑模式：缩小间距并自动换行');
+      }
+      if (editor) editor.wrap = enabled && !forceNoWrap ? 'soft' : 'off';
+      if (codeMirrorEditor) {
+        const lineWrapping = enabled && !forceNoWrap;
+        codeMirrorEditor.setOption('lineWrapping', lineWrapping);
+        jsonEditorPerformanceState.lineWrapping = lineWrapping;
+      }
+      if (persist) {
+        try { localStorage.setItem(JSON_COMPACT_MODE_KEY, enabled ? '1' : '0'); } catch (e) { /* ignore */ }
+      }
+      refreshJsonEditorLayout(false);
+      vwdDebugLog('json-panel', { phase: 'compact-mode', enabled, forceNoWrap });
+    }
+
+    function restoreJsonCompactMode() {
+      try {
+        setJsonCompactMode(localStorage.getItem(JSON_COMPACT_MODE_KEY) === '1', false);
+      } catch (e) {
+        setJsonCompactMode(false, false);
+      }
+    }
+
+    function getJsonBigDataApi() {
+      return window.VisualWaveDromJsonBigData
+        && typeof window.VisualWaveDromJsonBigData.createWindowDocument === 'function'
+        ? window.VisualWaveDromJsonBigData
+        : null;
+    }
+
+    function getJsonDocumentIdentity() {
+      return String(editingWaveDocumentName || selectedNavDocumentName || 'active-editor');
+    }
+
+    function isLargeJsonDocument(metrics, textLength) {
+      return !!(metrics && Number(metrics.maxWaveLength) > JSON_WRAP_DISABLE_COLUMN_THRESHOLD)
+        || Number(textLength) >= JSON_LARGE_TEXT_THRESHOLD;
+    }
+
+    function shouldForceJsonNoWrap() {
+      return !!(jsonDocumentMetrics
+        && Number(jsonDocumentMetrics.maxWaveLength) > JSON_WRAP_DISABLE_COLUMN_THRESHOLD);
+    }
+
+    function isJsonViewReadOnly() {
+      if (jsonDocumentViewMode === 'summary') return true;
+      return jsonDocumentViewMode === 'full'
+        && isLargeJsonDocument(jsonDocumentMetrics, editor ? editor.value.length : 0)
+        && !jsonFullEditUnlocked;
+    }
+
+    function syncJsonEditorAccessMode() {
+      const readOnly = isJsonViewReadOnly();
+      app.classList.toggle('json-view-readonly', readOnly);
+      if (editor) {
+        editor.readOnly = readOnly;
+        editor.setAttribute('aria-readonly', String(readOnly));
+      }
+      if (editorPanel) editorPanel.setAttribute('aria-readonly', String(readOnly));
+      if (codeMirrorEditor && jsonEditorReadOnlyState !== readOnly) {
+        codeMirrorEditor.setOption('readOnly', readOnly ? 'nocursor' : false);
+        jsonEditorReadOnlyState = readOnly;
+      }
+      if (codeMirrorEditor) {
+        const wrapper = codeMirrorEditor.getWrapperElement();
+        if (wrapper) wrapper.setAttribute('aria-readonly', String(readOnly));
+      }
+      if (unlockJsonFullBtn) {
+        const largeFull = jsonDocumentViewMode === 'full'
+          && isLargeJsonDocument(jsonDocumentMetrics, editor ? editor.value.length : 0);
+        unlockJsonFullBtn.hidden = !largeFull;
+        unlockJsonFullBtn.classList.toggle('active', largeFull && jsonFullEditUnlocked);
+        unlockJsonFullBtn.setAttribute('aria-pressed', String(largeFull && jsonFullEditUnlocked));
+        unlockJsonFullBtn.title = jsonFullEditUnlocked
+          ? '锁定完整 JSON，避免大文本误输入'
+          : '完整大 JSON 默认只读，点击后允许编辑';
+      }
+      if (jsonFullEditLabel) {
+        jsonFullEditLabel.textContent = jsonFullEditUnlocked ? '锁定完整 JSON' : '编辑完整 JSON';
+      }
+    }
+
+    function syncJsonEditorPerformanceOptions() {
+      const large = isLargeJsonDocument(
+        jsonDocumentMetrics,
+        editor ? editor.value.length : 0
+      );
+      const forceNoWrap = shouldForceJsonNoWrap();
+      const compact = app.classList.contains('json-compact-mode');
+      app.classList.toggle('json-large-document', large);
+      app.classList.toggle('json-wrap-forced-off', forceNoWrap);
+      if (editor) editor.wrap = compact && !forceNoWrap ? 'soft' : 'off';
+      if (codeMirrorEditor) {
+        const lineWrapping = compact && !forceNoWrap;
+        const viewportMargin = large ? 5 : 20;
+        const maxHighlightLength = large ? 2000 : 10000;
+        const crudeMeasuringFrom = large ? 2000 : 10000;
+        const mode = large && jsonDocumentViewMode === 'full' ? 'plain' : 'json';
+        if (jsonEditorPerformanceState.lineWrapping !== lineWrapping) {
+          codeMirrorEditor.setOption('lineWrapping', lineWrapping);
+          jsonEditorPerformanceState.lineWrapping = lineWrapping;
+        }
+        if (jsonEditorPerformanceState.viewportMargin !== viewportMargin) {
+          codeMirrorEditor.setOption('viewportMargin', viewportMargin);
+          jsonEditorPerformanceState.viewportMargin = viewportMargin;
+        }
+        if (jsonEditorPerformanceState.maxHighlightLength !== maxHighlightLength) {
+          codeMirrorEditor.setOption('maxHighlightLength', maxHighlightLength);
+          jsonEditorPerformanceState.maxHighlightLength = maxHighlightLength;
+        }
+        if (jsonEditorPerformanceState.crudeMeasuringFrom !== crudeMeasuringFrom) {
+          codeMirrorEditor.setOption('crudeMeasuringFrom', crudeMeasuringFrom);
+          jsonEditorPerformanceState.crudeMeasuringFrom = crudeMeasuringFrom;
+        }
+        if (jsonEditorPerformanceState.mode !== mode) {
+          codeMirrorEditor.setOption('mode', mode === 'plain' ? null : { name: 'javascript', json: true });
+          jsonEditorPerformanceState.mode = mode;
+        }
+      }
+      if (jsonCompactModeBtn) {
+        jsonCompactModeBtn.title = forceNoWrap
+          ? '当前波形超过 200 列，紧凑模式保留小字号但关闭自动换行'
+          : (compact
+            ? '关闭 JSON 紧凑模式'
+            : '开启 JSON 紧凑模式：缩小间距并自动换行');
+      }
+      syncJsonEditorAccessMode();
+    }
+
+    function getJsonWindowRange(metrics) {
+      const totalColumns = Math.max(0, Number(metrics && metrics.maxWaveLength) || 0);
+      if (bigWaveViewportState.enabled && bigWaveViewportState.window) {
+        return {
+          start: bigWaveViewportState.window.start,
+          end: bigWaveViewportState.window.end,
+          totalColumns
+        };
+      }
+      if (jsonNativeWindowRange
+          && jsonNativeWindowRange.documentKey === getJsonDocumentIdentity()
+          && jsonNativeWindowRange.totalColumns === totalColumns) {
+        return {
+          start: jsonNativeWindowRange.start,
+          end: jsonNativeWindowRange.end,
+          totalColumns
+        };
+      }
+      const size = Math.min(
+        Math.max(1, totalColumns),
+        Math.max(BIG_WAVE_MIN_WINDOW_COLUMNS, Math.min(BIG_WAVE_MAX_WINDOW_COLUMNS, totalColumns || 1))
+      );
+      return { start: 0, end: Math.min(totalColumns, size), totalColumns };
+    }
+
+    function scheduleJsonWindowFromNativeScroller(scroller, svg, waveStartX) {
+      if (!scroller || !svg || bigWaveViewportState.enabled
+          || jsonDocumentViewMode !== 'window'
+          || jsonWindowViewDirty
+          || !jsonDocumentMetrics
+          || Number(jsonDocumentMetrics.maxWaveLength) <= JSON_WRAP_DISABLE_COLUMN_THRESHOLD) {
+        return;
+      }
+      if (jsonNativeWindowTimer !== null) clearTimeout(jsonNativeWindowTimer);
+      jsonNativeWindowTimer = setTimeout(function () {
+        jsonNativeWindowTimer = null;
+        if (!scroller.isConnected || !svg.isConnected || jsonWindowViewDirty
+            || jsonDocumentViewMode !== 'window' || bigWaveViewportState.enabled) return;
+        const totalColumns = Math.max(0, Number(jsonDocumentMetrics.maxWaveLength) || 0);
+        const rect = svg.getBoundingClientRect();
+        const viewBox = svg.viewBox && svg.viewBox.baseVal;
+        const userWidth = viewBox && viewBox.width > 0
+          ? viewBox.width
+          : Math.max(1, parseFloat(svg.getAttribute('width') || '1'));
+        const userUnitsPerPixel = rect.width > 0 ? userWidth / rect.width : 1;
+        const columnWidth = Math.max(
+          1,
+          getWaveColumnWidth(getWaveUnitWidth(editor.value, jsonDocumentSource))
+        );
+        const viewportStartX = Math.max(Number(waveStartX) || 0, scroller.scrollLeft * userUnitsPerPixel);
+        const viewportEndX = Math.max(
+          viewportStartX,
+          (scroller.scrollLeft + scroller.clientWidth) * userUnitsPerPixel
+        );
+        const start = Math.max(0, Math.min(
+          Math.max(0, totalColumns - 1),
+          Math.floor((viewportStartX - (Number(waveStartX) || 0)) / columnWidth)
+        ));
+        const visibleColumns = Math.max(
+          BIG_WAVE_MIN_WINDOW_COLUMNS,
+          Math.ceil((viewportEndX - viewportStartX) / columnWidth) + 8
+        );
+        const end = Math.min(totalColumns, start + Math.min(BIG_WAVE_MAX_WINDOW_COLUMNS, visibleColumns));
+        const previous = jsonNativeWindowRange;
+        if (previous && previous.documentKey === getJsonDocumentIdentity()
+            && previous.start === start && previous.end === end) return;
+        jsonNativeWindowRange = {
+          documentKey: getJsonDocumentIdentity(),
+          totalColumns,
+          start,
+          end
+        };
+        refreshJsonDocumentView({
+          source: jsonDocumentSource,
+          metrics: jsonDocumentMetrics,
+          clearHistory: true
+        });
+        vwdDebugLog('json-bigdata', {
+          phase: 'native-window-scroll',
+          start,
+          end,
+          totalColumns
+        });
+      }, 140);
+    }
+
+    function bindJsonWindowScroller(host) {
+      if (!host || !host.querySelector) return;
+      const svg = host.querySelector('svg');
+      const scroller = host.closest('.wave-document-canvas') || wavePanel;
+      if (!svg || !scroller) return;
+      let waveStartX = 0;
+      try {
+        const drawBounds = getWaveLaneGroups(svg).map(function (lane) {
+          const drawGroup = lane.querySelector('[id^="wavelane_draw_"]');
+          return drawGroup && typeof drawGroup.getBBox === 'function' ? drawGroup.getBBox() : null;
+        }).filter(Boolean);
+        if (drawBounds.length) waveStartX = Math.min(...drawBounds.map((bounds) => bounds.x));
+      } catch (_e) {
+        waveStartX = 0;
+      }
+      scroller.__vwdJsonWindowContext = { svg, waveStartX };
+      if (!scroller.__vwdJsonWindowScrollBound) {
+        scroller.addEventListener('scroll', () => {
+          const context = scroller.__vwdJsonWindowContext;
+          if (context) scheduleJsonWindowFromNativeScroller(scroller, context.svg, context.waveStartX);
+        }, { passive: true });
+        scroller.__vwdJsonWindowScrollBound = true;
+      }
+    }
+
+    function cancelCodeMirrorSync() {
+      if (codeMirrorSyncTimer !== null) clearTimeout(codeMirrorSyncTimer);
+      codeMirrorSyncTimer = null;
+      codeMirrorSyncPending = false;
+      codeMirrorPendingChanges = [];
+      codeMirrorBeforeChange = null;
+    }
+
+    function setCodeMirrorDisplayValue(text, options) {
+      if (!codeMirrorEditor) return;
+      const value = String(text == null ? '' : text);
+      const opts = options || {};
+      cancelCodeMirrorSync();
+      if (codeMirrorEditor.getValue() !== value) {
+        syncingCodeMirror = true;
+        const cursor = codeMirrorEditor.getCursor();
+        codeMirrorEditor.setValue(value);
+        if (opts.preserveCursor) {
+          codeMirrorEditor.setCursor({
+            line: Math.min(cursor.line, Math.max(0, codeMirrorEditor.lineCount() - 1)),
+            ch: cursor.ch
+          });
+        }
+        syncingCodeMirror = false;
+      }
+      if (opts.clearHistory !== false) codeMirrorEditor.clearHistory();
+    }
+
+    function updateJsonViewButtons() {
+      [
+        [jsonViewSummaryBtn, 'summary'],
+        [jsonViewWindowBtn, 'window'],
+        [jsonViewFullBtn, 'full']
+      ].forEach(function (entry) {
+        const button = entry[0];
+        if (!button) return;
+        const active = jsonDocumentViewMode === entry[1];
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-pressed', String(active));
+      });
+      if (applyJsonWindowBtn) {
+        applyJsonWindowBtn.hidden = jsonDocumentViewMode !== 'window';
+        applyJsonWindowBtn.disabled = !jsonWindowViewDirty;
+        applyJsonWindowBtn.classList.toggle('json-window-dirty', jsonWindowViewDirty);
+      }
+      if (jsonViewInfo) {
+        if (jsonDocumentViewMode === 'window' && jsonWindowView) {
+          jsonViewInfo.textContent = '窗口 '
+            + (jsonWindowView.start + 1) + '-' + jsonWindowView.end
+            + ' / ' + jsonWindowView.totalColumns;
+        } else if (jsonDocumentViewMode === 'summary') {
+          jsonViewInfo.textContent = '摘要';
+        } else {
+          const columns = Math.max(0, Number(jsonDocumentMetrics && jsonDocumentMetrics.maxWaveLength) || 0);
+          jsonViewInfo.textContent = columns ? '完整 · ' + columns + ' 列' : '完整';
+        }
+      }
+      syncJsonEditorPerformanceOptions();
+      if (jsonDocumentViewMode === 'window' && !jsonWindowViewDirty) {
+        requestAnimationFrame(function () {
+          bindJsonWindowScroller(waveContainer);
+        });
+      }
+    }
+
+    function preferredInitialJsonViewMode(metrics) {
+      if (Number(metrics && metrics.maxWaveLength) > JSON_WRAP_DISABLE_COLUMN_THRESHOLD) {
+        return 'window';
+      }
+      try {
+        const saved = localStorage.getItem(JSON_VIEW_MODE_KEY);
+        return saved === 'summary' || saved === 'window' || saved === 'full' ? saved : 'full';
+      } catch (_e) {
+        return 'full';
+      }
+    }
+
+    function refreshJsonDocumentView(options) {
+      if (refreshingJsonDocumentView || !editor) return false;
+      const opts = options || {};
+      const api = getJsonBigDataApi();
+      if (!codeMirrorEditor || !api) {
+        jsonDocumentViewMode = 'full';
+        jsonWindowView = null;
+        jsonWindowViewDirty = false;
+        updateJsonViewButtons();
+        return false;
+      }
+      let source = opts.source && typeof opts.source === 'object' ? opts.source : null;
+      if (!source) {
+        try {
+          source = JSON.parse(editor.value);
+        } catch (_e) {
+          jsonDocumentViewMode = 'full';
+          jsonDocumentMetrics = null;
+          jsonDocumentSource = null;
+          jsonWindowView = null;
+          jsonWindowViewDirty = false;
+          setCodeMirrorDisplayValue(editor.value, {
+            preserveCursor: !!opts.preserveCursor,
+            clearHistory: opts.clearHistory
+          });
+          jsonFullEditUnlocked = true;
+          updateJsonViewButtons();
+          return false;
+        }
+      }
+      const metrics = opts.metrics || api.measureSource(source);
+      const documentKey = getJsonDocumentIdentity();
+      const documentChanged = documentKey !== jsonViewDocumentKey;
+      if (documentChanged) {
+        jsonViewDocumentKey = documentKey;
+        jsonViewModeExplicitForDocument = '';
+        jsonNativeWindowRange = null;
+        jsonDocumentViewMode = preferredInitialJsonViewMode(metrics);
+        jsonFullEditUnlocked = false;
+      } else if (!jsonViewModeExplicitForDocument
+          && Number(metrics.maxWaveLength) > JSON_WRAP_DISABLE_COLUMN_THRESHOLD
+          && jsonDocumentViewMode === 'full') {
+        jsonDocumentViewMode = 'window';
+        jsonFullEditUnlocked = false;
+      }
+
+      jsonDocumentMetrics = metrics;
+      jsonDocumentSource = source;
+      refreshingJsonDocumentView = true;
+      try {
+        if (jsonDocumentViewMode === 'summary') {
+          const summary = api.createSummaryDocument(source, metrics);
+          jsonWindowView = null;
+          jsonWindowViewDirty = false;
+          setCodeMirrorDisplayValue(JSON.stringify(summary.source, null, 2), {
+            preserveCursor: !!opts.preserveCursor,
+            clearHistory: opts.clearHistory
+          });
+        } else if (jsonDocumentViewMode === 'window') {
+          const range = getJsonWindowRange(metrics);
+          const windowDocument = api.createWindowDocument(source, {
+            start: range.start,
+            end: range.end,
+            metrics
+          });
+          jsonWindowView = windowDocument;
+          jsonWindowViewDirty = false;
+          setCodeMirrorDisplayValue(JSON.stringify(windowDocument.source, null, 2), {
+            preserveCursor: !!opts.preserveCursor,
+            clearHistory: opts.clearHistory
+          });
+        } else {
+          jsonWindowView = null;
+          jsonWindowViewDirty = false;
+          setCodeMirrorDisplayValue(editor.value, {
+            preserveCursor: !!opts.preserveCursor,
+            clearHistory: opts.clearHistory
+          });
+        }
+      } finally {
+        refreshingJsonDocumentView = false;
+      }
+      updateJsonViewButtons();
+      vwdDebugLog('json-bigdata', {
+        phase: 'view-refresh',
+        mode: jsonDocumentViewMode,
+        documentKey,
+        textLength: editor.value.length,
+        maxWaveLength: metrics.maxWaveLength,
+        forceNoWrap: shouldForceJsonNoWrap()
+      });
+      return true;
+    }
+
+    function commitJsonWindowEdits(reason) {
+      if (jsonDocumentViewMode !== 'window' || !jsonWindowViewDirty) return true;
+      const api = getJsonBigDataApi();
+      if (!api || !codeMirrorEditor || !jsonWindowView) return false;
+      let fullSource;
+      let windowSource;
+      try {
+        fullSource = JSON.parse(editor.value);
+        windowSource = JSON.parse(codeMirrorEditor.getValue());
+        const merged = api.mergeWindowDocument(fullSource, windowSource, jsonWindowView);
+        const newText = JSON.stringify(merged.source, null, 2);
+        if (newText !== editor.value) {
+          pushUndoBeforeChange(newText);
+          jsonWindowViewDirty = false;
+          applyEditorChange(newText, 0, 0, { skipFocus: true });
+          scheduleFormatAfterWaveChange();
+        } else {
+          jsonWindowViewDirty = false;
+          refreshJsonDocumentView({ source: fullSource, metrics: jsonDocumentMetrics });
+        }
+        updateJsonViewButtons();
+        setStatus(true, '当前窗口 JSON 已应用');
+        vwdDebugLog('json-bigdata', {
+          phase: 'window-commit',
+          reason: reason || '',
+          start: jsonWindowView ? jsonWindowView.start : -1,
+          end: jsonWindowView ? jsonWindowView.end : -1
+        });
+        return true;
+      } catch (error) {
+        setStatus(false, '窗口 JSON 无法应用: ' + (error && error.message ? error.message : String(error)));
+        vwdDebugLog('json-bigdata', {
+          phase: 'window-commit-error',
+          reason: reason || '',
+          message: error && error.message ? error.message : String(error)
+        });
+        return false;
+      }
+    }
+
+    function setJsonDocumentViewMode(mode, options) {
+      const nextMode = mode === 'summary' || mode === 'window' || mode === 'full' ? mode : 'full';
+      const opts = options || {};
+      if (nextMode === jsonDocumentViewMode) return true;
+      if (jsonDocumentViewMode === 'full') flushCodeMirrorToTextarea('json-view-switch');
+      if (jsonDocumentViewMode === 'window' && !commitJsonWindowEdits('json-view-switch')) return false;
+      jsonDocumentViewMode = nextMode;
+      jsonWindowViewDirty = false;
+      if (nextMode === 'full') {
+        jsonFullEditUnlocked = !isLargeJsonDocument(jsonDocumentMetrics, editor.value.length);
+      } else {
+        jsonFullEditUnlocked = false;
+      }
+      if (opts.user) {
+        jsonViewModeExplicitForDocument = getJsonDocumentIdentity();
+        try { localStorage.setItem(JSON_VIEW_MODE_KEY, nextMode); } catch (_e) { /* ignore */ }
+      }
+      refreshJsonDocumentView({ source: jsonDocumentSource, metrics: jsonDocumentMetrics });
+      setStatus(true, nextMode === 'summary'
+        ? '已切换到 JSON 摘要'
+        : (nextMode === 'window' ? '已切换到当前窗口 JSON' : '已切换到完整 JSON'));
+      return true;
+    }
+
+    function toggleJsonFullEditing() {
+      if (jsonDocumentViewMode !== 'full') return false;
+      if (jsonFullEditUnlocked) flushCodeMirrorToTextarea('lock-full-json');
+      jsonFullEditUnlocked = !jsonFullEditUnlocked;
+      syncJsonEditorAccessMode();
+      updateJsonViewButtons();
+      if (jsonFullEditUnlocked) focusEditor();
+      setStatus(true, jsonFullEditUnlocked ? '完整 JSON 已解锁编辑' : '完整 JSON 已锁定');
+      return true;
+    }
+
+    function setJsonPanelFullscreen(fullscreen) {
+      const enabled = !!fullscreen;
+      if (enabled && app.classList.contains('json-panel-hidden')) {
+        setJsonPanelHidden(false, true);
+      }
+      app.classList.toggle('json-panel-fullscreen', enabled);
+      document.body.classList.toggle('json-panel-fullscreen-active', enabled);
+      if (jsonFullscreenBtn) {
+        jsonFullscreenBtn.classList.toggle('active', enabled);
+        jsonFullscreenBtn.setAttribute('aria-pressed', String(enabled));
+        jsonFullscreenBtn.setAttribute(
+          'aria-label',
+          enabled ? '退出 JSON 全屏' : '全屏显示 WaveDrom JSON'
+        );
+        jsonFullscreenBtn.title = enabled
+          ? '退出 WaveDrom JSON 全屏'
+          : '全屏显示 WaveDrom JSON';
+      }
+      if (jsonFullscreenLabel) jsonFullscreenLabel.textContent = enabled ? '退出全屏' : '全屏';
+      refreshJsonEditorLayout(enabled);
+      vwdDebugLog('json-panel', { phase: 'fullscreen', enabled });
+    }
+
     function setJsonPanelHidden(hidden, persist) {
       const shouldHide = !!hidden;
+      if (shouldHide && app.classList.contains('json-panel-fullscreen')) {
+        setJsonPanelFullscreen(false);
+      }
       app.classList.toggle('json-panel-hidden', shouldHide);
       if (toggleJsonPanelLabel) {
         toggleJsonPanelLabel.textContent = shouldHide ? '显示 JSON' : '隐藏 JSON';
@@ -2920,6 +3540,8 @@ ${lines.join('\n')}`;
     function flushPersistEditorJson() {
       clearTimeout(persistTimer);
       persistTimer = null;
+      flushCodeMirrorToTextarea('persist-editor-json');
+      if (jsonDocumentViewMode === 'window') commitJsonWindowEdits('persist-editor-json');
       saveEditorJsonToStorage(editor.value);
       const current = editingWaveDocumentName && getSavedTagByName(editingWaveDocumentName);
       if (current && current.content !== editor.value && isValidJsonText(editor.value)) {
@@ -2965,20 +3587,16 @@ ${lines.join('\n')}`;
       const text = value == null ? '' : String(value);
       const opts = options || {};
       if (!isApplyingHistory && editor.value !== text) compactPendingEditorHistory(text);
+      cancelCodeMirrorSync();
       editor.value = text;
-      if (codeMirrorEditor && codeMirrorEditor.getValue() !== text) {
-        syncingCodeMirror = true;
-        const cursor = codeMirrorEditor.getCursor();
-        codeMirrorEditor.setValue(text);
-        if (opts.preserveCursor) {
-          codeMirrorEditor.setCursor({
-            line: Math.min(cursor.line, Math.max(0, codeMirrorEditor.lineCount() - 1)),
-            ch: cursor.ch
-          });
-        }
-        syncingCodeMirror = false;
+      if (codeMirrorEditor) {
+        refreshJsonDocumentView({
+          preserveCursor: !!opts.preserveCursor,
+          clearHistory: opts.clearCodeMirrorHistory !== false,
+          source: opts.source,
+          metrics: opts.metrics
+        });
       }
-      if (codeMirrorEditor && opts.clearCodeMirrorHistory) codeMirrorEditor.clearHistory();
     }
 
     function isJsonEditorTarget(target) {
@@ -3014,10 +3632,12 @@ ${lines.join('\n')}`;
       editor.selectionStart = safeStart;
       editor.selectionEnd = safeEnd;
       if (codeMirrorEditor) {
-        codeMirrorEditor.setSelection(
-          codeMirrorEditor.posFromIndex(safeStart),
-          codeMirrorEditor.posFromIndex(safeEnd)
-        );
+        if (jsonDocumentViewMode === 'full') {
+          codeMirrorEditor.setSelection(
+            codeMirrorEditor.posFromIndex(safeStart),
+            codeMirrorEditor.posFromIndex(safeEnd)
+          );
+        }
         if (shouldFocus) {
           setKeyboardInputScope('json', 'editor-selection-focus');
           codeMirrorEditor.focus();
@@ -3367,6 +3987,11 @@ ${lines.join('\n')}`;
 
     function scheduleBigWaveViewportStart(nextStart, reason, immediate) {
       if (!bigWaveViewportState.enabled || !bigWaveViewportState.window) return false;
+      if (jsonDocumentViewMode === 'window'
+          && jsonWindowViewDirty
+          && !commitJsonWindowEdits('big-wave-window-change')) {
+        return false;
+      }
       const maxStart = bigWaveViewportState.window.maxStart;
       const start = Math.max(0, Math.min(maxStart, Math.round(Number(nextStart) || 0)));
       const currentTarget = bigWaveViewportState.pendingStart >= 0
@@ -3659,16 +4284,6 @@ ${lines.join('\n')}`;
       return entry && Number.isFinite(entry.sequence) ? entry.sequence : 0;
     }
 
-    function hashHistoryText(text) {
-      const value = String(text == null ? '' : text);
-      let hash = 2166136261;
-      for (let i = 0; i < value.length; i += 1) {
-        hash ^= value.charCodeAt(i);
-        hash = Math.imul(hash, 16777619);
-      }
-      return hash >>> 0;
-    }
-
     function createTextHistoryPatch(sourceContent, targetContent) {
       const source = String(sourceContent == null ? '' : sourceContent);
       const target = String(targetContent == null ? '' : targetContent);
@@ -3688,8 +4303,8 @@ ${lines.join('\n')}`;
         insertText: target.slice(start, targetEnd),
         sourceLength: source.length,
         targetLength: target.length,
-        sourceHash: hashHistoryText(source),
-        targetHash: hashHistoryText(target)
+        beforeContext: source.slice(Math.max(0, start - 32), start),
+        afterContext: source.slice(sourceEnd, Math.min(source.length, sourceEnd + 32))
       };
     }
 
@@ -3709,16 +4324,35 @@ ${lines.join('\n')}`;
       return entry;
     }
 
+    function createOperationHistoryEntry(operations, finalLength, initialLength, sequence, reason) {
+      const api = getJsonBigDataApi();
+      if (!api || !operations.length) return null;
+      return {
+        operationPatch: api.createReverseOperationPatch(operations, finalLength, initialLength),
+        sequence: Number.isFinite(sequence) ? sequence : nextHistorySequence(),
+        reason: reason || 'direct-json-interval'
+      };
+    }
+
     function getEditorHistoryContent(entry, sourceContent) {
+      if (entry && typeof entry === 'object' && entry.operationPatch) {
+        const api = getJsonBigDataApi();
+        return api ? api.applyOperationPatch(sourceContent, entry.operationPatch) : null;
+      }
       if (entry && typeof entry === 'object' && entry.patch) {
         const source = String(sourceContent == null ? '' : sourceContent);
         const patch = entry.patch;
-        if (source.length !== patch.sourceLength || hashHistoryText(source) !== patch.sourceHash) return null;
+        if (source.length !== patch.sourceLength) return null;
+        const beforeStart = Math.max(0, patch.start - String(patch.beforeContext || '').length);
+        if (source.slice(beforeStart, patch.start) !== String(patch.beforeContext || '')) return null;
         if (source.slice(patch.start, patch.start + patch.deleteText.length) !== patch.deleteText) return null;
+        const afterStart = patch.start + patch.deleteText.length;
+        if (source.slice(afterStart, afterStart + String(patch.afterContext || '').length)
+            !== String(patch.afterContext || '')) return null;
         const target = source.slice(0, patch.start)
           + patch.insertText
           + source.slice(patch.start + patch.deleteText.length);
-        if (target.length !== patch.targetLength || hashHistoryText(target) !== patch.targetHash) return null;
+        if (target.length !== patch.targetLength) return null;
         return target;
       }
       return entry && typeof entry === 'object' && typeof entry.content === 'string'
@@ -3729,8 +4363,30 @@ ${lines.join('\n')}`;
     function replaceEditorHistoryEntryContent(entry, replacement) {
       delete entry.content;
       delete entry.patch;
+      delete entry.operationPatch;
       if (replacement.patch) entry.patch = replacement.patch;
+      else if (replacement.operationPatch) entry.operationPatch = replacement.operationPatch;
       else entry.content = replacement.content;
+    }
+
+    function createInverseEditorHistoryEntry(entry, sourceContent, targetContent) {
+      if (entry && entry.operationPatch) {
+        const api = getJsonBigDataApi();
+        const inverse = api && api.invertOperationPatch(entry.operationPatch);
+        if (inverse) {
+          return {
+            operationPatch: inverse,
+            sequence: getHistorySequence(entry),
+            reason: entry.reason || 'editor-change'
+          };
+        }
+      }
+      return createEditorHistoryEntry(
+        sourceContent,
+        targetContent,
+        getHistorySequence(entry),
+        entry && entry.reason ? entry.reason : 'editor-change'
+      );
     }
 
     function rebaseLatestEditorUndoSource(sourceContent, nextSourceContent, reason) {
@@ -3793,12 +4449,14 @@ ${lines.join('\n')}`;
       editorHistoryBaseline = value;
       lastSavedContent = value;
       directJsonEditDirty = false;
+      directJsonOperations = [];
+      directJsonOperationBaseLength = -1;
       undoBurstCaptured = false;
     }
 
     function markDirectJsonEdit() {
       if (isApplyingHistory) return;
-      directJsonEditDirty = editor.value !== editorHistoryBaseline;
+      directJsonEditDirty = directJsonOperations.length > 0 || editor.value !== editorHistoryBaseline;
       updateUndoRedoButtons();
     }
 
@@ -3814,13 +4472,33 @@ ${lines.join('\n')}`;
 
     function checkpointDirectJsonEdit(reason) {
       if (isApplyingHistory) return false;
+      flushCodeMirrorToTextarea(reason || 'json-checkpoint');
       const current = editor.value;
       if (current === editorHistoryBaseline) {
         directJsonEditDirty = false;
+        directJsonOperations = [];
+        directJsonOperationBaseLength = -1;
         return false;
       }
       const previous = editorHistoryBaseline;
-      pushEditorUndoSnapshot(previous, reason || 'direct-json-interval', current);
+      const operationEntry = directJsonOperations.length && directJsonOperationBaseLength >= 0
+        ? createOperationHistoryEntry(
+          directJsonOperations,
+          current.length,
+          directJsonOperationBaseLength,
+          nextHistorySequence(),
+          reason || 'direct-json-interval'
+        )
+        : null;
+      if (operationEntry) {
+        compactPendingEditorHistory(current);
+        undoStack.push(operationEntry);
+        if (undoStack.length > 100) undoStack.shift();
+        redoStack = [];
+        waveLibraryRedoStack = [];
+      } else {
+        pushEditorUndoSnapshot(previous, reason || 'direct-json-interval', current);
+      }
       setEditorHistoryBaseline(current);
       updateUndoRedoButtons();
       vwdDebugLog('history', {
@@ -3829,6 +4507,7 @@ ${lines.join('\n')}`;
         documentName: editingWaveDocumentName || '',
         previousLength: previous.length,
         currentLength: current.length,
+        storage: operationEntry ? 'operations' : 'text-patch',
         undoDepth: undoStack.length
       });
       return true;
@@ -3851,6 +4530,7 @@ ${lines.join('\n')}`;
 
     function pushUndoBeforeChange(nextContent) {
       if (isApplyingHistory) return;
+      flushCodeMirrorToTextarea('before-toolbar-change');
       flushUndoDebounce();
       checkpointDirectJsonEdit('before-toolbar-change');
       pushEditorUndoSnapshot(
@@ -8963,6 +9643,14 @@ ${lines.join('\n')}`;
         scroller.addEventListener('scroll', () => scheduleFrozenWaveLabelUpdate(scroller), { passive: true });
         scroller.__vwdFrozenLabelScrollBound = true;
       }
+      scroller.__vwdJsonWindowContext = { svg, waveStartX };
+      if (!scroller.__vwdJsonWindowScrollBound) {
+        scroller.addEventListener('scroll', () => {
+          const context = scroller.__vwdJsonWindowContext;
+          if (context) scheduleJsonWindowFromNativeScroller(scroller, context.svg, context.waveStartX);
+        }, { passive: true });
+        scroller.__vwdJsonWindowScrollBound = true;
+      }
       if (typeof ResizeObserver === 'function') {
         controller.resizeObserver = new ResizeObserver(() => scheduleFrozenWaveLabelUpdate(scroller));
         controller.resizeObserver.observe(svg);
@@ -11299,8 +11987,46 @@ ${lines.join('\n')}`;
       });
     }
 
+    function queueCodeMirrorSync() {
+      if (jsonDocumentViewMode !== 'full' || syncingCodeMirror) return;
+      codeMirrorSyncPending = true;
+      if (codeMirrorSyncTimer !== null) clearTimeout(codeMirrorSyncTimer);
+      codeMirrorSyncTimer = setTimeout(function () {
+        codeMirrorSyncTimer = null;
+        flushCodeMirrorToTextarea('editor-idle');
+      }, JSON_EDITOR_SYNC_DEBOUNCE_MS);
+    }
+
+    function flushCodeMirrorToTextarea(reason) {
+      if (!codeMirrorEditor || jsonDocumentViewMode !== 'full' || !codeMirrorSyncPending) return false;
+      if (codeMirrorSyncTimer !== null) clearTimeout(codeMirrorSyncTimer);
+      codeMirrorSyncTimer = null;
+      codeMirrorSyncPending = false;
+      const previous = editor.value;
+      const current = codeMirrorEditor.getValue();
+      const changes = codeMirrorPendingChanges.slice();
+      codeMirrorPendingChanges = [];
+      codeMirrorBeforeChange = null;
+      if (current === previous) return false;
+      if (changes.length) {
+        if (!directJsonOperations.length) directJsonOperationBaseLength = previous.length;
+        directJsonOperations.push(...changes);
+      }
+      editor.value = current;
+      syncNativeSelectionFromCodeMirror();
+      editor.dispatchEvent(new Event('input', { bubbles: true }));
+      vwdDebugLog('json-bigdata', {
+        phase: 'editor-sync',
+        reason: reason || '',
+        previousLength: previous.length,
+        currentLength: current.length,
+        operationCount: changes.length
+      });
+      return true;
+    }
+
     function syncNativeSelectionFromCodeMirror() {
-      if (!codeMirrorEditor) return;
+      if (!codeMirrorEditor || jsonDocumentViewMode !== 'full') return;
       const anchor = codeMirrorEditor.indexFromPos(codeMirrorEditor.getCursor('anchor'));
       const head = codeMirrorEditor.indexFromPos(codeMirrorEditor.getCursor('head'));
       editor.selectionStart = Math.min(anchor, head);
@@ -11322,15 +12048,14 @@ ${lines.join('\n')}`;
       const vimEnabled = !!enabled;
       const vimAvailable = !!(window.CodeMirror && CodeMirror.keyMap && CodeMirror.keyMap.vim);
       const keyMap = vimEnabled && vimAvailable ? 'vim' : 'default';
-      editor.readOnly = false;
-      editor.setAttribute('aria-readonly', 'false');
-      if (editorPanel) editorPanel.setAttribute('aria-readonly', 'false');
-      if (!codeMirrorEditor) return;
-
-      codeMirrorEditor.setOption('readOnly', false);
+      if (!codeMirrorEditor) {
+        syncJsonEditorAccessMode();
+        return;
+      }
       codeMirrorEditor.setOption('keyMap', keyMap);
       const wrapper = codeMirrorEditor.getWrapperElement();
-      if (wrapper) wrapper.setAttribute('aria-readonly', 'false');
+      syncJsonEditorAccessMode();
+      if (wrapper) wrapper.setAttribute('aria-readonly', String(isJsonViewReadOnly()));
       codeMirrorVimMode = 'normal';
       codeMirrorEditor.refresh();
       vwdDebugLog('vim', {
@@ -11351,11 +12076,13 @@ ${lines.join('\n')}`;
         readOnly: false,
         lineNumbers: true,
         gutters: ['vwd-json-error-gutter', 'CodeMirror-linenumbers'],
-        lineWrapping: false,
+        lineWrapping: app.classList.contains('json-compact-mode'),
         indentUnit: 2,
         tabSize: 2,
         indentWithTabs: false,
-        viewportMargin: 20
+        viewportMargin: 20,
+        maxHighlightLength: 10000,
+        crudeMeasuringFrom: 10000
       });
       codeMirrorEditor.setOption(
         'cursorScrollMargin',
@@ -11363,17 +12090,35 @@ ${lines.join('\n')}`;
       );
       if (editorWrapper) editorWrapper.classList.add('codemirror-active');
 
+      codeMirrorEditor.on('beforeChange', (cm, change) => {
+        if (syncingCodeMirror || isJsonViewReadOnly()) return;
+        if (jsonDocumentViewMode !== 'full') return;
+        codeMirrorBeforeChange = {
+          start: cm.indexFromPos(change.from),
+          removed: cm.getRange(change.from, change.to),
+          inserted: Array.isArray(change.text) ? change.text.join('\n') : ''
+        };
+      });
       codeMirrorEditor.on('change', (cm) => {
         if (syncingCodeMirror) return;
-        cm.save();
-        syncNativeSelectionFromCodeMirror();
-        editor.dispatchEvent(new Event('input', { bubbles: true }));
+        if (jsonDocumentViewMode === 'window') {
+          jsonWindowViewDirty = true;
+          updateJsonViewButtons();
+          return;
+        }
+        if (jsonDocumentViewMode !== 'full' || isJsonViewReadOnly()) return;
+        if (codeMirrorBeforeChange) {
+          codeMirrorPendingChanges.push(codeMirrorBeforeChange);
+          codeMirrorBeforeChange = null;
+        }
+        queueCodeMirrorSync();
       });
       codeMirrorEditor.on('cursorActivity', syncNativeSelectionFromCodeMirror);
       codeMirrorEditor.on('focus', () => {
         setKeyboardInputScope('json', 'json-focus');
       });
       codeMirrorEditor.on('blur', () => {
+        flushCodeMirrorToTextarea('editor-blur');
         checkpointDirectJsonEdit('editor-blur');
       });
       codeMirrorEditor.on('vim-mode-change', (_cm, state) => {
@@ -11383,6 +12128,7 @@ ${lines.join('\n')}`;
         }
       });
       setJsonEditorVimMode(vimEnabled);
+      refreshJsonDocumentView({ clearHistory: true });
       updateCodeMirrorErrorMarker();
       return true;
     }
@@ -12513,6 +13259,263 @@ ${lines.join('\n')}`;
       }
     }
 
+    function setRowImportSchemeHint(message, isError) {
+      if (!rowImportSchemeHint) return;
+      rowImportSchemeHint.textContent = message || '';
+      rowImportSchemeHint.classList.toggle('is-info', !!message && !isError);
+    }
+
+    function closeRowImportSchemeModal() {
+      if (rowImportSchemeBusy) return;
+      if (rowImportSchemeModal) rowImportSchemeModal.hidden = true;
+      setRowImportSchemeHint('', false);
+    }
+
+    function rowImportResponseError(response, payload) {
+      const message = payload && payload.error
+        ? String(payload.error)
+        : ('服务返回错误 ' + response.status);
+      return new Error(message.replace(/^fileProc:\s*/i, ''));
+    }
+
+    function importedWaveWithPreservedNodes(signal, importedWave) {
+      let wave = String(importedWave || '');
+      if (!Object.prototype.hasOwnProperty.call(signal, 'node')) {
+        return { wave, extendedColumns: 0 };
+      }
+      const node = String(signal.node == null ? '' : signal.node);
+      let lastNodeColumn = -1;
+      for (let index = 0; index < node.length; index++) {
+        if (node[index] !== '.') lastNodeColumn = index;
+      }
+      const originalLength = wave.length;
+      if (lastNodeColumn >= wave.length) {
+        wave += EMPTY_WAVE_FILL_CHAR.repeat(lastNodeColumn + 1 - wave.length);
+      }
+      signal.node = node.length >= wave.length
+        ? node.slice(0, wave.length)
+        : node + '.'.repeat(wave.length - node.length);
+      return {
+        wave,
+        extendedColumns: Math.max(0, wave.length - originalLength)
+      };
+    }
+
+    function applyImportedWaveRows(payload) {
+      const updates = payload && Array.isArray(payload.updates) ? payload.updates : [];
+      if (!updates.length) throw new Error('导入方案没有返回任何信号行');
+
+      let parsed;
+      try {
+        parsed = JSON.parse(editor.value);
+      } catch (error) {
+        throw new Error('当前 WaveDrom JSON 有错误，无法导入');
+      }
+      if (!parsed || !Array.isArray(parsed.signal)) {
+        throw new Error('当前波形图没有 signal 数组');
+      }
+
+      const signals = flattenSignals(parsed.signal);
+      const signalsByName = new Map();
+      signals.forEach((signal, index) => {
+        const name = String(signal && signal.name || '');
+        if (!signalsByName.has(name)) signalsByName.set(name, []);
+        signalsByName.get(name).push({ signal, index });
+      });
+
+      const prepared = [];
+      const updateNames = new Set();
+      updates.forEach((update) => {
+        const signalName = String(update && update.signal || '').trim();
+        if (!signalName || updateNames.has(signalName)) {
+          throw new Error(signalName
+            ? ('导入方案重复指定信号：' + signalName)
+            : '导入方案包含空信号名');
+        }
+        updateNames.add(signalName);
+        const matches = signalsByName.get(signalName) || [];
+        if (matches.length === 0) throw new Error('当前波形图中找不到信号：' + signalName);
+        if (matches.length > 1) throw new Error('当前波形图中有多个同名信号，无法确定目标：' + signalName);
+        if (typeof update.wave !== 'string' || !Array.isArray(update.data)) {
+          throw new Error('信号 ' + signalName + ' 的解析结果无效');
+        }
+        prepared.push({
+          target: matches[0],
+          update,
+          wave: update.wave,
+          data: update.data.map((value) => String(value == null ? '' : value))
+        });
+      });
+
+      let extendedColumns = 0;
+      prepared.forEach((item) => {
+        const aligned = importedWaveWithPreservedNodes(item.target.signal, item.wave);
+        item.target.signal.wave = aligned.wave;
+        extendedColumns += aligned.extendedColumns;
+        if (item.data.length) item.target.signal.data = item.data;
+        else delete item.target.signal.data;
+      });
+
+      const newText = JSON.stringify(parsed, null, 2);
+      if (newText === editor.value) {
+        return { changed: false, count: prepared.length, extendedColumns };
+      }
+      const selectionStart = editor.selectionStart;
+      const selectionEnd = editor.selectionEnd;
+      exitWavePaintMode('row-import');
+      pushUndoBeforeChange(newText);
+      applyEditorChange(newText, selectionStart, selectionEnd, { skipFocus: true });
+      scheduleFormatAfterWaveChange();
+      return { changed: true, count: prepared.length, extendedColumns };
+    }
+
+    async function executeRowImportScheme(scheme) {
+      if (rowImportSchemeBusy || !scheme || !scheme.id) return;
+      rowImportSchemeBusy = true;
+      const sourceDocumentName = editingWaveDocumentName;
+      const sourceLibraryId = currentWaveLibraryId;
+      const optionButtons = rowImportSchemeOptions
+        ? Array.from(rowImportSchemeOptions.querySelectorAll('button'))
+        : [];
+      optionButtons.forEach((button) => { button.disabled = true; });
+      setRowImportSchemeHint('正在读取文件并解析波形…', false);
+      setStatus(true, '正在导入行波形：' + scheme.name);
+      vwdDebugLog('row-import', {
+        phase: 'execute-start',
+        schemeId: scheme.id,
+        schemeName: scheme.name,
+        mappingCount: Array.isArray(scheme.mappings) ? scheme.mappings.length : 0
+      });
+      try {
+        const response = await fetch('/api/import-wave-row', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ schemeId: scheme.id })
+        });
+        let payload = null;
+        try { payload = await response.json(); } catch (_error) { /* handled below */ }
+        if (!response.ok) throw rowImportResponseError(response, payload);
+        if (editingWaveDocumentName !== sourceDocumentName
+            || currentWaveLibraryId !== sourceLibraryId) {
+          throw new Error('解析期间波形图或波形库已切换，请重新导入');
+        }
+        const result = applyImportedWaveRows(payload);
+        rowImportSchemeBusy = false;
+        if (rowImportSchemeModal) rowImportSchemeModal.hidden = true;
+        setRowImportSchemeHint('', false);
+        const nodeMessage = result.extendedColumns
+          ? ('；为保留连接端点补了 ' + result.extendedColumns + ' 列未知态')
+          : '';
+        setStatus(
+          true,
+          (result.changed ? '已导入 ' : '导入内容未变化：')
+            + result.count + ' 个信号行' + nodeMessage
+        );
+        vwdDebugLog('row-import', {
+          phase: 'execute-complete',
+          schemeId: scheme.id,
+          changed: result.changed,
+          updateCount: result.count,
+          extendedColumns: result.extendedColumns,
+          pythonVersion: payload.pythonVersion || ''
+        });
+      } catch (error) {
+        rowImportSchemeBusy = false;
+        optionButtons.forEach((button) => { button.disabled = false; });
+        const message = error && error.message ? error.message : String(error);
+        setRowImportSchemeHint(message, true);
+        setStatus(false, '导入行波形失败：' + message);
+        vwdDebugLog('row-import', {
+          phase: 'execute-error',
+          schemeId: scheme.id,
+          message
+        });
+      }
+    }
+
+    async function openRowImportSchemeModal() {
+      if (!waveLibraryServerMode) {
+        setStatus(false, '行波形文件导入需要服务模式，请通过 BAT 或 SH 启动');
+        vwdDebugLog('row-import', { phase: 'open-blocked', reason: 'direct-html-mode' });
+        return;
+      }
+      if (!rowImportSchemeModal || !rowImportSchemeOptions) return;
+      rowImportSchemeModal.hidden = false;
+      rowImportSchemeOptions.innerHTML = '';
+      const loading = document.createElement('div');
+      loading.className = 'modal-empty-state';
+      loading.textContent = '正在读取 import/Scheme…';
+      rowImportSchemeOptions.appendChild(loading);
+      setRowImportSchemeHint('', false);
+      vwdDebugLog('row-import', { phase: 'catalog-load-start' });
+      try {
+        const response = await fetch('/api/import-schemes', { cache: 'no-store' });
+        let catalog = null;
+        try { catalog = await response.json(); } catch (_error) { /* handled below */ }
+        if (!response.ok) throw rowImportResponseError(response, catalog);
+        rowImportSchemeCatalog = Array.isArray(catalog.schemes) ? catalog.schemes : [];
+        rowImportSchemeOptions.innerHTML = '';
+        const pythonAvailable = !!(catalog.python && catalog.python.available);
+        rowImportSchemeCatalog.forEach((scheme) => {
+          const option = document.createElement('button');
+          option.type = 'button';
+          option.className = 'nav-move-option row-import-scheme-option';
+          option.disabled = !pythonAvailable;
+          const title = document.createElement('strong');
+          title.textContent = scheme.name || scheme.id;
+          const mappings = document.createElement('span');
+          mappings.textContent = (scheme.mappings || []).map((mapping) => (
+            mapping.file + ' → ' + mapping.signal + '（' + mapping.parser + '）'
+          )).join('；');
+          option.appendChild(title);
+          if (scheme.description) {
+            const description = document.createElement('span');
+            description.textContent = scheme.description;
+            option.appendChild(description);
+          }
+          option.appendChild(mappings);
+          option.addEventListener('click', () => { void executeRowImportScheme(scheme); });
+          rowImportSchemeOptions.appendChild(option);
+        });
+        if (!rowImportSchemeOptions.childElementCount) {
+          const empty = document.createElement('div');
+          empty.className = 'modal-empty-state';
+          empty.textContent = 'import/Scheme 中没有可用的 JSON 方案';
+          rowImportSchemeOptions.appendChild(empty);
+        }
+        if (!pythonAvailable) {
+          setRowImportSchemeHint(
+            (catalog.python && catalog.python.error) || '未找到 Python 3.6 或更高版本',
+            true
+          );
+        } else if (Array.isArray(catalog.invalid) && catalog.invalid.length) {
+          setRowImportSchemeHint(
+            catalog.invalid.length + ' 个方案无效，可在 Debug Mode 中查看详情',
+            true
+          );
+        } else {
+          setRowImportSchemeHint('Python ' + catalog.python.version + '；单击方案即可导入', false);
+        }
+        vwdDebugLog('row-import', {
+          phase: 'catalog-load-complete',
+          schemeCount: rowImportSchemeCatalog.length,
+          invalid: catalog.invalid || [],
+          python: catalog.python || null
+        });
+      } catch (error) {
+        rowImportSchemeCatalog = [];
+        rowImportSchemeOptions.innerHTML = '';
+        const empty = document.createElement('div');
+        empty.className = 'modal-empty-state';
+        empty.textContent = '无法读取导入方案';
+        rowImportSchemeOptions.appendChild(empty);
+        const message = error && error.message ? error.message : String(error);
+        setRowImportSchemeHint(message, true);
+        setStatus(false, '读取行波形导入方案失败');
+        vwdDebugLog('row-import', { phase: 'catalog-load-error', message });
+      }
+    }
+
     function formatTagSavedTime(iso) {
       if (!iso) return '';
       try {
@@ -13010,6 +14013,8 @@ ${lines.join('\n')}`;
     }
 
     function exportWaveJson() {
+      flushCodeMirrorToTextarea('export-json');
+      if (jsonDocumentViewMode === 'window' && !commitJsonWindowEdits('export-json')) return;
       const text = formatJsonForDisplay(editor.value);
       try {
         JSON.parse(text);
@@ -13047,12 +14052,60 @@ ${lines.join('\n')}`;
       waveAnalysisWorkerUnavailable = true;
       if (waveAnalysisWorker) waveAnalysisWorker.terminate();
       waveAnalysisWorker = null;
+      cancelActiveWaveAnalysis('worker-disabled');
       pendingWaveAnalysisRequests.forEach((request) => {
         clearTimeout(request.timer);
         request.resolve(null);
       });
       pendingWaveAnalysisRequests.clear();
       vwdDebugLog('performance', { phase: 'worker-disabled', reason: reason || 'unavailable' });
+    }
+
+    function cancelActiveWaveAnalysis(reason) {
+      activeWaveAnalysisRequestId += 1;
+      if (activeWaveAnalysisWorker) activeWaveAnalysisWorker.terminate();
+      activeWaveAnalysisWorker = null;
+      if (activeWaveAnalysisResolve) activeWaveAnalysisResolve(null);
+      activeWaveAnalysisResolve = null;
+      if (reason) {
+        vwdDebugLog('performance', { phase: 'active-worker-cancelled', reason });
+      }
+    }
+
+    function requestActiveWaveJsonAnalysis(jsonText) {
+      if (waveAnalysisWorkerUnavailable || typeof Worker !== 'function') return Promise.resolve(null);
+      cancelActiveWaveAnalysis('');
+      const requestId = ++activeWaveAnalysisRequestId;
+      const text = String(jsonText == null ? '' : jsonText);
+      return new Promise((resolve) => {
+        activeWaveAnalysisResolve = resolve;
+        let worker;
+        try {
+          worker = new Worker(WAVE_ANALYSIS_WORKER_URL);
+        } catch (_error) {
+          activeWaveAnalysisResolve = null;
+          resolve(null);
+          return;
+        }
+        activeWaveAnalysisWorker = worker;
+        const timer = setTimeout(() => {
+          if (requestId !== activeWaveAnalysisRequestId) return;
+          cancelActiveWaveAnalysis('timeout');
+        }, 10000);
+        const finish = function (result) {
+          if (requestId !== activeWaveAnalysisRequestId) return;
+          clearTimeout(timer);
+          activeWaveAnalysisWorker = null;
+          activeWaveAnalysisResolve = null;
+          worker.terminate();
+          resolve(result);
+        };
+        worker.addEventListener('message', (event) => {
+          finish(Object.assign({ text }, event.data || {}));
+        });
+        worker.addEventListener('error', () => finish(null));
+        worker.postMessage({ id: requestId, type: 'analyze-document', text });
+      });
     }
 
     function ensureWaveAnalysisWorker() {
@@ -13181,6 +14234,7 @@ ${lines.join('\n')}`;
         }
 
         let source;
+        let documentSource;
         try {
           if (preparedAnalysis && preparedAnalysis.text === jsonText) {
             if (!preparedAnalysis.ok) throw new Error(preparedAnalysis.error || 'JSON 解析失败');
@@ -13194,6 +14248,7 @@ ${lines.join('\n')}`;
           } else {
             source = JSON.parse(jsonText);
           }
+          documentSource = source;
           source = getWaveRenderSource(source);
           setJsonErrorLine(-1);
           if (!navTreeState) rebuildNavTreeStateFromJson(jsonText);
@@ -13212,6 +14267,16 @@ ${lines.join('\n')}`;
             ? preparedAnalysis.metrics
             : null
         );
+        if (!jsonWindowViewDirty) {
+          refreshJsonDocumentView({
+            source: documentSource,
+            metrics: preparedAnalysis && preparedAnalysis.text === jsonText
+              ? preparedAnalysis.metrics
+              : null,
+            preserveCursor: jsonDocumentViewMode === 'full',
+            clearHistory: false
+          });
+        }
         const renderSource = bigWaveWindow ? bigWaveWindow.source : fullSource;
 
         const displayDiv = document.createElement('div');
@@ -13237,6 +14302,7 @@ ${lines.join('\n')}`;
           renderConnectionEdgeList(fullSource);
           fitWaveSvgToContent();
           setupFrozenWaveLabels(waveContainer);
+          bindJsonWindowScroller(waveContainer);
           renderBigWaveNavigator();
           lastRenderedWaveText = jsonText;
           lastRenderedWaveSource = fullSource;
@@ -13265,15 +14331,19 @@ ${lines.join('\n')}`;
 
     function debouncedRender() {
       clearTimeout(renderTimer);
+      cancelActiveWaveAnalysis('editor-changed');
+      const delay = isLargeJsonDocument(jsonDocumentMetrics, editor.value.length)
+        ? JSON_EDITOR_RENDER_DEBOUNCE_MS
+        : JSON_EDITOR_NORMAL_RENDER_DEBOUNCE_MS;
       renderTimer = setTimeout(() => {
         renderTimer = null;
         const text = editor.value;
         const generation = ++waveAnalysisGeneration;
-        requestWaveJsonAnalysis(text).then((analysis) => {
+        requestActiveWaveJsonAnalysis(text).then((analysis) => {
           if (generation !== waveAnalysisGeneration || editor.value !== text) return;
           scheduleRenderWaveform(text, null, analysis);
         });
-      }, 300);
+      }, delay);
     }
 
     function debouncedSaveUndo() {
@@ -13388,12 +14458,7 @@ ${lines.join('\n')}`;
       }
       isApplyingHistory = true;
       try {
-        redoStack.push(createEditorHistoryEntry(
-          editor.value,
-          targetContent,
-          getHistorySequence(entry),
-          entry && entry.reason ? entry.reason : 'editor-change'
-        ));
+        redoStack.push(createInverseEditorHistoryEntry(entry, editor.value, targetContent));
         setEditorValue(targetContent, { clearCodeMirrorHistory: true });
         setEditorHistoryBaseline(editor.value);
         updateLineNumbers();
@@ -13441,12 +14506,7 @@ ${lines.join('\n')}`;
       }
       isApplyingHistory = true;
       try {
-        undoStack.push(createEditorHistoryEntry(
-          editor.value,
-          targetContent,
-          getHistorySequence(entry),
-          entry && entry.reason ? entry.reason : 'editor-change'
-        ));
+        undoStack.push(createInverseEditorHistoryEntry(entry, editor.value, targetContent));
         setEditorValue(targetContent, { clearCodeMirrorHistory: true });
         setEditorHistoryBaseline(editor.value);
         updateLineNumbers();
@@ -16229,6 +17289,17 @@ ${lines.join('\n')}`;
     document.addEventListener('pointerdown', (e) => {
       const target = e.target && e.target.closest ? e.target : null;
       const insideJsonEditor = isJsonEditorTarget(target);
+      if (!insideJsonEditor) {
+        flushCodeMirrorToTextarea('pointer-leave-json');
+        if (jsonDocumentViewMode === 'window' && jsonWindowViewDirty) {
+          if (!commitJsonWindowEdits('pointer-leave-json')) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            focusEditor();
+            return;
+          }
+        }
+      }
       const insideWaveArea = !!(target && target.closest('#wave-panel'));
       const interactiveWaveControl = !!(target && target.closest('input, textarea, select, button, [contenteditable="true"]'));
       if (insideJsonEditor) {
@@ -16316,7 +17387,8 @@ ${lines.join('\n')}`;
       if (pageExitStateFlushed) return;
       pageExitStateFlushed = true;
       commitOpenTextEditors(reason);
-      if (codeMirrorEditor) codeMirrorEditor.save();
+      flushCodeMirrorToTextarea(reason);
+      if (jsonDocumentViewMode === 'window') commitJsonWindowEdits(reason);
       checkpointDirectJsonEdit(reason);
       flushPersistEditorJson();
       persistEditingWaveDocumentOnExit();
@@ -16375,6 +17447,38 @@ ${lines.join('\n')}`;
     if (hideJsonPanelBtn) {
       hideJsonPanelBtn.addEventListener('click', () => {
         setJsonPanelHidden(true, true);
+      });
+    }
+    if (jsonCompactModeBtn) {
+      jsonCompactModeBtn.addEventListener('click', () => {
+        const enabled = !app.classList.contains('json-compact-mode');
+        setJsonCompactMode(enabled, true);
+        setStatus(true, enabled ? 'JSON 紧凑模式已开启' : 'JSON 紧凑模式已关闭');
+      });
+    }
+    [
+      [jsonViewSummaryBtn, 'summary'],
+      [jsonViewWindowBtn, 'window'],
+      [jsonViewFullBtn, 'full']
+    ].forEach(function (entry) {
+      if (!entry[0]) return;
+      entry[0].addEventListener('click', function () {
+        setJsonDocumentViewMode(entry[1], { user: true });
+      });
+    });
+    if (applyJsonWindowBtn) {
+      applyJsonWindowBtn.addEventListener('click', function () {
+        commitJsonWindowEdits('apply-button');
+      });
+    }
+    if (unlockJsonFullBtn) {
+      unlockJsonFullBtn.addEventListener('click', toggleJsonFullEditing);
+    }
+    if (jsonFullscreenBtn) {
+      jsonFullscreenBtn.addEventListener('click', () => {
+        const enabled = !app.classList.contains('json-panel-fullscreen');
+        setJsonPanelFullscreen(enabled);
+        setStatus(true, enabled ? 'JSON 已全屏显示' : '已退出 JSON 全屏');
       });
     }
     if (vimModeBtn) {
@@ -16466,6 +17570,9 @@ ${lines.join('\n')}`;
     });
     document.getElementById('btn-add-signal').addEventListener('click', () => insertNewSignalRow());
     document.getElementById('btn-copy-signal').addEventListener('click', () => copySelectedSignalRow());
+    document.getElementById('btn-import-wave-row').addEventListener('click', () => {
+      void openRowImportSchemeModal();
+    });
     document.getElementById('btn-copy-wave-selection').addEventListener('click', copySelectedWaveRange);
     document.getElementById('btn-paste-wave-selection').addEventListener('click', pasteCopiedWaveRange);
     document.getElementById('btn-delete-signal').addEventListener('click', () => deleteSelectedSignalRow());
@@ -16541,6 +17648,12 @@ ${lines.join('\n')}`;
         groupDeleteShortcutActive,
         drag: waveSelectionDrag
       });
+      window.__vwdGetRowImportState = () => ({
+        serviceMode: waveLibraryServerMode,
+        busy: rowImportSchemeBusy,
+        modalOpen: !!(rowImportSchemeModal && !rowImportSchemeModal.hidden),
+        schemes: rowImportSchemeCatalog.slice()
+      });
       window.__vwdGetPresetHighlightIndex = () => {
         const el = document.querySelector('#connection-list [data-line-style].active');
         return el ? CONNECTION_LINE_STYLES.indexOf(el.dataset.lineStyle) : -1;
@@ -16560,6 +17673,24 @@ ${lines.join('\n')}`;
           crossingEdges: current ? current.crossingEdges.slice() : []
         };
       };
+      window.__vwdGetJsonBigDataState = () => ({
+        mode: jsonDocumentViewMode,
+        documentKey: jsonViewDocumentKey,
+        metrics: jsonDocumentMetrics ? Object.assign({}, jsonDocumentMetrics) : null,
+        window: jsonWindowView ? {
+          start: jsonWindowView.start,
+          end: jsonWindowView.end,
+          totalColumns: jsonWindowView.totalColumns
+        } : null,
+        windowDirty: jsonWindowViewDirty,
+        fullEditUnlocked: jsonFullEditUnlocked,
+        readOnly: isJsonViewReadOnly(),
+        forceNoWrap: shouldForceJsonNoWrap(),
+        canonicalLength: editor.value.length,
+        displayLength: codeMirrorEditor ? codeMirrorEditor.getValue().length : editor.value.length,
+        pendingEditorSync: codeMirrorSyncPending,
+        pendingDirectOperations: directJsonOperations.length
+      });
       window.__vwdSetBigWaveStart = (columnIndex) => (
         scheduleBigWaveViewportStart(columnIndex, 'debug-api', true)
       );
@@ -16586,6 +17717,15 @@ ${lines.join('\n')}`;
     document.getElementById('btn-format-json').addEventListener('click', formatEditorJson);
     if (wavePanel) {
       wavePanel.addEventListener('wheel', handleWavePanelWheelPaging, { passive: false });
+      wavePanel.addEventListener('scroll', function (event) {
+        const scroller = event.target;
+        if (!scroller || !scroller.classList
+            || !scroller.classList.contains('wave-document-canvas')
+            || !scroller.contains(waveContainer)) return;
+        bindJsonWindowScroller(waveContainer);
+        const context = scroller.__vwdJsonWindowContext;
+        if (context) scheduleJsonWindowFromNativeScroller(scroller, context.svg, context.waveStartX);
+      }, { capture: true, passive: true });
     }
     document.getElementById('btn-export-json').addEventListener('click', exportWaveJson);
     const copyDebugLogBtn = document.getElementById('btn-copy-debug-log');
@@ -16644,6 +17784,15 @@ ${lines.join('\n')}`;
         if (e.target === waveLibraryPickerModal) closeWaveLibraryPickerModal();
       });
     }
+    const rowImportSchemeCancelBtn = document.getElementById('row-import-scheme-cancel');
+    if (rowImportSchemeCancelBtn) {
+      rowImportSchemeCancelBtn.addEventListener('click', closeRowImportSchemeModal);
+    }
+    if (rowImportSchemeModal) {
+      rowImportSchemeModal.addEventListener('click', (e) => {
+        if (e.target === rowImportSchemeModal) closeRowImportSchemeModal();
+      });
+    }
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && vimHelpModal && !vimHelpModal.hidden) {
         e.preventDefault();
@@ -16668,6 +17817,17 @@ ${lines.join('\n')}`;
       if (e.key === 'Escape' && waveLibraryPickerModal && !waveLibraryPickerModal.hidden) {
         e.preventDefault();
         closeWaveLibraryPickerModal();
+        return;
+      }
+      if (e.key === 'Escape' && rowImportSchemeModal && !rowImportSchemeModal.hidden) {
+        e.preventDefault();
+        closeRowImportSchemeModal();
+        return;
+      }
+      if (e.key === 'Escape' && app.classList.contains('json-panel-fullscreen')) {
+        e.preventDefault();
+        setJsonPanelFullscreen(false);
+        setStatus(true, '已退出 JSON 全屏');
       }
     });
 
@@ -16680,7 +17840,9 @@ ${lines.join('\n')}`;
       migrateSessionStorageToLocal(NAV_SIDEBAR_WIDTH_KEY);
       migrateSessionStorageToLocal(NAV_SIDEBAR_HIDDEN_KEY);
       migrateSessionStorageToLocal(JSON_PANEL_HIDDEN_KEY);
+      migrateSessionStorageToLocal(JSON_COMPACT_MODE_KEY);
       restoreJsonPanelVisibility();
+      restoreJsonCompactMode();
       restoreNavSidebarVisibility();
       restoreNavSidebarWidth();
       loadWaveEditMode();

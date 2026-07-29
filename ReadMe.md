@@ -4,13 +4,16 @@ VisualWaveDrom 是一个本地 WaveDrom 波形编辑器，支持多张波形图�
 
 ## 快速开始
 
-推荐双击 `VisualWaveDrom.bat` 使用服务模式。默认打开：
+推荐使用服务模式。Windows 双击 `VisualWaveDrom.bat`，Linux 运行
+`./VisualWaveDrom.sh`。默认打开：
 
 ```text
 http://127.0.0.1:4173/VisualWaveDrom.html
 ```
 
 端口 `4173` 已被其他程序占用时会自动选择空闲端口；同一工程的服务已经运行时会直接复用。
+
+### Windows 启动
 
 BAT 会依次查找项目内的 `inc\node-runtime\node.exe`、系统 `PATH` 和 Node.js 常见安装目录。若电脑完全没有 Node.js，BAT 会询问是否从 [Node.js 官方发布源](https://nodejs.org/dist/)下载最新 LTS 便携运行环境，并校验官方 SHA-256 后安装到项目内部，不需要管理员权限。安装一次后可离线启动。
 
@@ -26,6 +29,56 @@ set "WAVE_LIBRARY_RELATIVE_PATH=Wave\VisualWaveDrom-library\library.sqlite"
 ```
 
 路径以 BAT 所在目录为基准。工程整体复制到其他磁盘或电脑后，只要内部相对路径不变，就不需要修改绝对路径。关闭全部页面后，本地服务和 BAT 窗口会自动退出。
+
+### Linux 启动
+
+Linux 服务模式需要 Node.js 18 或更高版本，以及支持 JSON 输出的 SQLite
+3.33 或更高版本。常见发行版可以执行：
+
+```bash
+# Debian / Ubuntu
+sudo apt install nodejs sqlite3
+
+# Fedora / RHEL
+sudo dnf install nodejs sqlite
+
+# Arch Linux
+sudo pacman -S nodejs sqlite
+```
+
+首次运行：
+
+```bash
+chmod +x VisualWaveDrom.sh
+./VisualWaveDrom.sh
+```
+
+也可以始终使用 `bash VisualWaveDrom.sh`，不依赖脚本的可执行位。运行
+`./VisualWaveDrom.sh --check-runtime` 可以检查 Node.js、SQLite、HTML 和波形库路径，
+不会启动服务。服务器或 SSH 等没有图形桌面的环境使用：
+
+```bash
+./VisualWaveDrom.sh --no-open
+```
+
+终端会打印访问地址；在浏览器中打开该地址，结束时按 `Ctrl+C` 停止服务。
+
+脚本优先使用 `VWD_NODE_EXE`、项目内 `inc/node-runtime/bin/node` 和系统
+`node`；SQLite 优先使用 `VWD_SQLITE_EXE`、项目内 `inc/sqlite/sqlite3` 和系统
+`sqlite3`。默认浏览器依次尝试 `xdg-open`、`gio open` 和 `sensible-browser`，
+Firefox 116 及以上受支持。
+
+Linux 的 HTML 文件名和默认波形库路径在 `VisualWaveDrom.sh` 顶部配置：
+
+```bash
+HTML_FILE_NAME="VisualWaveDrom.html"
+WAVE_LIBRARY_RELATIVE_PATH="Wave/VisualWaveDrom-library/library.sqlite"
+```
+
+路径以脚本所在目录为基准，因此工程移动到其他 Linux 目录后不需要修改绝对路径。
+首次正常启动时，如果系统提供 `xdg-mime`，服务会在当前用户范围注册单图链接协议；
+该操作不需要管理员权限，但桌面环境仍可能要求用户确认默认处理程序。使用不支持
+自定义链接协议的软件时，仍可先启动服务，再使用普通的本地 HTTP 单图链接。
 
 ## 简洁示例：从模板做一张 SPI 波形图
 
@@ -216,6 +269,94 @@ set "WAVE_LIBRARY_RELATIVE_PATH=Wave\VisualWaveDrom-library\library.sqlite"
 - 浏览器安全限制不允许网页静默覆盖用户选择的原文件，因此需要点击“保存波形库”下载更新后的文件。
 - 只发送 HTML 文件不会携带浏览器中的波形；共享时应同时发送导出的 SQLite 文件和 `inc` 目录。
 
+## 按预设方案导入信号行
+
+服务模式下，波形菜单提供 **导入行波形**。单击后直接选择
+`import/Scheme` 中的 JSON 方案，页面会读取方案指定的文件，并把解析结果写入当前波形图
+中名称相同的信号行。一次方案可以更新一个或多个信号行；应用前会先检查全部目标，
+任一文件、解析函数或信号名有误时不会只修改其中一部分。
+
+目录结构如下：
+
+```text
+import/
+├─ Scheme/                 多个导入预设方案
+│  └─ basic-index-data.json
+├─ Data/                   建议存放待导入的数据文件
+│  └─ basic-signal.txt
+└─ inc/
+   └─ fileProc.py          Python 文件解析函数
+```
+
+方案示例：
+
+```json
+{
+  "version": 1,
+  "name": "基础序号数据导入",
+  "description": "把文件内容导入 signal 行",
+  "mappings": [
+    {
+      "file": "Data/basic-signal.txt",
+      "signal": "signal",
+      "parser": "parse_index_data",
+      "options": {
+        "delimiter": "auto",
+        "encoding": "utf-8-sig"
+      }
+    }
+  ]
+}
+```
+
+- `file` 相对于 `import` 文件夹；也可以写成
+  `import/Data/basic-signal.txt`。为保证工程可整体搬移和避免误读其他文件，不能使用绝对
+  路径或跳出 `import` 文件夹。
+- `signal` 是当前波形图中的信号 `name`，必须精确匹配且不能有同名行。
+- `parser` 是 `import/inc/fileProc.py` 的已注册解析函数。内置
+  `parse_index_data`、`parse_csv_index_data`、`parse_tsv_index_data` 和
+  `parse_single_column`。
+- `options` 可设置 `delimiter`、`encoding`、`skipRows`、`commentPrefixes`、
+  `stateMap`、`valueMode`、`fillLeading`、`fillGap` 和 `maxColumns`。默认自动识别逗号、Tab 或空白分隔，
+  `#` 与 `//` 开头的行作为注释。
+
+Python 处理固定分成两步：
+
+1. **文件解析**：方案中的 `parser` 只读取文件并返回
+   `{"points":[{"index":0,"value":"0"}]}` 格式的点列。
+2. **信号补全**：程序固定调用内置 `complete_previous_value`，统一处理起始缺口、离散序号、
+   WaveDrom 状态转换以及 `wave/data` 绑定。预设方案不需要、也不能指定第二步函数。
+
+新增自定义文件格式时，用户只需在 `fileProc.py` 中增加一个签名为
+`parse_xxx(file_path, options=None)` 的解析函数，并把它加入 `FILE_PARSERS`；不需要编写
+任何波形补全代码。
+
+基础解析函数按以下规则工作：
+
+```text
+# 双列：第一列序号，第二列数据
+2 0
+3 1
+5 x
+
+# 单列：没有序号时，按 0、1、2……自动编号
+0
+1
+x
+```
+
+双列文件的序号必须从小到大且不能重复。文件不从序号 0 开始时，第一个序号之前因为没有
+历史值而补为 `x`；两个离散序号之间使用 `.` 延续上一个序号的值。以上双列示例会生成
+`xx01.x`。单字符 WaveDrom 状态直接写入
+`wave`，其他文本会转换为数据波形 `=` 并同步写入 `data`，因此波形和文字保持绑定。
+导入会进入撤销历史并触发格式化、渲染和波形库自动保存。已有连接端点超出新文件长度时，
+页面会在末尾补 `x` 以保留端点。
+
+`fileProc.py` 只使用 Python 标准库，语法兼容 Python 3.6、3.7 和 3.12。服务会依次
+查找环境变量 `VWD_PYTHON_EXE`、项目内 `import/python-runtime`、Windows Python
+Launcher 或系统 `python3/python`。直接双击 HTML 的模式受浏览器安全限制，不能调用
+本机 Python，因此该功能只在 BAT/SH 服务模式中启用。
+
 ## SQLite 波形库
 
 `Wave` 是波形库根目录。每个一级子文件夹是一套独立波形库，文件夹名称就是界面中的库名称：
@@ -234,7 +375,9 @@ Wave\
 - 多级波形目录、显示顺序和波形归属关系。
 - 当前编辑波形图、当前选择目录和永久 `libraryId`。
 
-SQLite 虽然是单文件，但会使用数据库页和索引按需读取，不需要像单个巨大 JSON 那样先解析全部波形。服务端修改单图时也不重写整个库。当前版本只支持 SQLite 波形库，不再读取、迁移或导出旧 JSON 波形库。
+SQLite 虽然是单文件，但会使用数据库页和索引按需读取，不需要像单个巨大 JSON 那样先解析全部波形。服务端修改单图时也不重写整个库。单张波形 JSON 小于 256 KiB 时直接保存在文档记录中；达到该大小后自动按 64 KiB 拆入同一个 SQLite 文件的分块表。读取时会透明拼回完整 JSON，库文件仍然只有一个，不会产生外部碎片文件。旧版 SQLite 波形库首次打开时会自动补充分块表，不需要手工转换。
+
+当前版本只支持 SQLite 波形库，不再读取、迁移或导出旧 JSON 波形库。
 
 ## 大波形与浏览器兼容
 
@@ -248,7 +391,17 @@ SQLite 虽然是单文件，但会使用数据库页和索引按需读取，不�
 
 复制图片时，少于 200 列会直接生成完整截图；达到 200 列时会弹出起始列和结束列。弹窗优先填入当前屏幕正在显示的列范围，用户可以在此基础上修改后再截图。截图仍不包含波形图下方的 `description` 说明。
 
-当前目标浏览器为 Chrome、Edge，以及 Firefox 116 或更高版本。为兼容 Firefox 不同版本的 PNG 剪贴板行为，Firefox 116 及以上统一采用可靠降级路径：“复制图片”会自动下载 PNG，复制带链接截图时还会同时复制单图链接。Firefox 128 及更高版本同样受支持。
+当前目标浏览器为 Chrome、Edge，以及 Firefox 116 或更高版本。Firefox 在
+Windows 和 Linux 下使用同一套页面逻辑；Linux 字体会优先使用 Noto 和 Liberation
+系列回退字体。为兼容 Firefox 不同版本的 PNG 剪贴板行为，Firefox 116 及以上统一采用可靠降级路径：“复制图片”会自动下载 PNG，复制带链接截图时还会同时复制单图链接。Firefox 128 及更高版本同样受支持。
+
+Firefox 116 不使用较新的 `content-visibility` 优化，页面会通过
+`IntersectionObserver` 卸载屏幕外的波形预览作为回退，功能不受影响；波形图数量极多时，
+新版 Firefox 或 Chromium 浏览器的滚动性能可能更高。
+
+Linux 上推荐通过 `VisualWaveDrom.sh` 使用 `http://127.0.0.1` 服务模式。直接用
+`file://` 打开 HTML 仍可导入和导出 SQLite，但 Firefox 对本地文件的 IndexedDB、
+Worker 和剪贴板权限可能受发行版安全策略影响，不能保证与服务模式完全一致。
 
 ## 备份和共享
 
@@ -357,6 +510,17 @@ SQLite 虽然是单文件，但会使用数据库页和索引按需读取，不�
 
 JSON 面板标题栏中的“隐藏”按钮可以直接隐藏 WaveDrom JSON 编辑窗口；隐藏后可通过功能菜单中的“显示 JSON”恢复。显示状态会保存到浏览器本地设置中。
 
+“全屏”会让 JSON 面板覆盖整个浏览器视口，按 `Esc` 或再次点击按钮退出。
+“紧凑”会缩小工具栏、字号和行间距。最长波形不超过 200 列时，长 JSON 行会自动折行；超过 200 列后自动关闭折行并恢复横向滚动，避免浏览器为超长行反复计算布局。紧凑模式会保存到浏览器本地设置中；Chrome、Edge 和 Firefox 116 以上行为一致。
+
+JSON 标题栏提供三种显示范围：
+
+- **摘要**：只显示标题、说明、信号数量、最长列数和各信号概况，内容只读。
+- **窗口**：只显示当前波形窗口的 24 至 320 列。可以直接修改窗口 JSON，点击“应用窗口”后会合并回完整波形；窗口外的波形、数据标签和连接信息保持不变。
+- **完整**：按需显示整张波形的 JSON。大型 JSON 默认只读并关闭语法高亮，点击“编辑完整 JSON”后才会解锁，防止误输入触发大文本处理。
+
+超过 200 列的波形首次打开时默认使用“窗口”视图。编辑器会在输入停顿约 0.36 秒后才同步完整文本，波形解析采用较长防抖并取消过期任务；直接编辑 JSON 的撤销记录使用增量修改，不再每次扫描并保存整份文本。窗口合并和撤销内部使用分块字符串处理，长 `wave` / `node` 内容不会因一次小修改产生多轮整串复制。
+
 功能菜单中的“添加列号”按 `Off → Tick → Tock → Off` 循环：`Tick` 写入 `head.tick`，在列边界显示编号；`Tock` 写入 `head.tock`，在列中间显示编号。首次启用默认从 `0` 开始，切换模式时保留已有起始编号，并支持撤销和重做。
 
 JSON 面板提供格式化和导出功能。JSON 解析失败时，错误行左侧会显示 `×`。
@@ -408,16 +572,19 @@ JSON 面板提供格式化和导出功能。JSON 解析失败时，错误行左�
 VisualWaveDrom.html      主页面
 VisualWaveDrom.js        本地服务
 VisualWaveDrom.bat       Windows 双击启动入口
+VisualWaveDrom.sh        Linux 启动入口
 inc/                     页面样式、应用逻辑和依赖库
 inc/node-runtime/        BAT 自动下载的便携 Node.js 运行环境（Git 忽略）
-inc/sqlite/              SQLite 官方 Windows 与 WebAssembly 运行文件
+inc/sqlite/              SQLite 官方 Windows 与浏览器 WebAssembly 运行文件
 inc/visualwavedrom-vim.js Vim 键盘控制器
+import/                  行波形导入方案、数据文件和 Python 解析函数
 Wave/                    多个 SQLite 波形库
 tools/GenerateReadMeGifs.py README 示例动画生成脚本
 tools/InstallNodeRuntime.ps1 便携 Node.js 下载与 SHA-256 校验脚本
 ```
 
-每套波形库固定保存在 `Wave\<波形库名称>\library.sqlite`。每个 SQLite 文件都可以独立复制、备份和导入。
+每套波形库固定保存在 Windows 的 `Wave\<波形库名称>\library.sqlite`，或 Linux
+的 `Wave/<波形库名称>/library.sqlite`。每个 SQLite 文件都可以独立复制、备份和导入。
 
 ## 常见问题
 

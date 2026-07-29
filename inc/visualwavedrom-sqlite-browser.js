@@ -6,6 +6,8 @@
   const SNAPSHOT_STORE_NAME = 'waveLibraries';
   const SNAPSHOT_KEY = 'active:' + encodeURIComponent(global.location.pathname || 'VisualWaveDrom.html');
   const SQLITE_HEADER = 'SQLite format 3\0';
+  const DOCUMENT_CHUNK_THRESHOLD = 256 * 1024;
+  const DOCUMENT_CHUNK_SIZE = 64 * 1024;
   const moduleBaseUrl = new URL('.', document.currentScript.src).href;
   let sqlitePromise = null;
 
@@ -37,7 +39,16 @@
     );
     CREATE INDEX IF NOT EXISTS vwd_documents_sort_order
       ON vwd_documents(sort_order, name);
-    PRAGMA user_version=1;
+    CREATE TABLE IF NOT EXISTS vwd_document_chunks (
+      document_name TEXT NOT NULL,
+      chunk_index INTEGER NOT NULL,
+      content_chunk TEXT NOT NULL,
+      PRIMARY KEY (document_name, chunk_index),
+      FOREIGN KEY (document_name) REFERENCES vwd_documents(name) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS vwd_document_chunks_document
+      ON vwd_document_chunks(document_name, chunk_index);
+    PRAGMA user_version=2;
   `;
 
   function loadScript(relativePath) {
@@ -142,6 +153,32 @@
     };
   }
 
+  function safeChunkEnd(text, start, requestedEnd) {
+    let end = Math.min(text.length, requestedEnd);
+    if (end > start && end < text.length) {
+      const previous = text.charCodeAt(end - 1);
+      const next = text.charCodeAt(end);
+      if (previous >= 0xD800 && previous <= 0xDBFF && next >= 0xDC00 && next <= 0xDFFF) {
+        end -= 1;
+      }
+    }
+    return end;
+  }
+
+  function splitDocumentContent(content) {
+    const text = String(content == null ? '' : content);
+    if (text.length < DOCUMENT_CHUNK_THRESHOLD) return [];
+    const chunks = [];
+    let start = 0;
+    while (start < text.length) {
+      let end = safeChunkEnd(text, start, start + DOCUMENT_CHUNK_SIZE);
+      if (end <= start) end = Math.min(text.length, start + DOCUMENT_CHUNK_SIZE);
+      chunks.push(text.slice(start, end));
+      start = end;
+    }
+    return chunks;
+  }
+
   const knownDocumentFields = new Set([
     'name', 'content', 'json', 'hscale', 'waveEditMode', 'revision', 'savedAt',
     'deferred', 'titleCache', 'descriptionCache', 'contentLength', 'sortOrder'
@@ -154,6 +191,7 @@
     const name = document.name.trim();
     if (!name) throw new Error('波形图标识不能为空');
     const metadata = documentMetadata(document.content, name);
+    const contentChunks = splitDocumentContent(document.content);
     const extra = {};
     Object.keys(document).forEach((key) => {
       if (!knownDocumentFields.has(key) && document[key] !== undefined) extra[key] = document[key];
@@ -162,6 +200,8 @@
       name,
       sortOrder: Number.isInteger(sortOrder) ? sortOrder : Number(document.sortOrder || 0),
       content: document.content,
+      inlineContent: contentChunks.length ? '' : document.content,
+      contentChunks,
       hscale: Number.isFinite(Number(document.hscale)) ? Number(document.hscale) : 1,
       waveEditMode: document.waveEditMode === 'insert' ? 'insert' : 'modify',
       revision: Number.isInteger(document.revision) && document.revision >= 0 ? document.revision : 0,
@@ -289,10 +329,22 @@
           description_cache=excluded.description_cache, content_length=excluded.content_length,
           extra_json=excluded.extra_json`,
         bind: [
-          document.name, document.sortOrder, document.content, document.hscale,
+          document.name, document.sortOrder, document.inlineContent, document.hscale,
           document.waveEditMode, document.revision, document.savedAt, document.titleCache,
           document.descriptionCache, document.contentLength, document.extraJson
         ]
+      });
+      this.db.exec({
+        sql: 'DELETE FROM vwd_document_chunks WHERE document_name=?',
+        bind: [document.name]
+      });
+      document.contentChunks.forEach((chunk, index) => {
+        this.db.exec({
+          sql: `INSERT INTO vwd_document_chunks (
+            document_name, chunk_index, content_chunk
+          ) VALUES (?, ?, ?)`,
+          bind: [document.name, index, chunk]
+        });
       });
     }
 
@@ -306,7 +358,7 @@
       return this.readSummary();
     }
 
-    documentFromRow(row, summaryOnly) {
+    documentFromRow(row, summaryOnly, chunkContent) {
       const document = Object.assign({}, parseJson(row.extra_json, {}), {
         name: String(row.name || ''),
         hscale: Number(row.hscale),
@@ -320,9 +372,18 @@
         document.descriptionCache = String(row.description_cache || '');
         document.contentLength = Number(row.content_length) || 0;
       } else {
-        document.content = String(row.content || '');
+        document.content = chunkContent === undefined
+          ? String(row.content || '')
+          : String(chunkContent);
       }
       return document;
+    }
+
+    readDocumentChunkContent(name) {
+      const rows = this.query(`SELECT content_chunk FROM vwd_document_chunks
+        WHERE document_name=? ORDER BY chunk_index`, [String(name || '')]);
+      if (!rows.length) return undefined;
+      return rows.map((row) => String(row.content_chunk || '')).join('');
     }
 
     readSummary() {
@@ -337,7 +398,11 @@
       const library = this.libraryRow();
       library.documents = this.query(`SELECT name, content, hscale, wave_edit_mode, revision, saved_at,
         title_cache, description_cache, content_length, extra_json
-        FROM vwd_documents ORDER BY sort_order, name`).map((row) => this.documentFromRow(row, false));
+        FROM vwd_documents ORDER BY sort_order, name`).map((row) => this.documentFromRow(
+        row,
+        false,
+        this.readDocumentChunkContent(row.name)
+      ));
       return library;
     }
 
@@ -345,7 +410,7 @@
       const row = this.query(`SELECT name, content, hscale, wave_edit_mode, revision, saved_at,
         title_cache, description_cache, content_length, extra_json
         FROM vwd_documents WHERE name=? LIMIT 1`, [String(name || '')])[0];
-      return row ? this.documentFromRow(row, false) : null;
+      return row ? this.documentFromRow(row, false, this.readDocumentChunkContent(row.name)) : null;
     }
 
     patchState(payload) {
@@ -432,6 +497,7 @@
       try {
         this.db.exec('PRAGMA journal_mode=DELETE');
         this.validate();
+        this.db.exec(schemaSql);
       } catch (error) {
         this.db = previous;
         imported.close();
