@@ -72,6 +72,25 @@ body.scope-wave-view > #vim-help-modal {
   flex-wrap: wrap;
 }
 
+.scope-analog-controls {
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+}
+
+.scope-analog-controls #scope-analog-type {
+  width: 112px;
+}
+
+.scope-analog-controls input[type="number"] {
+  width: 58px;
+}
+
+.scope-analog-controls :disabled {
+  color: #8b9098;
+  background: #eef0f2;
+  cursor: not-allowed;
+}
+
 .scope-toolbar-label {
   color: #555b63;
   font-size: 11px;

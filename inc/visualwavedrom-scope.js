@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260730-scope-v4';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260730-scope-v6';
   const ROW_HEIGHT = 84;
   const AXIS_HEIGHT = 38;
   const OVERVIEW_HEIGHT = 76;
@@ -39,6 +39,23 @@
     const normalized = safe / power;
     const factor = normalized <= 1 ? 1 : (normalized <= 2 ? 2 : (normalized <= 5 ? 5 : 10));
     return factor * power;
+  }
+
+  function normalizeAnalogFormat(candidate, fallbackType) {
+    const source = candidate && typeof candidate === 'object' ? candidate : {};
+    const supported = ['unsigned', 'signed', 'ufixed', 'sfixed', 'float'];
+    const requestedType = String(
+      source.type || source.numericType || source.dataType || fallbackType || 'unsigned'
+    ).toLowerCase();
+    const type = supported.indexOf(requestedType) >= 0 ? requestedType : 'unsigned';
+    let bitWidth = clamp(Math.floor(Number(source.bitWidth) || 32), 1, 64);
+    if (type === 'float') bitWidth = bitWidth <= 32 ? 32 : 64;
+    const fractionalBits = clamp(
+      Math.floor(Number(source.fractionalBits) || 0),
+      0,
+      Math.max(0, bitWidth - 1)
+    );
+    return { type, bitWidth, fractionalBits };
   }
 
   class ScopeWorkerClient {
@@ -113,6 +130,7 @@
       this.document = null;
       this.meta = null;
       this.modes = {};
+      this.analogFormats = {};
       this.windowData = null;
       this.simplified = null;
       this.outputContent = '';
@@ -123,6 +141,7 @@
       this.activeCursor = 'A';
       this.activeCursorRow = 0;
       this.cursorMode = false;
+      this.showOriginal = false;
       this.cursorInspectSequence = 0;
       this.cursorNavigationSequence = 0;
       this.selectedPoint = null;
@@ -151,6 +170,10 @@
       this.meta = await this.worker.call('prepare', { content: this.document.content });
       this.meta.rows.forEach((row) => {
         this.modes[row.index] = row.mode;
+        this.analogFormats[row.index] = normalizeAnalogFormat(
+          row.analogFormat,
+          row.detectedMode === 'analog' ? 'float' : 'unsigned'
+        );
       });
       this.viewStart = 0;
       this.viewEnd = this.meta.totalColumns;
@@ -196,6 +219,8 @@
             <button type="button" class="scope-icon-btn" id="scope-zoom-out" title="缩小">−</button>
             <button type="button" class="scope-command-btn" id="scope-fit">适应窗口</button>
             <button type="button" class="scope-command-btn" id="scope-cursors">游标测量</button>
+            <button type="button" class="scope-command-btn" id="scope-original-data"
+                aria-pressed="false" title="显示或隐藏原始数据">原始数据 Off</button>
           </div>
           <div class="scope-toolbar-group scope-cursor-controls" aria-label="游标工具">
             <span class="scope-toolbar-label">游标</span>
@@ -210,6 +235,24 @@
             </label>
             <button type="button" class="scope-icon-btn scope-small-icon" id="scope-cursor-prev-value" title="跳到上一个指定值" aria-label="跳到上一个指定值">◀</button>
             <button type="button" class="scope-icon-btn scope-small-icon" id="scope-cursor-next-value" title="跳到下一个指定值" aria-label="跳到下一个指定值">▶</button>
+          </div>
+          <div class="scope-toolbar-group scope-analog-controls" aria-label="模拟波形数据解释">
+            <span class="scope-toolbar-label">模拟解析</span>
+            <label>类型
+              <select id="scope-analog-type" aria-label="模拟波形数据类型">
+                <option value="unsigned">无符号整数</option>
+                <option value="signed">有符号整数</option>
+                <option value="ufixed">无符号定点</option>
+                <option value="sfixed">有符号定点</option>
+                <option value="float">浮点数</option>
+              </select>
+            </label>
+            <label>位宽
+              <input type="number" id="scope-analog-width" min="1" max="64" step="1" value="32">
+            </label>
+            <label>小数位
+              <input type="number" id="scope-analog-fraction" min="0" max="63" step="1" value="0">
+            </label>
           </div>
           <div class="scope-toolbar-group scope-simplify-controls">
             <label>方法
@@ -267,7 +310,7 @@
         <section class="scope-editor-strip">
           <div class="scope-point-editor" id="scope-point-editor">
             <strong>简化点编辑</strong>
-            <span id="scope-point-position">单击下半行的简化波形选择数据点</span>
+            <span id="scope-point-position">单击简化波形选择数据点</span>
             <label>数值
               <input type="text" id="scope-point-value" disabled>
             </label>
@@ -310,6 +353,7 @@
       this.rangeEndInput = root.querySelector('#scope-range-end');
       this.outputTitleInput = root.querySelector('#scope-output-title');
       this.cursorButton = root.querySelector('#scope-cursors');
+      this.originalDataButton = root.querySelector('#scope-original-data');
       this.cursorAButton = root.querySelector('#scope-cursor-a');
       this.cursorBButton = root.querySelector('#scope-cursor-b');
       this.cursorSignalEl = root.querySelector('#scope-cursor-signal');
@@ -318,6 +362,9 @@
       this.cursorNextEdgeButton = root.querySelector('#scope-cursor-next-edge');
       this.cursorPrevValueButton = root.querySelector('#scope-cursor-prev-value');
       this.cursorNextValueButton = root.querySelector('#scope-cursor-next-value');
+      this.analogTypeSelect = root.querySelector('#scope-analog-type');
+      this.analogWidthInput = root.querySelector('#scope-analog-width');
+      this.analogFractionInput = root.querySelector('#scope-analog-fraction');
       this.statusEl = root.querySelector('#scope-status');
       this.metricsEl = root.querySelector('#scope-metrics');
       this.measurementsEl = root.querySelector('#scope-measurements');
@@ -338,6 +385,7 @@
       this.root.querySelector('#scope-zoom-out').addEventListener('click', () => this.zoom(2));
       this.root.querySelector('#scope-fit').addEventListener('click', () => this.fit());
       this.cursorButton.addEventListener('click', () => this.toggleCursorMode());
+      this.originalDataButton.addEventListener('click', () => this.toggleOriginalData());
       this.cursorAButton.addEventListener('click', () => this.setActiveCursor('A', true));
       this.cursorBButton.addEventListener('click', () => this.setActiveCursor('B', true));
       this.cursorPrevEdgeButton.addEventListener('click', () => {
@@ -357,6 +405,9 @@
         event.preventDefault();
         void this.navigateActiveCursor('value', event.shiftKey ? -1 : 1);
       });
+      this.analogTypeSelect.addEventListener('change', () => this.applyAnalogFormatControls());
+      this.analogWidthInput.addEventListener('change', () => this.applyAnalogFormatControls());
+      this.analogFractionInput.addEventListener('change', () => this.applyAnalogFormatControls());
       this.root.querySelector('#scope-use-view').addEventListener('click', () => this.useCurrentViewRange());
       this.root.querySelector('#scope-simplify').addEventListener('click', () => this.runSimplify(true));
       this.root.querySelector('#scope-save-instance').addEventListener('click', () => this.saveInstance());
@@ -375,16 +426,13 @@
         const rowIndex = Number(select.dataset.scopeModeRow);
         const nextMode = select.value;
         if (this.modes[rowIndex] === nextMode) return;
-        if (this.simplified && this.simplified.model.rows[rowIndex]) {
-          this.pushHistory();
-          this.simplified.model.rows[rowIndex].mode = nextMode;
-          this.scheduleBuild();
-        }
+        if (this.simplified) this.pushHistory();
         this.cursorNavigationSequence += 1;
         this.modes[rowIndex] = nextMode;
+        this.setActiveCursorRow(rowIndex);
+        this.updateAnalogControls();
         this.scheduleWindowRequest();
-        void this.updateCursorReadout();
-        this.draw();
+        void this.runSimplify(false);
       });
 
       this.signalList.addEventListener('click', (event) => {
@@ -537,7 +585,8 @@
           width: this.plotViewport.clientWidth,
           rowStart: visible.start,
           rowEnd: visible.end,
-          modes: this.modes
+          modes: this.modes,
+          analogFormats: this.analogFormats
         });
         if (sequence !== this.windowRequestSequence) return;
         this.rowStart = result.rowStart;
@@ -840,10 +889,27 @@
         });
         context.stroke();
       } else if (row.mode === 'bus') {
-        visible.forEach((pointIndex, index) => {
-          const x1 = this.xForColumn(columns[pointIndex], width);
-          const nextPoint = visible[index + 1];
-          const x2 = nextPoint == null ? width : this.xForColumn(columns[nextPoint], width);
+        const busSegments = [];
+        columns.forEach((column, pointIndex) => {
+          const value = String(
+            row.labels && row.labels[pointIndex] != null
+              ? row.labels[pointIndex]
+              : (row.values[pointIndex] == null ? '' : row.values[pointIndex])
+          );
+          const end = pointIndex + 1 < columns.length
+            ? columns[pointIndex + 1]
+            : this.simplified.model.rangeEnd;
+          const previous = busSegments[busSegments.length - 1];
+          if (previous && previous.value === value && Math.abs(previous.end - column) < 1e-7) {
+            previous.end = end;
+          } else {
+            busSegments.push({ start: column, end, value });
+          }
+        });
+        busSegments.forEach((segment) => {
+          if (segment.end <= this.viewStart || segment.start >= this.viewEnd) return;
+          const x1 = this.xForColumn(Math.max(segment.start, this.viewStart), width);
+          const x2 = this.xForColumn(Math.min(segment.end, this.viewEnd), width);
           context.fillStyle = 'rgba(0, 151, 167, 0.1)';
           context.fillRect(x1, yTop + 5, Math.max(1, x2 - x1), yBottom - yTop - 10);
           context.strokeStyle = color;
@@ -853,10 +919,11 @@
             context.font = '11px "Segoe UI", sans-serif';
             context.textAlign = 'center';
             context.textBaseline = 'middle';
-            const value = row.labels && row.labels[pointIndex] != null
-              ? row.labels[pointIndex]
-              : row.values[pointIndex];
-            context.fillText(String(value).slice(0, 16), (x1 + x2) / 2, (yTop + yBottom) / 2);
+            context.fillText(
+              segment.value.length > 18 ? segment.value.slice(0, 17) + '…' : segment.value,
+              (x1 + x2) / 2,
+              (yTop + yBottom) / 2
+            );
           }
         });
       } else {
@@ -1000,29 +1067,51 @@
           context.moveTo(0, rowTop + ROW_HEIGHT - 0.5);
           context.lineTo(width, rowTop + ROW_HEIGHT - 0.5);
           context.stroke();
-          context.fillStyle = '#777d86';
-          context.font = '10px "Segoe UI", sans-serif';
-          context.textAlign = 'left';
-          context.textBaseline = 'top';
-          context.fillText('原', 4, rowTop + 3);
-          context.fillText('简', 4, rowTop + ROW_HEIGHT / 2 + 3);
-          this.drawSegments(
-            context,
-            rowResult,
-            rowIndex,
-            rowTop + 2,
-            rowTop + ROW_HEIGHT / 2 - 2,
-            width,
-            color
-          );
-          this.drawSimplifiedRow(
-            context,
-            rowIndex,
-            rowTop + ROW_HEIGHT / 2 + 2,
-            rowTop + ROW_HEIGHT - 3,
-            width,
-            color
-          );
+          const simplifiedRow = this.simplified && this.simplified.model.rows[rowIndex];
+          if (this.showOriginal && !simplifiedRow) {
+            this.drawSegments(
+              context,
+              rowResult,
+              rowIndex,
+              rowTop + 3,
+              rowTop + ROW_HEIGHT - 3,
+              width,
+              color
+            );
+          } else if (this.showOriginal) {
+            context.fillStyle = '#777d86';
+            context.font = '10px "Segoe UI", sans-serif';
+            context.textAlign = 'left';
+            context.textBaseline = 'top';
+            context.fillText('原', 4, rowTop + 3);
+            context.fillText('简', 4, rowTop + ROW_HEIGHT / 2 + 3);
+            this.drawSegments(
+              context,
+              rowResult,
+              rowIndex,
+              rowTop + 2,
+              rowTop + ROW_HEIGHT / 2 - 2,
+              width,
+              color
+            );
+            this.drawSimplifiedRow(
+              context,
+              rowIndex,
+              rowTop + ROW_HEIGHT / 2 + 2,
+              rowTop + ROW_HEIGHT - 3,
+              width,
+              color
+            );
+          } else {
+            this.drawSimplifiedRow(
+              context,
+              rowIndex,
+              rowTop + 3,
+              rowTop + ROW_HEIGHT - 3,
+              width,
+              color
+            );
+          }
         });
       }
       this.drawCursors(context, width, height);
@@ -1187,15 +1276,15 @@
       const absoluteY = y + this.plotViewport.scrollTop;
       const rowIndex = clamp(Math.floor(absoluteY / ROW_HEIGHT), 0, this.meta.rows.length - 1);
       const rowLocalY = absoluteY - rowIndex * ROW_HEIGHT;
-      if (this.simplified && rowLocalY >= ROW_HEIGHT / 2) {
-        this.selectNearestPoint(rowIndex, column);
-        return;
-      }
+      const selectPoint = this.simplified && (!this.showOriginal || rowLocalY >= ROW_HEIGHT / 2)
+        ? { rowIndex, column }
+        : null;
       this.drag = {
         pointerId: event.pointerId,
         startX: event.clientX,
         viewStart: this.viewStart,
-        moved: false
+        moved: false,
+        selectPoint
       };
       this.plotCanvas.setPointerCapture(event.pointerId);
     }
@@ -1218,8 +1307,12 @@
 
     onPlotPointerUp(event) {
       if (!this.drag || this.drag.pointerId !== event.pointerId) return;
+      const selectPoint = this.drag.moved ? null : this.drag.selectPoint;
       try { this.plotCanvas.releasePointerCapture(event.pointerId); } catch (_error) {}
       this.drag = null;
+      if (selectPoint) {
+        this.selectNearestPoint(selectPoint.rowIndex, selectPoint.column);
+      }
     }
 
     onOverviewPointer(event) {
@@ -1239,6 +1332,15 @@
       this.setStatus(this.cursorMode
         ? '游标测量：选择 A 或 B 后单击波形定位'
         : '已退出游标测量');
+    }
+
+    toggleOriginalData() {
+      this.showOriginal = !this.showOriginal;
+      this.originalDataButton.classList.toggle('active', this.showOriginal);
+      this.originalDataButton.setAttribute('aria-pressed', String(this.showOriginal));
+      this.originalDataButton.textContent = this.showOriginal ? '原始数据 On' : '原始数据 Off';
+      this.draw();
+      this.setStatus(this.showOriginal ? '已显示原始数据对比' : '已隐藏原始数据');
     }
 
     setCursorMode(enabled) {
@@ -1318,6 +1420,61 @@
       const row = this.meta && this.meta.rows[this.activeCursorRow];
       this.cursorSignalEl.textContent = row ? row.name : '';
       this.cursorSignalEl.title = row ? row.name : '';
+      this.updateAnalogControls();
+    }
+
+    updateAnalogControls() {
+      if (!this.analogTypeSelect || !this.meta) return;
+      const row = this.meta.rows[this.activeCursorRow];
+      const enabled = !!row && this.modes[row.index] === 'analog';
+      const format = normalizeAnalogFormat(
+        row && this.analogFormats[row.index],
+        row && row.detectedMode === 'analog' ? 'float' : 'unsigned'
+      );
+      if (row) this.analogFormats[row.index] = format;
+      this.analogTypeSelect.value = format.type;
+      this.analogWidthInput.value = String(format.bitWidth);
+      this.analogFractionInput.value = String(format.fractionalBits);
+      this.analogTypeSelect.disabled = !enabled;
+      this.analogWidthInput.disabled = !enabled;
+      const fixedPoint = format.type === 'ufixed' || format.type === 'sfixed';
+      this.analogFractionInput.disabled = !enabled || !fixedPoint;
+      this.analogFractionInput.max = String(Math.max(0, format.bitWidth - 1));
+    }
+
+    applyAnalogFormatControls() {
+      if (!this.meta) return;
+      const row = this.meta.rows[this.activeCursorRow];
+      if (!row || this.modes[row.index] !== 'analog') {
+        this.updateAnalogControls();
+        return;
+      }
+      const previous = normalizeAnalogFormat(
+        this.analogFormats[row.index],
+        row.detectedMode === 'analog' ? 'float' : 'unsigned'
+      );
+      const next = normalizeAnalogFormat({
+        type: this.analogTypeSelect.value,
+        bitWidth: this.analogWidthInput.value,
+        fractionalBits: this.analogFractionInput.value
+      }, previous.type);
+      const changed = previous.type !== next.type
+        || previous.bitWidth !== next.bitWidth
+        || previous.fractionalBits !== next.fractionalBits;
+      if (!changed) {
+        this.analogFormats[row.index] = next;
+        this.updateAnalogControls();
+        return;
+      }
+      if (this.simplified) this.pushHistory();
+      this.analogFormats[row.index] = next;
+      this.updateAnalogControls();
+      this.cursorNavigationSequence += 1;
+      this.scheduleWindowRequest();
+      void this.updateCursorReadout();
+      void this.runSimplify(false);
+      this.setStatus('已按 ' + this.analogTypeSelect.options[this.analogTypeSelect.selectedIndex].text
+        + ' 解析 ' + row.name);
     }
 
     formatCursorValue(value) {
@@ -1336,7 +1493,8 @@
       try {
         const result = await this.worker.call('inspect', {
           column,
-          modes: this.modes
+          modes: this.modes,
+          analogFormats: this.analogFormats
         });
         if (sequence !== this.cursorInspectSequence) return;
         result.rows.forEach((row) => {
@@ -1395,7 +1553,8 @@
           direction,
           kind,
           value,
-          mode
+          mode,
+          analogFormat: this.analogFormats[this.activeCursorRow]
         });
         if (sequence !== this.cursorNavigationSequence) return;
         if (!result.found) {
@@ -1473,6 +1632,7 @@
         rangeEnd: end,
         method: this.methodSelect.value,
         modes: this.modes,
+        analogFormats: this.analogFormats,
         lockedColumns: Array.from(this.lockedColumns),
         outputTitle: this.outputTitleInput.value.trim() || (this.meta.title + ' - 展示实例'),
         sourceWaveId: this.document.name,
@@ -1496,7 +1656,7 @@
         this.redoStack = [];
         this.updateHistoryButtons();
         this.draw();
-        this.setStatus('简化实例已生成，可单击下半行继续编辑');
+        this.setStatus('简化实例已生成，可单击简化波形继续编辑');
         this.log('scope-simplify', Object.assign({
           phase: 'complete',
           method: options.method
@@ -1558,7 +1718,7 @@
         this.pointLockButton
       ].forEach((element) => { element.disabled = !enabled; });
       if (!enabled) {
-        this.pointPositionEl.textContent = '单击下半行的简化波形选择数据点';
+        this.pointPositionEl.textContent = '单击简化波形选择数据点';
         this.pointValueInput.value = '';
         this.pointLabelInput.value = '';
         return;
@@ -1589,6 +1749,7 @@
         simplified: clone(this.simplified),
         outputContent: this.outputContent,
         modes: Object.assign({}, this.modes),
+        analogFormats: clone(this.analogFormats),
         lockedColumns: Array.from(this.lockedColumns),
         selectedPoint: this.selectedPoint ? Object.assign({}, this.selectedPoint) : null,
         outputTitle: this.outputTitleInput.value
@@ -1600,6 +1761,7 @@
       this.simplified = clone(snapshot.simplified);
       this.outputContent = snapshot.outputContent;
       this.modes = Object.assign({}, snapshot.modes || this.modes);
+      this.analogFormats = clone(snapshot.analogFormats || this.analogFormats);
       this.lockedColumns = new Set(snapshot.lockedColumns || []);
       this.selectedPoint = snapshot.selectedPoint ? Object.assign({}, snapshot.selectedPoint) : null;
       this.outputTitleInput.value = snapshot.outputTitle || this.simplified.model.title;
@@ -1810,8 +1972,13 @@
         this.document = saved;
         this.meta = await this.worker.call('prepare', { content: saved.content });
         this.modes = {};
+        this.analogFormats = {};
         this.meta.rows.forEach((row) => {
           this.modes[row.index] = row.mode;
+          this.analogFormats[row.index] = normalizeAnalogFormat(
+            row.analogFormat,
+            row.detectedMode === 'analog' ? 'float' : 'unsigned'
+          );
         });
         this.viewStart = 0;
         this.viewEnd = this.meta.totalColumns;

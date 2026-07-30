@@ -73,6 +73,78 @@ function getAnalogSamples(source, row, rowIndex) {
   return validCount ? values : null;
 }
 
+function normalizeAnalogFormat(candidate, fallbackType) {
+  const source = candidate && typeof candidate === 'object' ? candidate : {};
+  const supported = ['unsigned', 'signed', 'ufixed', 'sfixed', 'float'];
+  const requestedType = String(
+    source.type || source.numericType || source.dataType || fallbackType || 'unsigned'
+  ).toLowerCase();
+  const type = supported.indexOf(requestedType) >= 0 ? requestedType : (fallbackType || 'unsigned');
+  let bitWidth = clamp(Math.floor(finiteNumber(source.bitWidth) || 32), 1, 64);
+  if (type === 'float') bitWidth = bitWidth <= 32 ? 32 : 64;
+  const fractionalBits = clamp(
+    Math.floor(finiteNumber(source.fractionalBits) || 0),
+    0,
+    Math.max(0, bitWidth - 1)
+  );
+  return { type, bitWidth, fractionalBits };
+}
+
+function getAnalogFormat(source, row, rowIndex, hasSamples) {
+  const signal = row.source || {};
+  const localScope = signal.scope && typeof signal.scope === 'object' ? signal.scope : null;
+  const globalScope = getScopeSignalConfig(source, row, rowIndex);
+  return normalizeAnalogFormat(localScope || globalScope, hasSamples ? 'float' : 'unsigned');
+}
+
+function parseIntegerToken(value) {
+  let token = String(value == null ? '' : value).trim().replace(/_/g, '');
+  if (!token || /^(x|z)$/i.test(token)) return null;
+  if (token[0] === '+') token = token.slice(1);
+  if (!/^-?(?:0[xX][0-9a-fA-F]+|0[bB][01]+|0[oO][0-7]+|\d+)$/.test(token)) return null;
+  try {
+    return BigInt(token);
+  } catch (_error) {
+    return null;
+  }
+}
+
+function floatFromBits(rawValue, bitWidth) {
+  const width = bitWidth <= 32 ? 32 : 64;
+  const buffer = new ArrayBuffer(width / 8);
+  const view = new DataView(buffer);
+  if (width === 32) {
+    view.setUint32(0, Number(BigInt.asUintN(32, rawValue)), false);
+    return view.getFloat32(0, false);
+  }
+  view.setBigUint64(0, BigInt.asUintN(64, rawValue), false);
+  return view.getFloat64(0, false);
+}
+
+function parseAnalogValue(value, analogFormat) {
+  const format = normalizeAnalogFormat(analogFormat);
+  const token = String(value == null ? '' : value).trim().replace(/_/g, '');
+  if (!token || /^(x|z)$/i.test(token)) return Number.NaN;
+  if (format.type === 'float') {
+    if (/^[-+]?(?:\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?$/i.test(token)) {
+      const numeric = Number(token);
+      return Number.isFinite(numeric) ? numeric : Number.NaN;
+    }
+    const bits = parseIntegerToken(token);
+    return bits == null ? Number.NaN : floatFromBits(bits, format.bitWidth);
+  }
+  const integer = parseIntegerToken(token);
+  if (integer == null) return Number.NaN;
+  const raw = format.type === 'signed' || format.type === 'sfixed'
+    ? BigInt.asIntN(format.bitWidth, integer)
+    : BigInt.asUintN(format.bitWidth, integer);
+  const numeric = Number(raw);
+  if (!Number.isFinite(numeric)) return Number.NaN;
+  return format.type === 'ufixed' || format.type === 'sfixed'
+    ? numeric / Math.pow(2, format.fractionalBits)
+    : numeric;
+}
+
 function stateKind(character) {
   if (/[2-9=]/.test(character)) return 'bus';
   return 'digital';
@@ -289,6 +361,8 @@ function createSession(content) {
       samples: analogSamples,
       analogLevels: analogSamples ? buildAnalogLevels(analogSamples) : [],
       range: analogSamples ? analogRange(analogSamples) : null,
+      analogFormat: getAnalogFormat(source, row, rowIndex, !!analogSamples),
+      analogCache: new Map(),
       unit: String(
         (row.source.scope && row.source.scope.unit)
         || row.source.unit
@@ -490,8 +564,15 @@ function createWindow(payload) {
   for (let index = rowStart; index < rowEnd; index += 1) {
     const row = activeSession.rows[index];
     const mode = payload.modes && payload.modes[index] || row.mode;
-    const data = mode === 'analog' && row.samples
-      ? analogWindow(row, start, end, width, total)
+    const analogRow = mode === 'analog'
+      ? analogRowForFormat(
+        row,
+        payload.analogFormats && payload.analogFormats[index],
+        total
+      )
+      : row;
+    const data = mode === 'analog' && analogRow.samples
+      ? analogWindow(analogRow, start, end, width, total)
       : rowSegmentsInWindow(row, start, end, width);
     rows.push({ index, mode, data });
   }
@@ -502,6 +583,38 @@ function segmentAt(row, column) {
   const index = findFirstSegment(row.segments, column);
   if (index >= row.segments.length) return row.segments[row.segments.length - 1];
   return row.segments[index];
+}
+
+function analogRowForFormat(row, requestedFormat, totalColumns) {
+  if (row.samples && row.samples.length) return row;
+  const format = normalizeAnalogFormat(requestedFormat || row.analogFormat, 'unsigned');
+  const key = format.type + ':' + format.bitWidth + ':' + format.fractionalBits
+    + ':' + totalColumns;
+  if (row.analogCache && row.analogCache.has(key)) return row.analogCache.get(key);
+  const samples = new Float64Array(Math.max(1, totalColumns));
+  samples.fill(Number.NaN);
+  const sourceLength = Math.min(samples.length, row.wave.length);
+  let segmentIndex = 0;
+  for (let column = 0; column < sourceLength; column += 1) {
+    while (segmentIndex < row.segments.length
+        && row.segments[segmentIndex].end <= column + 1e-7) {
+      segmentIndex += 1;
+    }
+    const segment = row.segments[Math.min(segmentIndex, row.segments.length - 1)];
+    if (!segment) continue;
+    samples[column] = parseAnalogValue(
+      segment.kind === 'bus' ? segment.value : segment.state,
+      format
+    );
+  }
+  const derived = Object.assign({}, row, {
+    samples,
+    analogLevels: buildAnalogLevels(samples),
+    range: analogRange(samples),
+    analogFormat: format
+  });
+  if (row.analogCache) row.analogCache.set(key, derived);
+  return derived;
 }
 
 function clockSymbolAt(row, column) {
@@ -586,7 +699,15 @@ function lttbIndexes(samples, threshold) {
   return sampled;
 }
 
-function chooseColumns(targetPoints, lockedColumns, method, requestedStart, requestedEnd) {
+function chooseColumns(
+  targetPoints,
+  lockedColumns,
+  method,
+  requestedStart,
+  requestedEnd,
+  modes,
+  analogFormats
+) {
   const total = activeSession.totalColumns;
   const rangeStart = clamp(Math.floor(finiteNumber(requestedStart) || 0), 0, Math.max(0, total - 1));
   const rangeEnd = clamp(
@@ -615,6 +736,14 @@ function chooseColumns(targetPoints, lockedColumns, method, requestedStart, requ
 
   const rowBudget = Math.max(8, Math.floor(target / Math.max(1, activeSession.rows.length)));
   activeSession.rows.forEach((row) => {
+    const mode = modes && modes[row.index] || row.mode;
+    const analogRow = mode === 'analog'
+      ? analogRowForFormat(
+        row,
+        analogFormats && analogFormats[row.index],
+        activeSession.totalColumns
+      )
+      : row;
     if (includeTransitions) {
       row.transitions.forEach((column) => {
         if (column < rangeStart || column >= rangeEnd) return;
@@ -622,11 +751,14 @@ function chooseColumns(targetPoints, lockedColumns, method, requestedStart, requ
         add(column, segment && segment.kind === 'bus' ? 850 : 1000);
       });
     }
-    if (includeAnalog && row.samples) {
-      lttbIndexes(row.samples, Math.min(row.samples.length, rowBudget)).forEach((sampleIndex) => {
-        const column = row.samples.length <= 1
+    if (includeAnalog && analogRow.samples) {
+      lttbIndexes(
+        analogRow.samples,
+        Math.min(analogRow.samples.length, rowBudget)
+      ).forEach((sampleIndex) => {
+        const column = analogRow.samples.length <= 1
           ? 0
-          : sampleIndex * (total - 1) / (row.samples.length - 1);
+          : sampleIndex * (total - 1) / (analogRow.samples.length - 1);
         if (column >= rangeStart && column < rangeEnd) add(column, 700);
       });
     }
@@ -654,10 +786,11 @@ function chooseColumns(targetPoints, lockedColumns, method, requestedStart, requ
   return selected.slice(0, target);
 }
 
-function stateAtColumn(row, column, mode) {
-  if (mode === 'analog' && row.samples) {
-    const index = sampleIndexForColumn(row, column, activeSession.totalColumns);
-    const value = row.samples[index];
+function stateAtColumn(row, column, mode, analogFormat) {
+  if (mode === 'analog') {
+    const analogRow = analogRowForFormat(row, analogFormat, activeSession.totalColumns);
+    const index = sampleIndexForColumn(analogRow, column, activeSession.totalColumns);
+    const value = analogRow.samples[index];
     return Number.isFinite(value) ? value : null;
   }
   const segment = segmentAt(row, column + 1e-7);
@@ -674,6 +807,7 @@ function inspectCursor(payload) {
     Math.max(0, activeSession.totalColumns - 1e-7)
   );
   const modes = payload.modes || {};
+  const analogFormats = payload.analogFormats || {};
   return {
     column,
     rows: activeSession.rows.map((row) => {
@@ -681,7 +815,7 @@ function inspectCursor(payload) {
       return {
         index: row.index,
         mode,
-        value: stateAtColumn(row, column, mode),
+        value: stateAtColumn(row, column, mode, analogFormats[row.index]),
         symbol: mode === 'digital' ? clockSymbolAt(row, column) : ''
       };
     })
@@ -737,22 +871,23 @@ function segmentValueColumn(row, column, direction, mode, target) {
   return null;
 }
 
-function analogValueColumn(row, column, direction, target) {
+function analogValueColumn(row, column, direction, target, analogFormat) {
   const targetNumber = finiteNumber(target);
-  if (targetNumber == null || !row.samples || !row.samples.length) return null;
-  const currentIndex = sampleIndexForColumn(row, column, activeSession.totalColumns);
+  const analogRow = analogRowForFormat(row, analogFormat, activeSession.totalColumns);
+  if (targetNumber == null || !analogRow.samples || !analogRow.samples.length) return null;
+  const currentIndex = sampleIndexForColumn(analogRow, column, activeSession.totalColumns);
   const step = direction > 0 ? 1 : -1;
   const tolerance = Math.max(1e-9, Math.abs(targetNumber) * 1e-9);
   for (
     let index = currentIndex + step;
-    index >= 0 && index < row.samples.length;
+    index >= 0 && index < analogRow.samples.length;
     index += step
   ) {
-    const value = row.samples[index];
+    const value = analogRow.samples[index];
     if (!Number.isFinite(value) || Math.abs(value - targetNumber) > tolerance) continue;
-    return row.samples.length <= 1
+    return analogRow.samples.length <= 1
       ? 0
-      : index * (activeSession.totalColumns - 1) / (row.samples.length - 1);
+      : index * (activeSession.totalColumns - 1) / (analogRow.samples.length - 1);
   }
   return null;
 }
@@ -772,13 +907,14 @@ function navigateCursor(payload) {
   );
   const direction = Number(payload.direction) < 0 ? -1 : 1;
   const mode = payload.mode || row.mode;
+  const analogFormat = payload.analogFormat;
   const kind = String(payload.kind || 'edge');
   let targetColumn = null;
   if (kind === 'edge') {
     targetColumn = edgeColumn(row, column, direction);
   } else if (kind === 'value') {
     if (mode === 'analog') {
-      targetColumn = analogValueColumn(row, column, direction, payload.value);
+      targetColumn = analogValueColumn(row, column, direction, payload.value, analogFormat);
     } else {
       const target = mode === 'bus'
         ? String(payload.value == null ? '' : payload.value)
@@ -793,7 +929,7 @@ function navigateCursor(payload) {
     found: true,
     rowIndex,
     column: targetColumn,
-    value: stateAtColumn(row, targetColumn, mode)
+    value: stateAtColumn(row, targetColumn, mode, analogFormat)
   };
 }
 
@@ -909,14 +1045,24 @@ function buildSimplifiedContent(model, options) {
     if (built.data && built.data.length) target.data = built.data;
     else delete target.data;
     if (rowModel.mode === 'analog') {
+      const analogFormat = normalizeAnalogFormat(
+        rowModel.analogFormat || rowMeta.analogFormat,
+        rowMeta.samples ? 'float' : 'unsigned'
+      );
       target.scope = Object.assign({}, target.scope || {}, {
         mode: 'analog',
         samples: rowModel.values.map((value) => value == null ? null : Number(value)),
-        unit: rowMeta.unit || undefined
+        unit: rowMeta.unit || undefined,
+        numericType: analogFormat.type,
+        bitWidth: analogFormat.bitWidth,
+        fractionalBits: analogFormat.fractionalBits
       });
     } else if (target.scope && typeof target.scope === 'object') {
       target.scope.mode = rowModel.mode;
       delete target.scope.samples;
+      delete target.scope.numericType;
+      delete target.scope.bitWidth;
+      delete target.scope.fractionalBits;
     }
   });
   source.scopeInstance = {
@@ -931,7 +1077,10 @@ function buildSimplifiedContent(model, options) {
     rangeStart: model.rangeStart,
     rangeEnd: model.rangeEnd,
     columnMap: model.columns.slice(),
-    displayModes: model.rows.map((row) => row.mode)
+    displayModes: model.rows.map((row) => row.mode),
+    analogFormats: model.rows.map((row) => (
+      row.mode === 'analog' ? normalizeAnalogFormat(row.analogFormat) : null
+    ))
   };
   source.scope = Object.assign({}, source.scope || {}, {
     samplePeriod: activeSession.samplePeriod,
@@ -940,24 +1089,31 @@ function buildSimplifiedContent(model, options) {
   return JSON.stringify(source, null, 2);
 }
 
-function calculateAnalogMaxError(columns) {
+function calculateAnalogMaxError(columns, modes, analogFormats) {
   if (!columns || columns.length < 2) return null;
   let maximumError = 0;
   let measured = false;
   activeSession.rows.forEach((row) => {
-    if (!row.samples || !row.samples.length) return;
+    const mode = modes && modes[row.index] || row.mode;
+    if (mode !== 'analog') return;
+    const analogRow = analogRowForFormat(
+      row,
+      analogFormats && analogFormats[row.index],
+      activeSession.totalColumns
+    );
+    if (!analogRow.samples || !analogRow.samples.length) return;
     const selectedValues = columns.map((column) => {
-      const index = sampleIndexForColumn(row, column, activeSession.totalColumns);
-      return row.samples[index];
+      const index = sampleIndexForColumn(analogRow, column, activeSession.totalColumns);
+      return analogRow.samples[index];
     });
-    const stride = Math.max(1, Math.floor(row.samples.length / 50000));
+    const stride = Math.max(1, Math.floor(analogRow.samples.length / 50000));
     let selectedIndex = 0;
-    for (let sampleIndex = 0; sampleIndex < row.samples.length; sampleIndex += stride) {
-      const actual = row.samples[sampleIndex];
+    for (let sampleIndex = 0; sampleIndex < analogRow.samples.length; sampleIndex += stride) {
+      const actual = analogRow.samples[sampleIndex];
       if (!Number.isFinite(actual)) continue;
-      const column = row.samples.length <= 1
+      const column = analogRow.samples.length <= 1
         ? 0
-        : sampleIndex * (activeSession.totalColumns - 1) / (row.samples.length - 1);
+        : sampleIndex * (activeSession.totalColumns - 1) / (analogRow.samples.length - 1);
       if (column < columns[0] || column > columns[columns.length - 1]) continue;
       while (selectedIndex + 1 < columns.length && columns[selectedIndex + 1] < column) {
         selectedIndex += 1;
@@ -995,17 +1151,30 @@ function createSimplifiedModel(payload) {
     payload.lockedColumns,
     payload.method,
     rangeStart,
-    rangeEnd
+    rangeEnd,
+    payload.modes,
+    payload.analogFormats
   );
   const modes = payload.modes || {};
+  const analogFormats = payload.analogFormats || {};
   const rows = activeSession.rows.map((row) => {
     const mode = modes[row.index] || row.mode;
-    const values = columns.map((column) => stateAtColumn(row, column, mode));
+    const analogFormat = normalizeAnalogFormat(
+      analogFormats[row.index] || row.analogFormat,
+      row.samples ? 'float' : 'unsigned'
+    );
+    const values = columns.map((column) => stateAtColumn(
+      row,
+      column,
+      mode,
+      analogFormat
+    ));
     return {
       index: row.index,
       name: row.name,
       mode,
       values,
+      analogFormat,
       symbols: mode === 'digital'
         ? columns.map((column) => clockSymbolAt(row, column))
         : [],
@@ -1031,7 +1200,7 @@ function createSimplifiedModel(payload) {
       else digitalTransitions += 1;
     });
   });
-  const analogMaxError = calculateAnalogMaxError(columns);
+  const analogMaxError = calculateAnalogMaxError(columns, modes, analogFormats);
   return {
     model,
     content,
@@ -1062,6 +1231,7 @@ function prepareResponse() {
       detectedMode: row.detectedMode,
       unit: row.unit,
       range: row.range,
+      analogFormat: row.analogFormat,
       sampleCount: row.samples ? row.samples.length : row.wave.length
     }))
   };
