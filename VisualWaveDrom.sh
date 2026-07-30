@@ -67,16 +67,6 @@ if (( $# > 0 )) && [[ "$1" != --* ]]; then
   shift
   set -- --open-url "$OPEN_URL" "$@"
 fi
-if [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
-  HAS_NO_OPEN=0
-  for argument in "$@"; do
-    [[ "$argument" == "--no-open" ]] && HAS_NO_OPEN=1
-  done
-  if (( HAS_NO_OPEN == 0 )); then
-    set -- --no-open "$@"
-  fi
-fi
-
 cd -- "$SCRIPT_DIR" || exit 1
 exec "$SERVER_EXE" \
   --root "$SCRIPT_DIR" \

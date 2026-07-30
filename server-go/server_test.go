@@ -9,8 +9,35 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
+	"time"
 )
+
+func TestLinuxBrowserCommandsIncludeDesktopFallbacks(t *testing.T) {
+	commands := browserCommands("linux", "http://127.0.0.1:4173/VisualWaveDrom.html")
+	expected := []string{"xdg-open", "gio", "sensible-browser", "kde-open5", "kde-open", "gnome-open"}
+	if len(commands) != len(expected) {
+		t.Fatalf("expected %d browser commands, got %d", len(expected), len(commands))
+	}
+	for index, name := range expected {
+		if len(commands[index]) == 0 || commands[index][0] != name {
+			t.Fatalf("browser command %d = %#v, expected %q", index, commands[index], name)
+		}
+	}
+}
+
+func TestBrowserLauncherDetectsImmediateFailure(t *testing.T) {
+	var command []string
+	if runtime.GOOS == "windows" {
+		command = []string{"cmd.exe", "/c", "exit", "7"}
+	} else {
+		command = []string{"sh", "-c", "exit 7"}
+	}
+	if err := launchBrowserCommand(command, time.Second); err == nil {
+		t.Fatal("expected immediate browser launcher failure")
+	}
+}
 
 func TestWaveDocumentHTTPRoundTrip(t *testing.T) {
 	root := t.TempDir()

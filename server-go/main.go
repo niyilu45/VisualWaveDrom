@@ -31,6 +31,7 @@ const (
 	defaultPort                = 4173
 	maxWaveLibraryRequestBytes = 256 * 1024 * 1024
 	importMaxUploadBytes       = 128 * 1024 * 1024
+	browserLaunchProbeDelay    = 2 * time.Second
 )
 
 var buildVersion = "dev"
@@ -581,6 +582,57 @@ func (s *service) pageAddress(port int) string {
 	return fmt.Sprintf("http://127.0.0.1:%d%s", port, s.requestedPagePath(s.config.openURL))
 }
 
+func browserCommands(goos, address string) [][]string {
+	switch goos {
+	case "windows":
+		return [][]string{{"rundll32.exe", "url.dll,FileProtocolHandler", address}}
+	case "darwin":
+		return [][]string{{"open", address}}
+	default:
+		return [][]string{
+			{"xdg-open", address},
+			{"gio", "open", address},
+			{"sensible-browser", address},
+			{"kde-open5", address},
+			{"kde-open", address},
+			{"gnome-open", address},
+		}
+	}
+}
+
+func launchBrowserCommand(candidate []string, probeDelay time.Duration) error {
+	if len(candidate) == 0 {
+		return errors.New("empty browser launcher command")
+	}
+	var stderr strings.Builder
+	command := exec.Command(candidate[0], candidate[1:]...)
+	command.Stdout = io.Discard
+	command.Stderr = &stderr
+	if err := command.Start(); err != nil {
+		return err
+	}
+	finished := make(chan error, 1)
+	go func() {
+		finished <- command.Wait()
+	}()
+	timer := time.NewTimer(probeDelay)
+	defer timer.Stop()
+	select {
+	case err := <-finished:
+		if err == nil {
+			return nil
+		}
+		detail := strings.TrimSpace(stderr.String())
+		if detail != "" {
+			return fmt.Errorf("%w: %s", err, detail)
+		}
+		return err
+	case <-timer.C:
+		// Some launchers remain attached while the browser is open.
+		return nil
+	}
+}
+
 func openBrowser(address string, noOpen bool) {
 	if noOpen {
 		return
@@ -591,29 +643,18 @@ func openBrowser(address string, noOpen bool) {
 		log.Printf("Could not open browser automatically: invalid local address")
 		return
 	}
-	if runtime.GOOS == "linux" && os.Getenv("DISPLAY") == "" && os.Getenv("WAYLAND_DISPLAY") == "" {
-		log.Print("No Linux desktop session was detected; open the printed URL manually.")
-		return
-	}
-	var candidates [][]string
-	switch runtime.GOOS {
-	case "windows":
-		candidates = [][]string{{"rundll32.exe", "url.dll,FileProtocolHandler", address}}
-	case "darwin":
-		candidates = [][]string{{"open", address}}
-	default:
-		candidates = [][]string{
-			{"xdg-open", address}, {"gio", "open", address}, {"sensible-browser", address},
-		}
-	}
-	for _, candidate := range candidates {
-		command := exec.Command(candidate[0], candidate[1:]...)
-		if err = command.Start(); err == nil {
-			_ = command.Process.Release()
+	failures := make([]string, 0)
+	for _, candidate := range browserCommands(runtime.GOOS, address) {
+		if err = launchBrowserCommand(candidate, browserLaunchProbeDelay); err == nil {
 			return
 		}
+		failures = append(failures, candidate[0]+": "+err.Error())
 	}
-	log.Print("Could not open the browser automatically; open the printed URL manually.")
+	if runtime.GOOS == "linux" && os.Getenv("DISPLAY") == "" && os.Getenv("WAYLAND_DISPLAY") == "" {
+		log.Print("Linux desktop variables were not detected, but available browser launchers were tried.")
+	}
+	log.Printf("Could not open the browser automatically (%s); open the printed URL manually.",
+		strings.Join(failures, "; "))
 }
 
 func sendJSON(writer http.ResponseWriter, status int, payload any) {
