@@ -145,6 +145,120 @@ function parseAnalogValue(value, analogFormat) {
     : numeric;
 }
 
+function splitConditionParts(expression, separator) {
+  const parts = [];
+  let start = 0;
+  let quote = '';
+  let escaped = false;
+  for (let index = 0; index < expression.length; index += 1) {
+    const character = expression[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (character === quote) quote = '';
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+      continue;
+    }
+    if (expression.slice(index, index + separator.length) === separator) {
+      parts.push(expression.slice(start, index));
+      start = index + separator.length;
+      index += separator.length - 1;
+    }
+  }
+  if (quote) throw new Error('条件中的引号没有闭合');
+  parts.push(expression.slice(start));
+  return parts;
+}
+
+function conditionLiteral(rawValue) {
+  const raw = String(rawValue == null ? '' : rawValue).trim();
+  if (!raw) throw new Error('条件比较值不能为空');
+  const first = raw[0];
+  const last = raw[raw.length - 1];
+  const quoted = raw.length >= 2
+    && (first === '"' || first === "'")
+    && last === first;
+  const text = quoted
+    ? raw.slice(1, -1).replace(/\\(['"\\])/g, '$1')
+    : raw;
+  return {
+    text,
+    quoted,
+    number: finiteNumber(text)
+  };
+}
+
+function compileConditionAtom(rawAtom, mode) {
+  const atom = String(rawAtom || '').trim();
+  if (!atom) throw new Error('条件中存在空表达式');
+  if (/[()]/.test(atom)) throw new Error('条件暂不支持括号');
+  const match = atom.match(/^(?:value\s*)?(==|!=|>=|<=|>|<|=)?\s*(.+)$/i);
+  if (!match) throw new Error('无法解析条件：' + atom);
+  const operator = match[1] === '=' || !match[1] ? '==' : match[1];
+  const expected = conditionLiteral(match[2]);
+  const numericOperator = /^(>|>=|<|<=)$/.test(operator);
+  if ((mode === 'analog' || numericOperator) && expected.number == null) {
+    throw new Error('数值条件需要有效数字：' + atom);
+  }
+  if (mode === 'digital' && !/^[01xzhHlL]$/.test(expected.text)) {
+    throw new Error('数字信号条件支持 0、1、x、z、h、l');
+  }
+  return function testConditionAtom(actualValue) {
+    if (numericOperator || mode === 'analog') {
+      const actual = finiteNumber(actualValue);
+      if (actual == null) return false;
+      if (operator === '>') return actual > expected.number;
+      if (operator === '>=') return actual >= expected.number;
+      if (operator === '<') return actual < expected.number;
+      if (operator === '<=') return actual <= expected.number;
+      const tolerance = Math.max(1e-9, Math.abs(expected.number) * 1e-9);
+      const equal = Math.abs(actual - expected.number) <= tolerance;
+      return operator === '!=' ? !equal : equal;
+    }
+    let actual = String(actualValue == null ? '' : actualValue);
+    let target = expected.text;
+    if (mode === 'digital') {
+      actual = normalizedDigitalState(actual, 'x');
+      target = normalizedDigitalState(target, '');
+    } else if (!expected.quoted) {
+      const actualNumber = finiteNumber(actual);
+      if (actualNumber != null && expected.number != null) {
+        const equal = actualNumber === expected.number;
+        return operator === '!=' ? !equal : equal;
+      }
+    }
+    const equal = actual === target;
+    return operator === '!=' ? !equal : equal;
+  };
+}
+
+function compileCondition(expression, mode) {
+  const source = String(expression == null ? '' : expression).trim();
+  if (!source) throw new Error('条件不能为空');
+  if (source.length > 256) throw new Error('条件长度不能超过 256 个字符');
+  const orParts = splitConditionParts(source, '||');
+  if (orParts.length > 16) throw new Error('条件组合数量过多');
+  let atomCount = 0;
+  const groups = orParts.map((orPart) => {
+    const andParts = splitConditionParts(orPart, '&&');
+    atomCount += andParts.length;
+    if (atomCount > 32) throw new Error('条件组合数量过多');
+    return andParts.map((atom) => compileConditionAtom(atom, mode));
+  });
+  return function testCondition(value) {
+    return groups.some((group) => group.every((test) => test(value)));
+  };
+}
+
 function stateKind(character) {
   if (/[2-9=]/.test(character)) return 'bus';
   return 'digital';
@@ -892,6 +1006,79 @@ function analogValueColumn(row, column, direction, target, analogFormat) {
   return null;
 }
 
+function segmentConditionValue(segment, mode) {
+  if (mode === 'bus') return String(segment.value == null ? '' : segment.value);
+  return normalizedDigitalState(segment.state, 'x');
+}
+
+function conditionSegmentColumn(row, column, direction, mode, testCondition) {
+  const segments = row.segments || [];
+  if (segments.length < 2) return null;
+  const epsilon = 1e-7;
+  if (direction > 0) {
+    let index = findFirstSegment(segments, column + epsilon);
+    if (index >= segments.length) return null;
+    for (index = Math.max(1, index); index < segments.length; index += 1) {
+      const boundary = segments[index].start;
+      if (boundary <= column + epsilon) continue;
+      const previousMatches = testCondition(segmentConditionValue(segments[index - 1], mode));
+      const currentMatches = testCondition(segmentConditionValue(segments[index], mode));
+      if (!previousMatches && currentMatches) return boundary;
+    }
+    return null;
+  }
+  let index = findFirstSegment(segments, Math.max(0, column - epsilon));
+  if (index >= segments.length) index = segments.length - 1;
+  for (; index >= 1; index -= 1) {
+    const boundary = segments[index].start;
+    if (boundary >= column - epsilon) continue;
+    const previousMatches = testCondition(segmentConditionValue(segments[index - 1], mode));
+    const currentMatches = testCondition(segmentConditionValue(segments[index], mode));
+    if (!previousMatches && currentMatches) return boundary;
+  }
+  return null;
+}
+
+function analogSampleColumn(sampleIndex, sampleCount, totalColumns) {
+  if (sampleCount <= 1 || totalColumns <= 1) return 0;
+  return sampleIndex * (totalColumns - 1) / (sampleCount - 1);
+}
+
+function conditionAnalogColumn(row, column, direction, testCondition, analogFormat) {
+  const analogRow = analogRowForFormat(row, analogFormat, activeSession.totalColumns);
+  const samples = analogRow.samples;
+  if (!samples || samples.length < 2) return null;
+  const scale = samples.length <= 1 || activeSession.totalColumns <= 1
+    ? 0
+    : (samples.length - 1) / (activeSession.totalColumns - 1);
+  if (direction > 0) {
+    let index = Math.max(1, Math.floor(column * scale + 1e-7) + 1);
+    for (; index < samples.length; index += 1) {
+      if (!testCondition(samples[index - 1]) && testCondition(samples[index])) {
+        return analogSampleColumn(index, samples.length, activeSession.totalColumns);
+      }
+    }
+    return null;
+  }
+  let index = Math.min(
+    samples.length - 1,
+    Math.ceil(column * scale - 1e-7) - 1
+  );
+  for (; index >= 1; index -= 1) {
+    if (!testCondition(samples[index - 1]) && testCondition(samples[index])) {
+      return analogSampleColumn(index, samples.length, activeSession.totalColumns);
+    }
+  }
+  return null;
+}
+
+function conditionRisingColumn(row, column, direction, mode, expression, analogFormat) {
+  const testCondition = compileCondition(expression, mode);
+  return mode === 'analog'
+    ? conditionAnalogColumn(row, column, direction, testCondition, analogFormat)
+    : conditionSegmentColumn(row, column, direction, mode, testCondition);
+}
+
 function navigateCursor(payload) {
   if (!activeSession) throw new Error('Scope session has not been prepared');
   const rowIndex = clamp(
@@ -921,6 +1108,15 @@ function navigateCursor(payload) {
         : normalizedDigitalState(payload.value, '');
       targetColumn = segmentValueColumn(row, column, direction, mode, target);
     }
+  } else if (kind === 'condition') {
+    targetColumn = conditionRisingColumn(
+      row,
+      column,
+      direction,
+      mode,
+      payload.condition,
+      analogFormat
+    );
   }
   if (targetColumn == null) {
     return { found: false, rowIndex, column };

@@ -141,6 +141,10 @@ body.scope-wave-view > #vim-help-modal {
   width: 74px;
 }
 
+.scope-cursor-controls #scope-cursor-condition {
+  width: 118px;
+}
+
 .scope-small-icon {
   width: 28px;
   font-size: 12px;

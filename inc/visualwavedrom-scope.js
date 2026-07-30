@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260730-scope-v6';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260730-scope-v8';
   const DEFAULT_ROW_HEIGHT = 84;
   const MIN_ANALOG_ROW_HEIGHT = 56;
   const MAX_ANALOG_ROW_HEIGHT = 480;
@@ -242,6 +242,14 @@
             </label>
             <button type="button" class="scope-icon-btn scope-small-icon" id="scope-cursor-prev-value" title="跳到上一个指定值" aria-label="跳到上一个指定值">◀</button>
             <button type="button" class="scope-icon-btn scope-small-icon" id="scope-cursor-next-value" title="跳到下一个指定值" aria-label="跳到下一个指定值">▶</button>
+            <label>条件
+              <input type="text" id="scope-cursor-condition" placeholder="&gt;=10 &amp;&amp; &lt;20"
+                  aria-label="游标跳转条件" title="支持 ==、!=、&gt;、&gt;=、&lt;、&lt;=、&amp;&amp;、||">
+            </label>
+            <button type="button" class="scope-icon-btn scope-small-icon" id="scope-cursor-prev-condition"
+                title="跳到上一个条件由假变真的边沿" aria-label="上一个条件成立边沿">◀</button>
+            <button type="button" class="scope-icon-btn scope-small-icon" id="scope-cursor-next-condition"
+                title="跳到下一个条件由假变真的边沿" aria-label="下一个条件成立边沿">▶</button>
           </div>
           <div class="scope-toolbar-group scope-analog-controls" aria-label="模拟波形数据解释">
             <span class="scope-toolbar-label">模拟解析</span>
@@ -369,6 +377,9 @@
       this.cursorNextEdgeButton = root.querySelector('#scope-cursor-next-edge');
       this.cursorPrevValueButton = root.querySelector('#scope-cursor-prev-value');
       this.cursorNextValueButton = root.querySelector('#scope-cursor-next-value');
+      this.cursorConditionInput = root.querySelector('#scope-cursor-condition');
+      this.cursorPrevConditionButton = root.querySelector('#scope-cursor-prev-condition');
+      this.cursorNextConditionButton = root.querySelector('#scope-cursor-next-condition');
       this.analogTypeSelect = root.querySelector('#scope-analog-type');
       this.analogWidthInput = root.querySelector('#scope-analog-width');
       this.analogFractionInput = root.querySelector('#scope-analog-fraction');
@@ -407,10 +418,21 @@
       this.cursorNextValueButton.addEventListener('click', () => {
         void this.navigateActiveCursor('value', 1);
       });
+      this.cursorPrevConditionButton.addEventListener('click', () => {
+        void this.navigateActiveCursor('condition', -1);
+      });
+      this.cursorNextConditionButton.addEventListener('click', () => {
+        void this.navigateActiveCursor('condition', 1);
+      });
       this.cursorValueInput.addEventListener('keydown', (event) => {
         if (event.key !== 'Enter') return;
         event.preventDefault();
         void this.navigateActiveCursor('value', event.shiftKey ? -1 : 1);
+      });
+      this.cursorConditionInput.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter') return;
+        event.preventDefault();
+        void this.navigateActiveCursor('condition', event.shiftKey ? -1 : 1);
       });
       this.analogTypeSelect.addEventListener('change', () => this.applyAnalogFormatControls());
       this.analogWidthInput.addEventListener('change', () => this.applyAnalogFormatControls());
@@ -1689,6 +1711,7 @@
       const row = this.meta.rows[this.activeCursorRow];
       const mode = this.modes[this.activeCursorRow] || row.mode;
       const value = this.cursorValueInput.value.trim();
+      const condition = this.cursorConditionInput.value.trim();
       if (kind === 'value' && !value) {
         this.setStatus('请先输入要跳转的值', true);
         this.cursorValueInput.focus();
@@ -1702,6 +1725,11 @@
         this.setStatus('数字信号的目标值支持 0、1、x、z、h、l', true);
         return;
       }
+      if (kind === 'condition' && !condition) {
+        this.setStatus('请先输入游标跳转条件', true);
+        this.cursorConditionInput.focus();
+        return;
+      }
       const sequence = ++this.cursorNavigationSequence;
       try {
         const result = await this.worker.call('navigate', {
@@ -1710,6 +1738,7 @@
           direction,
           kind,
           value,
+          condition,
           mode,
           analogFormat: this.analogFormats[this.activeCursorRow]
         });
@@ -1717,7 +1746,8 @@
         if (!result.found) {
           this.setStatus(
             (direction < 0 ? '前方' : '后方')
-            + '没有匹配的' + (kind === 'edge' ? '边沿' : '值'),
+            + '没有匹配的'
+            + (kind === 'edge' ? '边沿' : (kind === 'condition' ? '条件成立边沿' : '值')),
             true
           );
           return;
@@ -1727,7 +1757,9 @@
         this.draw();
         this.setStatus(
           this.activeCursor + ' 已跳到 ' + row.name + ' 的'
-          + (kind === 'edge' ? '边沿' : ('值 ' + value))
+          + (kind === 'edge'
+            ? '边沿'
+            : (kind === 'condition' ? ('条件成立边沿 ' + condition) : ('值 ' + value)))
         );
       } catch (error) {
         if (sequence !== this.cursorNavigationSequence) return;
