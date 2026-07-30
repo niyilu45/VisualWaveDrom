@@ -767,13 +767,64 @@ func (s *service) handleImportAnalyze(writer http.ResponseWriter, request *http.
 		sendJSON(writer, 400, map[string]any{"error": err.Error()})
 		return
 	}
+	var sourceFile map[string]any
+	if _, supplied := payload["sourcePath"]; supplied {
+		sourcePath, info, err := resolvePastedImportPath(
+			stringValue(payload["sourcePath"]), s.config.rootDir)
+		if err != nil {
+			sendJSON(writer, 400, map[string]any{"error": err.Error()})
+			return
+		}
+		sampleLines, err := readImportSampleLines(sourcePath)
+		if err != nil {
+			sendJSON(writer, 400, map[string]any{"error": err.Error()})
+			return
+		}
+		payload["fileName"] = info.Name()
+		payload["sampleLines"] = sampleLines
+		sourceFile = map[string]any{
+			"name": info.Name(), "path": sourcePath, "size": info.Size(),
+			"modifiedAt": info.ModTime().UTC().Format(time.RFC3339Nano),
+		}
+	}
 	result := s.imports.analyzeRequest(payload)
 	result["ok"] = true
 	result["python"] = s.imports.pythonRuntime()
+	if sourceFile != nil {
+		result["sourceFile"] = sourceFile
+		result["sampleLines"] = payload["sampleLines"]
+	}
 	sendJSON(writer, 200, result)
 }
 
 func (s *service) handleImportPreview(writer http.ResponseWriter, request *http.Request) {
+	if strings.HasPrefix(strings.ToLower(request.Header.Get("Content-Type")), "application/json") {
+		payload := make(map[string]any)
+		if err := decodeJSONBody(writer, request, 128*1024, &payload); err != nil {
+			sendJSON(writer, 400, map[string]any{"error": err.Error()})
+			return
+		}
+		sourcePath, _, err := resolvePastedImportPath(
+			stringValue(payload["sourcePath"]), s.config.rootDir)
+		if err != nil {
+			sendJSON(writer, 400, map[string]any{"error": err.Error()})
+			return
+		}
+		result, err := s.imports.runLocalFile(
+			stringValue(payload["schemeId"]),
+			intValue(payload["mappingIndex"], -1),
+			stringValue(payload["signalName"]),
+			sourcePath,
+		)
+		if err != nil {
+			sendJSON(writer, 400, map[string]any{"error": err.Error()})
+			return
+		}
+		result["ok"] = true
+		result["sourcePath"] = sourcePath
+		sendJSON(writer, 200, result)
+		return
+	}
 	request.Body = http.MaxBytesReader(writer, request.Body, importMaxUploadBytes)
 	data, err := io.ReadAll(request.Body)
 	if err != nil {

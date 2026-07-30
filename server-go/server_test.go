@@ -39,6 +39,46 @@ func TestBrowserLauncherDetectsImmediateFailure(t *testing.T) {
 	}
 }
 
+func TestResolvePastedImportPathAcceptsQuotedAndRelativePaths(t *testing.T) {
+	root := t.TempDir()
+	sourcePath := filepath.Join(root, "sample data.csv")
+	if err := os.WriteFile(sourcePath, []byte("0,1\n1,0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	expectedInfo, err := os.Stat(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, supplied := range []string{
+		`"` + sourcePath + `"`,
+		"'sample data.csv'",
+	} {
+		resolved, info, resolveErr := resolvePastedImportPath(supplied, root)
+		if resolveErr != nil {
+			t.Fatalf("resolve %q: %v", supplied, resolveErr)
+		}
+		if filepath.Clean(resolved) != filepath.Clean(sourcePath) {
+			t.Fatalf("resolve %q = %q, expected %q", supplied, resolved, sourcePath)
+		}
+		if !os.SameFile(expectedInfo, info) {
+			t.Fatalf("resolve %q returned different file info", supplied)
+		}
+	}
+}
+
+func TestImportSampleLinesSupportsLinuxAndWindowsNewlines(t *testing.T) {
+	lines := importSampleLinesFromBytes([]byte("a\r\nb\nc\rd\ne\nf\n"))
+	expected := []string{"a", "b", "c", "d", "e"}
+	if len(lines) != len(expected) {
+		t.Fatalf("sample line count = %d, expected %d", len(lines), len(expected))
+	}
+	for index, value := range expected {
+		if lines[index] != value {
+			t.Fatalf("sample line %d = %q, expected %q", index, lines[index], value)
+		}
+	}
+}
+
 func TestWaveDocumentHTTPRoundTrip(t *testing.T) {
 	root := t.TempDir()
 	htmlName := "VisualWaveDrom.html"

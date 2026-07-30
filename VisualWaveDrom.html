@@ -575,12 +575,20 @@
     <div class="modal-dialog row-import-dialog" role="dialog" aria-modal="true" aria-labelledby="row-import-scheme-title">
       <div class="modal-header" id="row-import-scheme-title">导入波形数据</div>
       <div class="modal-body row-import-body">
+        <label class="row-import-path-field" for="row-import-path-input">
+          <span>文件路径</span>
+          <span class="row-import-path-controls">
+            <input type="text" class="modal-input" id="row-import-path-input"
+              autocomplete="off" spellcheck="false" placeholder="/home/user/data.csv">
+            <button type="button" class="modal-btn" id="row-import-load-path">读取路径</button>
+          </span>
+        </label>
         <div class="row-import-file-row">
           <div class="row-import-file-text">
             <strong id="row-import-file-name">尚未选择文件</strong>
             <span id="row-import-file-meta"></span>
           </div>
-          <button type="button" class="modal-btn" id="row-import-change-file">重新选择</button>
+          <button type="button" class="modal-btn" id="row-import-change-file">选择文件</button>
         </div>
         <div class="row-import-section">
           <div class="row-import-section-title">文件前 5 行</div>

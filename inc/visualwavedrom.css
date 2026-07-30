@@ -1794,6 +1794,34 @@
       gap: 12px;
     }
 
+    .row-import-path-field {
+      display: grid;
+      gap: 6px;
+    }
+
+    .row-import-path-field > span:first-child {
+      color: var(--text);
+      font-size: 0.78rem;
+      font-weight: 600;
+    }
+
+    .row-import-path-controls {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+    }
+
+    .row-import-path-controls .modal-input {
+      min-width: 0;
+      font-family: Consolas, "Courier New", monospace;
+    }
+
+    .row-import-file-row > .modal-btn,
+    .row-import-path-controls > .modal-btn {
+      flex-shrink: 0;
+      white-space: nowrap;
+    }
+
     .row-import-file-text {
       min-width: 0;
       display: grid;
@@ -1929,6 +1957,10 @@
       .row-import-file-row {
         align-items: stretch;
         flex-direction: column;
+      }
+
+      .row-import-path-controls {
+        grid-template-columns: 1fr;
       }
 
       .row-import-signal-field {

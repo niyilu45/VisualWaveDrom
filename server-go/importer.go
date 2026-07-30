@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -579,7 +581,9 @@ func recommendScheme(schemes []map[string]any, analysis map[string]any) map[stri
 
 func normalizeSampleLines(payload map[string]any) []string {
 	lines := make([]string, 0)
-	if supplied, ok := payload["sampleLines"].([]any); ok {
+	if supplied, ok := payload["sampleLines"].([]string); ok {
+		lines = append(lines, supplied...)
+	} else if supplied, ok := payload["sampleLines"].([]any); ok {
 		for _, line := range supplied {
 			lines = append(lines, stringValue(line))
 		}
@@ -700,6 +704,96 @@ func (m *importManager) runScheme(schemeID string) (map[string]any, error) {
 	}, nil
 }
 
+func resolvePastedImportPath(rawPath, baseDir string) (string, os.FileInfo, error) {
+	value := strings.TrimSpace(rawPath)
+	if len(value) >= 2 {
+		first, last := value[0], value[len(value)-1]
+		if (first == '"' && last == '"') || (first == '\'' && last == '\'') {
+			value = strings.TrimSpace(value[1 : len(value)-1])
+		}
+	}
+	if value == "" {
+		return "", nil, errors.New("waveform data file path is required")
+	}
+	if strings.HasPrefix(strings.ToLower(value), "file:") {
+		parsed, err := url.Parse(value)
+		if err != nil || !strings.EqualFold(parsed.Scheme, "file") {
+			return "", nil, errors.New("invalid waveform data file URL")
+		}
+		decodedPath, decodeErr := url.PathUnescape(parsed.EscapedPath())
+		if decodeErr != nil {
+			return "", nil, errors.New("invalid waveform data file URL")
+		}
+		if parsed.Host != "" && !strings.EqualFold(parsed.Host, "localhost") {
+			if runtime.GOOS != "windows" {
+				return "", nil, errors.New("remote file URLs are not supported")
+			}
+			value = `\\` + parsed.Host + filepath.FromSlash(decodedPath)
+		} else {
+			value = filepath.FromSlash(decodedPath)
+			if runtime.GOOS == "windows" && len(value) >= 3 &&
+				(value[0] == '\\' || value[0] == '/') && value[2] == ':' {
+				value = value[1:]
+			}
+		}
+	}
+	if value == "~" || strings.HasPrefix(value, "~/") || strings.HasPrefix(value, `~\`) {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", nil, fmt.Errorf("could not resolve home directory: %w", err)
+		}
+		if value == "~" {
+			value = home
+		} else {
+			value = filepath.Join(home, filepath.FromSlash(value[2:]))
+		}
+	}
+	if !filepath.IsAbs(value) {
+		value = filepath.Join(baseDir, value)
+	}
+	resolved, err := filepath.Abs(value)
+	if err != nil {
+		return "", nil, fmt.Errorf("invalid waveform data file path: %w", err)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", nil, fmt.Errorf("waveform data file was not found: %s", resolved)
+	}
+	if !info.Mode().IsRegular() {
+		return "", nil, errors.New("waveform data path must point to a regular file")
+	}
+	if info.Size() == 0 {
+		return "", nil, errors.New("waveform data file is empty")
+	}
+	if info.Size() > importMaxUploadBytes {
+		return "", nil, errors.New("waveform data file exceeds 128 MB")
+	}
+	return filepath.Clean(resolved), info, nil
+}
+
+func importSampleLinesFromBytes(data []byte) []string {
+	text := strings.ReplaceAll(string(data), "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	lines := strings.Split(text, "\n")
+	if len(lines) > importSampleLineLimit {
+		lines = lines[:importSampleLineLimit]
+	}
+	return lines
+}
+
+func readImportSampleLines(sourcePath string) ([]string, error) {
+	file, err := os.Open(sourcePath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, 64*1024))
+	if err != nil {
+		return nil, err
+	}
+	return importSampleLinesFromBytes(data), nil
+}
+
 func safeUploadName(fileName string) string {
 	name := filepath.Base(fileName)
 	invalid := regexp.MustCompile(`[\x00-\x1f<>:"/\\|?*]`)
@@ -725,13 +819,26 @@ func normalizeSignalName(value string) (string, error) {
 	return name, nil
 }
 
-func (m *importManager) runUploaded(schemeID string, mappingIndex int, signalName, fileName string, data []byte) (map[string]any, error) {
+func (m *importManager) runSourceFile(
+	schemeID string,
+	mappingIndex int,
+	signalName string,
+	sourcePath string,
+	displayName string,
+) (map[string]any, error) {
 	python := m.pythonRuntime()
 	if !python.Available {
 		return nil, errors.New(python.Error)
 	}
-	if len(data) == 0 {
-		return nil, errors.New("uploaded waveform data file is empty")
+	info, err := os.Stat(sourcePath)
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, errors.New("waveform data file is not available")
+	}
+	if info.Size() == 0 {
+		return nil, errors.New("waveform data file is empty")
+	}
+	if info.Size() > importMaxUploadBytes {
+		return nil, errors.New("waveform data file exceeds 128 MB")
 	}
 	scheme, err := m.loadScheme(schemeID)
 	if err != nil {
@@ -744,25 +851,15 @@ func (m *importManager) runUploaded(schemeID string, mappingIndex int, signalNam
 	if err != nil {
 		return nil, err
 	}
-	uploadedName := safeUploadName(fileName)
-	tempDirectory, err := os.MkdirTemp("", "visualwavedrom-import-")
+	lines, err := readImportSampleLines(sourcePath)
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(tempDirectory)
-	tempPath := filepath.Join(tempDirectory, uploadedName)
-	if err = os.WriteFile(tempPath, data, 0o600); err != nil {
-		return nil, err
+	displayName = filepath.Base(strings.TrimSpace(displayName))
+	if displayName == "" || displayName == "." {
+		displayName = filepath.Base(sourcePath)
 	}
-	sampleData := data
-	if len(sampleData) > 64*1024 {
-		sampleData = sampleData[:64*1024]
-	}
-	lines := strings.Split(strings.ReplaceAll(string(sampleData), "\r\n", "\n"), "\n")
-	if len(lines) > importSampleLineLimit {
-		lines = lines[:importSampleLineLimit]
-	}
-	analysis := analyzeImportSample(uploadedName, lines)
+	analysis := analyzeImportSample(displayName, lines)
 	source := scheme.Mappings[mappingIndex]
 	options := cloneJSONValue(source.Options, map[string]any{}).(map[string]any)
 	headerLikely, _ := analysis["headerLikely"].(bool)
@@ -770,8 +867,8 @@ func (m *importManager) runUploaded(schemeID string, mappingIndex int, signalNam
 		options["skipRows"] = 1
 	}
 	effective := source
-	effective.SourcePath = tempPath
-	effective.DisplayPath = uploadedName
+	effective.SourcePath = sourcePath
+	effective.DisplayPath = displayName
 	effective.Options = options
 	result, err := m.runParser(effective, python)
 	if err != nil {
@@ -784,4 +881,45 @@ func (m *importManager) runUploaded(schemeID string, mappingIndex int, signalNam
 		"parser": source.Parser, "pythonVersion": python.Version, "analysis": analysis,
 		"updates": []map[string]any{update},
 	}, nil
+}
+
+func (m *importManager) runUploaded(
+	schemeID string,
+	mappingIndex int,
+	signalName string,
+	fileName string,
+	data []byte,
+) (map[string]any, error) {
+	if len(data) == 0 {
+		return nil, errors.New("uploaded waveform data file is empty")
+	}
+	if len(data) > importMaxUploadBytes {
+		return nil, errors.New("uploaded waveform data file exceeds 128 MB")
+	}
+	uploadedName := safeUploadName(fileName)
+	tempDirectory, err := os.MkdirTemp("", "visualwavedrom-import-")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(tempDirectory)
+	tempPath := filepath.Join(tempDirectory, uploadedName)
+	if err = os.WriteFile(tempPath, data, 0o600); err != nil {
+		return nil, err
+	}
+	return m.runSourceFile(schemeID, mappingIndex, signalName, tempPath, uploadedName)
+}
+
+func (m *importManager) runLocalFile(
+	schemeID string,
+	mappingIndex int,
+	signalName string,
+	sourcePath string,
+) (map[string]any, error) {
+	return m.runSourceFile(
+		schemeID,
+		mappingIndex,
+		signalName,
+		sourcePath,
+		filepath.Base(sourcePath),
+	)
 }
