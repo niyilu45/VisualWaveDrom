@@ -28,11 +28,16 @@ import (
 const (
 	appID                      = "VisualWaveDrom"
 	protocolScheme             = "visualwavedrom"
-	serviceAPIVersion          = 4
+	serviceAPIVersion          = 6
 	defaultPort                = 4173
 	maxWaveLibraryRequestBytes = 256 * 1024 * 1024
 	importMaxUploadBytes       = 128 * 1024 * 1024
 	browserLaunchProbeDelay    = 2 * time.Second
+	clientHeartbeatInterval    = 15 * time.Second
+	clientLeaseTimeout         = 90 * time.Second
+	clientShutdownDelay        = 1800 * time.Millisecond
+	clientStartupGracePeriod   = 30 * time.Second
+	clientTimerMinimumDelay    = 50 * time.Millisecond
 )
 
 var buildVersion = "dev"
@@ -129,9 +134,14 @@ type service struct {
 	activeScheme  string
 	httpServer    *http.Server
 	clientMu      sync.Mutex
-	clients       map[string]bool
+	clients       map[string]clientLease
 	shutdownTimer *time.Timer
 	stateMu       sync.Mutex
+}
+
+type clientLease struct {
+	token    string
+	lastSeen time.Time
 }
 
 func stableID(prefix string) string {
@@ -238,7 +248,7 @@ func newService(configuration config) (*service, error) {
 	instance := &service{
 		config: configuration, store: store, imports: newImportManager(configuration.rootDir),
 		sqliteVersion: sqliteVersion, activeScheme: protocolScheme,
-		clients: make(map[string]bool),
+		clients: make(map[string]clientLease),
 	}
 	if err = instance.ensureWaveDirectory(); err != nil {
 		return nil, err
@@ -580,7 +590,13 @@ func (s *service) requestedPagePath(rawURL string) string {
 }
 
 func (s *service) pageAddress(port int) string {
-	return fmt.Sprintf("http://127.0.0.1:%d%s", port, s.requestedPagePath(s.config.openURL))
+	pagePath := s.requestedPagePath(s.config.openURL)
+	separator := "?"
+	if strings.Contains(pagePath, "?") {
+		separator = "&"
+	}
+	pagePath += separator + "serviceApi=" + strconv.Itoa(serviceAPIVersion)
+	return fmt.Sprintf("http://127.0.0.1:%d%s", port, pagePath)
 }
 
 func browserCommands(goos, address string) [][]string {
@@ -712,47 +728,172 @@ func (s *service) handleServerInfo(writer http.ResponseWriter, _ *http.Request) 
 	})
 }
 
-func (s *service) handleClientConnect(writer http.ResponseWriter, request *http.Request) {
-	id := request.URL.Query().Get("id")
+func requestClientID(request *http.Request) string {
+	id := strings.TrimSpace(request.URL.Query().Get("id"))
 	if id == "" {
-		id = "anonymous-client"
+		return "anonymous-client"
 	}
+	return id
+}
+
+func (s *service) stopClientTimerLocked() {
+	if s.shutdownTimer == nil {
+		return
+	}
+	s.shutdownTimer.Stop()
+	s.shutdownTimer = nil
+}
+
+func (s *service) pruneExpiredClientsLocked(now time.Time) {
+	for id, lease := range s.clients {
+		if now.Sub(lease.lastSeen) >= clientLeaseTimeout {
+			delete(s.clients, id)
+		}
+	}
+}
+
+func (s *service) scheduleClientShutdownLocked(delay time.Duration) {
+	s.stopClientTimerLocked()
+	if delay < clientTimerMinimumDelay {
+		delay = clientTimerMinimumDelay
+	}
+	s.shutdownTimer = time.AfterFunc(delay, s.shutdownIfNoClients)
+}
+
+func (s *service) scheduleClientLeaseCheckLocked(now time.Time) {
+	s.stopClientTimerLocked()
+	if len(s.clients) == 0 {
+		s.scheduleClientShutdownLocked(clientShutdownDelay)
+		return
+	}
+	delay := clientLeaseTimeout
+	for _, lease := range s.clients {
+		remaining := clientLeaseTimeout - now.Sub(lease.lastSeen)
+		if remaining < delay {
+			delay = remaining
+		}
+	}
+	if delay < clientTimerMinimumDelay {
+		delay = clientTimerMinimumDelay
+	}
+	s.shutdownTimer = time.AfterFunc(delay, s.reapExpiredClients)
+}
+
+func (s *service) reapExpiredClients() {
 	s.clientMu.Lock()
-	s.clients[id] = true
-	if s.shutdownTimer != nil {
-		s.shutdownTimer.Stop()
-		s.shutdownTimer = nil
+	s.shutdownTimer = nil
+	now := time.Now()
+	s.pruneExpiredClientsLocked(now)
+	if len(s.clients) == 0 {
+		s.scheduleClientShutdownLocked(clientShutdownDelay)
+	} else {
+		s.scheduleClientLeaseCheckLocked(now)
+	}
+	s.clientMu.Unlock()
+}
+
+func (s *service) shutdownIfNoClients() {
+	s.clientMu.Lock()
+	s.shutdownTimer = nil
+	now := time.Now()
+	s.pruneExpiredClientsLocked(now)
+	if len(s.clients) != 0 {
+		s.scheduleClientLeaseCheckLocked(now)
+		s.clientMu.Unlock()
+		return
+	}
+	server := s.httpServer
+	s.clientMu.Unlock()
+	if server == nil {
+		return
+	}
+	context, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = server.Shutdown(context)
+}
+
+func (s *service) touchClient(id, token string) int {
+	now := time.Now()
+	s.clientMu.Lock()
+	s.pruneExpiredClientsLocked(now)
+	s.clients[id] = clientLease{token: token, lastSeen: now}
+	s.scheduleClientLeaseCheckLocked(now)
+	count := len(s.clients)
+	s.clientMu.Unlock()
+	return count
+}
+
+func (s *service) removeClient(id, token string, force bool) int {
+	now := time.Now()
+	s.clientMu.Lock()
+	s.pruneExpiredClientsLocked(now)
+	if lease, found := s.clients[id]; found && (force || lease.token == token) {
+		delete(s.clients, id)
+	}
+	if len(s.clients) == 0 {
+		s.scheduleClientShutdownLocked(clientShutdownDelay)
+	} else {
+		s.scheduleClientLeaseCheckLocked(now)
 	}
 	count := len(s.clients)
 	s.clientMu.Unlock()
+	return count
+}
+
+func (s *service) handleClientConnect(writer http.ResponseWriter, request *http.Request) {
+	count := s.touchClient(requestClientID(request), "heartbeat")
 	sendJSON(writer, 200, map[string]any{"ok": true, "clients": count})
 }
 
 func (s *service) handleClientDisconnect(writer http.ResponseWriter, request *http.Request) {
-	id := request.URL.Query().Get("id")
-	if id == "" {
-		id = "anonymous-client"
-	}
-	s.clientMu.Lock()
-	delete(s.clients, id)
-	count := len(s.clients)
-	if s.shutdownTimer != nil {
-		s.shutdownTimer.Stop()
-	}
-	if count == 0 {
-		s.shutdownTimer = time.AfterFunc(1800*time.Millisecond, func() {
-			s.clientMu.Lock()
-			stillEmpty := len(s.clients) == 0
-			s.clientMu.Unlock()
-			if stillEmpty && s.httpServer != nil {
-				context, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-				defer cancel()
-				_ = s.httpServer.Shutdown(context)
-			}
-		})
-	}
-	s.clientMu.Unlock()
+	count := s.removeClient(requestClientID(request), "", true)
 	sendJSON(writer, 200, map[string]any{"ok": true, "clients": count})
+}
+
+func (s *service) handleClientSession(writer http.ResponseWriter, request *http.Request) {
+	flusher, ok := writer.(http.Flusher)
+	if !ok {
+		sendJSON(writer, 500, map[string]any{"error": "Streaming is not supported"})
+		return
+	}
+	id := requestClientID(request)
+	token := stableID("session")
+	s.touchClient(id, token)
+	defer s.removeClient(id, token, false)
+
+	writer.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	writer.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	writer.Header().Set("Connection", "keep-alive")
+	writer.Header().Set("X-Accel-Buffering", "no")
+	if _, err := fmt.Fprintf(writer, "retry: 3000\nevent: connected\ndata: ok\n\n"); err != nil {
+		return
+	}
+	flusher.Flush()
+
+	ticker := time.NewTicker(clientHeartbeatInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-request.Context().Done():
+			return
+		case <-ticker.C:
+			s.clientMu.Lock()
+			lease, active := s.clients[id]
+			if active && lease.token == token {
+				lease.lastSeen = time.Now()
+				s.clients[id] = lease
+				s.scheduleClientLeaseCheckLocked(lease.lastSeen)
+			}
+			s.clientMu.Unlock()
+			if !active {
+				return
+			}
+			if _, err := fmt.Fprint(writer, ": keepalive\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
 }
 
 func (s *service) handleImportSchemes(writer http.ResponseWriter, _ *http.Request) {
@@ -1151,6 +1292,14 @@ func (s *service) serveStatic(writer http.ResponseWriter, request *http.Request)
 	defer file.Close()
 	writer.Header().Set("Content-Type", contentType(realTarget))
 	writer.Header().Set("X-Content-Type-Options", "nosniff")
+	switch strings.ToLower(filepath.Ext(realTarget)) {
+	case ".html", ".htm":
+		writer.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		writer.Header().Set("Pragma", "no-cache")
+		writer.Header().Set("Expires", "0")
+	case ".js", ".css":
+		writer.Header().Set("Cache-Control", "no-cache")
+	}
 	http.ServeContent(writer, request, info.Name(), info.ModTime(), file)
 }
 
@@ -1168,6 +1317,7 @@ func (s *service) routes() http.Handler {
 	mux.HandleFunc("/api/server-info", method(http.MethodGet, s.handleServerInfo))
 	mux.HandleFunc("/api/client-connect", method(http.MethodPost, s.handleClientConnect))
 	mux.HandleFunc("/api/client-disconnect", method(http.MethodPost, s.handleClientDisconnect))
+	mux.HandleFunc("/api/client-session", method(http.MethodGet, s.handleClientSession))
 	mux.HandleFunc("/api/import-schemes", method(http.MethodGet, s.handleImportSchemes))
 	mux.HandleFunc("/api/import-wave-analyze", method(http.MethodPost, s.handleImportAnalyze))
 	mux.HandleFunc("/api/import-wave-preview", method(http.MethodPost, s.handleImportPreview))
@@ -1257,6 +1407,11 @@ func (s *service) run() error {
 	fmt.Printf("Runtime: %s/%s / Go %s / SQLite %s\n",
 		runtime.GOOS, runtime.GOARCH, runtime.Version(), s.sqliteVersion)
 	fmt.Printf("VisualWaveDrom is running at %s\n", address)
+	if !s.config.noOpen {
+		s.clientMu.Lock()
+		s.scheduleClientShutdownLocked(clientStartupGracePeriod)
+		s.clientMu.Unlock()
+	}
 	openBrowser(address, s.config.noOpen)
 	err = s.httpServer.Serve(listener)
 	if errors.Is(err, http.ErrServerClosed) {

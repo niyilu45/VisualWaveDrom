@@ -39,6 +39,29 @@ func TestBrowserLauncherDetectsImmediateFailure(t *testing.T) {
 	}
 }
 
+func TestPruneExpiredClientsRemovesOnlyStaleLeases(t *testing.T) {
+	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
+	instance := &service{
+		clients: map[string]clientLease{
+			"active": {
+				token:    "active-token",
+				lastSeen: now.Add(-clientLeaseTimeout / 2),
+			},
+			"stale": {
+				token:    "stale-token",
+				lastSeen: now.Add(-clientLeaseTimeout),
+			},
+		},
+	}
+	instance.pruneExpiredClientsLocked(now)
+	if _, found := instance.clients["stale"]; found {
+		t.Fatal("stale client lease was not removed")
+	}
+	if _, found := instance.clients["active"]; !found {
+		t.Fatal("active client lease was removed")
+	}
+}
+
 func TestResolvePastedImportPathAcceptsQuotedAndRelativePaths(t *testing.T) {
 	root := t.TempDir()
 	sourcePath := filepath.Join(root, "sample data.csv")

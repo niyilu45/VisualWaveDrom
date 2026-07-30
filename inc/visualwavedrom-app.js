@@ -920,6 +920,10 @@ ${lines.join('\n')}`;
     const scopeWaveViewActive = pageQuery.get('view') === 'scope' && !!requestedWaveDocumentName;
     const focusedWaveViewActive = singleWaveViewActive || scopeWaveViewActive;
     const waveLibraryClientId = 'client-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+    const WAVE_LIBRARY_CLIENT_HEARTBEAT_MS = 20000;
+    let waveLibraryClientEventSource = null;
+    let waveLibraryClientHeartbeatTimer = 0;
+    let waveLibraryClientDisconnectSent = false;
     let currentWaveLibraryFile = '';
     let currentWaveLibraryId = '';
     let waveLinkProtocolScheme = 'visualwavedrom';
@@ -13437,16 +13441,58 @@ ${lines.join('\n')}`;
       }
     }
 
+    function waveLibraryClientQuery() {
+      return '?id=' + encodeURIComponent(waveLibraryClientId);
+    }
+
+    function sendWaveLibraryClientHeartbeat() {
+      if (!waveLibraryServerMode) return;
+      fetch('/api/client-connect' + waveLibraryClientQuery(), {
+        method: 'POST',
+        keepalive: true
+      }).catch(() => {});
+    }
+
+    function stopWaveLibraryClientSession(notifyServer) {
+      if (waveLibraryClientEventSource) {
+        waveLibraryClientEventSource.close();
+        waveLibraryClientEventSource = null;
+      }
+      if (waveLibraryClientHeartbeatTimer) {
+        clearInterval(waveLibraryClientHeartbeatTimer);
+        waveLibraryClientHeartbeatTimer = 0;
+      }
+      if (!notifyServer || waveLibraryClientDisconnectSent || !waveLibraryServerMode) return;
+      waveLibraryClientDisconnectSent = true;
+      const disconnectURL = '/api/client-disconnect' + waveLibraryClientQuery();
+      if (!navigator.sendBeacon(disconnectURL, '')) {
+        fetch(disconnectURL, { method: 'POST', keepalive: true }).catch(() => {});
+      }
+    }
+
+    function startWaveLibraryClientSession() {
+      if (!waveLibraryServerMode) return;
+      stopWaveLibraryClientSession(false);
+      waveLibraryClientDisconnectSent = false;
+      if (typeof window.EventSource === 'function') {
+        waveLibraryClientEventSource = new EventSource(
+          '/api/client-session' + waveLibraryClientQuery()
+        );
+        return;
+      }
+      sendWaveLibraryClientHeartbeat();
+      waveLibraryClientHeartbeatTimer = window.setInterval(
+        sendWaveLibraryClientHeartbeat,
+        WAVE_LIBRARY_CLIENT_HEARTBEAT_MS
+      );
+    }
+
     async function initializeServerWaveLibrary() {
       if (!waveLibraryServerMode) {
         updateWaveLibraryFileStatus();
         return;
       }
-      const clientQuery = '?id=' + encodeURIComponent(waveLibraryClientId);
-      fetch('/api/client-connect' + clientQuery, { method: 'POST', keepalive: true }).catch(() => {});
-      window.addEventListener('pagehide', () => {
-        navigator.sendBeacon('/api/client-disconnect' + clientQuery, '');
-      }, { once: true });
+      startWaveLibraryClientSession();
       try {
         const response = await fetch('/api/wave-libraries');
         const catalog = await response.json();
@@ -18440,12 +18486,15 @@ ${lines.join('\n')}`;
 
     window.addEventListener('beforeunload', () => {
       persistPageStateBeforeExit('before-unload');
+      stopWaveLibraryClientSession(true);
     });
     window.addEventListener('pagehide', () => {
       persistPageStateBeforeExit('page-hide');
+      stopWaveLibraryClientSession(true);
     });
-    window.addEventListener('pageshow', () => {
+    window.addEventListener('pageshow', (event) => {
       pageExitStateFlushed = false;
+      if (event.persisted) startWaveLibraryClientSession();
     });
 
     ensureDebugModeButton();
@@ -18623,8 +18672,11 @@ ${lines.join('\n')}`;
         }
       })
       : null;
-    const importWaveCollectionButton = document.getElementById('btn-import-wave-collection');
-    if (importWaveCollectionButton) {
+    [
+      document.getElementById('btn-import-wave-collection'),
+      document.getElementById('btn-import-wave-collection-shortcut')
+    ].forEach((importWaveCollectionButton) => {
+      if (!importWaveCollectionButton) return;
       importWaveCollectionButton.addEventListener('click', () => {
         if (!waveCollectionImporter) {
           setStatus(false, '预设集合导入模块未加载');
@@ -18632,7 +18684,7 @@ ${lines.join('\n')}`;
         }
         waveCollectionImporter.open();
       });
-    }
+    });
     [importWaveDataBtn, document.getElementById('btn-import-wave-row')].forEach((button) => {
       if (!button) return;
       button.addEventListener('click', () => {

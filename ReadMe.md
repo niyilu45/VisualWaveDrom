@@ -249,6 +249,8 @@ WAVE_LIBRARY_RELATIVE_PATH="Wave/VisualWaveDrom-library/library.sqlite"
 - 功能菜单中的“导入波形库”用于切换 `Wave` 下不同的波形库文件夹。
 - 服务会记住最后一次成功打开的波形库；下次双击 BAT 时优先恢复该库。记录文件为 `Wave\.visualwavedrom-state.json`，它是本机状态，不需要随工程提交。
 - Windows x64 与 Linux x64 服务程序均由同一份 `server-go` 源码生成，API 和波形库格式一致。
+- 网页与服务通过会话连接保持在线；关闭最后一个页面后，服务和 BAT/SH 窗口通常会在约 2 秒内
+  自动退出。即使浏览器崩溃或关闭通知丢失，过期会话也会被自动清理，不再无限等待。
 
 这是大型波形库、自动保存和 Word 单图链接的推荐模式。
 
