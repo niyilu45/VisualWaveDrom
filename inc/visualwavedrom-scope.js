@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260730-scope-v11';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260730-scope-v13';
   const DEFAULT_ROW_HEIGHT = 42;
   const MIN_ANALOG_ROW_HEIGHT = 28;
   const MAX_ANALOG_ROW_HEIGHT = 480;
@@ -17,6 +17,16 @@
     { name: '蓝色', value: '#536dfe' },
     { name: '紫色', value: '#7b3fc6' },
     { name: '黑色', value: '#25282d' }
+  ];
+  const BACKGROUND_COLOR_PRESETS = [
+    { name: '淡黄色', value: '#fff1a8' },
+    { name: '淡蓝色', value: '#e6f0ff' },
+    { name: '淡青色', value: '#e2f4f4' },
+    { name: '淡绿色', value: '#e7f5e9' },
+    { name: '淡橙色', value: '#ffe7cf' },
+    { name: '淡红色', value: '#fde5e2' },
+    { name: '淡紫色', value: '#eee5fa' },
+    { name: '浅灰色', value: '#eef0f2' }
   ];
   const COLORS = COLOR_PRESETS.map((preset) => preset.value);
 
@@ -241,6 +251,9 @@
       this.showOriginal = false;
       this.cursorInspectSequence = 0;
       this.cursorNavigationSequence = 0;
+      this.cursorReadoutFrame = 0;
+      this.cursorReadoutInFlight = false;
+      this.cursorReadoutQueued = false;
       this.selectedPoint = null;
       this.columnSelection = null;
       this.lockedColumns = new Set();
@@ -250,14 +263,22 @@
       this.buildSequence = 0;
       this.drag = null;
       this.rowResize = null;
-      this.styleSaveInFlight = false;
-      this.styleSaveQueued = false;
+      this.presentationDraftDirty = false;
+      this.dataDraftDirty = false;
+      this.saveInFlight = false;
       this.styleControlRow = null;
+      this.stylePopoverAnchor = null;
+      this.columnBackgroundColor = BACKGROUND_COLOR_PRESETS[0].value;
       this.rowStart = 0;
       this.rowEnd = 0;
       this.resizeObserver = null;
       this.scheduleWindowRequest = debounce(() => this.requestWindow(), 24);
       this.scheduleBuild = debounce(() => this.rebuildOutput(), 80);
+      this.handleBeforeUnload = (event) => {
+        if (!this.hasUnsavedChanges()) return;
+        event.preventDefault();
+        event.returnValue = '';
+      };
     }
 
     async mount() {
@@ -278,7 +299,7 @@
         );
         this.rowStyles[row.index] = normalizeRowStyle(row.style);
       });
-      this.rowHeights = this.meta.rows.map(() => DEFAULT_ROW_HEIGHT);
+      this.rowHeights = this.meta.rows.map((row) => row.rowHeight || DEFAULT_ROW_HEIGHT);
       this.rebuildRowOffsets();
       this.viewStart = 0;
       this.viewEnd = this.meta.totalColumns;
@@ -298,6 +319,7 @@
       await this.requestWindow();
       await this.runSimplify(false);
       await this.updateCursorReadout();
+      this.updateDraftState();
       this.setStatus('示波器数据已就绪');
       this.log('scope-view', {
         phase: 'ready',
@@ -313,14 +335,29 @@
       const root = document.createElement('div');
       root.className = 'scope-app';
       root.id = 'scope-app';
-      const waveColorPresetButtons = COLOR_PRESETS.map((preset) => `
+      const buildPresetButtons = (presets, attribute, label) => presets.map((preset) => `
         <button type="button" class="scope-color-preset"
-            data-scope-wave-color="${preset.value}"
+            ${attribute}="${preset.value}"
             style="--scope-preset-color:${preset.value}"
             title="${escapeHtml(preset.name)}"
-            aria-label="波形颜色：${escapeHtml(preset.name)}"
+            aria-label="${escapeHtml(label)}：${escapeHtml(preset.name)}"
             aria-pressed="false"></button>
       `).join('');
+      const waveColorPresetButtons = buildPresetButtons(
+        COLOR_PRESETS,
+        'data-scope-wave-color',
+        '波形颜色'
+      );
+      const rowBackgroundPresetButtons = buildPresetButtons(
+        BACKGROUND_COLOR_PRESETS,
+        'data-scope-row-background',
+        '整行背景'
+      );
+      const columnBackgroundPresetButtons = buildPresetButtons(
+        BACKGROUND_COLOR_PRESETS,
+        'data-scope-column-background',
+        '指定列背景'
+      );
       root.innerHTML = `
         <header class="scope-toolbar">
           <div class="scope-title-block">
@@ -378,25 +415,16 @@
           <div class="scope-toolbar-group scope-style-controls" aria-label="波形显示样式">
             <span class="scope-toolbar-label">行样式</span>
             <span class="scope-style-signal" id="scope-style-signal"></span>
-            <span class="scope-toolbar-label">波形</span>
-            <div class="scope-color-presets" id="scope-wave-color-presets"
-                role="group" aria-label="波形预设颜色">${waveColorPresetButtons}</div>
-            <button type="button" class="scope-icon-btn scope-small-icon" id="scope-wave-color-reset"
-                title="恢复自动波形颜色" aria-label="恢复自动波形颜色">↺</button>
-            <label>整行背景
-              <input type="color" class="scope-color-input" id="scope-row-background"
-                  aria-label="整行背景色" value="#f3f7fc">
-            </label>
-            <button type="button" class="scope-icon-btn scope-small-icon" id="scope-row-background-clear"
-                title="清除整行背景色" aria-label="清除整行背景色">×</button>
             <label>指定列
               <input type="text" id="scope-style-columns" placeholder="1,3-5"
                   aria-label="需要设置背景色的列">
             </label>
             <button type="button" class="scope-command-btn" id="scope-style-use-cursors"
                 title="使用 A、B 游标之间的列">使用 A-B</button>
-            <input type="color" class="scope-color-input" id="scope-column-background"
-                aria-label="指定列背景色" value="#fff1a8">
+            <span class="scope-toolbar-label">列背景</span>
+            <div class="scope-color-presets scope-background-presets"
+                id="scope-column-background-presets"
+                role="group" aria-label="指定列背景预设颜色">${columnBackgroundPresetButtons}</div>
             <button type="button" class="scope-command-btn" id="scope-column-background-apply">应用列背景</button>
             <button type="button" class="scope-command-btn" id="scope-column-background-clear">清除列背景</button>
           </div>
@@ -425,8 +453,10 @@
             <label class="scope-title-input-label">实例标题
               <input type="text" id="scope-output-title">
             </label>
-            <button type="button" class="scope-command-btn scope-primary" id="scope-save-instance">保存为展示实例</button>
-            <button type="button" class="scope-command-btn scope-danger" id="scope-overwrite-source">覆盖原波形</button>
+            <span class="scope-draft-state" id="scope-draft-state">已保存</span>
+            <button type="button" class="scope-command-btn scope-primary"
+                id="scope-save-source" disabled>保存修改</button>
+            <button type="button" class="scope-command-btn" id="scope-save-instance">保存为展示实例</button>
             <button type="button" class="scope-command-btn" id="scope-open-normal">普通编辑</button>
           </div>
         </header>
@@ -480,6 +510,29 @@
           <span id="scope-status">初始化</span>
           <span id="scope-metrics"></span>
         </footer>
+        <div class="scope-style-popover" id="scope-style-popover" role="dialog"
+            aria-label="信号颜色设置" hidden>
+          <div class="scope-style-popover-header">
+            <strong id="scope-style-popover-title"></strong>
+            <button type="button" class="scope-icon-btn scope-small-icon"
+                id="scope-style-popover-close" title="关闭" aria-label="关闭颜色设置">×</button>
+          </div>
+          <div class="scope-style-popover-row">
+            <span>波形颜色</span>
+            <div class="scope-color-presets" id="scope-wave-color-presets"
+                role="group" aria-label="波形预设颜色">${waveColorPresetButtons}</div>
+            <button type="button" class="scope-icon-btn scope-small-icon" id="scope-wave-color-reset"
+                title="恢复自动波形颜色" aria-label="恢复自动波形颜色">↺</button>
+          </div>
+          <div class="scope-style-popover-row">
+            <span>整行背景</span>
+            <div class="scope-color-presets scope-background-presets"
+                id="scope-row-background-presets"
+                role="group" aria-label="整行背景预设颜色">${rowBackgroundPresetButtons}</div>
+            <button type="button" class="scope-icon-btn scope-small-icon" id="scope-row-background-clear"
+                title="清除整行背景色" aria-label="清除整行背景色">×</button>
+          </div>
+        </div>
       `;
       document.body.appendChild(root);
 
@@ -515,13 +568,16 @@
       this.analogWidthInput = root.querySelector('#scope-analog-width');
       this.analogFractionInput = root.querySelector('#scope-analog-fraction');
       this.styleSignalEl = root.querySelector('#scope-style-signal');
+      this.stylePopover = root.querySelector('#scope-style-popover');
+      this.stylePopoverTitle = root.querySelector('#scope-style-popover-title');
+      this.stylePopoverCloseButton = root.querySelector('#scope-style-popover-close');
       this.waveColorPresets = root.querySelector('#scope-wave-color-presets');
       this.waveColorResetButton = root.querySelector('#scope-wave-color-reset');
-      this.rowBackgroundInput = root.querySelector('#scope-row-background');
+      this.rowBackgroundPresets = root.querySelector('#scope-row-background-presets');
       this.rowBackgroundClearButton = root.querySelector('#scope-row-background-clear');
       this.styleColumnsInput = root.querySelector('#scope-style-columns');
       this.styleUseCursorsButton = root.querySelector('#scope-style-use-cursors');
-      this.columnBackgroundInput = root.querySelector('#scope-column-background');
+      this.columnBackgroundPresets = root.querySelector('#scope-column-background-presets');
       this.columnBackgroundApplyButton = root.querySelector('#scope-column-background-apply');
       this.columnBackgroundClearButton = root.querySelector('#scope-column-background-clear');
       this.statusEl = root.querySelector('#scope-status');
@@ -536,6 +592,8 @@
       this.pointLockButton = root.querySelector('#scope-point-lock');
       this.undoButton = root.querySelector('#scope-undo');
       this.redoButton = root.querySelector('#scope-redo');
+      this.saveSourceButton = root.querySelector('#scope-save-source');
+      this.draftStateEl = root.querySelector('#scope-draft-state');
       this.libraryNameEl.textContent = this.adapter.libraryName || '';
     }
 
@@ -584,8 +642,19 @@
         this.applyWaveColor(button.dataset.scopeWaveColor);
       });
       this.waveColorResetButton.addEventListener('click', () => this.resetWaveColor());
-      this.rowBackgroundInput.addEventListener('change', () => this.applyRowBackground());
+      this.rowBackgroundPresets.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-scope-row-background]');
+        if (!button || button.disabled) return;
+        this.applyRowBackground(button.dataset.scopeRowBackground);
+      });
       this.rowBackgroundClearButton.addEventListener('click', () => this.clearRowBackground());
+      this.stylePopoverCloseButton.addEventListener('click', () => this.closeStylePopover());
+      this.columnBackgroundPresets.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-scope-column-background]');
+        if (!button || button.disabled) return;
+        this.columnBackgroundColor = button.dataset.scopeColumnBackground;
+        this.updateStyleControls();
+      });
       this.styleUseCursorsButton.addEventListener('click', () => this.useCursorColumnSelection());
       this.columnBackgroundApplyButton.addEventListener('click', () => {
         this.applyColumnBackground(false);
@@ -601,7 +670,7 @@
       this.root.querySelector('#scope-use-view').addEventListener('click', () => this.useCurrentViewRange());
       this.root.querySelector('#scope-simplify').addEventListener('click', () => this.runSimplify(true));
       this.root.querySelector('#scope-save-instance').addEventListener('click', () => this.saveInstance());
-      this.root.querySelector('#scope-overwrite-source').addEventListener('click', () => this.overwriteSource());
+      this.saveSourceButton.addEventListener('click', () => this.saveChanges());
       this.root.querySelector('#scope-open-normal').addEventListener('click', () => this.adapter.openNormalView());
       this.pointApplyButton.addEventListener('click', () => this.applySelectedPoint());
       this.pointInsertButton.addEventListener('click', () => this.insertSelectedPoint());
@@ -620,6 +689,7 @@
         const scrollTop = this.plotViewport.scrollTop;
         this.cursorNavigationSequence += 1;
         this.modes[rowIndex] = nextMode;
+        this.markDraftDirty('presentation');
         this.activeCursorRow = rowIndex;
         this.renderSignalRows();
         this.plotViewport.scrollTop = scrollTop;
@@ -638,6 +708,12 @@
       this.signalList.addEventListener('pointerup', (event) => this.finishRowResize(event));
       this.signalList.addEventListener('pointercancel', (event) => this.finishRowResize(event));
       this.signalList.addEventListener('click', (event) => {
+        const swatch = event.target.closest('[data-scope-swatch-row]');
+        if (swatch) {
+          event.preventDefault();
+          this.openStylePopover(Number(swatch.dataset.scopeSwatchRow), swatch);
+          return;
+        }
         if (event.target.closest('select, [data-scope-row-resize]')) return;
         const row = event.target.closest('[data-scope-signal-row]');
         if (!row) return;
@@ -648,22 +724,31 @@
         if (handle && /^(ArrowUp|ArrowDown|Home)$/.test(event.key)) {
           event.preventDefault();
           const rowIndex = Number(handle.dataset.scopeRowResize);
-          const nextHeight = event.key === 'Home'
+          const previousHeight = this.rowHeight(rowIndex);
+          const requestedHeight = event.key === 'Home'
             ? DEFAULT_ROW_HEIGHT
-            : this.rowHeight(rowIndex) + (event.key === 'ArrowUp' ? -8 : 8);
-          this.setAnalogRowHeight(rowIndex, nextHeight, handle);
+            : previousHeight + (event.key === 'ArrowUp' ? -8 : 8);
+          const nextHeight = clamp(
+            requestedHeight,
+            MIN_ANALOG_ROW_HEIGHT,
+            MAX_ANALOG_ROW_HEIGHT
+          );
+          if (nextHeight !== previousHeight && this.simplified) this.pushHistory();
+          const changed = this.setAnalogRowHeight(rowIndex, nextHeight, handle);
+          if (changed) this.markDraftDirty('presentation');
           this.setStatus('已将 ' + this.meta.rows[rowIndex].name
             + ' 行高设为 ' + this.rowHeight(rowIndex) + ' px');
           return;
         }
         if (event.key !== 'Enter' && event.key !== ' ') return;
         const row = event.target.closest('[data-scope-signal-row]');
-        if (!row || event.target.closest('select, [data-scope-row-resize]')) return;
+        if (!row || event.target.closest('select, [data-scope-row-resize], [data-scope-swatch-row]')) return;
         event.preventDefault();
         this.setActiveCursorRow(Number(row.dataset.scopeSignalRow));
       });
 
       this.plotViewport.addEventListener('scroll', () => {
+        this.closeStylePopover();
         this.signalScroll.scrollTop = this.plotViewport.scrollTop;
         this.positionPlotCanvas();
         this.scheduleWindowRequest();
@@ -683,6 +768,11 @@
       this.outputTitleInput.addEventListener('input', () => this.scheduleBuild());
 
       global.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape' && this.stylePopover && !this.stylePopover.hidden) {
+          event.preventDefault();
+          this.closeStylePopover();
+          return;
+        }
         const target = event.target;
         const editingText = target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName);
         if (editingText) return;
@@ -699,19 +789,67 @@
         }
       });
 
+      this.root.addEventListener('pointerdown', (event) => {
+        if (!this.stylePopover || this.stylePopover.hidden) return;
+        if (this.stylePopover.contains(event.target)
+            || event.target.closest('[data-scope-swatch-row]')) return;
+        this.closeStylePopover();
+      });
+
       if (typeof ResizeObserver === 'function') {
         this.resizeObserver = new ResizeObserver(() => this.updateLayout());
         this.resizeObserver.observe(this.plotViewport);
       } else {
         global.addEventListener('resize', () => this.updateLayout());
       }
-      global.addEventListener('pagehide', () => this.worker.close(), { once: true });
+      global.addEventListener('beforeunload', this.handleBeforeUnload);
+      global.addEventListener('pagehide', () => {
+        if (this.cursorReadoutFrame) global.cancelAnimationFrame(this.cursorReadoutFrame);
+        this.worker.close();
+      }, { once: true });
     }
 
     setStatus(message, error) {
       if (!this.statusEl) return;
       this.statusEl.textContent = String(message || '');
       this.statusEl.classList.toggle('error', !!error);
+    }
+
+    hasUnsavedChanges() {
+      return !!(this.presentationDraftDirty || this.dataDraftDirty);
+    }
+
+    updateDraftState() {
+      const dirty = this.hasUnsavedChanges();
+      if (this.saveSourceButton) {
+        this.saveSourceButton.disabled = !dirty || this.saveInFlight;
+        this.saveSourceButton.textContent = this.saveInFlight ? '保存中...' : '保存修改';
+        this.saveSourceButton.classList.toggle('scope-unsaved', dirty);
+        this.saveSourceButton.title = dirty
+          ? '将当前示波器草稿写回原波形'
+          : '当前没有未保存修改';
+      }
+      if (this.draftStateEl) {
+        this.draftStateEl.textContent = dirty ? '未保存' : '已保存';
+        this.draftStateEl.classList.toggle('unsaved', dirty);
+      }
+    }
+
+    markDraftDirty(kind) {
+      if (kind === 'data') this.dataDraftDirty = true;
+      else this.presentationDraftDirty = true;
+      this.updateDraftState();
+      this.log('scope-draft', {
+        phase: 'changed',
+        kind: kind === 'data' ? 'data' : 'presentation',
+        waveId: this.document && this.document.name
+      });
+    }
+
+    clearDraftDirty() {
+      this.presentationDraftDirty = false;
+      this.dataDraftDirty = false;
+      this.updateDraftState();
     }
 
     rowHeight(rowIndex) {
@@ -755,6 +893,7 @@
     }
 
     renderSignalRows() {
+      this.closeStylePopover();
       this.rebuildRowOffsets();
       this.signalList.innerHTML = this.meta.rows.map((row) => {
         const group = row.groups && row.groups.length ? row.groups.join(' / ') : '';
@@ -766,8 +905,11 @@
               data-row-index="${row.index}" data-scope-signal-row="${row.index}"
               tabindex="0" aria-label="选择信号 ${escapeHtml(row.name)}"
               style="height:${rowHeight}px">
-            <span class="scope-swatch" data-scope-swatch-row="${row.index}"
-                style="background:${waveColor}" title="波形颜色 ${waveColor}"></span>
+            <button type="button" class="scope-swatch" data-scope-swatch-row="${row.index}"
+                style="background:${waveColor}"
+                title="设置 ${escapeHtml(row.name)} 的波形和背景颜色"
+                aria-label="设置 ${escapeHtml(row.name)} 的波形和背景颜色"
+                aria-haspopup="dialog" aria-expanded="false"></button>
             <span class="scope-signal-name" title="${escapeHtml(row.name)}">
               ${group ? `<small>${escapeHtml(group)}</small>` : ''}
               <strong>${escapeHtml(row.name)}</strong>
@@ -813,21 +955,28 @@
       const waveColorButtons = Array.from(
         this.waveColorPresets.querySelectorAll('[data-scope-wave-color]')
       );
+      const rowBackgroundButtons = Array.from(
+        this.rowBackgroundPresets.querySelectorAll('[data-scope-row-background]')
+      );
+      const columnBackgroundButtons = Array.from(
+        this.columnBackgroundPresets.querySelectorAll('[data-scope-column-background]')
+      );
       const controls = [
         ...waveColorButtons,
+        ...rowBackgroundButtons,
+        ...columnBackgroundButtons,
         this.waveColorResetButton,
-        this.rowBackgroundInput,
         this.rowBackgroundClearButton,
         this.styleColumnsInput,
         this.styleUseCursorsButton,
-        this.columnBackgroundInput,
         this.columnBackgroundApplyButton,
         this.columnBackgroundClearButton
       ];
       controls.forEach((control) => { control.disabled = !row; });
       if (!row) {
         this.styleSignalEl.textContent = '';
-        waveColorButtons.forEach((button) => {
+        this.stylePopoverTitle.textContent = '';
+        waveColorButtons.concat(rowBackgroundButtons, columnBackgroundButtons).forEach((button) => {
           button.classList.remove('active');
           button.setAttribute('aria-pressed', 'false');
         });
@@ -840,6 +989,7 @@
       }
       this.styleSignalEl.textContent = row.name;
       this.styleSignalEl.title = row.name;
+      this.stylePopoverTitle.textContent = row.name;
       const effectiveWaveColor = this.rowWaveColor(row.index);
       waveColorButtons.forEach((button) => {
         const active = button.dataset.scopeWaveColor === effectiveWaveColor;
@@ -847,14 +997,73 @@
         button.setAttribute('aria-pressed', String(active));
       });
       this.waveColorResetButton.disabled = !style.waveColor;
-      this.rowBackgroundInput.value = style.backgroundColor || '#f3f7fc';
+      rowBackgroundButtons.forEach((button) => {
+        const active = button.dataset.scopeRowBackground === style.backgroundColor;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-pressed', String(active));
+      });
       this.rowBackgroundClearButton.disabled = !style.backgroundColor;
+      columnBackgroundButtons.forEach((button) => {
+        const active = button.dataset.scopeColumnBackground === this.columnBackgroundColor;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-pressed', String(active));
+      });
       const count = style.backgroundRanges.length;
       this.styleSignalEl.dataset.rangeCount = String(count);
       this.styleSignalEl.setAttribute(
         'aria-label',
         row.name + (count ? '，已设置 ' + count + ' 个列背景区间' : '')
       );
+    }
+
+    openStylePopover(rowIndex, anchor) {
+      const index = clamp(
+        Math.floor(Number(rowIndex) || 0),
+        0,
+        Math.max(0, this.meta.rows.length - 1)
+      );
+      if (!anchor || !this.meta.rows[index]) return;
+      this.closeStylePopover();
+      this.setActiveCursorRow(index);
+      this.stylePopoverAnchor = anchor;
+      anchor.classList.add('active');
+      anchor.setAttribute('aria-expanded', 'true');
+      this.stylePopover.hidden = false;
+      this.stylePopover.style.visibility = 'hidden';
+      this.updateStyleControls();
+      const anchorRect = anchor.getBoundingClientRect();
+      const popoverRect = this.stylePopover.getBoundingClientRect();
+      const margin = 8;
+      const viewportWidth = Math.max(1, document.documentElement.clientWidth);
+      const viewportHeight = Math.max(1, document.documentElement.clientHeight);
+      let left = anchorRect.right + 8;
+      if (left + popoverRect.width > viewportWidth - margin) {
+        left = anchorRect.left - popoverRect.width - 8;
+      }
+      const top = clamp(
+        anchorRect.top,
+        margin,
+        Math.max(margin, viewportHeight - popoverRect.height - margin)
+      );
+      this.stylePopover.style.left = clamp(
+        left,
+        margin,
+        Math.max(margin, viewportWidth - popoverRect.width - margin)
+      ) + 'px';
+      this.stylePopover.style.top = top + 'px';
+      this.stylePopover.style.visibility = '';
+      this.setStatus('正在设置 ' + this.meta.rows[index].name + ' 的波形和背景颜色');
+    }
+
+    closeStylePopover() {
+      if (!this.stylePopover || this.stylePopover.hidden) return;
+      if (this.stylePopoverAnchor) {
+        this.stylePopoverAnchor.classList.remove('active');
+        this.stylePopoverAnchor.setAttribute('aria-expanded', 'false');
+      }
+      this.stylePopoverAnchor = null;
+      this.stylePopover.hidden = true;
+      this.stylePopover.style.visibility = '';
     }
 
     updateSignalStyleIndicator(rowIndex) {
@@ -864,7 +1073,8 @@
       if (!swatch) return;
       const color = this.rowWaveColor(rowIndex);
       swatch.style.background = color;
-      swatch.title = '波形颜色 ' + color;
+      const row = this.meta.rows[rowIndex];
+      swatch.title = '设置 ' + (row ? row.name : '') + ' 的波形和背景颜色';
     }
 
     changeRowStyle(update, message) {
@@ -881,7 +1091,7 @@
       this.updateStyleControls();
       this.draw();
       this.scheduleBuild();
-      this.queueStyleSave();
+      this.markDraftDirty('presentation');
       this.setStatus(message);
     }
 
@@ -897,8 +1107,8 @@
       this.changeRowStyle((style) => { style.waveColor = ''; }, '已恢复 ' + row.name + ' 的自动波形颜色');
     }
 
-    applyRowBackground() {
-      const color = normalizeScopeColor(this.rowBackgroundInput.value);
+    applyRowBackground(presetColor) {
+      const color = normalizeScopeColor(presetColor);
       if (!color) return;
       const row = this.meta.rows[this.activeCursorRow];
       this.changeRowStyle(
@@ -940,7 +1150,7 @@
         this.styleColumnsInput.focus();
         return;
       }
-      const color = clear ? '' : normalizeScopeColor(this.columnBackgroundInput.value);
+      const color = clear ? '' : normalizeScopeColor(this.columnBackgroundColor);
       if (!clear && !color) return;
       this.changeRowStyle((style) => {
         selection.forEach((range) => {
@@ -952,36 +1162,6 @@
           );
         });
       }, (clear ? '已清除 ' : '已设置 ') + row.name + ' 指定列的背景色');
-    }
-
-    queueStyleSave() {
-      this.styleSaveQueued = true;
-      if (!this.styleSaveInFlight) void this.flushStyleSave();
-    }
-
-    async flushStyleSave() {
-      if (this.styleSaveInFlight) return;
-      this.styleSaveInFlight = true;
-      try {
-        while (this.styleSaveQueued) {
-          this.styleSaveQueued = false;
-          const result = await this.worker.call('style-source', {
-            rowStyles: clone(this.rowStyles)
-          });
-          const saved = await this.adapter.saveSource({ content: result.content });
-          if (saved) this.document = saved;
-        }
-        this.log('scope-style', { phase: 'saved', waveId: this.document.name });
-      } catch (error) {
-        this.log('scope-style', {
-          phase: 'save-error',
-          message: error.message || String(error)
-        });
-        this.setStatus('保存波形颜色失败：' + (error.message || String(error)), true);
-      } finally {
-        this.styleSaveInFlight = false;
-        if (this.styleSaveQueued) void this.flushStyleSave();
-      }
     }
 
     resizeCanvas(canvas, width, height) {
@@ -1061,6 +1241,7 @@
         rowIndex,
         startY: event.clientY,
         startHeight: this.rowHeight(rowIndex),
+        historySnapshot: this.snapshot(),
         handle
       };
       handle.classList.add('active');
@@ -1089,6 +1270,10 @@
       document.body.classList.remove('scope-row-resizing');
       this.rowResize = null;
       const height = this.rowHeight(resize.rowIndex);
+      if (height !== resize.startHeight) {
+        this.pushHistorySnapshot(resize.historySnapshot);
+        this.markDraftDirty('presentation');
+      }
       this.setStatus('已将 ' + this.meta.rows[resize.rowIndex].name + ' 行高设为 ' + height + ' px');
       this.log('scope-row-resize', {
         phase: 'complete',
@@ -2104,7 +2289,7 @@
       this.setStatus('当前工作游标：' + next);
     }
 
-    setActiveCursorPosition(column, deferReadout) {
+    setActiveCursorPosition(column, realtimeReadout) {
       this.cursorNavigationSequence += 1;
       const value = clamp(
         Number(column) || 0,
@@ -2114,7 +2299,8 @@
       if (this.activeCursor === 'B') this.cursorB = value;
       else this.cursorA = value;
       this.updateMeasurements();
-      if (!deferReadout) void this.updateCursorReadout();
+      if (realtimeReadout) this.scheduleCursorReadout();
+      else void this.updateCursorReadout();
       this.draw();
     }
 
@@ -2227,6 +2413,7 @@
       }
       if (this.simplified) this.pushHistory();
       this.analogFormats[row.index] = next;
+      this.markDraftDirty('presentation');
       this.updateAnalogControls();
       this.cursorNavigationSequence += 1;
       this.scheduleWindowRequest();
@@ -2242,6 +2429,27 @@
         return String(Math.round(value * 1000000) / 1000000);
       }
       return String(value);
+    }
+
+    scheduleCursorReadout() {
+      this.cursorReadoutQueued = true;
+      if (this.cursorReadoutFrame || this.cursorReadoutInFlight) return;
+      this.cursorReadoutFrame = global.requestAnimationFrame(() => {
+        this.cursorReadoutFrame = 0;
+        void this.flushCursorReadout();
+      });
+    }
+
+    async flushCursorReadout() {
+      if (this.cursorReadoutInFlight) return;
+      this.cursorReadoutQueued = false;
+      this.cursorReadoutInFlight = true;
+      try {
+        await this.updateCursorReadout();
+      } finally {
+        this.cursorReadoutInFlight = false;
+        if (this.cursorReadoutQueued) this.scheduleCursorReadout();
+      }
     }
 
     async updateCursorReadout() {
@@ -2403,6 +2611,7 @@
         modes: this.modes,
         analogFormats: this.analogFormats,
         rowStyles: this.rowStyles,
+        rowHeights: this.rowHeights,
         lockedColumns: Array.from(this.lockedColumns),
         outputTitle: this.outputTitleInput.value.trim() || (this.meta.title + ' - 展示实例'),
         sourceWaveId: this.document.name,
@@ -2426,6 +2635,7 @@
         this.redoStack = [];
         this.updateHistoryButtons();
         this.draw();
+        if (recordHistory) this.markDraftDirty('data');
         this.setStatus('简化实例已生成，可单击简化波形继续编辑');
         this.log('scope-simplify', Object.assign({
           phase: 'complete',
@@ -2521,23 +2731,30 @@
         modes: Object.assign({}, this.modes),
         analogFormats: clone(this.analogFormats),
         rowStyles: clone(this.rowStyles),
+        rowHeights: this.rowHeights.slice(),
         lockedColumns: Array.from(this.lockedColumns),
         selectedPoint: this.selectedPoint ? Object.assign({}, this.selectedPoint) : null,
-        outputTitle: this.outputTitleInput.value
+        outputTitle: this.outputTitleInput.value,
+        presentationDraftDirty: this.presentationDraftDirty,
+        dataDraftDirty: this.dataDraftDirty
       };
     }
 
     restoreSnapshot(snapshot) {
       if (!snapshot) return;
-      const previousRowStyles = JSON.stringify(this.rowStyles);
       this.simplified = clone(snapshot.simplified);
       this.outputContent = snapshot.outputContent;
       this.modes = Object.assign({}, snapshot.modes || this.modes);
       this.analogFormats = clone(snapshot.analogFormats || this.analogFormats);
       this.rowStyles = clone(snapshot.rowStyles || this.rowStyles);
+      this.rowHeights = Array.isArray(snapshot.rowHeights)
+        ? snapshot.rowHeights.slice()
+        : this.rowHeights;
       this.lockedColumns = new Set(snapshot.lockedColumns || []);
       this.selectedPoint = snapshot.selectedPoint ? Object.assign({}, snapshot.selectedPoint) : null;
       this.outputTitleInput.value = snapshot.outputTitle || this.simplified.model.title;
+      this.presentationDraftDirty = !!snapshot.presentationDraftDirty;
+      this.dataDraftDirty = !!snapshot.dataDraftDirty;
       const scrollTop = this.plotViewport.scrollTop;
       this.renderSignalRows();
       this.signalScroll.scrollTop = scrollTop;
@@ -2546,17 +2763,20 @@
       this.updateHistoryButtons();
       this.scheduleWindowRequest();
       this.scheduleBuild();
-      if (previousRowStyles !== JSON.stringify(this.rowStyles)) this.queueStyleSave();
+      this.updateDraftState();
       this.draw();
     }
 
-    pushHistory() {
-      const snapshot = this.snapshot();
+    pushHistorySnapshot(snapshot) {
       if (!snapshot) return;
       this.undoStack.push(snapshot);
       if (this.undoStack.length > MAX_HISTORY) this.undoStack.shift();
       this.redoStack = [];
       this.updateHistoryButtons();
+    }
+
+    pushHistory() {
+      this.pushHistorySnapshot(this.snapshot());
     }
 
     undo() {
@@ -2621,6 +2841,7 @@
       }
       this.scheduleBuild();
       this.draw();
+      this.markDraftDirty('data');
       this.setStatus('简化点已修改');
     }
 
@@ -2642,6 +2863,7 @@
       this.scheduleBuild();
       this.updatePointEditor();
       this.draw();
+      this.markDraftDirty('data');
       this.setStatus('已插入简化点');
     }
 
@@ -2667,6 +2889,7 @@
       this.scheduleBuild();
       this.updatePointEditor();
       this.draw();
+      this.markDraftDirty('data');
       this.setStatus('已删除简化点');
     }
 
@@ -2738,53 +2961,97 @@
       }
     }
 
-    async overwriteSource() {
-      if (!global.confirm('覆盖会用当前简化结果替换原波形。确认继续吗？')) return;
+    async buildDraftSourceContent() {
+      if (this.dataDraftDirty) return this.ensureOutputBuilt();
+      const result = await this.worker.call('style-source', {
+        modes: Object.assign({}, this.modes),
+        analogFormats: clone(this.analogFormats),
+        rowStyles: clone(this.rowStyles),
+        rowHeights: this.rowHeights.slice()
+      });
+      return result.content;
+    }
+
+    async reloadSavedDocument(saved) {
+      this.document = saved;
+      this.meta = await this.worker.call('prepare', { content: saved.content });
+      this.modes = {};
+      this.analogFormats = {};
+      this.rowStyles = {};
+      this.meta.rows.forEach((row) => {
+        this.modes[row.index] = row.mode;
+        this.analogFormats[row.index] = normalizeAnalogFormat(
+          row.analogFormat,
+          row.detectedMode === 'analog' ? 'float' : 'unsigned'
+        );
+        this.rowStyles[row.index] = normalizeRowStyle(row.style);
+      });
+      this.rowHeights = this.meta.rows.map((row) => row.rowHeight || DEFAULT_ROW_HEIGHT);
+      this.rebuildRowOffsets();
+      this.viewStart = 0;
+      this.viewEnd = this.meta.totalColumns;
+      this.cursorA = clamp(
+        this.cursorA == null ? 0 : this.cursorA,
+        0,
+        Math.max(0, this.meta.totalColumns - 1)
+      );
+      this.cursorB = clamp(
+        this.cursorB == null ? this.meta.totalColumns - 1 : this.cursorB,
+        0,
+        Math.max(0, this.meta.totalColumns - 1)
+      );
+      this.activeCursorRow = clamp(
+        this.activeCursorRow,
+        0,
+        Math.max(0, this.meta.rows.length - 1)
+      );
+      this.targetInput.max = String(Math.max(2, this.meta.totalColumns));
+      this.targetInput.value = String(Math.min(100, Math.max(2, this.meta.totalColumns)));
+      this.rangeStartInput.value = '1';
+      this.rangeEndInput.value = String(this.meta.totalColumns);
+      this.selectedPoint = null;
+      this.columnSelection = null;
+      this.lockedColumns = new Set();
+      this.undoStack = [];
+      this.redoStack = [];
+      this.renderSignalRows();
+      this.updateHistoryButtons();
+      this.updateCursorControls();
+      this.updateMeasurements();
+      this.updateLayout();
+      await this.requestWindow();
+      await this.runSimplify(false);
+      await this.updateCursorReadout();
+    }
+
+    async saveChanges() {
+      if (!this.hasUnsavedChanges() || this.saveInFlight) return;
+      const replacesSourceData = this.dataDraftDirty;
+      if (replacesSourceData
+          && !global.confirm('保存会用当前简化结果更新原波形数据。确认继续吗？')) return;
+      this.saveInFlight = true;
+      this.updateDraftState();
       try {
-        this.setStatus('正在覆盖原波形');
-        const content = await this.ensureOutputBuilt();
+        this.setStatus('正在保存示波器修改');
+        const content = await this.buildDraftSourceContent();
         const saved = await this.adapter.saveSource({ content });
-        this.document = saved;
-        this.meta = await this.worker.call('prepare', { content: saved.content });
-        this.modes = {};
-        this.analogFormats = {};
-        this.rowStyles = {};
-        this.meta.rows.forEach((row) => {
-          this.modes[row.index] = row.mode;
-          this.analogFormats[row.index] = normalizeAnalogFormat(
-            row.analogFormat,
-            row.detectedMode === 'analog' ? 'float' : 'unsigned'
-          );
-          this.rowStyles[row.index] = normalizeRowStyle(row.style);
+        await this.reloadSavedDocument(saved);
+        this.clearDraftDirty();
+        this.setStatus(replacesSourceData ? '简化结果已保存到原波形' : '示波器修改已保存');
+        this.log('scope-save', {
+          phase: 'source-saved',
+          waveId: saved.name,
+          replacedData: replacesSourceData
         });
-        this.rowHeights = this.meta.rows.map(() => DEFAULT_ROW_HEIGHT);
-        this.rebuildRowOffsets();
-        this.viewStart = 0;
-        this.viewEnd = this.meta.totalColumns;
-        this.cursorA = clamp(
-          this.cursorA == null ? 0 : this.cursorA,
-          0,
-          Math.max(0, this.meta.totalColumns - 1)
-        );
-        this.cursorB = clamp(
-          this.cursorB == null ? this.meta.totalColumns - 1 : this.cursorB,
-          0,
-          Math.max(0, this.meta.totalColumns - 1)
-        );
-        this.activeCursorRow = clamp(
-          this.activeCursorRow,
-          0,
-          Math.max(0, this.meta.rows.length - 1)
-        );
-        this.renderSignalRows();
-        this.updateCursorControls();
-        this.updateMeasurements();
-        this.updateLayout();
-        await this.requestWindow();
-        await this.updateCursorReadout();
-        this.setStatus('原波形已被简化结果覆盖');
       } catch (error) {
-        this.setStatus('覆盖原波形失败：' + (error.message || String(error)), true);
+        this.setStatus('保存示波器修改失败：' + (error.message || String(error)), true);
+        this.log('scope-save', {
+          phase: 'source-error',
+          message: error.message || String(error)
+        });
+      } finally {
+        this.saveInFlight = false;
+        this.updateDraftState();
       }
     }
   }

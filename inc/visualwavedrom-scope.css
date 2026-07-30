@@ -107,19 +107,10 @@ body.scope-wave-view > #vim-help-modal {
   text-overflow: ellipsis;
 }
 
-.scope-toolbar .scope-color-input {
-  width: 32px;
-  padding: 2px;
-  cursor: pointer;
-}
-
-.scope-toolbar .scope-color-input:disabled {
-  cursor: not-allowed;
-}
-
 .scope-color-presets {
   display: inline-flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 4px;
 }
 
@@ -152,6 +143,16 @@ body.scope-wave-view > #vim-help-modal {
 .scope-color-preset:disabled {
   cursor: not-allowed;
   opacity: 0.42;
+}
+
+.scope-background-presets .scope-color-preset {
+  border-color: #9299a2;
+}
+
+.scope-style-controls .scope-color-preset {
+  width: 20px;
+  height: 20px;
+  flex-basis: 20px;
 }
 
 .scope-style-controls #scope-style-columns {
@@ -256,6 +257,28 @@ body.scope-wave-view > #vim-help-modal {
   justify-content: flex-end;
   padding-right: 0;
   border-right: 0;
+}
+
+.scope-draft-state {
+  min-width: 48px;
+  height: 24px;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #b8c8bc;
+  border-radius: 4px;
+  padding: 0 6px;
+  color: #35613f;
+  background: #f1f7f2;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.scope-draft-state.unsaved {
+  border-color: #d4a04c;
+  color: #795019;
+  background: #fff6df;
 }
 
 .scope-command-btn,
@@ -427,9 +450,23 @@ body.scope-row-resizing * {
 }
 
 .scope-swatch {
-  width: 9px;
+  width: 10px;
   height: 28px;
+  padding: 0;
+  border: 0;
   border-radius: 2px;
+  box-shadow: 0 0 0 1px rgba(37, 40, 45, 0.18);
+  cursor: pointer;
+}
+
+.scope-swatch:hover,
+.scope-swatch.active {
+  box-shadow: 0 0 0 2px #2f73bf;
+}
+
+.scope-swatch:focus-visible {
+  outline: 2px solid #2f73bf;
+  outline-offset: 2px;
 }
 
 .scope-signal-name {
@@ -610,6 +647,54 @@ body.scope-row-resizing * {
 .scope-measurements span.active {
   color: #1d5fa8;
   font-weight: 700;
+}
+
+.scope-style-popover {
+  position: fixed;
+  z-index: 30;
+  width: min(390px, calc(100vw - 16px));
+  box-sizing: border-box;
+  padding: 8px;
+  border: 1px solid #aeb4bc;
+  border-radius: 6px;
+  background: #ffffff;
+  box-shadow: 0 8px 24px rgba(37, 40, 45, 0.2);
+}
+
+.scope-style-popover[hidden] {
+  display: none;
+}
+
+.scope-style-popover-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 7px;
+  border-bottom: 1px solid #dfe2e6;
+}
+
+.scope-style-popover-header strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #2c5d94;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scope-style-popover-row {
+  display: grid;
+  grid-template-columns: 68px minmax(0, 1fr) 28px;
+  align-items: center;
+  gap: 8px;
+  padding-top: 8px;
+}
+
+.scope-style-popover-row > span {
+  color: #555b63;
+  font-size: 11px;
+  font-weight: 600;
 }
 
 .scope-statusbar {

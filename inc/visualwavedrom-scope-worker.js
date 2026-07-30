@@ -2,6 +2,9 @@
 'use strict';
 
 let activeSession = null;
+const DEFAULT_ROW_HEIGHT = 42;
+const MIN_ANALOG_ROW_HEIGHT = 28;
+const MAX_ANALOG_ROW_HEIGHT = 480;
 
 function finiteNumber(value) {
   const number = Number(value);
@@ -148,6 +151,14 @@ function normalizeRowStyle(candidate, totalColumns) {
     backgroundColor: normalizeScopeColor(source.backgroundColor),
     backgroundRanges: normalizeBackgroundRanges(source.backgroundRanges, totalColumns)
   };
+}
+
+function normalizeRowHeight(value) {
+  return clamp(
+    Math.round(finiteNumber(value) || DEFAULT_ROW_HEIGHT),
+    MIN_ANALOG_ROW_HEIGHT,
+    MAX_ANALOG_ROW_HEIGHT
+  );
 }
 
 function getAnalogFormat(source, row, rowIndex, hasSamples) {
@@ -505,8 +516,11 @@ function createSession(content) {
   const rows = flat.map((row, rowIndex) => {
     const parsedWave = parseWaveSegments(row.source);
     const analogSamples = getAnalogSamples(source, row, rowIndex);
-    const requestedMode = row.source.scope && row.source.scope.mode
-      ? String(row.source.scope.mode)
+    const localScope = row.source.scope && typeof row.source.scope === 'object'
+      ? row.source.scope
+      : null;
+    const requestedMode = localScope && localScope.mode
+      ? String(localScope.mode)
       : '';
     const detectedMode = analogSamples
       ? 'analog'
@@ -537,8 +551,9 @@ function createSession(content) {
       range: analogSamples ? analogRange(analogSamples) : null,
       analogFormat: getAnalogFormat(source, row, rowIndex, !!analogSamples),
       analogCache: new Map(),
+      rowHeight: normalizeRowHeight(localScope && localScope.rowHeight),
       unit: String(
-        (row.source.scope && row.source.scope.unit)
+        (localScope && localScope.unit)
         || row.source.unit
         || ''
       )
@@ -1376,6 +1391,42 @@ function applyRowStyle(target, candidate, totalColumns, columnMap) {
   else delete target.scope;
 }
 
+function applyRowDisplayConfig(target, row, rowIndex, payload) {
+  if (!target || typeof target !== 'object') return;
+  const source = payload || {};
+  const scope = Object.assign(
+    {},
+    target.scope && typeof target.scope === 'object' ? target.scope : {}
+  );
+  const requestedMode = source.modes && source.modes[rowIndex];
+  const mode = /^(digital|bus|analog)$/.test(String(requestedMode || ''))
+    ? String(requestedMode)
+    : row.mode;
+  if (mode !== row.detectedMode || Object.prototype.hasOwnProperty.call(scope, 'mode')) {
+    scope.mode = mode;
+  } else {
+    delete scope.mode;
+  }
+  if (mode === 'analog') {
+    const format = normalizeAnalogFormat(
+      source.analogFormats && source.analogFormats[rowIndex] || row.analogFormat,
+      row.samples ? 'float' : 'unsigned'
+    );
+    scope.numericType = format.type;
+    scope.bitWidth = format.bitWidth;
+    scope.fractionalBits = format.fractionalBits;
+  }
+  const rowHeight = normalizeRowHeight(
+    source.rowHeights && source.rowHeights[rowIndex] != null
+      ? source.rowHeights[rowIndex]
+      : row.rowHeight
+  );
+  if (rowHeight !== DEFAULT_ROW_HEIGHT) scope.rowHeight = rowHeight;
+  else delete scope.rowHeight;
+  if (Object.keys(scope).length) target.scope = scope;
+  else delete target.scope;
+}
+
 function buildStyledSource(payload) {
   if (!activeSession) throw new Error('Scope session has not been prepared');
   const source = cloneJson(activeSession.source);
@@ -1383,6 +1434,7 @@ function buildStyledSource(payload) {
   activeSession.rows.forEach((row) => {
     const target = signalAtPath(source, row.path);
     applyRowStyle(target, rowStyles[row.index], activeSession.totalColumns, null);
+    applyRowDisplayConfig(target, row, row.index, payload);
   });
   return JSON.stringify(source, null, 2);
 }
@@ -1435,6 +1487,7 @@ function buildSimplifiedContent(model, options) {
       activeSession.totalColumns,
       model.columns
     );
+    applyRowDisplayConfig(target, rowMeta, rowIndex, options);
   });
   source.scopeInstance = {
     kind: 'VisualWaveDromScopeInstance',
@@ -1603,6 +1656,7 @@ function prepareResponse() {
       unit: row.unit,
       range: row.range,
       analogFormat: row.analogFormat,
+      rowHeight: row.rowHeight,
       style: normalizeRowStyle(row.source.scope, activeSession.totalColumns),
       sampleCount: row.samples ? row.samples.length : row.wave.length
     }))
