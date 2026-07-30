@@ -14270,6 +14270,9 @@ ${lines.join('\n')}`;
         let payload = null;
         try { payload = await response.json(); } catch (_error) { /* handled below */ }
         if (!response.ok) throw rowImportResponseError(response, payload);
+        if (!payload || !payload.sourceFile || !payload.sourceFile.path) {
+          throw new Error('当前后台服务版本过旧，请关闭原 BAT/SH 窗口后重新启动');
+        }
         if (requestId !== rowImportAnalysisRequestId
             || rowImportSelectedFile !== pendingSource) return;
         const sourceFile = payload && payload.sourceFile || {};

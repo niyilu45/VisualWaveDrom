@@ -79,6 +79,42 @@ func TestImportSampleLinesSupportsLinuxAndWindowsNewlines(t *testing.T) {
 	}
 }
 
+func TestDecimalSingleColumnSampleUsesSingleColumnParser(t *testing.T) {
+	analysis := analyzeImportSample("SeqConvInA.txt", []string{
+		"0.814724", "0.905792", "0.126987", "0.913376", "0.632359",
+	})
+	if parser := stringValue(analysis["recommendedParser"]); parser != "parse_single_column" {
+		t.Fatalf("recommended parser = %q, expected parse_single_column", parser)
+	}
+	if explicit, _ := analysis["explicitIndex"].(bool); explicit {
+		t.Fatal("decimal single-column data must not be treated as an explicit index")
+	}
+}
+
+func TestSameRunningServiceRequiresCurrentAPIVersion(t *testing.T) {
+	root := t.TempDir()
+	instance := &service{config: config{
+		rootDir: root, htmlName: "VisualWaveDrom.html",
+		configuredName: "test-library", waveDir: filepath.Join(root, "Wave"),
+	}}
+	info := map[string]any{
+		"app": appID, "htmlName": instance.config.htmlName,
+		"currentLibrary": instance.config.configuredName,
+		"rootDir":        root, "libraryDir": instance.config.waveDir,
+	}
+	if instance.sameRunningService(info) {
+		t.Fatal("service without an API version must not be reused")
+	}
+	info["serviceAPIVersion"] = serviceAPIVersion - 1
+	if instance.sameRunningService(info) {
+		t.Fatal("service with an older API version must not be reused")
+	}
+	info["serviceAPIVersion"] = serviceAPIVersion
+	if !instance.sameRunningService(info) {
+		t.Fatal("service with the current API version should be reused")
+	}
+}
+
 func TestWaveDocumentHTTPRoundTrip(t *testing.T) {
 	root := t.TempDir()
 	htmlName := "VisualWaveDrom.html"

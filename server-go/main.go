@@ -28,6 +28,7 @@ import (
 const (
 	appID                      = "VisualWaveDrom"
 	protocolScheme             = "visualwavedrom"
+	serviceAPIVersion          = 2
 	defaultPort                = 4173
 	maxWaveLibraryRequestBytes = 256 * 1024 * 1024
 	importMaxUploadBytes       = 128 * 1024 * 1024
@@ -704,7 +705,8 @@ func (s *service) handleServerInfo(writer http.ResponseWriter, _ *http.Request) 
 		"app": appID, "rootDir": s.config.rootDir, "htmlName": s.config.htmlName,
 		"platform": runtime.GOOS, "architecture": runtime.GOARCH,
 		"runtime": runtime.Version(), "serverVersion": buildVersion,
-		"sqliteVersion": s.sqliteVersion, "protocolScheme": s.activeScheme,
+		"serviceAPIVersion": serviceAPIVersion,
+		"sqliteVersion":     s.sqliteVersion, "protocolScheme": s.activeScheme,
 		"libraryDir": s.config.waveDir, "currentLibrary": s.config.configuredName,
 		"currentLibraryId": library.LibraryID,
 	})
@@ -1214,6 +1216,7 @@ func probeServer(port int) map[string]any {
 
 func (s *service) sameRunningService(info map[string]any) bool {
 	return stringValue(info["app"]) == appID &&
+		intValue(info["serviceAPIVersion"], 0) == serviceAPIVersion &&
 		stringValue(info["htmlName"]) == s.config.htmlName &&
 		stringValue(info["currentLibrary"]) == s.config.configuredName &&
 		normalizedPath(stringValue(info["rootDir"])) == normalizedPath(s.config.rootDir) &&
