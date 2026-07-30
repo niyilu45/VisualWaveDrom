@@ -101,11 +101,29 @@ function pushSegment(segments, segment) {
   segments.push(segment);
 }
 
+function clockStates(symbol) {
+  return String(symbol || '').toLowerCase() === 'p'
+    ? ['1', '0']
+    : ['0', '1'];
+}
+
+function pushClockRange(ranges, column, symbol) {
+  const last = ranges[ranges.length - 1];
+  if (last && last.end === column && last.symbol === symbol) {
+    last.end = column + 1;
+    return;
+  }
+  ranges.push({ start: column, end: column + 1, symbol });
+}
+
 function parseWaveSegments(signal) {
   const wave = String(signal.wave || '');
   const labels = Array.isArray(signal.data) ? signal.data.map((value) => String(value)) : [];
   const segments = [];
   const transitions = [];
+  const clockEdges = [];
+  const clockRanges = [];
+  const gaps = [];
   let dataIndex = 0;
   let current = { kind: 'digital', state: 'x', value: 'x' };
   let clockMode = '';
@@ -127,14 +145,33 @@ function parseWaveSegments(signal) {
     });
   }
 
+  function emitClock(column, symbol) {
+    const states = clockStates(symbol);
+    const positive = String(symbol).toLowerCase() === 'p';
+    emit(column, column + 0.5, {
+      kind: 'digital',
+      state: states[0],
+      value: states[0]
+    });
+    emit(column + 0.5, column + 1, {
+      kind: 'digital',
+      state: states[1],
+      value: states[1]
+    });
+    clockEdges.push({
+      column,
+      edge: positive ? 'rising' : 'falling',
+      marked: symbol === symbol.toUpperCase()
+    });
+    pushClockRange(clockRanges, column, symbol);
+  }
+
   for (let column = 0; column < wave.length; column += 1) {
     const character = wave[column];
     const lower = character.toLowerCase();
-    if ((character === '.' || character === '|' || character === ' ') && clockMode) {
-      const first = clockMode === 'p' ? '0' : '1';
-      const second = clockMode === 'p' ? '1' : '0';
-      emit(column, column + 0.5, { kind: 'digital', state: first, value: first });
-      emit(column + 0.5, column + 1, { kind: 'digital', state: second, value: second });
+    if (character === '|') gaps.push(column + 0.5);
+    if ((character === '.' || character === '|') && clockMode) {
+      emitClock(column, clockMode);
       continue;
     }
     if (character === '.' || character === ' ' || character === '|') {
@@ -142,11 +179,8 @@ function parseWaveSegments(signal) {
       continue;
     }
     if (lower === 'p' || lower === 'n') {
-      clockMode = lower;
-      const first = lower === 'p' ? '0' : '1';
-      const second = lower === 'p' ? '1' : '0';
-      emit(column, column + 0.5, { kind: 'digital', state: first, value: first });
-      emit(column + 0.5, column + 1, { kind: 'digital', state: second, value: second });
+      clockMode = character;
+      emitClock(column, character);
       continue;
     }
     clockMode = '';
@@ -163,7 +197,7 @@ function parseWaveSegments(signal) {
   if (!segments.length) {
     segments.push({ start: 0, end: 1, kind: 'digital', state: 'x', value: 'x' });
   }
-  return { wave, segments, transitions };
+  return { wave, segments, transitions, clockEdges, clockRanges, gaps };
 }
 
 function buildAnalogLevels(samples) {
@@ -249,6 +283,9 @@ function createSession(content) {
       wave: parsedWave.wave,
       segments: parsedWave.segments,
       transitions: parsedWave.transitions,
+      clockEdges: parsedWave.clockEdges,
+      clockRanges: parsedWave.clockRanges,
+      gaps: parsedWave.gaps,
       samples: analogSamples,
       analogLevels: analogSamples ? buildAnalogLevels(analogSamples) : [],
       range: analogSamples ? analogRange(analogSamples) : null,
@@ -292,6 +329,34 @@ function findFirstSegment(segments, position) {
   return answer;
 }
 
+function pointEventsInWindow(events, start, end, width) {
+  if (!events || !events.length) return [];
+  let low = 0;
+  let high = events.length;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    const column = typeof events[middle] === 'number'
+      ? events[middle]
+      : events[middle].column;
+    if (column < start) low = middle + 1;
+    else high = middle;
+  }
+  const first = low;
+  while (low < events.length) {
+    const column = typeof events[low] === 'number' ? events[low] : events[low].column;
+    if (column >= end) break;
+    low += 1;
+  }
+  const count = low - first;
+  const limit = Math.max(64, Math.floor(width * 2));
+  if (count <= limit) return events.slice(first, low);
+  const result = [];
+  for (let index = 0; index < limit; index += 1) {
+    result.push(events[first + Math.floor(index * count / limit)]);
+  }
+  return result;
+}
+
 function rowSegmentsInWindow(row, start, end, width) {
   const first = findFirstSegment(row.segments, start);
   const selected = [];
@@ -306,8 +371,12 @@ function rowSegmentsInWindow(row, start, end, width) {
       value: segment.value
     });
   }
+  const decorations = {
+    clockEdges: pointEventsInWindow(row.clockEdges, start, end, width),
+    gaps: pointEventsInWindow(row.gaps, start, end, width)
+  };
   if (selected.length <= Math.max(64, width * 4)) {
-    return { kind: 'segments', items: selected };
+    return Object.assign({ kind: 'segments', items: selected }, decorations);
   }
 
   const bucketCount = Math.max(1, Math.floor(width));
@@ -350,7 +419,7 @@ function rowSegmentsInWindow(row, start, end, width) {
       changes
     });
   }
-  return { kind: 'buckets', items: buckets };
+  return Object.assign({ kind: 'buckets', items: buckets }, decorations);
 }
 
 function sampleIndexForColumn(row, column, totalColumns) {
@@ -433,6 +502,35 @@ function segmentAt(row, column) {
   const index = findFirstSegment(row.segments, column);
   if (index >= row.segments.length) return row.segments[row.segments.length - 1];
   return row.segments[index];
+}
+
+function clockSymbolAt(row, column) {
+  const ranges = row.clockRanges || [];
+  let low = 0;
+  let high = ranges.length - 1;
+  while (low <= high) {
+    const middle = (low + high) >> 1;
+    const range = ranges[middle];
+    if (column < range.start) high = middle - 1;
+    else if (column >= range.end) low = middle + 1;
+    else return range.symbol;
+  }
+  return '';
+}
+
+function gapAtColumn(row, column) {
+  const gaps = row.gaps || [];
+  const target = column + 0.5;
+  let low = 0;
+  let high = gaps.length - 1;
+  while (low <= high) {
+    const middle = (low + high) >> 1;
+    const difference = gaps[middle] - target;
+    if (Math.abs(difference) < 1e-7) return true;
+    if (difference < 0) low = middle + 1;
+    else high = middle - 1;
+  }
+  return false;
 }
 
 function lttbIndexes(samples, threshold) {
@@ -568,6 +666,137 @@ function stateAtColumn(row, column, mode) {
   return normalizedDigitalState(segment.state, 'x');
 }
 
+function inspectCursor(payload) {
+  if (!activeSession) throw new Error('Scope session has not been prepared');
+  const column = clamp(
+    finiteNumber(payload.column) || 0,
+    0,
+    Math.max(0, activeSession.totalColumns - 1e-7)
+  );
+  const modes = payload.modes || {};
+  return {
+    column,
+    rows: activeSession.rows.map((row) => {
+      const mode = modes[row.index] || row.mode;
+      return {
+        index: row.index,
+        mode,
+        value: stateAtColumn(row, column, mode),
+        symbol: mode === 'digital' ? clockSymbolAt(row, column) : ''
+      };
+    })
+  };
+}
+
+function edgeColumn(row, column, direction) {
+  const transitions = row.transitions || [];
+  const epsilon = 1e-7;
+  if (direction > 0) {
+    let low = 0;
+    let high = transitions.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (transitions[middle] <= column + epsilon) low = middle + 1;
+      else high = middle;
+    }
+    return low < transitions.length ? transitions[low] : null;
+  }
+  let low = 0;
+  let high = transitions.length;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (transitions[middle] < column - epsilon) low = middle + 1;
+    else high = middle;
+  }
+  return low > 0 ? transitions[low - 1] : null;
+}
+
+function segmentMatchesValue(segment, mode, target) {
+  if (mode === 'bus') return String(segment.value == null ? '' : segment.value) === target;
+  return normalizedDigitalState(segment.state, 'x') === target;
+}
+
+function segmentValueColumn(row, column, direction, mode, target) {
+  const epsilon = 1e-7;
+  if (direction > 0) {
+    let index = findFirstSegment(row.segments, column + epsilon);
+    for (; index < row.segments.length; index += 1) {
+      const segment = row.segments[index];
+      if (segment.start <= column + epsilon) continue;
+      if (segmentMatchesValue(segment, mode, target)) return segment.start;
+    }
+    return null;
+  }
+  let index = findFirstSegment(row.segments, Math.max(0, column - epsilon));
+  if (index >= row.segments.length) index = row.segments.length - 1;
+  for (; index >= 0; index -= 1) {
+    const segment = row.segments[index];
+    if (segment.start >= column - epsilon) continue;
+    if (segmentMatchesValue(segment, mode, target)) return segment.start;
+  }
+  return null;
+}
+
+function analogValueColumn(row, column, direction, target) {
+  const targetNumber = finiteNumber(target);
+  if (targetNumber == null || !row.samples || !row.samples.length) return null;
+  const currentIndex = sampleIndexForColumn(row, column, activeSession.totalColumns);
+  const step = direction > 0 ? 1 : -1;
+  const tolerance = Math.max(1e-9, Math.abs(targetNumber) * 1e-9);
+  for (
+    let index = currentIndex + step;
+    index >= 0 && index < row.samples.length;
+    index += step
+  ) {
+    const value = row.samples[index];
+    if (!Number.isFinite(value) || Math.abs(value - targetNumber) > tolerance) continue;
+    return row.samples.length <= 1
+      ? 0
+      : index * (activeSession.totalColumns - 1) / (row.samples.length - 1);
+  }
+  return null;
+}
+
+function navigateCursor(payload) {
+  if (!activeSession) throw new Error('Scope session has not been prepared');
+  const rowIndex = clamp(
+    Math.floor(finiteNumber(payload.rowIndex) || 0),
+    0,
+    Math.max(0, activeSession.rows.length - 1)
+  );
+  const row = activeSession.rows[rowIndex];
+  const column = clamp(
+    finiteNumber(payload.column) || 0,
+    0,
+    Math.max(0, activeSession.totalColumns - 1e-7)
+  );
+  const direction = Number(payload.direction) < 0 ? -1 : 1;
+  const mode = payload.mode || row.mode;
+  const kind = String(payload.kind || 'edge');
+  let targetColumn = null;
+  if (kind === 'edge') {
+    targetColumn = edgeColumn(row, column, direction);
+  } else if (kind === 'value') {
+    if (mode === 'analog') {
+      targetColumn = analogValueColumn(row, column, direction, payload.value);
+    } else {
+      const target = mode === 'bus'
+        ? String(payload.value == null ? '' : payload.value)
+        : normalizedDigitalState(payload.value, '');
+      targetColumn = segmentValueColumn(row, column, direction, mode, target);
+    }
+  }
+  if (targetColumn == null) {
+    return { found: false, rowIndex, column };
+  }
+  return {
+    found: true,
+    rowIndex,
+    column: targetColumn,
+    value: stateAtColumn(row, targetColumn, mode)
+  };
+}
+
 function signalAtPath(source, path) {
   let cursor = source.signal;
   for (let index = 0; index < path.length; index += 1) {
@@ -589,7 +818,7 @@ function signalAtPath(source, path) {
   return cursor;
 }
 
-function buildWaveFromValues(mode, values, labels) {
+function buildWaveFromValues(mode, values, labels, symbols, gaps) {
   if (!values.length) return { wave: '' };
   if (mode === 'analog') {
     const data = [];
@@ -627,10 +856,23 @@ function buildWaveFromValues(mode, values, labels) {
     return { wave, data };
   }
   let previous = null;
+  let previousClock = '';
   let wave = '';
-  values.forEach((value) => {
+  values.forEach((value, index) => {
+    const clock = symbols && /^[pPnN]$/.test(symbols[index] || '')
+      ? symbols[index]
+      : '';
+    if (clock) {
+      wave += previousClock === clock
+        ? (gaps && gaps[index] ? '|' : '.')
+        : clock;
+      previousClock = clock;
+      previous = null;
+      return;
+    }
     const state = normalizedDigitalState(value, previous || 'x');
-    wave += state === previous ? '.' : state;
+    wave += !previousClock && state === previous ? '.' : state;
+    previousClock = '';
     previous = state;
   });
   return { wave };
@@ -656,7 +898,13 @@ function buildSimplifiedContent(model, options) {
     const rowMeta = activeSession.rows[rowIndex];
     const target = signalAtPath(source, rowMeta.path);
     if (!target || typeof target !== 'object') return;
-    const built = buildWaveFromValues(rowModel.mode, rowModel.values, rowModel.labels);
+    const built = buildWaveFromValues(
+      rowModel.mode,
+      rowModel.values,
+      rowModel.labels,
+      rowModel.symbols,
+      rowModel.gaps
+    );
     target.wave = built.wave;
     if (built.data && built.data.length) target.data = built.data;
     else delete target.data;
@@ -758,6 +1006,10 @@ function createSimplifiedModel(payload) {
       name: row.name,
       mode,
       values,
+      symbols: mode === 'digital'
+        ? columns.map((column) => clockSymbolAt(row, column))
+        : [],
+      gaps: columns.map((column) => gapAtColumn(row, column)),
       labels: mode === 'bus' ? values.map((value) => String(value == null ? '' : value)) : []
     };
   });
@@ -825,6 +1077,10 @@ function handleRequest(message) {
       result = prepareResponse();
     } else if (request.type === 'window') {
       result = createWindow(request);
+    } else if (request.type === 'inspect') {
+      result = inspectCursor(request);
+    } else if (request.type === 'navigate') {
+      result = navigateCursor(request);
     } else if (request.type === 'simplify') {
       result = createSimplifiedModel(request);
     } else if (request.type === 'build') {

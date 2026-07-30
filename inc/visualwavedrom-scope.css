@@ -67,6 +67,66 @@ body.scope-wave-view > #vim-help-modal {
   white-space: nowrap;
 }
 
+.scope-cursor-controls {
+  flex: 1 1 500px;
+  flex-wrap: wrap;
+}
+
+.scope-toolbar-label {
+  color: #555b63;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.scope-cursor-choice {
+  width: 28px;
+  height: 28px;
+  box-sizing: border-box;
+  border: 1px solid #aeb4bc;
+  border-radius: 4px;
+  color: #363b42;
+  background: #ffffff;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.scope-cursor-choice:hover {
+  border-color: #3978c5;
+  background: #f2f7fc;
+}
+
+#scope-cursor-a.active {
+  border-color: #1f68d5;
+  color: #ffffff;
+  background: #1f68d5;
+}
+
+#scope-cursor-b.active {
+  border-color: #d93025;
+  color: #ffffff;
+  background: #d93025;
+}
+
+.scope-cursor-signal {
+  max-width: 120px;
+  overflow: hidden;
+  color: #30353b;
+  font-size: 11px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scope-cursor-controls #scope-cursor-value {
+  width: 74px;
+}
+
+.scope-small-icon {
+  width: 28px;
+  font-size: 12px;
+}
+
 .scope-toolbar label {
   display: inline-flex;
   align-items: center;
@@ -218,6 +278,21 @@ body.scope-wave-view > #vim-help-modal {
   background: #fbfcfc;
 }
 
+.scope-signal-row:hover {
+  background: #f2f7fc;
+}
+
+.scope-signal-row.active,
+.scope-signal-row:nth-child(even).active {
+  box-shadow: inset 3px 0 #2f73bf;
+  background: #eaf3fd;
+}
+
+.scope-signal-row:focus-visible {
+  outline: 2px solid #2f73bf;
+  outline-offset: -2px;
+}
+
 .scope-swatch {
   width: 9px;
   height: 36px;
@@ -251,9 +326,19 @@ body.scope-wave-view > #vim-help-modal {
 }
 
 .scope-signal-name em {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 5px;
   color: #737981;
   font-size: 10px;
   font-style: normal;
+}
+
+.scope-signal-name em b {
+  color: #2c5d94;
+  font-family: Consolas, "Courier New", monospace;
+  font-weight: 700;
 }
 
 .scope-signal-row select {
@@ -320,6 +405,11 @@ body.scope-wave-view > #vim-help-modal {
   cursor: grabbing;
 }
 
+.scope-plot.cursor-mode,
+.scope-plot.cursor-mode:active {
+  cursor: crosshair;
+}
+
 .scope-overview {
   border-top: 1px solid #c9cdd2;
   cursor: crosshair;
@@ -373,6 +463,11 @@ body.scope-wave-view > #vim-help-modal {
   min-width: 90px;
 }
 
+.scope-measurements span.active {
+  color: #1d5fa8;
+  font-weight: 700;
+}
+
 .scope-statusbar {
   display: flex;
   align-items: center;
@@ -424,6 +519,10 @@ body.scope-wave-view > #vim-help-modal {
   .scope-save-controls {
     padding-right: 0;
     border-right: 0;
+  }
+
+  .scope-cursor-controls {
+    flex-basis: 100%;
   }
 
   .scope-editor-strip {

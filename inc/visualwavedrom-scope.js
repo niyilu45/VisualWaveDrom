@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260730-scope-v3';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260730-scope-v4';
   const ROW_HEIGHT = 84;
   const AXIS_HEIGHT = 38;
   const OVERVIEW_HEIGHT = 76;
@@ -120,8 +120,11 @@
       this.viewEnd = 1;
       this.cursorA = null;
       this.cursorB = null;
-      this.cursorNext = 'A';
+      this.activeCursor = 'A';
+      this.activeCursorRow = 0;
       this.cursorMode = false;
+      this.cursorInspectSequence = 0;
+      this.cursorNavigationSequence = 0;
       this.selectedPoint = null;
       this.lockedColumns = new Set();
       this.undoStack = [];
@@ -151,6 +154,9 @@
       });
       this.viewStart = 0;
       this.viewEnd = this.meta.totalColumns;
+      this.cursorA = 0;
+      this.cursorB = Math.max(0, this.meta.totalColumns - 1);
+      this.activeCursorRow = this.meta.rows.length ? this.meta.rows[0].index : 0;
       this.titleEl.textContent = this.meta.title;
       document.title = this.meta.title + ' - 示波器';
       this.targetInput.max = String(Math.max(2, this.meta.totalColumns));
@@ -158,9 +164,12 @@
       this.rangeStartInput.value = '1';
       this.rangeEndInput.value = String(this.meta.totalColumns);
       this.renderSignalRows();
+      this.updateCursorControls();
+      this.updateMeasurements();
       this.updateLayout();
       await this.requestWindow();
       await this.runSimplify(false);
+      await this.updateCursorReadout();
       this.setStatus('示波器数据已就绪');
       this.log('scope-view', {
         phase: 'ready',
@@ -187,6 +196,20 @@
             <button type="button" class="scope-icon-btn" id="scope-zoom-out" title="缩小">−</button>
             <button type="button" class="scope-command-btn" id="scope-fit">适应窗口</button>
             <button type="button" class="scope-command-btn" id="scope-cursors">游标测量</button>
+          </div>
+          <div class="scope-toolbar-group scope-cursor-controls" aria-label="游标工具">
+            <span class="scope-toolbar-label">游标</span>
+            <button type="button" class="scope-cursor-choice active" id="scope-cursor-a" aria-pressed="true">A</button>
+            <button type="button" class="scope-cursor-choice" id="scope-cursor-b" aria-pressed="false">B</button>
+            <span class="scope-cursor-signal" id="scope-cursor-signal"></span>
+            <span class="scope-toolbar-label">边沿</span>
+            <button type="button" class="scope-icon-btn scope-small-icon" id="scope-cursor-prev-edge" title="跳到上一个边沿" aria-label="跳到上一个边沿">◀</button>
+            <button type="button" class="scope-icon-btn scope-small-icon" id="scope-cursor-next-edge" title="跳到下一个边沿" aria-label="跳到下一个边沿">▶</button>
+            <label>值
+              <input type="text" id="scope-cursor-value" aria-label="游标目标值">
+            </label>
+            <button type="button" class="scope-icon-btn scope-small-icon" id="scope-cursor-prev-value" title="跳到上一个指定值" aria-label="跳到上一个指定值">◀</button>
+            <button type="button" class="scope-icon-btn scope-small-icon" id="scope-cursor-next-value" title="跳到下一个指定值" aria-label="跳到下一个指定值">▶</button>
           </div>
           <div class="scope-toolbar-group scope-simplify-controls">
             <label>方法
@@ -287,6 +310,14 @@
       this.rangeEndInput = root.querySelector('#scope-range-end');
       this.outputTitleInput = root.querySelector('#scope-output-title');
       this.cursorButton = root.querySelector('#scope-cursors');
+      this.cursorAButton = root.querySelector('#scope-cursor-a');
+      this.cursorBButton = root.querySelector('#scope-cursor-b');
+      this.cursorSignalEl = root.querySelector('#scope-cursor-signal');
+      this.cursorValueInput = root.querySelector('#scope-cursor-value');
+      this.cursorPrevEdgeButton = root.querySelector('#scope-cursor-prev-edge');
+      this.cursorNextEdgeButton = root.querySelector('#scope-cursor-next-edge');
+      this.cursorPrevValueButton = root.querySelector('#scope-cursor-prev-value');
+      this.cursorNextValueButton = root.querySelector('#scope-cursor-next-value');
       this.statusEl = root.querySelector('#scope-status');
       this.metricsEl = root.querySelector('#scope-metrics');
       this.measurementsEl = root.querySelector('#scope-measurements');
@@ -307,6 +338,25 @@
       this.root.querySelector('#scope-zoom-out').addEventListener('click', () => this.zoom(2));
       this.root.querySelector('#scope-fit').addEventListener('click', () => this.fit());
       this.cursorButton.addEventListener('click', () => this.toggleCursorMode());
+      this.cursorAButton.addEventListener('click', () => this.setActiveCursor('A', true));
+      this.cursorBButton.addEventListener('click', () => this.setActiveCursor('B', true));
+      this.cursorPrevEdgeButton.addEventListener('click', () => {
+        void this.navigateActiveCursor('edge', -1);
+      });
+      this.cursorNextEdgeButton.addEventListener('click', () => {
+        void this.navigateActiveCursor('edge', 1);
+      });
+      this.cursorPrevValueButton.addEventListener('click', () => {
+        void this.navigateActiveCursor('value', -1);
+      });
+      this.cursorNextValueButton.addEventListener('click', () => {
+        void this.navigateActiveCursor('value', 1);
+      });
+      this.cursorValueInput.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter') return;
+        event.preventDefault();
+        void this.navigateActiveCursor('value', event.shiftKey ? -1 : 1);
+      });
       this.root.querySelector('#scope-use-view').addEventListener('click', () => this.useCurrentViewRange());
       this.root.querySelector('#scope-simplify').addEventListener('click', () => this.runSimplify(true));
       this.root.querySelector('#scope-save-instance').addEventListener('click', () => this.saveInstance());
@@ -330,9 +380,25 @@
           this.simplified.model.rows[rowIndex].mode = nextMode;
           this.scheduleBuild();
         }
+        this.cursorNavigationSequence += 1;
         this.modes[rowIndex] = nextMode;
         this.scheduleWindowRequest();
+        void this.updateCursorReadout();
         this.draw();
+      });
+
+      this.signalList.addEventListener('click', (event) => {
+        if (event.target.closest('select')) return;
+        const row = event.target.closest('[data-scope-signal-row]');
+        if (!row) return;
+        this.setActiveCursorRow(Number(row.dataset.scopeSignalRow));
+      });
+      this.signalList.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        const row = event.target.closest('[data-scope-signal-row]');
+        if (!row || event.target.closest('select')) return;
+        event.preventDefault();
+        this.setActiveCursorRow(Number(row.dataset.scopeSignalRow));
       });
 
       this.plotViewport.addEventListener('scroll', () => {
@@ -390,12 +456,18 @@
       this.signalList.innerHTML = this.meta.rows.map((row) => {
         const group = row.groups && row.groups.length ? row.groups.join(' / ') : '';
         return `
-          <div class="scope-signal-row" data-row-index="${row.index}" style="height:${ROW_HEIGHT}px">
+          <div class="scope-signal-row${row.index === this.activeCursorRow ? ' active' : ''}"
+              data-row-index="${row.index}" data-scope-signal-row="${row.index}"
+              tabindex="0" aria-label="选择信号 ${escapeHtml(row.name)}"
+              style="height:${ROW_HEIGHT}px">
             <span class="scope-swatch" style="background:${COLORS[row.index % COLORS.length]}"></span>
             <span class="scope-signal-name" title="${escapeHtml(row.name)}">
               ${group ? `<small>${escapeHtml(group)}</small>` : ''}
               <strong>${escapeHtml(row.name)}</strong>
-              <em>${escapeHtml(String(row.sampleCount || 0))} 点${row.unit ? ` · ${escapeHtml(row.unit)}` : ''}</em>
+              <em>
+                <span>${escapeHtml(String(row.sampleCount || 0))} 点${row.unit ? ` · ${escapeHtml(row.unit)}` : ''}</span>
+                <b data-scope-cursor-value-row="${row.index}">${escapeHtml(this.activeCursor)}：--</b>
+              </em>
             </span>
             <select data-scope-mode-row="${row.index}" aria-label="${escapeHtml(row.name)} 显示模式">
               <option value="digital"${this.modes[row.index] === 'digital' ? ' selected' : ''}>数字</option>
@@ -406,6 +478,10 @@
         `;
       }).join('');
       this.plotSpacer.style.height = (this.meta.rows.length * ROW_HEIGHT) + 'px';
+      if (this.cursorAButton) {
+        this.updateCursorControls();
+        void this.updateCursorReadout();
+      }
     }
 
     resizeCanvas(canvas, width, height) {
@@ -540,6 +616,59 @@
       }
     }
 
+    drawClockMarker(context, x, yTop, yBottom, edge, color) {
+      const centerY = (yTop + yBottom) / 2;
+      const direction = edge === 'falling' ? 1 : -1;
+      context.fillStyle = color;
+      context.beginPath();
+      context.moveTo(x - 3.5, centerY - direction * 3.5);
+      context.lineTo(x + 3.5, centerY - direction * 3.5);
+      context.lineTo(x, centerY + direction * 3.5);
+      context.closePath();
+      context.fill();
+    }
+
+    drawWaveGap(context, x, yTop, yBottom) {
+      context.save();
+      context.fillStyle = '#ffffff';
+      context.fillRect(x - 4, yTop, 8, Math.max(1, yBottom - yTop));
+      context.strokeStyle = '#7b818a';
+      context.lineWidth = 1.15;
+      context.beginPath();
+      [x - 2, x + 2].forEach((lineX) => {
+        context.moveTo(lineX, yTop + 2);
+        context.lineTo(lineX - 2, (yTop + yBottom) / 2);
+        context.lineTo(lineX, yBottom - 2);
+      });
+      context.stroke();
+      context.restore();
+    }
+
+    drawDigitalDecorations(context, data, yTop, yBottom, width, color) {
+      const highY = yTop + 5;
+      const lowY = yBottom - 5;
+      context.save();
+      (data.clockEdges || []).forEach((clockEdge) => {
+        const x = this.xForColumn(clockEdge.column, width);
+        if (x < -2 || x > width + 2) return;
+        context.strokeStyle = color;
+        context.lineWidth = clockEdge.marked ? 2 : 1.5;
+        context.beginPath();
+        context.moveTo(x, clockEdge.edge === 'falling' ? highY : lowY);
+        context.lineTo(x, clockEdge.edge === 'falling' ? lowY : highY);
+        context.stroke();
+        if (clockEdge.marked) {
+          this.drawClockMarker(context, x, yTop, yBottom, clockEdge.edge, color);
+        }
+      });
+      (data.gaps || []).forEach((column) => {
+        const x = this.xForColumn(column, width);
+        if (x < -4 || x > width + 4) return;
+        this.drawWaveGap(context, x, yTop, yBottom);
+      });
+      context.restore();
+    }
+
     drawSegments(context, rowResult, rowIndex, yTop, yBottom, width, color) {
       const data = rowResult.data;
       const mode = rowResult.mode;
@@ -576,6 +705,9 @@
             context.stroke();
           }
         });
+        if (mode === 'digital') {
+          this.drawDigitalDecorations(context, data, yTop, yBottom, width, color);
+        }
         return;
       }
       let previousY = null;
@@ -627,6 +759,9 @@
         }
         previousY = y;
       });
+      if (mode === 'digital') {
+        this.drawDigitalDecorations(context, data, yTop, yBottom, width, color);
+      }
     }
 
     drawAnalog(context, data, yTop, yBottom, width, color) {
@@ -730,6 +865,47 @@
           const x1 = this.xForColumn(columns[pointIndex], width);
           const nextPoint = visible[index + 1];
           const x2 = nextPoint == null ? width : this.xForColumn(columns[nextPoint], width);
+          const symbol = row.symbols && /^[pPnN]$/.test(row.symbols[pointIndex] || '')
+            ? row.symbols[pointIndex]
+            : '';
+          if (symbol) {
+            const positive = symbol.toLowerCase() === 'p';
+            const highY = yTop + 5;
+            const lowY = yBottom - 5;
+            const firstY = positive ? highY : lowY;
+            const secondY = positive ? lowY : highY;
+            const middleX = (x1 + x2) / 2;
+            context.strokeStyle = color;
+            context.lineWidth = 1.7;
+            context.beginPath();
+            if (previousY != null && Math.abs(previousY - firstY) > 0.5) {
+              context.moveTo(x1, previousY);
+              context.lineTo(x1, firstY);
+            } else if (previousY == null) {
+              context.moveTo(x1, secondY);
+              context.lineTo(x1, firstY);
+            }
+            context.moveTo(x1, firstY);
+            context.lineTo(middleX, firstY);
+            context.lineTo(middleX, secondY);
+            context.lineTo(x2, secondY);
+            context.stroke();
+            if (symbol === symbol.toUpperCase()) {
+              this.drawClockMarker(
+                context,
+                x1,
+                yTop,
+                yBottom,
+                positive ? 'rising' : 'falling',
+                color
+              );
+            }
+            if (row.gaps && row.gaps[pointIndex]) {
+              this.drawWaveGap(context, middleX, yTop, yBottom);
+            }
+            previousY = secondY;
+            return;
+          }
           const state = String(row.values[pointIndex] || 'x').toLowerCase();
           const y = state === '1'
             ? yTop + 5
@@ -770,25 +946,33 @@
     }
 
     drawCursors(context, width, height) {
-      [
+      const cursors = [
         { name: 'A', column: this.cursorA, color: '#1f68d5' },
         { name: 'B', column: this.cursorB, color: '#d93025' }
-      ].forEach((cursor) => {
+      ].sort((left, right) => {
+        if (left.name === this.activeCursor) return 1;
+        if (right.name === this.activeCursor) return -1;
+        return 0;
+      });
+      cursors.forEach((cursor) => {
         if (cursor.column == null || cursor.column < this.viewStart || cursor.column > this.viewEnd) return;
         const x = this.xForColumn(cursor.column, width);
+        const active = cursor.name === this.activeCursor;
         context.strokeStyle = cursor.color;
-        context.lineWidth = 1.5;
+        context.lineWidth = active ? 2.5 : 1.35;
         context.beginPath();
         context.moveTo(x, 0);
         context.lineTo(x, height);
         context.stroke();
+        const labelX = clamp(x, 10, Math.max(10, width - 10));
+        const labelHeight = active ? 20 : 17;
         context.fillStyle = cursor.color;
-        context.fillRect(x - 9, 0, 18, 17);
+        context.fillRect(labelX - 10, 0, 20, labelHeight);
         context.fillStyle = '#ffffff';
         context.font = 'bold 11px "Segoe UI", sans-serif';
         context.textAlign = 'center';
         context.textBaseline = 'middle';
-        context.fillText(cursor.name, x, 8.5);
+        context.fillText(cursor.name, labelX, labelHeight / 2);
       });
     }
 
@@ -861,20 +1045,72 @@
         const color = COLORS[rowIndex % COLORS.length];
         context.strokeStyle = color;
         context.lineWidth = 1;
-        context.beginPath();
-        row.values.forEach((value, pointIndex) => {
-          const column = this.simplified.model.columns[pointIndex];
-          const x = column / Math.max(1, this.meta.totalColumns - 1) * width;
-          let y = (yTop + yBottom) / 2;
-          if (row.mode === 'digital') y = String(value) === '1' ? yTop : yBottom;
-          else if (row.mode === 'analog') {
-            const number = Number(value);
-            y = Number.isFinite(number) ? yBottom - clamp((number + 1) / 2, 0, 1) * (yBottom - yTop) : y;
-          }
-          if (!pointIndex) context.moveTo(x, y);
-          else context.lineTo(x, y);
-        });
-        context.stroke();
+        if (row.mode === 'digital') {
+          let previousY = null;
+          row.values.forEach((value, pointIndex) => {
+            const column = this.simplified.model.columns[pointIndex];
+            const nextColumn = pointIndex + 1 < this.simplified.model.columns.length
+              ? this.simplified.model.columns[pointIndex + 1]
+              : this.meta.totalColumns;
+            const x1 = column / Math.max(1, this.meta.totalColumns) * width;
+            const x2 = nextColumn / Math.max(1, this.meta.totalColumns) * width;
+            const symbol = row.symbols && /^[pPnN]$/.test(row.symbols[pointIndex] || '')
+              ? row.symbols[pointIndex]
+              : '';
+            if (symbol) {
+              const positive = symbol.toLowerCase() === 'p';
+              const firstY = positive ? yTop : yBottom;
+              const secondY = positive ? yBottom : yTop;
+              const middleX = (x1 + x2) / 2;
+              context.beginPath();
+              if (previousY != null && Math.abs(previousY - firstY) > 0.25) {
+                context.moveTo(x1, previousY);
+                context.lineTo(x1, firstY);
+              } else if (previousY == null) {
+                context.moveTo(x1, secondY);
+                context.lineTo(x1, firstY);
+              }
+              context.moveTo(x1, firstY);
+              context.lineTo(middleX, firstY);
+              context.lineTo(middleX, secondY);
+              context.lineTo(x2, secondY);
+              context.stroke();
+              if (row.gaps && row.gaps[pointIndex]) {
+                this.drawWaveGap(context, middleX, yTop, yBottom);
+              }
+              previousY = secondY;
+              return;
+            }
+            const y = String(value) === '1'
+              ? yTop
+              : (String(value) === '0' ? yBottom : (yTop + yBottom) / 2);
+            context.beginPath();
+            if (previousY != null && Math.abs(previousY - y) > 0.25) {
+              context.moveTo(x1, previousY);
+              context.lineTo(x1, y);
+            }
+            context.moveTo(x1, y);
+            context.lineTo(x2, y);
+            context.stroke();
+            previousY = y;
+          });
+        } else {
+          context.beginPath();
+          row.values.forEach((value, pointIndex) => {
+            const column = this.simplified.model.columns[pointIndex];
+            const x = column / Math.max(1, this.meta.totalColumns - 1) * width;
+            let y = (yTop + yBottom) / 2;
+            if (row.mode === 'analog') {
+              const number = Number(value);
+              y = Number.isFinite(number)
+                ? yBottom - clamp((number + 1) / 2, 0, 1) * (yBottom - yTop)
+                : y;
+            }
+            if (!pointIndex) context.moveTo(x, y);
+            else context.lineTo(x, y);
+          });
+          context.stroke();
+        }
       });
       const x1 = this.viewStart / this.meta.totalColumns * width;
       const x2 = this.viewEnd / this.meta.totalColumns * width;
@@ -939,16 +1175,13 @@
       const x = event.clientX - rect.left;
       const y = event.clientY - rect.top;
       const column = this.columnForX(x, rect.width);
+      const hitCursor = this.cursorAtX(x, rect.width);
+      if (hitCursor) {
+        this.setActiveCursor(hitCursor, true);
+        return;
+      }
       if (this.cursorMode) {
-        if (this.cursorNext === 'A') {
-          this.cursorA = column;
-          this.cursorNext = 'B';
-        } else {
-          this.cursorB = column;
-          this.cursorNext = 'A';
-        }
-        this.updateMeasurements();
-        this.draw();
+        this.setActiveCursorPosition(column);
         return;
       }
       const absoluteY = y + this.plotViewport.scrollTop;
@@ -1002,10 +1235,194 @@
     }
 
     toggleCursorMode() {
-      this.cursorMode = !this.cursorMode;
+      this.setCursorMode(!this.cursorMode);
+      this.setStatus(this.cursorMode
+        ? '游标测量：选择 A 或 B 后单击波形定位'
+        : '已退出游标测量');
+    }
+
+    setCursorMode(enabled) {
+      this.cursorMode = !!enabled;
       this.cursorButton.classList.toggle('active', this.cursorMode);
       this.cursorButton.textContent = this.cursorMode ? '退出游标测量' : '游标测量';
-      this.setStatus(this.cursorMode ? '游标测量：依次单击设置 A、B' : '已退出游标测量');
+      this.plotCanvas.classList.toggle('cursor-mode', this.cursorMode);
+    }
+
+    activeCursorColumn() {
+      return this.activeCursor === 'B' ? this.cursorB : this.cursorA;
+    }
+
+    cursorAtX(x, width) {
+      const candidates = [
+        { name: 'A', x: this.xForColumn(this.cursorA, width) },
+        { name: 'B', x: this.xForColumn(this.cursorB, width) }
+      ].filter((cursor) => Number.isFinite(cursor.x) && Math.abs(cursor.x - x) <= 7);
+      if (!candidates.length) return '';
+      if (candidates.length > 1
+          && Math.abs(candidates[0].x - candidates[1].x) < 1) {
+        return this.activeCursor === 'A' ? 'B' : 'A';
+      }
+      candidates.sort((left, right) => Math.abs(left.x - x) - Math.abs(right.x - x));
+      return candidates[0].name;
+    }
+
+    setActiveCursor(name, enableMode) {
+      const next = name === 'B' ? 'B' : 'A';
+      this.cursorNavigationSequence += 1;
+      this.activeCursor = next;
+      if (enableMode) this.setCursorMode(true);
+      this.updateCursorControls();
+      this.updateMeasurements();
+      void this.updateCursorReadout();
+      this.draw();
+      this.setStatus('当前工作游标：' + next);
+    }
+
+    setActiveCursorPosition(column) {
+      this.cursorNavigationSequence += 1;
+      const value = clamp(
+        Number(column) || 0,
+        0,
+        Math.max(0, this.meta.totalColumns - 1e-7)
+      );
+      if (this.activeCursor === 'B') this.cursorB = value;
+      else this.cursorA = value;
+      this.updateMeasurements();
+      void this.updateCursorReadout();
+      this.draw();
+    }
+
+    setActiveCursorRow(rowIndex) {
+      const next = clamp(
+        Math.floor(Number(rowIndex) || 0),
+        0,
+        Math.max(0, this.meta.rows.length - 1)
+      );
+      this.cursorNavigationSequence += 1;
+      this.activeCursorRow = next;
+      this.signalList.querySelectorAll('[data-scope-signal-row]').forEach((row) => {
+        row.classList.toggle('active', Number(row.dataset.scopeSignalRow) === next);
+      });
+      this.updateCursorControls();
+      void this.updateCursorReadout();
+      this.setStatus('游标跳转信号：' + (this.meta.rows[next] ? this.meta.rows[next].name : ''));
+    }
+
+    updateCursorControls() {
+      if (!this.cursorAButton || !this.cursorBButton) return;
+      const activeA = this.activeCursor === 'A';
+      this.cursorAButton.classList.toggle('active', activeA);
+      this.cursorBButton.classList.toggle('active', !activeA);
+      this.cursorAButton.setAttribute('aria-pressed', String(activeA));
+      this.cursorBButton.setAttribute('aria-pressed', String(!activeA));
+      const row = this.meta && this.meta.rows[this.activeCursorRow];
+      this.cursorSignalEl.textContent = row ? row.name : '';
+      this.cursorSignalEl.title = row ? row.name : '';
+    }
+
+    formatCursorValue(value) {
+      if (value == null || value === '') return '--';
+      if (typeof value === 'number') {
+        return String(Math.round(value * 1000000) / 1000000);
+      }
+      return String(value);
+    }
+
+    async updateCursorReadout() {
+      if (!this.meta || !this.signalList) return;
+      const column = this.activeCursorColumn();
+      if (column == null) return;
+      const sequence = ++this.cursorInspectSequence;
+      try {
+        const result = await this.worker.call('inspect', {
+          column,
+          modes: this.modes
+        });
+        if (sequence !== this.cursorInspectSequence) return;
+        result.rows.forEach((row) => {
+          const target = this.signalList.querySelector(
+            '[data-scope-cursor-value-row="' + row.index + '"]'
+          );
+          if (!target) return;
+          target.textContent = this.activeCursor + '：' + this.formatCursorValue(row.value);
+          target.title = this.activeCursor + ' @ ' + this.formatTime(result.column)
+            + ' = ' + this.formatCursorValue(row.value);
+        });
+      } catch (error) {
+        this.log('scope-cursor', {
+          phase: 'inspect-error',
+          message: error.message || String(error)
+        });
+      }
+    }
+
+    ensureCursorVisible(column) {
+      if (column >= this.viewStart && column <= this.viewEnd) return;
+      const span = this.viewEnd - this.viewStart;
+      const start = clamp(
+        column - span / 2,
+        0,
+        Math.max(0, this.meta.totalColumns - span)
+      );
+      this.viewStart = start;
+      this.viewEnd = start + span;
+      this.scheduleWindowRequest();
+    }
+
+    async navigateActiveCursor(kind, direction) {
+      if (!this.meta.rows.length) return;
+      const row = this.meta.rows[this.activeCursorRow];
+      const mode = this.modes[this.activeCursorRow] || row.mode;
+      const value = this.cursorValueInput.value.trim();
+      if (kind === 'value' && !value) {
+        this.setStatus('请先输入要跳转的值', true);
+        this.cursorValueInput.focus();
+        return;
+      }
+      if (kind === 'value' && mode === 'analog' && !Number.isFinite(Number(value))) {
+        this.setStatus('模拟信号的目标值必须是数字', true);
+        return;
+      }
+      if (kind === 'value' && mode === 'digital' && !/^[01xzhHlL]$/.test(value)) {
+        this.setStatus('数字信号的目标值支持 0、1、x、z、h、l', true);
+        return;
+      }
+      const sequence = ++this.cursorNavigationSequence;
+      try {
+        const result = await this.worker.call('navigate', {
+          rowIndex: this.activeCursorRow,
+          column: this.activeCursorColumn(),
+          direction,
+          kind,
+          value,
+          mode
+        });
+        if (sequence !== this.cursorNavigationSequence) return;
+        if (!result.found) {
+          this.setStatus(
+            (direction < 0 ? '前方' : '后方')
+            + '没有匹配的' + (kind === 'edge' ? '边沿' : '值'),
+            true
+          );
+          return;
+        }
+        this.setActiveCursorPosition(result.column);
+        this.ensureCursorVisible(result.column);
+        this.draw();
+        this.setStatus(
+          this.activeCursor + ' 已跳到 ' + row.name + ' 的'
+          + (kind === 'edge' ? '边沿' : ('值 ' + value))
+        );
+      } catch (error) {
+        if (sequence !== this.cursorNavigationSequence) return;
+        this.setStatus('游标跳转失败：' + (error.message || String(error)), true);
+        this.log('scope-cursor', {
+          phase: 'navigate-error',
+          kind,
+          direction,
+          message: error.message || String(error)
+        });
+      }
     }
 
     updateMeasurements() {
@@ -1019,8 +1436,8 @@
         if (delta > 0) frequencyText = ' · 1/Δt：' + (Math.round(1000000 / delta) / 1000000);
       }
       this.measurementsEl.innerHTML = `
-        <span>${escapeHtml(aText)}</span>
-        <span>${escapeHtml(bText)}</span>
+        <span class="${this.activeCursor === 'A' ? 'active' : ''}">${escapeHtml(aText)}</span>
+        <span class="${this.activeCursor === 'B' ? 'active' : ''}">${escapeHtml(bText)}</span>
         <strong>${escapeHtml(deltaText + frequencyText)}</strong>
       `;
     }
@@ -1150,9 +1567,14 @@
       const column = this.simplified.model.columns[selected.pointIndex];
       this.pointPositionEl.textContent = row.name + ' · 第 ' + (selected.pointIndex + 1)
         + ' 点 · 来源列 ' + (Math.round(column * 1000) / 1000 + 1);
-      this.pointValueInput.value = row.values[selected.pointIndex] == null
+      const clockSymbol = row.mode === 'digital'
+        && row.symbols
+        && /^[pPnN]$/.test(row.symbols[selected.pointIndex] || '')
+        ? row.symbols[selected.pointIndex]
+        : '';
+      this.pointValueInput.value = clockSymbol || (row.values[selected.pointIndex] == null
         ? ''
-        : String(row.values[selected.pointIndex]);
+        : String(row.values[selected.pointIndex]));
       this.pointLabelInput.value = row.labels && row.labels[selected.pointIndex] != null
         ? String(row.labels[selected.pointIndex])
         : '';
@@ -1234,14 +1656,27 @@
         }
         value = number;
       } else if (row.mode === 'digital') {
-        value = String(value || '').trim().toLowerCase();
-        if (!/^[01xz]$/.test(value)) {
-          this.setStatus('数字波形只支持 0、1、x、z', true);
+        value = String(value || '').trim();
+        if (!/^[01xzpn]$/i.test(value)) {
+          this.setStatus('数字波形支持 0、1、x、z、p、P、n、N', true);
           return;
         }
       }
       this.pushHistory();
-      row.values[selected.pointIndex] = value;
+      if (row.mode === 'digital') {
+        row.symbols = row.symbols || new Array(row.values.length).fill('');
+        row.gaps = row.gaps || new Array(row.values.length).fill(false);
+        if (/^[pPnN]$/.test(value)) {
+          row.symbols[selected.pointIndex] = value;
+          row.values[selected.pointIndex] = value.toLowerCase() === 'p' ? '1' : '0';
+        } else {
+          row.symbols[selected.pointIndex] = '';
+          row.gaps[selected.pointIndex] = false;
+          row.values[selected.pointIndex] = value.toLowerCase();
+        }
+      } else {
+        row.values[selected.pointIndex] = value;
+      }
       if (row.mode === 'bus') {
         row.labels = row.labels || [];
         row.labels[selected.pointIndex] = this.pointLabelInput.value;
@@ -1263,6 +1698,8 @@
       this.simplified.model.rows.forEach((row) => {
         row.values.splice(pointIndex + 1, 0, row.values[pointIndex]);
         if (row.labels) row.labels.splice(pointIndex + 1, 0, row.labels[pointIndex] || '');
+        if (row.symbols) row.symbols.splice(pointIndex + 1, 0, row.symbols[pointIndex] || '');
+        if (row.gaps) row.gaps.splice(pointIndex + 1, 0, false);
       });
       this.selectedPoint.pointIndex += 1;
       this.scheduleBuild();
@@ -1285,6 +1722,8 @@
       this.simplified.model.rows.forEach((row) => {
         row.values.splice(pointIndex, 1);
         if (row.labels) row.labels.splice(pointIndex, 1);
+        if (row.symbols) row.symbols.splice(pointIndex, 1);
+        if (row.gaps) row.gaps.splice(pointIndex, 1);
       });
       this.lockedColumns.delete(removedColumn);
       this.selectedPoint.pointIndex = Math.min(pointIndex, columns.length - 1);
@@ -1376,9 +1815,27 @@
         });
         this.viewStart = 0;
         this.viewEnd = this.meta.totalColumns;
+        this.cursorA = clamp(
+          this.cursorA == null ? 0 : this.cursorA,
+          0,
+          Math.max(0, this.meta.totalColumns - 1)
+        );
+        this.cursorB = clamp(
+          this.cursorB == null ? this.meta.totalColumns - 1 : this.cursorB,
+          0,
+          Math.max(0, this.meta.totalColumns - 1)
+        );
+        this.activeCursorRow = clamp(
+          this.activeCursorRow,
+          0,
+          Math.max(0, this.meta.rows.length - 1)
+        );
         this.renderSignalRows();
+        this.updateCursorControls();
+        this.updateMeasurements();
         this.updateLayout();
         await this.requestWindow();
+        await this.updateCursorReadout();
         this.setStatus('原波形已被简化结果覆盖');
       } catch (error) {
         this.setStatus('覆盖原波形失败：' + (error.message || String(error)), true);
