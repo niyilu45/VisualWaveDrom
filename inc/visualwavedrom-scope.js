@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260730-scope-v9';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260730-scope-v10';
   const DEFAULT_ROW_HEIGHT = 84;
   const MIN_ANALOG_ROW_HEIGHT = 56;
   const MAX_ANALOG_ROW_HEIGHT = 480;
@@ -58,6 +58,88 @@
       Math.max(0, bitWidth - 1)
     );
     return { type, bitWidth, fractionalBits };
+  }
+
+  function normalizeScopeColor(value) {
+    const color = String(value == null ? '' : value).trim().toLowerCase();
+    if (/^#[0-9a-f]{6}$/.test(color)) return color;
+    if (/^#[0-9a-f]{3}$/.test(color)) {
+      return '#' + color.slice(1).split('').map((character) => character + character).join('');
+    }
+    return '';
+  }
+
+  function overlayBackgroundRange(ranges, start, end, color) {
+    const next = [];
+    (ranges || []).forEach((range) => {
+      if (range.end <= start || range.start >= end) {
+        next.push(Object.assign({}, range));
+        return;
+      }
+      if (range.start < start) {
+        next.push({ start: range.start, end: start, color: range.color });
+      }
+      if (range.end > end) {
+        next.push({ start: end, end: range.end, color: range.color });
+      }
+    });
+    if (color && end > start) next.push({ start, end, color });
+    next.sort((left, right) => left.start - right.start || left.end - right.end);
+    return next.reduce((merged, range) => {
+      const previous = merged[merged.length - 1];
+      if (previous && previous.color === range.color && previous.end === range.start) {
+        previous.end = range.end;
+      } else {
+        merged.push(range);
+      }
+      return merged;
+    }, []);
+  }
+
+  function normalizeRowStyle(candidate) {
+    const source = candidate && typeof candidate === 'object' ? candidate : {};
+    return {
+      waveColor: normalizeScopeColor(source.waveColor),
+      backgroundColor: normalizeScopeColor(source.backgroundColor),
+      backgroundRanges: (Array.isArray(source.backgroundRanges)
+        ? source.backgroundRanges
+        : []).map((range) => ({
+        start: Math.max(0, Math.floor(Number(range.start) || 0)),
+        end: Math.max(0, Math.ceil(Number(range.end) || 0)),
+        color: normalizeScopeColor(range.color)
+      })).filter((range) => range.color && range.end > range.start)
+    };
+  }
+
+  function parseColumnSelection(value, totalColumns) {
+    const text = String(value == null ? '' : value).trim();
+    if (!text) throw new Error('请输入列号，例如 1,3-5');
+    const maximum = Math.max(1, Math.floor(Number(totalColumns) || 1));
+    const ranges = [];
+    text.replace(/[，；;]/g, ',').split(',').forEach((part) => {
+      const token = part.trim();
+      const match = token.match(/^(\d+)(?:\s*-\s*(\d+))?$/);
+      if (!match) throw new Error('列号格式错误：' + token);
+      const first = Number(match[1]);
+      const last = Number(match[2] || match[1]);
+      if (first < 1 || last < 1 || first > maximum || last > maximum) {
+        throw new Error('列号必须在 1-' + maximum + ' 范围内');
+      }
+      ranges.push({
+        start: Math.min(first, last) - 1,
+        end: Math.max(first, last)
+      });
+    });
+    ranges.sort((left, right) => left.start - right.start || left.end - right.end);
+    return ranges.reduce((merged, range) => {
+      const previous = merged[merged.length - 1];
+      if (previous && range.start <= previous.end) {
+        previous.end = Math.max(previous.end, range.end);
+      } else {
+        merged.push(range);
+      }
+      return merged;
+    }, []);
   }
 
   class ScopeWorkerClient {
@@ -133,6 +215,7 @@
       this.meta = null;
       this.modes = {};
       this.analogFormats = {};
+      this.rowStyles = {};
       this.rowHeights = [];
       this.rowOffsets = [0];
       this.windowData = null;
@@ -156,6 +239,9 @@
       this.buildSequence = 0;
       this.drag = null;
       this.rowResize = null;
+      this.styleSaveInFlight = false;
+      this.styleSaveQueued = false;
+      this.styleControlRow = null;
       this.rowStart = 0;
       this.rowEnd = 0;
       this.resizeObserver = null;
@@ -179,6 +265,7 @@
           row.analogFormat,
           row.detectedMode === 'analog' ? 'float' : 'unsigned'
         );
+        this.rowStyles[row.index] = normalizeRowStyle(row.style);
       });
       this.rowHeights = this.meta.rows.map(() => DEFAULT_ROW_HEIGHT);
       this.rebuildRowOffsets();
@@ -268,6 +355,32 @@
             <label>小数位
               <input type="number" id="scope-analog-fraction" min="0" max="63" step="1" value="0">
             </label>
+          </div>
+          <div class="scope-toolbar-group scope-style-controls" aria-label="波形显示样式">
+            <span class="scope-toolbar-label">行样式</span>
+            <span class="scope-style-signal" id="scope-style-signal"></span>
+            <label>波形
+              <input type="color" class="scope-color-input" id="scope-wave-color"
+                  aria-label="波形颜色" value="#07853d">
+            </label>
+            <button type="button" class="scope-icon-btn scope-small-icon" id="scope-wave-color-reset"
+                title="恢复自动波形颜色" aria-label="恢复自动波形颜色">↺</button>
+            <label>整行背景
+              <input type="color" class="scope-color-input" id="scope-row-background"
+                  aria-label="整行背景色" value="#f3f7fc">
+            </label>
+            <button type="button" class="scope-icon-btn scope-small-icon" id="scope-row-background-clear"
+                title="清除整行背景色" aria-label="清除整行背景色">×</button>
+            <label>指定列
+              <input type="text" id="scope-style-columns" placeholder="1,3-5"
+                  aria-label="需要设置背景色的列">
+            </label>
+            <button type="button" class="scope-command-btn" id="scope-style-use-cursors"
+                title="使用 A、B 游标之间的列">使用 A-B</button>
+            <input type="color" class="scope-color-input" id="scope-column-background"
+                aria-label="指定列背景色" value="#fff1a8">
+            <button type="button" class="scope-command-btn" id="scope-column-background-apply">应用列背景</button>
+            <button type="button" class="scope-command-btn" id="scope-column-background-clear">清除列背景</button>
           </div>
           <div class="scope-toolbar-group scope-simplify-controls">
             <label>方法
@@ -383,6 +496,16 @@
       this.analogTypeSelect = root.querySelector('#scope-analog-type');
       this.analogWidthInput = root.querySelector('#scope-analog-width');
       this.analogFractionInput = root.querySelector('#scope-analog-fraction');
+      this.styleSignalEl = root.querySelector('#scope-style-signal');
+      this.waveColorInput = root.querySelector('#scope-wave-color');
+      this.waveColorResetButton = root.querySelector('#scope-wave-color-reset');
+      this.rowBackgroundInput = root.querySelector('#scope-row-background');
+      this.rowBackgroundClearButton = root.querySelector('#scope-row-background-clear');
+      this.styleColumnsInput = root.querySelector('#scope-style-columns');
+      this.styleUseCursorsButton = root.querySelector('#scope-style-use-cursors');
+      this.columnBackgroundInput = root.querySelector('#scope-column-background');
+      this.columnBackgroundApplyButton = root.querySelector('#scope-column-background-apply');
+      this.columnBackgroundClearButton = root.querySelector('#scope-column-background-clear');
       this.statusEl = root.querySelector('#scope-status');
       this.metricsEl = root.querySelector('#scope-metrics');
       this.measurementsEl = root.querySelector('#scope-measurements');
@@ -437,6 +560,22 @@
       this.analogTypeSelect.addEventListener('change', () => this.applyAnalogFormatControls());
       this.analogWidthInput.addEventListener('change', () => this.applyAnalogFormatControls());
       this.analogFractionInput.addEventListener('change', () => this.applyAnalogFormatControls());
+      this.waveColorInput.addEventListener('change', () => this.applyWaveColor());
+      this.waveColorResetButton.addEventListener('click', () => this.resetWaveColor());
+      this.rowBackgroundInput.addEventListener('change', () => this.applyRowBackground());
+      this.rowBackgroundClearButton.addEventListener('click', () => this.clearRowBackground());
+      this.styleUseCursorsButton.addEventListener('click', () => this.useCursorColumnSelection());
+      this.columnBackgroundApplyButton.addEventListener('click', () => {
+        this.applyColumnBackground(false);
+      });
+      this.columnBackgroundClearButton.addEventListener('click', () => {
+        this.applyColumnBackground(true);
+      });
+      this.styleColumnsInput.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter') return;
+        event.preventDefault();
+        this.applyColumnBackground(false);
+      });
       this.root.querySelector('#scope-use-view').addEventListener('click', () => this.useCurrentViewRange());
       this.root.querySelector('#scope-simplify').addEventListener('click', () => this.runSimplify(true));
       this.root.querySelector('#scope-save-instance').addEventListener('click', () => this.saveInstance());
@@ -599,12 +738,14 @@
         const group = row.groups && row.groups.length ? row.groups.join(' / ') : '';
         const rowHeight = this.rowHeight(row.index);
         const analogMode = this.modes[row.index] === 'analog';
+        const waveColor = this.rowWaveColor(row.index);
         return `
           <div class="scope-signal-row${row.index === this.activeCursorRow ? ' active' : ''}${analogMode ? ' scope-signal-row-analog' : ''}"
               data-row-index="${row.index}" data-scope-signal-row="${row.index}"
               tabindex="0" aria-label="选择信号 ${escapeHtml(row.name)}"
               style="height:${rowHeight}px">
-            <span class="scope-swatch" style="background:${COLORS[row.index % COLORS.length]}"></span>
+            <span class="scope-swatch" data-scope-swatch-row="${row.index}"
+                style="background:${waveColor}" title="波形颜色 ${waveColor}"></span>
             <span class="scope-signal-name" title="${escapeHtml(row.name)}">
               ${group ? `<small>${escapeHtml(group)}</small>` : ''}
               <strong>${escapeHtml(row.name)}</strong>
@@ -631,6 +772,181 @@
       if (this.cursorAButton) {
         this.updateCursorControls();
         void this.updateCursorReadout();
+      }
+    }
+
+    rowStyle(rowIndex) {
+      const index = Math.max(0, Math.floor(Number(rowIndex) || 0));
+      if (!this.rowStyles[index]) this.rowStyles[index] = normalizeRowStyle(null);
+      return this.rowStyles[index];
+    }
+
+    rowWaveColor(rowIndex) {
+      return this.rowStyle(rowIndex).waveColor || COLORS[rowIndex % COLORS.length];
+    }
+
+    updateStyleControls() {
+      if (!this.styleSignalEl) return;
+      const row = this.meta && this.meta.rows[this.activeCursorRow];
+      const controls = [
+        this.waveColorInput,
+        this.waveColorResetButton,
+        this.rowBackgroundInput,
+        this.rowBackgroundClearButton,
+        this.styleColumnsInput,
+        this.styleUseCursorsButton,
+        this.columnBackgroundInput,
+        this.columnBackgroundApplyButton,
+        this.columnBackgroundClearButton
+      ];
+      controls.forEach((control) => { control.disabled = !row; });
+      if (!row) {
+        this.styleSignalEl.textContent = '';
+        return;
+      }
+      const style = this.rowStyle(row.index);
+      if (this.styleControlRow !== row.index) {
+        this.styleColumnsInput.value = '';
+        this.styleControlRow = row.index;
+      }
+      this.styleSignalEl.textContent = row.name;
+      this.styleSignalEl.title = row.name;
+      this.waveColorInput.value = this.rowWaveColor(row.index);
+      this.waveColorResetButton.disabled = !style.waveColor;
+      this.rowBackgroundInput.value = style.backgroundColor || '#f3f7fc';
+      this.rowBackgroundClearButton.disabled = !style.backgroundColor;
+      const count = style.backgroundRanges.length;
+      this.styleSignalEl.dataset.rangeCount = String(count);
+      this.styleSignalEl.setAttribute(
+        'aria-label',
+        row.name + (count ? '，已设置 ' + count + ' 个列背景区间' : '')
+      );
+    }
+
+    updateSignalStyleIndicator(rowIndex) {
+      const swatch = this.signalList.querySelector(
+        '[data-scope-swatch-row="' + rowIndex + '"]'
+      );
+      if (!swatch) return;
+      const color = this.rowWaveColor(rowIndex);
+      swatch.style.background = color;
+      swatch.title = '波形颜色 ' + color;
+    }
+
+    changeRowStyle(update, message) {
+      const row = this.meta && this.meta.rows[this.activeCursorRow];
+      if (!row) return;
+      const previous = clone(this.rowStyle(row.index));
+      const next = clone(previous);
+      update(next);
+      const normalized = normalizeRowStyle(next);
+      if (JSON.stringify(previous) === JSON.stringify(normalized)) return;
+      if (this.simplified) this.pushHistory();
+      this.rowStyles[row.index] = normalized;
+      this.updateSignalStyleIndicator(row.index);
+      this.updateStyleControls();
+      this.draw();
+      this.scheduleBuild();
+      this.queueStyleSave();
+      this.setStatus(message);
+    }
+
+    applyWaveColor() {
+      const color = normalizeScopeColor(this.waveColorInput.value);
+      if (!color) return;
+      const row = this.meta.rows[this.activeCursorRow];
+      this.changeRowStyle((style) => { style.waveColor = color; }, '已设置 ' + row.name + ' 的波形颜色');
+    }
+
+    resetWaveColor() {
+      const row = this.meta.rows[this.activeCursorRow];
+      this.changeRowStyle((style) => { style.waveColor = ''; }, '已恢复 ' + row.name + ' 的自动波形颜色');
+    }
+
+    applyRowBackground() {
+      const color = normalizeScopeColor(this.rowBackgroundInput.value);
+      if (!color) return;
+      const row = this.meta.rows[this.activeCursorRow];
+      this.changeRowStyle(
+        (style) => { style.backgroundColor = color; },
+        '已设置 ' + row.name + ' 的整行背景色'
+      );
+    }
+
+    clearRowBackground() {
+      const row = this.meta.rows[this.activeCursorRow];
+      this.changeRowStyle(
+        (style) => { style.backgroundColor = ''; },
+        '已清除 ' + row.name + ' 的整行背景色'
+      );
+    }
+
+    useCursorColumnSelection() {
+      if (this.cursorA == null || this.cursorB == null) return;
+      const maximum = Math.max(1, this.meta.totalColumns);
+      const left = clamp(Math.min(this.cursorA, this.cursorB), 0, maximum - 1);
+      const right = clamp(Math.max(this.cursorA, this.cursorB), 0, maximum);
+      const start = clamp(Math.floor(left) + 1, 1, maximum);
+      const end = Math.abs(right - left) < 1e-7
+        ? start
+        : clamp(Math.ceil(right), start, maximum);
+      this.styleColumnsInput.value = start === end ? String(start) : start + '-' + end;
+      this.styleColumnsInput.focus();
+      this.styleColumnsInput.select();
+    }
+
+    applyColumnBackground(clear) {
+      const row = this.meta && this.meta.rows[this.activeCursorRow];
+      if (!row) return;
+      let selection;
+      try {
+        selection = parseColumnSelection(this.styleColumnsInput.value, this.meta.totalColumns);
+      } catch (error) {
+        this.setStatus(error.message || String(error), true);
+        this.styleColumnsInput.focus();
+        return;
+      }
+      const color = clear ? '' : normalizeScopeColor(this.columnBackgroundInput.value);
+      if (!clear && !color) return;
+      this.changeRowStyle((style) => {
+        selection.forEach((range) => {
+          style.backgroundRanges = overlayBackgroundRange(
+            style.backgroundRanges,
+            range.start,
+            range.end,
+            color
+          );
+        });
+      }, (clear ? '已清除 ' : '已设置 ') + row.name + ' 指定列的背景色');
+    }
+
+    queueStyleSave() {
+      this.styleSaveQueued = true;
+      if (!this.styleSaveInFlight) void this.flushStyleSave();
+    }
+
+    async flushStyleSave() {
+      if (this.styleSaveInFlight) return;
+      this.styleSaveInFlight = true;
+      try {
+        while (this.styleSaveQueued) {
+          this.styleSaveQueued = false;
+          const result = await this.worker.call('style-source', {
+            rowStyles: clone(this.rowStyles)
+          });
+          const saved = await this.adapter.saveSource({ content: result.content });
+          if (saved) this.document = saved;
+        }
+        this.log('scope-style', { phase: 'saved', waveId: this.document.name });
+      } catch (error) {
+        this.log('scope-style', {
+          phase: 'save-error',
+          message: error.message || String(error)
+        });
+        this.setStatus('保存波形颜色失败：' + (error.message || String(error)), true);
+      } finally {
+        this.styleSaveInFlight = false;
+        if (this.styleSaveQueued) void this.flushStyleSave();
       }
     }
 
@@ -823,6 +1139,9 @@
     drawGrid(context, width, height) {
       context.fillStyle = '#ffffff';
       context.fillRect(0, 0, width, height);
+    }
+
+    drawGridLines(context, width, height) {
       const span = this.viewEnd - this.viewStart;
       const minor = niceStep(span / Math.max(4, Math.floor(width / 42)));
       const major = minor * 5;
@@ -836,6 +1155,40 @@
         context.lineTo(Math.round(x) + 0.5, height);
         context.stroke();
       }
+    }
+
+    drawRowBackground(context, rowIndex, rowTop, rowHeight, width) {
+      const style = this.rowStyle(rowIndex);
+      context.save();
+      context.beginPath();
+      context.rect(0, rowTop, width, rowHeight);
+      context.clip();
+      if (style.backgroundColor) {
+        context.fillStyle = style.backgroundColor;
+        context.fillRect(0, rowTop, width, rowHeight);
+      }
+      style.backgroundRanges.forEach((range) => {
+        if (range.end <= this.viewStart || range.start >= this.viewEnd) return;
+        const x1 = this.xForColumn(Math.max(range.start, this.viewStart), width);
+        const x2 = this.xForColumn(Math.min(range.end, this.viewEnd), width);
+        context.fillStyle = range.color;
+        context.fillRect(x1, rowTop, Math.max(1, x2 - x1), rowHeight);
+      });
+      context.restore();
+    }
+
+    drawOverviewRowBackground(context, rowIndex, yTop, yBottom, width) {
+      const style = this.rowStyle(rowIndex);
+      if (style.backgroundColor) {
+        context.fillStyle = style.backgroundColor;
+        context.fillRect(0, yTop, width, Math.max(1, yBottom - yTop));
+      }
+      style.backgroundRanges.forEach((range) => {
+        const x1 = range.start / Math.max(1, this.meta.totalColumns) * width;
+        const x2 = range.end / Math.max(1, this.meta.totalColumns) * width;
+        context.fillStyle = range.color;
+        context.fillRect(x1, yTop, Math.max(1, x2 - x1), Math.max(1, yBottom - yTop));
+      });
     }
 
     drawClockMarker(context, x, yTop, yBottom, edge, color) {
@@ -1235,7 +1588,17 @@
           const rowHeight = this.rowHeight(rowIndex);
           const rowTop = this.rowTop(rowIndex) - scrollTop;
           if (rowTop > height || rowTop + rowHeight < 0) return;
-          const color = COLORS[rowIndex % COLORS.length];
+          this.drawRowBackground(context, rowIndex, rowTop, rowHeight, width);
+        });
+      }
+      this.drawGridLines(context, width, height);
+      if (this.windowData) {
+        this.windowData.rows.forEach((rowResult) => {
+          const rowIndex = rowResult.index;
+          const rowHeight = this.rowHeight(rowIndex);
+          const rowTop = this.rowTop(rowIndex) - scrollTop;
+          if (rowTop > height || rowTop + rowHeight < 0) return;
+          const color = this.rowWaveColor(rowIndex);
           context.strokeStyle = '#dfe2e6';
           context.beginPath();
           context.moveTo(0, rowTop + rowHeight - 0.5);
@@ -1305,7 +1668,8 @@
       rows.forEach((row, rowIndex) => {
         const yTop = 5 + rowIndex * Math.max(6, (height - 10) / Math.max(1, rows.length));
         const yBottom = yTop + Math.max(4, (height - 14) / Math.max(1, rows.length) - 2);
-        const color = COLORS[rowIndex % COLORS.length];
+        const color = this.rowWaveColor(rowIndex);
+        this.drawOverviewRowBackground(context, rowIndex, yTop, yBottom, width);
         context.strokeStyle = color;
         context.lineWidth = 1;
         if (row.mode === 'digital') {
@@ -1635,6 +1999,7 @@
       this.cursorSignalEl.textContent = row ? row.name : '';
       this.cursorSignalEl.title = row ? row.name : '';
       this.updateAnalogControls();
+      this.updateStyleControls();
     }
 
     updateAnalogControls() {
@@ -1857,6 +2222,7 @@
         method: this.methodSelect.value,
         modes: this.modes,
         analogFormats: this.analogFormats,
+        rowStyles: this.rowStyles,
         lockedColumns: Array.from(this.lockedColumns),
         outputTitle: this.outputTitleInput.value.trim() || (this.meta.title + ' - 展示实例'),
         sourceWaveId: this.document.name,
@@ -1974,6 +2340,7 @@
         outputContent: this.outputContent,
         modes: Object.assign({}, this.modes),
         analogFormats: clone(this.analogFormats),
+        rowStyles: clone(this.rowStyles),
         lockedColumns: Array.from(this.lockedColumns),
         selectedPoint: this.selectedPoint ? Object.assign({}, this.selectedPoint) : null,
         outputTitle: this.outputTitleInput.value
@@ -1982,10 +2349,12 @@
 
     restoreSnapshot(snapshot) {
       if (!snapshot) return;
+      const previousRowStyles = JSON.stringify(this.rowStyles);
       this.simplified = clone(snapshot.simplified);
       this.outputContent = snapshot.outputContent;
       this.modes = Object.assign({}, snapshot.modes || this.modes);
       this.analogFormats = clone(snapshot.analogFormats || this.analogFormats);
+      this.rowStyles = clone(snapshot.rowStyles || this.rowStyles);
       this.lockedColumns = new Set(snapshot.lockedColumns || []);
       this.selectedPoint = snapshot.selectedPoint ? Object.assign({}, snapshot.selectedPoint) : null;
       this.outputTitleInput.value = snapshot.outputTitle || this.simplified.model.title;
@@ -1996,6 +2365,8 @@
       this.updateMetrics(this.simplified.metrics);
       this.updateHistoryButtons();
       this.scheduleWindowRequest();
+      this.scheduleBuild();
+      if (previousRowStyles !== JSON.stringify(this.rowStyles)) this.queueStyleSave();
       this.draw();
     }
 
@@ -2197,12 +2568,14 @@
         this.meta = await this.worker.call('prepare', { content: saved.content });
         this.modes = {};
         this.analogFormats = {};
+        this.rowStyles = {};
         this.meta.rows.forEach((row) => {
           this.modes[row.index] = row.mode;
           this.analogFormats[row.index] = normalizeAnalogFormat(
             row.analogFormat,
             row.detectedMode === 'analog' ? 'float' : 'unsigned'
           );
+          this.rowStyles[row.index] = normalizeRowStyle(row.style);
         });
         this.rowHeights = this.meta.rows.map(() => DEFAULT_ROW_HEIGHT);
         this.rebuildRowOffsets();

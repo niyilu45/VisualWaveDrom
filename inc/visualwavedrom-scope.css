@@ -91,6 +91,37 @@ body.scope-wave-view > #vim-help-modal {
   cursor: not-allowed;
 }
 
+.scope-style-controls {
+  flex: 1 1 100%;
+  flex-wrap: wrap;
+  padding-right: 0;
+  border-right: 0;
+}
+
+.scope-style-signal {
+  width: 82px;
+  overflow: hidden;
+  color: #2c5d94;
+  font-size: 11px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+}
+
+.scope-toolbar .scope-color-input {
+  width: 32px;
+  padding: 2px;
+  cursor: pointer;
+}
+
+.scope-toolbar .scope-color-input:disabled {
+  cursor: not-allowed;
+}
+
+.scope-style-controls #scope-style-columns {
+  width: 92px;
+  font-family: Consolas, "Courier New", monospace;
+}
+
 .scope-toolbar-label {
   color: #555b63;
   font-size: 11px;

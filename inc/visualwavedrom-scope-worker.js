@@ -90,6 +90,66 @@ function normalizeAnalogFormat(candidate, fallbackType) {
   return { type, bitWidth, fractionalBits };
 }
 
+function normalizeScopeColor(value) {
+  const color = String(value == null ? '' : value).trim().toLowerCase();
+  if (/^#[0-9a-f]{6}$/.test(color)) return color;
+  if (/^#[0-9a-f]{3}$/.test(color)) {
+    return '#' + color.slice(1).split('').map((character) => character + character).join('');
+  }
+  return '';
+}
+
+function overlayBackgroundRange(ranges, start, end, color) {
+  const next = [];
+  ranges.forEach((range) => {
+    if (range.end <= start || range.start >= end) {
+      next.push(range);
+      return;
+    }
+    if (range.start < start) {
+      next.push({ start: range.start, end: start, color: range.color });
+    }
+    if (range.end > end) {
+      next.push({ start: end, end: range.end, color: range.color });
+    }
+  });
+  if (color && end > start) next.push({ start, end, color });
+  next.sort((left, right) => left.start - right.start || left.end - right.end);
+  return next.reduce((merged, range) => {
+    const previous = merged[merged.length - 1];
+    if (previous && previous.color === range.color && previous.end === range.start) {
+      previous.end = range.end;
+    } else {
+      merged.push(range);
+    }
+    return merged;
+  }, []);
+}
+
+function normalizeBackgroundRanges(candidate, totalColumns) {
+  const maximum = Math.max(1, Math.ceil(finiteNumber(totalColumns) || 1));
+  let ranges = [];
+  (Array.isArray(candidate) ? candidate : []).forEach((range) => {
+    if (!range || typeof range !== 'object') return;
+    const color = normalizeScopeColor(range.color);
+    if (!color) return;
+    const start = clamp(Math.floor(finiteNumber(range.start) || 0), 0, maximum);
+    const end = clamp(Math.ceil(finiteNumber(range.end) || 0), start, maximum);
+    if (end <= start) return;
+    ranges = overlayBackgroundRange(ranges, start, end, color);
+  });
+  return ranges;
+}
+
+function normalizeRowStyle(candidate, totalColumns) {
+  const source = candidate && typeof candidate === 'object' ? candidate : {};
+  return {
+    waveColor: normalizeScopeColor(source.waveColor),
+    backgroundColor: normalizeScopeColor(source.backgroundColor),
+    backgroundRanges: normalizeBackgroundRanges(source.backgroundRanges, totalColumns)
+  };
+}
+
 function getAnalogFormat(source, row, rowIndex, hasSamples) {
   const signal = row.source || {};
   const localScope = signal.scope && typeof signal.scope === 'object' ? signal.scope : null;
@@ -1281,6 +1341,52 @@ function removeConnectionMetadata(source) {
   delete source.edge;
 }
 
+function mappedBackgroundRanges(ranges, columnMap) {
+  if (!Array.isArray(columnMap)) return ranges;
+  let mapped = [];
+  let rangeIndex = 0;
+  for (let index = 0; index < columnMap.length; index += 1) {
+    const sourceColumn = finiteNumber(columnMap[index]);
+    if (sourceColumn == null) continue;
+    while (rangeIndex < ranges.length && ranges[rangeIndex].end <= sourceColumn) {
+      rangeIndex += 1;
+    }
+    const range = ranges[rangeIndex];
+    const color = range && sourceColumn >= range.start && sourceColumn < range.end
+      ? range.color
+      : '';
+    if (color) mapped = overlayBackgroundRange(mapped, index, index + 1, color);
+  }
+  return mapped;
+}
+
+function applyRowStyle(target, candidate, totalColumns, columnMap) {
+  if (!target || typeof target !== 'object') return;
+  const style = normalizeRowStyle(candidate, totalColumns);
+  const hadScope = target.scope && typeof target.scope === 'object';
+  const scope = Object.assign({}, hadScope ? target.scope : {});
+  if (style.waveColor) scope.waveColor = style.waveColor;
+  else delete scope.waveColor;
+  if (style.backgroundColor) scope.backgroundColor = style.backgroundColor;
+  else delete scope.backgroundColor;
+  const ranges = mappedBackgroundRanges(style.backgroundRanges, columnMap);
+  if (ranges.length) scope.backgroundRanges = ranges;
+  else delete scope.backgroundRanges;
+  if (hadScope || Object.keys(scope).length) target.scope = scope;
+  else delete target.scope;
+}
+
+function buildStyledSource(payload) {
+  if (!activeSession) throw new Error('Scope session has not been prepared');
+  const source = cloneJson(activeSession.source);
+  const rowStyles = payload.rowStyles || {};
+  activeSession.rows.forEach((row) => {
+    const target = signalAtPath(source, row.path);
+    applyRowStyle(target, rowStyles[row.index], activeSession.totalColumns, null);
+  });
+  return JSON.stringify(source, null, 2);
+}
+
 function buildSimplifiedContent(model, options) {
   const source = cloneJson(activeSession.source);
   removeConnectionMetadata(source);
@@ -1323,6 +1429,12 @@ function buildSimplifiedContent(model, options) {
       delete target.scope.bitWidth;
       delete target.scope.fractionalBits;
     }
+    applyRowStyle(
+      target,
+      options.rowStyles && options.rowStyles[rowIndex],
+      activeSession.totalColumns,
+      model.columns
+    );
   });
   source.scopeInstance = {
     kind: 'VisualWaveDromScopeInstance',
@@ -1491,6 +1603,7 @@ function prepareResponse() {
       unit: row.unit,
       range: row.range,
       analogFormat: row.analogFormat,
+      style: normalizeRowStyle(row.source.scope, activeSession.totalColumns),
       sampleCount: row.samples ? row.samples.length : row.wave.length
     }))
   };
@@ -1510,6 +1623,8 @@ function handleRequest(message) {
       result = inspectCursor(request);
     } else if (request.type === 'snap') {
       result = snapCursor(request);
+    } else if (request.type === 'style-source') {
+      result = { content: buildStyledSource(request) };
     } else if (request.type === 'navigate') {
       result = navigateCursor(request);
     } else if (request.type === 'simplify') {
