@@ -15,11 +15,13 @@ http://127.0.0.1:4173/VisualWaveDrom.html
 
 ### Windows 启动
 
-BAT 会依次查找项目内的 `inc\node-runtime\node.exe`、系统 `PATH` 和 Node.js 常见安装目录。若电脑完全没有 Node.js，BAT 会询问是否从 [Node.js 官方发布源](https://nodejs.org/dist/)下载最新 LTS 便携运行环境，并校验官方 SHA-256 后安装到项目内部，不需要管理员权限。安装一次后可离线启动。
+BAT 直接启动项目内的 `bin\VisualWaveDrom-server.exe`。服务端、SQLite
+引擎和所需运行库已经包含在该静态程序中，不需要安装 Node.js、SQLite、Go，
+不需要管理员权限，也不需要联网。
 
-需要把工程发给无法联网的电脑时，请先在联网电脑上运行一次 BAT 完成便携环境下载，再把整个工程连同 `inc\node-runtime` 一起复制。该运行环境体积较大且与处理器架构相关，因此默认不提交到 Git。
-
-可在命令提示符运行 `VisualWaveDrom.bat --check-runtime`，仅检查 BAT 最终使用的 Node.js 路径和版本，不启动服务。
+复制工程到其他 Windows x64 电脑时，应保留整个 `bin` 目录。可在命令提示符运行
+`VisualWaveDrom.bat --check-runtime`，检查静态程序、内嵌 SQLite、HTML 和波形库路径，
+但不启动服务。
 
 HTML 文件名和默认波形库只需在 BAT 顶部配置：
 
@@ -32,19 +34,9 @@ set "WAVE_LIBRARY_RELATIVE_PATH=Wave\VisualWaveDrom-library\library.sqlite"
 
 ### Linux 启动
 
-Linux 服务模式需要 Node.js 18 或更高版本，以及支持 JSON 输出的 SQLite
-3.33 或更高版本。常见发行版可以执行：
-
-```bash
-# Debian / Ubuntu
-sudo apt install nodejs sqlite3
-
-# Fedora / RHEL
-sudo dnf install nodejs sqlite
-
-# Arch Linux
-sudo pacman -S nodejs sqlite
-```
+Linux x64 服务模式直接使用 `bin/VisualWaveDrom-server-linux-amd64`。该程序采用
+纯 Go SQLite 驱动并以 `CGO_ENABLED=0` 构建，不需要安装 Node.js、sqlite3、Go
+或 glibc。可以复制到使用 glibc 或 musl 的 Linux x64 系统中直接运行。
 
 首次运行：
 
@@ -54,7 +46,7 @@ chmod +x VisualWaveDrom.sh
 ```
 
 也可以始终使用 `bash VisualWaveDrom.sh`，不依赖脚本的可执行位。运行
-`./VisualWaveDrom.sh --check-runtime` 可以检查 Node.js、SQLite、HTML 和波形库路径，
+`./VisualWaveDrom.sh --check-runtime` 可以检查静态程序、内嵌 SQLite、HTML 和波形库路径，
 不会启动服务。服务器或 SSH 等没有图形桌面的环境使用：
 
 ```bash
@@ -63,10 +55,8 @@ chmod +x VisualWaveDrom.sh
 
 终端会打印访问地址；在浏览器中打开该地址，结束时按 `Ctrl+C` 停止服务。
 
-脚本优先使用 `VWD_NODE_EXE`、项目内 `inc/node-runtime/bin/node` 和系统
-`node`；SQLite 优先使用 `VWD_SQLITE_EXE`、项目内 `inc/sqlite/sqlite3` 和系统
-`sqlite3`。默认浏览器依次尝试 `xdg-open`、`gio open` 和 `sensible-browser`，
-Firefox 116 及以上受支持。
+脚本只启动项目内的 Linux x64 静态程序。默认浏览器依次尝试 `xdg-open`、
+`gio open` 和 `sensible-browser`，Firefox 116 及以上受支持。
 
 Linux 的 HTML 文件名和默认波形库路径在 `VisualWaveDrom.sh` 顶部配置：
 
@@ -86,7 +76,8 @@ WAVE_LIBRARY_RELATIVE_PATH="Wave/VisualWaveDrom-library/library.sqlite"
 
 ### 第 1 步：启动 VisualWaveDrom
 
-**怎么做：** 双击项目根目录中的 `VisualWaveDrom.bat`。第一次运行如果电脑没有 Node.js，按窗口提示下载便携运行环境；以后可以直接启动。
+**怎么做：** 双击项目根目录中的 `VisualWaveDrom.bat`。静态服务程序已随工程提供，
+第一次运行也不需要安装或下载其他软件。
 
 **看到什么：** 浏览器自动打开 VisualWaveDrom，左边是波形目录，中间是波形图和 JSON，右边是功能菜单与波形菜单。右侧显示 `波形库：库名称`，说明波形库已经载入。
 
@@ -248,20 +239,22 @@ WAVE_LIBRARY_RELATIVE_PATH="Wave/VisualWaveDrom-library/library.sqlite"
 
 ### 服务模式
 
-`VisualWaveDrom.js` 直接读写磁盘上的 SQLite 文件。
+项目内的静态 Go 服务程序直接读写磁盘上的 SQLite 文件。
 
 - 目录页只查询波形摘要，打开某张图时才读取该图的完整 JSON。
 - 修改波形时只更新对应数据库记录；目录和归属关系使用同一事务保存。
-- SQLite 使用索引和事务；数据库采用可独立复制的单文件日志模式，不依赖额外的 `-wal` 文件。
+- SQLite 引擎已嵌入静态程序，使用索引和事务；数据库采用可独立复制的单文件日志模式，
+  不依赖额外的 `-wal` 文件。
 - 每次写入保留波形修订号，用于发现完整页面与单图页面之间的同步冲突。
 - 功能菜单中的“导入波形库”用于切换 `Wave` 下不同的波形库文件夹。
 - 服务会记住最后一次成功打开的波形库；下次双击 BAT 时优先恢复该库。记录文件为 `Wave\.visualwavedrom-state.json`，它是本机状态，不需要随工程提交。
+- Windows x64 与 Linux x64 服务程序均由同一份 `server-go` 源码生成，API 和波形库格式一致。
 
 这是大型波形库、自动保存和 Word 单图链接的推荐模式。
 
 ### 直接打开 HTML
 
-直接双击 `VisualWaveDrom.html` 不需要 Node.js。页面会加载随项目提供的 SQLite WebAssembly 运行文件。
+直接双击 `VisualWaveDrom.html` 不需要启动本地服务。页面会加载随项目提供的 SQLite WebAssembly 运行文件。
 
 - “导入波形库”只接受标准 `.sqlite` 波形库文件。
 - “保存波形库”始终下载标准 `.sqlite` 文件。
@@ -704,17 +697,19 @@ JSON 面板提供格式化和导出功能。JSON 解析失败时，错误行左�
 
 ```text
 VisualWaveDrom.html      主页面
-VisualWaveDrom.js        本地服务
 VisualWaveDrom.bat       Windows 双击启动入口
 VisualWaveDrom.sh        Linux 启动入口
+bin/VisualWaveDrom-server.exe Windows x64 静态服务程序
+bin/VisualWaveDrom-server-linux-amd64 Linux x64 静态服务程序
+bin/SHA256SUMS.txt        两个平台程序的 SHA-256
+server-go/                静态服务源码、SQLite 数据层和测试
 inc/                     页面样式、应用逻辑和依赖库
-inc/node-runtime/        BAT 自动下载的便携 Node.js 运行环境（Git 忽略）
-inc/sqlite/              SQLite 官方 Windows 与浏览器 WebAssembly 运行文件
+inc/sqlite/              直接打开 HTML 使用的 SQLite WebAssembly 文件
 inc/visualwavedrom-vim.js Vim 键盘控制器
 import/                  行波形导入方案、数据文件和 Python 解析函数
 Wave/                    多个 SQLite 波形库
 tools/GenerateReadMeGifs.py README 示例动画生成脚本
-tools/InstallNodeRuntime.ps1 便携 Node.js 下载与 SHA-256 校验脚本
+tools/BuildGoServer.ps1   Windows/Linux x64 静态程序构建脚本
 ```
 
 每套波形库固定保存在 Windows 的 `Wave\<波形库名称>\library.sqlite`，或 Linux

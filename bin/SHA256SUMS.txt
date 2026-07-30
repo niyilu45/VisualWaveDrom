@@ -1,0 +1,2 @@
+c144a4d602a7742abdf79d3fc3aba212b9002aec2f5e7c88dfb27998d931c618  VisualWaveDrom-server.exe
+7bcadea7a5d862a7e596517a8dc8dafa21d083722ca88c35373fed46daee2ea5  VisualWaveDrom-server-linux-amd64

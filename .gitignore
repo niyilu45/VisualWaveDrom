@@ -3,5 +3,3 @@ node_modules/
 __pycache__/
 *.pyc
 Wave/.visualwavedrom-state.json
-inc/node-runtime/*
-!inc/node-runtime/README.txt
