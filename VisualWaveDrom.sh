@@ -62,17 +62,19 @@ if [[ "${1:-}" == "--check-runtime" ]]; then
     --check-runtime
 fi
 
-LAUNCH_ARGS=()
 if (( $# > 0 )) && [[ "$1" != --* ]]; then
-  LAUNCH_ARGS+=(--open-url "$1")
+  OPEN_URL="$1"
   shift
+  set -- --open-url "$OPEN_URL" "$@"
 fi
 if [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
   HAS_NO_OPEN=0
   for argument in "$@"; do
     [[ "$argument" == "--no-open" ]] && HAS_NO_OPEN=1
   done
-  (( HAS_NO_OPEN == 0 )) && LAUNCH_ARGS+=(--no-open)
+  if (( HAS_NO_OPEN == 0 )); then
+    set -- --no-open "$@"
+  fi
 fi
 
 cd -- "$SCRIPT_DIR" || exit 1
@@ -81,5 +83,4 @@ exec "$SERVER_EXE" \
   --html "$HTML_FILE_NAME" \
   --library "$WAVE_LIBRARY_PATH" \
   --protocol-handler "$SCRIPT_PATH" \
-  "${LAUNCH_ARGS[@]}" \
   "$@"
