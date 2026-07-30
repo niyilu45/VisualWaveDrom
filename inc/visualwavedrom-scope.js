@@ -1,10 +1,12 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260730-scope-v13';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260730-scope-v15';
   const DEFAULT_ROW_HEIGHT = 42;
   const MIN_ANALOG_ROW_HEIGHT = 28;
   const MAX_ANALOG_ROW_HEIGHT = 480;
+  const FULL_RESOLUTION_TARGET_LIMIT = 2000;
+  const LARGE_WAVE_TARGET_POINTS = 1000;
   const AXIS_HEIGHT = 38;
   const OVERVIEW_HEIGHT = 76;
   const MAX_HISTORY = 100;
@@ -32,6 +34,13 @@
 
   function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
+  }
+
+  function initialTargetPointCount(totalColumns) {
+    const total = Math.max(2, Math.floor(Number(totalColumns) || 2));
+    return total <= FULL_RESOLUTION_TARGET_LIMIT
+      ? total
+      : Math.min(total, LARGE_WAVE_TARGET_POINTS);
   }
 
   function escapeHtml(value) {
@@ -262,6 +271,10 @@
       this.windowRequestSequence = 0;
       this.buildSequence = 0;
       this.drag = null;
+      this.overviewDrag = null;
+      this.overviewWindowRequestFrame = 0;
+      this.overviewWindowRequestInFlight = false;
+      this.overviewWindowRequestQueued = false;
       this.rowResize = null;
       this.presentationDraftDirty = false;
       this.dataDraftDirty = false;
@@ -309,7 +322,7 @@
       this.titleEl.textContent = this.meta.title;
       document.title = this.meta.title + ' - 示波器';
       this.targetInput.max = String(Math.max(2, this.meta.totalColumns));
-      this.targetInput.value = String(Math.min(100, Math.max(2, this.meta.totalColumns)));
+      this.targetInput.value = String(initialTargetPointCount(this.meta.totalColumns));
       this.rangeStartInput.value = '1';
       this.rangeEndInput.value = String(this.meta.totalColumns);
       this.renderSignalRows();
@@ -764,7 +777,10 @@
       this.plotCanvas.addEventListener('pointerup', (event) => this.onPlotPointerUp(event));
       this.plotCanvas.addEventListener('pointercancel', (event) => this.cancelPlotDrag(event));
       this.plotCanvas.addEventListener('wheel', (event) => this.onPlotWheel(event), { passive: false });
-      this.overviewCanvas.addEventListener('pointerdown', (event) => this.onOverviewPointer(event));
+      this.overviewCanvas.addEventListener('pointerdown', (event) => this.onOverviewPointerDown(event));
+      this.overviewCanvas.addEventListener('pointermove', (event) => this.onOverviewPointerMove(event));
+      this.overviewCanvas.addEventListener('pointerup', (event) => this.finishOverviewDrag(event, false));
+      this.overviewCanvas.addEventListener('pointercancel', (event) => this.finishOverviewDrag(event, true));
       this.outputTitleInput.addEventListener('input', () => this.scheduleBuild());
 
       global.addEventListener('keydown', (event) => {
@@ -805,6 +821,9 @@
       global.addEventListener('beforeunload', this.handleBeforeUnload);
       global.addEventListener('pagehide', () => {
         if (this.cursorReadoutFrame) global.cancelAnimationFrame(this.cursorReadoutFrame);
+        if (this.overviewWindowRequestFrame) {
+          global.cancelAnimationFrame(this.overviewWindowRequestFrame);
+        }
         this.worker.close();
       }, { once: true });
     }
@@ -2004,9 +2023,16 @@
       const span = this.viewEnd - this.viewStart;
       const minimum = Math.min(1, this.meta.totalColumns);
       const nextSpan = clamp(span * factor, minimum, this.meta.totalColumns);
-      const anchor = anchorColumn == null ? (this.viewStart + this.viewEnd) / 2 : anchorColumn;
-      const ratio = span > 0 ? (anchor - this.viewStart) / span : 0.5;
-      let start = anchor - nextSpan * ratio;
+      const activeCursorColumn = this.activeCursorColumn();
+      const cursorCenter = activeCursorColumn == null ? NaN : Number(activeCursorColumn);
+      let start;
+      if (Number.isFinite(cursorCenter)) {
+        start = cursorCenter - nextSpan / 2;
+      } else {
+        const anchor = anchorColumn == null ? (this.viewStart + this.viewEnd) / 2 : anchorColumn;
+        const ratio = span > 0 ? (anchor - this.viewStart) / span : 0.5;
+        start = anchor - nextSpan * ratio;
+      }
       start = clamp(start, 0, Math.max(0, this.meta.totalColumns - nextSpan));
       this.viewStart = start;
       this.viewEnd = start + nextSpan;
@@ -2222,16 +2248,96 @@
       this.draw();
     }
 
-    onOverviewPointer(event) {
+    scheduleOverviewWindowRequest() {
+      this.overviewWindowRequestQueued = true;
+      if (this.overviewWindowRequestFrame || this.overviewWindowRequestInFlight) return;
+      this.overviewWindowRequestFrame = global.requestAnimationFrame(() => {
+        this.overviewWindowRequestFrame = 0;
+        void this.flushOverviewWindowRequest();
+      });
+    }
+
+    async flushOverviewWindowRequest() {
+      if (this.overviewWindowRequestInFlight) return;
+      this.overviewWindowRequestQueued = false;
+      this.overviewWindowRequestInFlight = true;
+      try {
+        await this.requestWindow();
+      } finally {
+        this.overviewWindowRequestInFlight = false;
+        if (this.overviewWindowRequestQueued) this.scheduleOverviewWindowRequest();
+      }
+    }
+
+    updateOverviewDrag(clientX) {
+      if (!this.overviewDrag) return false;
       const rect = this.overviewCanvas.getBoundingClientRect();
-      const ratio = clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
-      const span = this.viewEnd - this.viewStart;
-      const center = ratio * this.meta.totalColumns;
-      const start = clamp(center - span / 2, 0, Math.max(0, this.meta.totalColumns - span));
+      const ratio = clamp((clientX - rect.left) / Math.max(1, rect.width), 0, 1);
+      const totalColumns = this.meta.totalColumns;
+      const span = Math.min(this.overviewDrag.span, totalColumns);
+      const pointerColumn = ratio * totalColumns;
+      const start = clamp(
+        pointerColumn - this.overviewDrag.offsetColumns,
+        0,
+        Math.max(0, totalColumns - span)
+      );
+      if (Math.abs(start - this.viewStart) < 1e-9) return false;
       this.viewStart = start;
       this.viewEnd = start + span;
-      this.scheduleWindowRequest();
+      this.scheduleOverviewWindowRequest();
       this.draw();
+      return true;
+    }
+
+    onOverviewPointerDown(event) {
+      if (!this.meta || event.button !== 0) return;
+      event.preventDefault();
+      const rect = this.overviewCanvas.getBoundingClientRect();
+      const totalColumns = Math.max(1, this.meta.totalColumns);
+      const span = Math.min(this.viewEnd - this.viewStart, totalColumns);
+      const pointerColumn = clamp(
+        (event.clientX - rect.left) / Math.max(1, rect.width),
+        0,
+        1
+      ) * totalColumns;
+      const insideWindow = pointerColumn >= this.viewStart && pointerColumn <= this.viewEnd;
+      this.overviewDrag = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        span,
+        offsetColumns: insideWindow ? pointerColumn - this.viewStart : span / 2,
+        moved: false
+      };
+      this.overviewCanvas.classList.add('dragging-window');
+      try { this.overviewCanvas.setPointerCapture(event.pointerId); } catch (_error) {}
+      if (!insideWindow) this.updateOverviewDrag(event.clientX);
+      this.setStatus('拖动全局预览框定位波形');
+    }
+
+    onOverviewPointerMove(event) {
+      if (!this.overviewDrag || this.overviewDrag.pointerId !== event.pointerId) return;
+      event.preventDefault();
+      if (Math.abs(event.clientX - this.overviewDrag.startX) > 2) {
+        this.overviewDrag.moved = true;
+      }
+      this.updateOverviewDrag(event.clientX);
+    }
+
+    finishOverviewDrag(event, canceled) {
+      if (!this.overviewDrag || this.overviewDrag.pointerId !== event.pointerId) return;
+      if (!canceled) this.updateOverviewDrag(event.clientX);
+      try { this.overviewCanvas.releasePointerCapture(event.pointerId); } catch (_error) {}
+      const moved = this.overviewDrag.moved;
+      this.overviewDrag = null;
+      this.overviewCanvas.classList.remove('dragging-window');
+      this.scheduleOverviewWindowRequest();
+      this.draw();
+      if (moved) {
+        this.setStatus(
+          '当前窗口：第 ' + (Math.floor(this.viewStart) + 1)
+          + '-' + Math.ceil(this.viewEnd) + ' 列'
+        );
+      }
     }
 
     toggleCursorMode() {
@@ -3006,7 +3112,7 @@
         Math.max(0, this.meta.rows.length - 1)
       );
       this.targetInput.max = String(Math.max(2, this.meta.totalColumns));
-      this.targetInput.value = String(Math.min(100, Math.max(2, this.meta.totalColumns)));
+      this.targetInput.value = String(initialTargetPointCount(this.meta.totalColumns));
       this.rangeStartInput.value = '1';
       this.rangeEndInput.value = String(this.meta.totalColumns);
       this.selectedPoint = null;

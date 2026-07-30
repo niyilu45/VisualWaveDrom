@@ -337,6 +337,7 @@ function getDefaultJson() {
       resizeObserver: null
     };
     let pendingFormatRenderCallbacks = [];
+    let pendingFormatCompletionCallbacks = [];
     let groupPickActive = false;
     let groupPickStartIndex = -1;
     let wavePaintModeActive = false;
@@ -2931,7 +2932,10 @@ ${lines.join('\n')}`;
 
     // Toolbar actions may update only a small JSON fragment. Normalize the full source
     // once the action finishes, while coalescing formatting and rendering into one pass.
-    function scheduleFormatAfterWaveChange() {
+    function scheduleFormatAfterWaveChange(onComplete) {
+      if (typeof onComplete === 'function') {
+        pendingFormatCompletionCallbacks.push(onComplete);
+      }
       if (formatAfterWaveChangeRaf !== null) return;
       if (renderWaveformRaf !== null) {
         cancelAnimationFrame(renderWaveformRaf);
@@ -2945,7 +2949,16 @@ ${lines.join('\n')}`;
       }
       const runFormat = () => {
         formatAfterWaveChangeRaf = null;
-        formatEditorJson({ skipUndo: true, skipFocus: true, rebaseUndoSource: true });
+        const formatSucceeded = formatEditorJson({
+          skipUndo: true,
+          skipFocus: true,
+          rebaseUndoSource: true
+        });
+        const completionCallbacks = pendingFormatCompletionCallbacks;
+        pendingFormatCompletionCallbacks = [];
+        completionCallbacks.forEach((callback) => {
+          try { callback(formatSucceeded); } catch (_e) { /* ignore */ }
+        });
         const callbacks = pendingFormatRenderCallbacks;
         pendingFormatRenderCallbacks = [];
         scheduleRenderWaveform(editor.value, callbacks.length
@@ -13760,15 +13773,52 @@ ${lines.join('\n')}`;
 
       const newText = JSON.stringify(parsed, null, 2);
       if (newText === editor.value) {
-        return { changed: false, count: prepared.length, createdCount, extendedColumns };
+        return {
+          changed: false,
+          count: prepared.length,
+          createdCount,
+          extendedColumns,
+          formatPromise: Promise.resolve(true)
+        };
       }
+      let resolveFormat;
+      const formatPromise = new Promise((resolve) => {
+        resolveFormat = resolve;
+      });
       const selectionStart = editor.selectionStart;
       const selectionEnd = editor.selectionEnd;
       exitWavePaintMode('row-import');
       pushUndoBeforeChange(newText);
       applyEditorChange(newText, selectionStart, selectionEnd, { skipFocus: true });
-      scheduleFormatAfterWaveChange();
-      return { changed: true, count: prepared.length, createdCount, extendedColumns };
+      scheduleFormatAfterWaveChange(resolveFormat);
+      return {
+        changed: true,
+        count: prepared.length,
+        createdCount,
+        extendedColumns,
+        formatPromise
+      };
+    }
+
+    async function persistImportedWaveRows(result) {
+      const formatSucceeded = await result.formatPromise;
+      if (!formatSucceeded) throw new Error('导入后的 JSON 格式化失败');
+
+      flushPersistEditorJson();
+      flushPersistSavedTags();
+
+      if (waveLibraryServerMode) {
+        clearTimeout(waveLibrarySaveTimer);
+        waveLibrarySaveTimer = null;
+        const pendingMarker = readPendingWaveLibrarySave();
+        const saved = await flushScheduledWaveLibraryServerSave(pendingMarker);
+        if (!saved) throw new Error('波形库保存失败');
+      } else if (browserWaveLibraryReady && browserWaveLibraryStore) {
+        clearTimeout(browserWaveLibrarySaveTimer);
+        browserWaveLibrarySaveTimer = null;
+        const saved = await flushBrowserWaveLibrarySave({ force: true });
+        if (!saved) throw new Error('浏览器 SQLite 波形库保存失败');
+      }
     }
 
     async function executeRowImportScheme(scheme) {
@@ -13802,6 +13852,7 @@ ${lines.join('\n')}`;
           throw new Error('解析期间波形图或波形库已切换，请重新导入');
         }
         const result = applyImportedWaveRows(payload);
+        await persistImportedWaveRows(result);
         rowImportSchemeBusy = false;
         if (rowImportSchemeModal) rowImportSchemeModal.hidden = true;
         setRowImportSchemeHint('', false);
@@ -14146,7 +14197,7 @@ ${lines.join('\n')}`;
       }
     }
 
-    function confirmRowImportPreview() {
+    async function confirmRowImportPreview() {
       if (rowImportSchemeBusy || !rowImportPreviewPayload) return;
       const signalName = String(rowImportSignalName && rowImportSignalName.value || '').trim();
       const update = rowImportPreviewPayload.updates && rowImportPreviewPayload.updates[0];
@@ -14156,8 +14207,14 @@ ${lines.join('\n')}`;
         updateRowImportActionState();
         return;
       }
+      rowImportSchemeBusy = true;
+      if (rowImportConfirmBtn) rowImportConfirmBtn.textContent = '正在保存…';
+      setRowImportSchemeHint('正在导入并保存波形数据…', false);
+      updateRowImportActionState();
+      vwdDebugLog('row-import', { phase: 'confirm-start', signalName });
       try {
         const result = applyImportedWaveRows(rowImportPreviewPayload, { createMissing: true });
+        await persistImportedWaveRows(result);
         const createdMessage = result.createdCount
           ? '，其中新增 ' + result.createdCount + ' 行'
           : '';
@@ -14176,12 +14233,17 @@ ${lines.join('\n')}`;
           createdCount: result.createdCount,
           extendedColumns: result.extendedColumns
         });
+        rowImportSchemeBusy = false;
+        if (rowImportConfirmBtn) rowImportConfirmBtn.textContent = '确认导入';
         closeRowImportSchemeModal();
       } catch (error) {
+        rowImportSchemeBusy = false;
+        if (rowImportConfirmBtn) rowImportConfirmBtn.textContent = '确认导入';
         const message = error && error.message ? error.message : String(error);
         setRowImportSchemeHint(message, true);
         setStatus(false, '导入波形数据失败：' + message);
         vwdDebugLog('row-import', { phase: 'confirm-error', message });
+        updateRowImportActionState();
       }
     }
 

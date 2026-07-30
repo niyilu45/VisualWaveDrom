@@ -933,7 +933,7 @@ function chooseColumns(
         activeSession.totalColumns
       )
       : row;
-    if (includeTransitions) {
+    if (includeTransitions && mode !== 'analog') {
       row.transitions.forEach((column) => {
         if (column < rangeStart || column >= rangeEnd) return;
         const segment = segmentAt(row, column + 1e-7);
@@ -1617,6 +1617,8 @@ function createSimplifiedModel(payload) {
   let digitalTransitions = 0;
   let busTransitions = 0;
   activeSession.rows.forEach((row) => {
+    const mode = modes[row.index] || row.mode;
+    if (mode === 'analog') return;
     row.transitions.forEach((column) => {
       if (column < rangeStart || column >= rangeEnd) return;
       const segment = segmentAt(row, column + 1e-7);

@@ -593,7 +593,12 @@ body.scope-row-resizing * {
 
 .scope-overview {
   border-top: 1px solid #c9cdd2;
-  cursor: crosshair;
+  cursor: grab;
+  touch-action: none;
+}
+
+.scope-overview.dragging-window {
+  cursor: grabbing;
 }
 
 .scope-editor-strip {
