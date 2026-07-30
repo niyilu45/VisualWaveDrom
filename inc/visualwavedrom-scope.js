@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260730-scope-v8';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260730-scope-v9';
   const DEFAULT_ROW_HEIGHT = 84;
   const MIN_ANALOG_ROW_HEIGHT = 56;
   const MAX_ANALOG_ROW_HEIGHT = 480;
@@ -1443,16 +1443,17 @@
         this.setActiveCursor(hitCursor, true);
         return;
       }
-      if (this.cursorMode) {
-        this.setActiveCursorPosition(column);
-        return;
-      }
       const absoluteY = y + this.plotViewport.scrollTop;
       const rowIndex = clamp(
         this.rowIndexAtOffset(absoluteY),
         0,
         this.meta.rows.length - 1
       );
+      if (this.cursorMode) {
+        this.setActiveCursorRow(rowIndex);
+        void this.snapActiveCursorPosition(column, rowIndex);
+        return;
+      }
       const rowHeight = this.rowHeight(rowIndex);
       const rowLocalY = absoluteY - this.rowTop(rowIndex);
       const selectPoint = this.simplified && (!this.showOriginal || rowLocalY >= rowHeight / 2)
@@ -1571,6 +1572,40 @@
       this.updateMeasurements();
       void this.updateCursorReadout();
       this.draw();
+    }
+
+    async snapActiveCursorPosition(column, rowIndex) {
+      if (!this.meta.rows.length) return;
+      const index = clamp(
+        Math.floor(Number(rowIndex) || 0),
+        0,
+        this.meta.rows.length - 1
+      );
+      const row = this.meta.rows[index];
+      const sequence = ++this.cursorNavigationSequence;
+      try {
+        const result = await this.worker.call('snap', {
+          rowIndex: index,
+          column,
+          mode: this.modes[index] || row.mode,
+          analogFormat: this.analogFormats[index]
+        });
+        if (sequence !== this.cursorNavigationSequence) return;
+        this.setActiveCursorPosition(result.column);
+        this.setStatus(
+          this.activeCursor + ' 已吸附到 ' + row.name + ' 的边沿 '
+          + this.formatTime(result.column)
+        );
+      } catch (error) {
+        if (sequence !== this.cursorNavigationSequence) return;
+        this.log('scope-cursor', {
+          phase: 'snap-error',
+          rowIndex: index,
+          column,
+          message: error.message || String(error)
+        });
+        this.setStatus('游标边沿吸附失败：' + (error.message || String(error)), true);
+      }
     }
 
     setActiveCursorRow(rowIndex) {

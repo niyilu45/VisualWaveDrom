@@ -959,6 +959,22 @@ function edgeColumn(row, column, direction) {
   return low > 0 ? transitions[low - 1] : null;
 }
 
+function nearestSortedColumn(columns, column) {
+  if (!columns || !columns.length) return null;
+  let low = 0;
+  let high = columns.length;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (columns[middle] < column) low = middle + 1;
+    else high = middle;
+  }
+  if (low <= 0) return columns[0];
+  if (low >= columns.length) return columns[columns.length - 1];
+  const before = columns[low - 1];
+  const after = columns[low];
+  return Math.abs(column - before) <= Math.abs(after - column) ? before : after;
+}
+
 function segmentMatchesValue(segment, mode, target) {
   if (mode === 'bus') return String(segment.value == null ? '' : segment.value) === target;
   return normalizedDigitalState(segment.state, 'x') === target;
@@ -1042,6 +1058,53 @@ function conditionSegmentColumn(row, column, direction, mode, testCondition) {
 function analogSampleColumn(sampleIndex, sampleCount, totalColumns) {
   if (sampleCount <= 1 || totalColumns <= 1) return 0;
   return sampleIndex * (totalColumns - 1) / (sampleCount - 1);
+}
+
+function snapCursor(payload) {
+  if (!activeSession) throw new Error('Scope session has not been prepared');
+  const rowIndex = clamp(
+    Math.floor(finiteNumber(payload.rowIndex) || 0),
+    0,
+    Math.max(0, activeSession.rows.length - 1)
+  );
+  const row = activeSession.rows[rowIndex];
+  if (!row) return { rowIndex: 0, column: 0, source: 'column' };
+  const maximum = Math.max(0, activeSession.totalColumns - 1e-7);
+  const column = clamp(finiteNumber(payload.column) || 0, 0, maximum);
+  const mode = payload.mode || row.mode;
+  const candidates = [];
+
+  if (mode === 'analog') {
+    const analogRow = analogRowForFormat(row, payload.analogFormat, activeSession.totalColumns);
+    const sampleIndex = sampleIndexForColumn(analogRow, column, activeSession.totalColumns);
+    candidates.push({
+      column: analogSampleColumn(sampleIndex, analogRow.samples.length, activeSession.totalColumns),
+      source: 'sample'
+    });
+  } else {
+    const transition = nearestSortedColumn(row.transitions, column);
+    if (transition != null) candidates.push({ column: transition, source: 'transition' });
+  }
+
+  candidates.push({
+    column: clamp(Math.round(column), 0, Math.max(0, activeSession.totalColumns - 1)),
+    source: 'column'
+  });
+  const valid = candidates.filter((candidate) => (
+    Number.isFinite(candidate.column)
+    && candidate.column >= 0
+    && candidate.column <= maximum
+  ));
+  valid.sort((left, right) => (
+    Math.abs(left.column - column) - Math.abs(right.column - column)
+  ));
+  const selected = valid[0] || { column: 0, source: 'column' };
+  return {
+    rowIndex,
+    requestedColumn: column,
+    column: selected.column,
+    source: selected.source
+  };
 }
 
 function conditionAnalogColumn(row, column, direction, testCondition, analogFormat) {
@@ -1445,6 +1508,8 @@ function handleRequest(message) {
       result = createWindow(request);
     } else if (request.type === 'inspect') {
       result = inspectCursor(request);
+    } else if (request.type === 'snap') {
+      result = snapCursor(request);
     } else if (request.type === 'navigate') {
       result = navigateCursor(request);
     } else if (request.type === 'simplify') {
