@@ -1,14 +1,24 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260730-scope-v10';
-  const DEFAULT_ROW_HEIGHT = 84;
-  const MIN_ANALOG_ROW_HEIGHT = 56;
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260730-scope-v11';
+  const DEFAULT_ROW_HEIGHT = 42;
+  const MIN_ANALOG_ROW_HEIGHT = 28;
   const MAX_ANALOG_ROW_HEIGHT = 480;
   const AXIS_HEIGHT = 38;
   const OVERVIEW_HEIGHT = 76;
   const MAX_HISTORY = 100;
-  const COLORS = ['#07853d', '#0097a7', '#d66b00', '#cf2f7b', '#b3261e', '#536dfe'];
+  const COLOR_PRESETS = [
+    { name: '绿色', value: '#07853d' },
+    { name: '青色', value: '#0097a7' },
+    { name: '橙色', value: '#d66b00' },
+    { name: '洋红', value: '#cf2f7b' },
+    { name: '红色', value: '#b3261e' },
+    { name: '蓝色', value: '#536dfe' },
+    { name: '紫色', value: '#7b3fc6' },
+    { name: '黑色', value: '#25282d' }
+  ];
+  const COLORS = COLOR_PRESETS.map((preset) => preset.value);
 
   function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
@@ -232,6 +242,7 @@
       this.cursorInspectSequence = 0;
       this.cursorNavigationSequence = 0;
       this.selectedPoint = null;
+      this.columnSelection = null;
       this.lockedColumns = new Set();
       this.undoStack = [];
       this.redoStack = [];
@@ -302,6 +313,14 @@
       const root = document.createElement('div');
       root.className = 'scope-app';
       root.id = 'scope-app';
+      const waveColorPresetButtons = COLOR_PRESETS.map((preset) => `
+        <button type="button" class="scope-color-preset"
+            data-scope-wave-color="${preset.value}"
+            style="--scope-preset-color:${preset.value}"
+            title="${escapeHtml(preset.name)}"
+            aria-label="波形颜色：${escapeHtml(preset.name)}"
+            aria-pressed="false"></button>
+      `).join('');
       root.innerHTML = `
         <header class="scope-toolbar">
           <div class="scope-title-block">
@@ -359,10 +378,9 @@
           <div class="scope-toolbar-group scope-style-controls" aria-label="波形显示样式">
             <span class="scope-toolbar-label">行样式</span>
             <span class="scope-style-signal" id="scope-style-signal"></span>
-            <label>波形
-              <input type="color" class="scope-color-input" id="scope-wave-color"
-                  aria-label="波形颜色" value="#07853d">
-            </label>
+            <span class="scope-toolbar-label">波形</span>
+            <div class="scope-color-presets" id="scope-wave-color-presets"
+                role="group" aria-label="波形预设颜色">${waveColorPresetButtons}</div>
             <button type="button" class="scope-icon-btn scope-small-icon" id="scope-wave-color-reset"
                 title="恢复自动波形颜色" aria-label="恢复自动波形颜色">↺</button>
             <label>整行背景
@@ -497,7 +515,7 @@
       this.analogWidthInput = root.querySelector('#scope-analog-width');
       this.analogFractionInput = root.querySelector('#scope-analog-fraction');
       this.styleSignalEl = root.querySelector('#scope-style-signal');
-      this.waveColorInput = root.querySelector('#scope-wave-color');
+      this.waveColorPresets = root.querySelector('#scope-wave-color-presets');
       this.waveColorResetButton = root.querySelector('#scope-wave-color-reset');
       this.rowBackgroundInput = root.querySelector('#scope-row-background');
       this.rowBackgroundClearButton = root.querySelector('#scope-row-background-clear');
@@ -560,7 +578,11 @@
       this.analogTypeSelect.addEventListener('change', () => this.applyAnalogFormatControls());
       this.analogWidthInput.addEventListener('change', () => this.applyAnalogFormatControls());
       this.analogFractionInput.addEventListener('change', () => this.applyAnalogFormatControls());
-      this.waveColorInput.addEventListener('change', () => this.applyWaveColor());
+      this.waveColorPresets.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-scope-wave-color]');
+        if (!button || button.disabled) return;
+        this.applyWaveColor(button.dataset.scopeWaveColor);
+      });
       this.waveColorResetButton.addEventListener('click', () => this.resetWaveColor());
       this.rowBackgroundInput.addEventListener('change', () => this.applyRowBackground());
       this.rowBackgroundClearButton.addEventListener('click', () => this.clearRowBackground());
@@ -646,16 +668,16 @@
         this.positionPlotCanvas();
         this.scheduleWindowRequest();
       }, { passive: true });
-      this.signalScroll.addEventListener('scroll', () => {
-        if (Math.abs(this.plotViewport.scrollTop - this.signalScroll.scrollTop) > 1) {
-          this.plotViewport.scrollTop = this.signalScroll.scrollTop;
-        }
-      }, { passive: true });
+      this.signalScroll.addEventListener('wheel', (event) => {
+        if (event.ctrlKey || event.metaKey || event.shiftKey) return;
+        event.preventDefault();
+        this.scrollPlotVertically(event.deltaY, event.deltaMode);
+      }, { passive: false });
 
       this.plotCanvas.addEventListener('pointerdown', (event) => this.onPlotPointerDown(event));
       this.plotCanvas.addEventListener('pointermove', (event) => this.onPlotPointerMove(event));
       this.plotCanvas.addEventListener('pointerup', (event) => this.onPlotPointerUp(event));
-      this.plotCanvas.addEventListener('pointercancel', () => { this.drag = null; });
+      this.plotCanvas.addEventListener('pointercancel', (event) => this.cancelPlotDrag(event));
       this.plotCanvas.addEventListener('wheel', (event) => this.onPlotWheel(event), { passive: false });
       this.overviewCanvas.addEventListener('pointerdown', (event) => this.onOverviewPointer(event));
       this.outputTitleInput.addEventListener('input', () => this.scheduleBuild());
@@ -788,8 +810,11 @@
     updateStyleControls() {
       if (!this.styleSignalEl) return;
       const row = this.meta && this.meta.rows[this.activeCursorRow];
+      const waveColorButtons = Array.from(
+        this.waveColorPresets.querySelectorAll('[data-scope-wave-color]')
+      );
       const controls = [
-        this.waveColorInput,
+        ...waveColorButtons,
         this.waveColorResetButton,
         this.rowBackgroundInput,
         this.rowBackgroundClearButton,
@@ -802,6 +827,10 @@
       controls.forEach((control) => { control.disabled = !row; });
       if (!row) {
         this.styleSignalEl.textContent = '';
+        waveColorButtons.forEach((button) => {
+          button.classList.remove('active');
+          button.setAttribute('aria-pressed', 'false');
+        });
         return;
       }
       const style = this.rowStyle(row.index);
@@ -811,7 +840,12 @@
       }
       this.styleSignalEl.textContent = row.name;
       this.styleSignalEl.title = row.name;
-      this.waveColorInput.value = this.rowWaveColor(row.index);
+      const effectiveWaveColor = this.rowWaveColor(row.index);
+      waveColorButtons.forEach((button) => {
+        const active = button.dataset.scopeWaveColor === effectiveWaveColor;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-pressed', String(active));
+      });
       this.waveColorResetButton.disabled = !style.waveColor;
       this.rowBackgroundInput.value = style.backgroundColor || '#f3f7fc';
       this.rowBackgroundClearButton.disabled = !style.backgroundColor;
@@ -851,8 +885,8 @@
       this.setStatus(message);
     }
 
-    applyWaveColor() {
-      const color = normalizeScopeColor(this.waveColorInput.value);
+    applyWaveColor(presetColor) {
+      const color = normalizeScopeColor(presetColor);
       if (!color) return;
       const row = this.meta.rows[this.activeCursorRow];
       this.changeRowStyle((style) => { style.waveColor = color; }, '已设置 ' + row.name + ' 的波形颜色');
@@ -1569,6 +1603,31 @@
       });
     }
 
+    drawColumnSelection(context, width, height) {
+      const selection = this.columnSelection;
+      if (this.cursorMode || !selection || !this.meta.rows[selection.rowIndex]) return;
+      const rowTop = this.rowTop(selection.rowIndex) - this.plotViewport.scrollTop;
+      const rowHeight = this.rowHeight(selection.rowIndex);
+      if (rowTop >= height || rowTop + rowHeight <= 0) return;
+      if (selection.end <= this.viewStart || selection.start >= this.viewEnd) return;
+      const x1 = clamp(this.xForColumn(selection.start, width), 0, width);
+      const x2 = clamp(this.xForColumn(selection.end, width), 0, width);
+      const left = Math.min(x1, x2);
+      const right = Math.max(x1, x2);
+      context.save();
+      context.fillStyle = 'rgba(47, 115, 191, 0.16)';
+      context.fillRect(left, rowTop, Math.max(1, right - left), rowHeight);
+      context.strokeStyle = '#2f73bf';
+      context.lineWidth = 1.5;
+      context.strokeRect(
+        left + 0.75,
+        rowTop + 0.75,
+        Math.max(0, right - left - 1.5),
+        Math.max(0, rowHeight - 1.5)
+      );
+      context.restore();
+    }
+
     draw() {
       if (!this.meta || !this.plotViewport.clientWidth) return;
       this.drawAxis();
@@ -1651,6 +1710,7 @@
           }
         });
       }
+      this.drawColumnSelection(context, width, height);
       this.drawCursors(context, width, height);
       this.drawOverview();
     }
@@ -1793,48 +1853,132 @@
       if (event.shiftKey) {
         event.preventDefault();
         this.pan(event.deltaY / Math.max(1, this.plotCanvas.clientWidth) * (this.viewEnd - this.viewStart));
+        return;
+      }
+      event.preventDefault();
+      this.scrollPlotVertically(event.deltaY, event.deltaMode);
+    }
+
+    scrollPlotVertically(deltaY, deltaMode) {
+      const unit = deltaMode === 1
+        ? 16
+        : (deltaMode === 2 ? Math.max(1, this.plotViewport.clientHeight) : 1);
+      this.plotViewport.scrollTop += Number(deltaY || 0) * unit * 0.5;
+    }
+
+    columnIndexForX(x, width) {
+      return clamp(
+        Math.floor(this.columnForX(x, width)),
+        0,
+        Math.max(0, this.meta.totalColumns - 1)
+      );
+    }
+
+    updateColumnSelection(rowIndex, anchorColumn, currentColumn) {
+      const start = Math.min(anchorColumn, currentColumn);
+      const end = Math.max(anchorColumn, currentColumn) + 1;
+      this.columnSelection = { rowIndex, start, end };
+      if (this.styleColumnsInput) {
+        const first = start + 1;
+        const last = end;
+        this.styleColumnsInput.value = first === last ? String(first) : first + '-' + last;
       }
     }
 
     onPlotPointerDown(event) {
+      if (!this.meta.rows.length || (event.button !== 0 && event.button !== 1)) return;
       this.plotCanvas.focus({ preventScroll: true });
       const rect = this.plotCanvas.getBoundingClientRect();
       const x = event.clientX - rect.left;
       const y = event.clientY - rect.top;
       const column = this.columnForX(x, rect.width);
-      const hitCursor = this.cursorAtX(x, rect.width);
-      if (hitCursor) {
-        this.setActiveCursor(hitCursor, true);
-        return;
-      }
       const absoluteY = y + this.plotViewport.scrollTop;
       const rowIndex = clamp(
         this.rowIndexAtOffset(absoluteY),
         0,
         this.meta.rows.length - 1
       );
-      if (this.cursorMode) {
-        this.setActiveCursorRow(rowIndex);
-        void this.snapActiveCursorPosition(column, rowIndex);
+      event.preventDefault();
+      if (event.button === 1 || event.shiftKey) {
+        this.drag = {
+          kind: 'pan',
+          pointerId: event.pointerId,
+          startX: event.clientX,
+          viewStart: this.viewStart,
+          moved: false
+        };
+        this.plotCanvas.classList.add('dragging-pan');
+        this.plotCanvas.setPointerCapture(event.pointerId);
         return;
       }
+      if (this.cursorMode) {
+        const hitCursor = this.cursorAtX(x, rect.width);
+        if (hitCursor) this.setActiveCursor(hitCursor, false);
+        this.setActiveCursorRow(rowIndex);
+        this.drag = {
+          kind: 'cursor',
+          pointerId: event.pointerId,
+          startX: event.clientX,
+          rowIndex,
+          column,
+          moved: false,
+          relocate: !hitCursor
+        };
+        if (!hitCursor) {
+          this.setActiveCursorPosition(Math.round(column * 2) / 2, true);
+        }
+        this.plotCanvas.classList.add('dragging-cursor');
+        this.plotCanvas.setPointerCapture(event.pointerId);
+        return;
+      }
+      const columnIndex = this.columnIndexForX(x, rect.width);
+      this.setActiveCursorRow(rowIndex);
+      this.updateColumnSelection(rowIndex, columnIndex, columnIndex);
+      this.selectedPoint = null;
+      this.updatePointEditor();
       const rowHeight = this.rowHeight(rowIndex);
       const rowLocalY = absoluteY - this.rowTop(rowIndex);
       const selectPoint = this.simplified && (!this.showOriginal || rowLocalY >= rowHeight / 2)
         ? { rowIndex, column }
         : null;
       this.drag = {
+        kind: 'columns',
         pointerId: event.pointerId,
         startX: event.clientX,
-        viewStart: this.viewStart,
+        rowIndex,
+        anchorColumn: columnIndex,
         moved: false,
         selectPoint
       };
+      this.draw();
       this.plotCanvas.setPointerCapture(event.pointerId);
     }
 
     onPlotPointerMove(event) {
       if (!this.drag || this.drag.pointerId !== event.pointerId) return;
+      event.preventDefault();
+      const rect = this.plotCanvas.getBoundingClientRect();
+      const x = event.clientX - rect.left;
+      if (this.drag.kind === 'cursor') {
+        const column = this.columnForX(x, rect.width);
+        if (Math.abs(event.clientX - this.drag.startX) > 2) this.drag.moved = true;
+        this.drag.column = column;
+        this.setActiveCursorPosition(Math.round(column * 2) / 2, true);
+        return;
+      }
+      if (this.drag.kind === 'columns') {
+        const columnIndex = this.columnIndexForX(x, rect.width);
+        this.drag.moved = this.drag.moved
+          || columnIndex !== this.drag.anchorColumn
+          || Math.abs(event.clientX - this.drag.startX) > 3;
+        this.updateColumnSelection(
+          this.drag.rowIndex,
+          this.drag.anchorColumn,
+          columnIndex
+        );
+        this.draw();
+        return;
+      }
       const delta = event.clientX - this.drag.startX;
       if (Math.abs(delta) > 3) this.drag.moved = true;
       const span = this.viewEnd - this.viewStart;
@@ -1851,12 +1995,46 @@
 
     onPlotPointerUp(event) {
       if (!this.drag || this.drag.pointerId !== event.pointerId) return;
-      const selectPoint = this.drag.moved ? null : this.drag.selectPoint;
+      const drag = this.drag;
       try { this.plotCanvas.releasePointerCapture(event.pointerId); } catch (_error) {}
       this.drag = null;
-      if (selectPoint) {
-        this.selectNearestPoint(selectPoint.rowIndex, selectPoint.column);
+      this.plotCanvas.classList.remove('dragging-pan', 'dragging-cursor');
+      if (drag.kind === 'cursor') {
+        if (drag.moved || drag.relocate) {
+          void this.snapActiveCursorPosition(drag.column, drag.rowIndex);
+        } else {
+          void this.updateCursorReadout();
+          this.draw();
+        }
+        return;
       }
+      if (drag.kind !== 'columns') return;
+      const selection = this.columnSelection;
+      if (!drag.moved && drag.selectPoint) {
+        this.selectNearestPoint(drag.selectPoint.rowIndex, drag.selectPoint.column);
+      } else {
+        this.selectedPoint = null;
+        this.updatePointEditor();
+        this.draw();
+      }
+      if (selection) {
+        const row = this.meta.rows[selection.rowIndex];
+        const count = selection.end - selection.start;
+        this.setStatus(
+          '已选择 ' + row.name + ' 的第 '
+          + (selection.start + 1)
+          + (count > 1 ? ('-' + selection.end) : '')
+          + ' 列'
+        );
+      }
+    }
+
+    cancelPlotDrag(event) {
+      if (!this.drag || this.drag.pointerId !== event.pointerId) return;
+      try { this.plotCanvas.releasePointerCapture(event.pointerId); } catch (_error) {}
+      this.drag = null;
+      this.plotCanvas.classList.remove('dragging-pan', 'dragging-cursor');
+      this.draw();
     }
 
     onOverviewPointer(event) {
@@ -1874,8 +2052,8 @@
     toggleCursorMode() {
       this.setCursorMode(!this.cursorMode);
       this.setStatus(this.cursorMode
-        ? '游标测量：选择 A 或 B 后单击波形定位'
-        : '已退出游标测量');
+        ? '游标测量：拖动 A/B 游标，或在波形中按住拖动定位'
+        : '已退出游标测量，可拖动选择连续多列');
     }
 
     toggleOriginalData() {
@@ -1889,9 +2067,11 @@
 
     setCursorMode(enabled) {
       this.cursorMode = !!enabled;
+      if (this.cursorMode) this.columnSelection = null;
       this.cursorButton.classList.toggle('active', this.cursorMode);
       this.cursorButton.textContent = this.cursorMode ? '退出游标测量' : '游标测量';
       this.plotCanvas.classList.toggle('cursor-mode', this.cursorMode);
+      this.draw();
     }
 
     activeCursorColumn() {
@@ -1924,7 +2104,7 @@
       this.setStatus('当前工作游标：' + next);
     }
 
-    setActiveCursorPosition(column) {
+    setActiveCursorPosition(column, deferReadout) {
       this.cursorNavigationSequence += 1;
       const value = clamp(
         Number(column) || 0,
@@ -1934,7 +2114,7 @@
       if (this.activeCursor === 'B') this.cursorB = value;
       else this.cursorA = value;
       this.updateMeasurements();
-      void this.updateCursorReadout();
+      if (!deferReadout) void this.updateCursorReadout();
       this.draw();
     }
 

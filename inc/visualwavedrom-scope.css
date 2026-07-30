@@ -117,6 +117,43 @@ body.scope-wave-view > #vim-help-modal {
   cursor: not-allowed;
 }
 
+.scope-color-presets {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.scope-color-preset {
+  position: relative;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  padding: 0;
+  border: 1px solid #aeb4bc;
+  border-radius: 4px;
+  background: var(--scope-preset-color);
+  cursor: pointer;
+}
+
+.scope-color-preset:hover {
+  border-color: #555b63;
+}
+
+.scope-color-preset.active {
+  border-color: #ffffff;
+  box-shadow: 0 0 0 2px #2f73bf;
+}
+
+.scope-color-preset:focus-visible {
+  outline: 2px solid #2f73bf;
+  outline-offset: 2px;
+}
+
+.scope-color-preset:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
 .scope-style-controls #scope-style-columns {
   width: 92px;
   font-family: Consolas, "Courier New", monospace;
@@ -312,9 +349,8 @@ body.scope-wave-view > #vim-help-modal {
 
 .scope-signal-scroll {
   min-height: 0;
-  overflow-y: auto;
+  overflow-y: hidden;
   overflow-x: hidden;
-  scrollbar-width: thin;
 }
 
 .scope-signal-row {
@@ -324,7 +360,7 @@ body.scope-wave-view > #vim-help-modal {
   align-items: center;
   gap: 7px;
   box-sizing: border-box;
-  padding: 7px 7px 7px 10px;
+  padding: 3px 7px 3px 10px;
   border-bottom: 1px solid #dfe2e6;
   background: #ffffff;
 }
@@ -392,7 +428,7 @@ body.scope-row-resizing * {
 
 .scope-swatch {
   width: 9px;
-  height: 36px;
+  height: 28px;
   border-radius: 2px;
 }
 
@@ -407,6 +443,7 @@ body.scope-row-resizing * {
 .scope-signal-name strong,
 .scope-signal-name em {
   overflow: hidden;
+  line-height: 1;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -493,18 +530,28 @@ body.scope-row-resizing * {
   left: 0;
   display: block;
   z-index: 1;
-  cursor: grab;
+  cursor: crosshair;
   outline: none;
   touch-action: none;
 }
 
 .scope-plot:active {
-  cursor: grabbing;
+  cursor: crosshair;
 }
 
 .scope-plot.cursor-mode,
 .scope-plot.cursor-mode:active {
   cursor: crosshair;
+}
+
+.scope-plot.dragging-pan,
+.scope-plot.dragging-pan:active {
+  cursor: grabbing;
+}
+
+.scope-plot.dragging-cursor,
+.scope-plot.dragging-cursor:active {
+  cursor: ew-resize;
 }
 
 .scope-overview {
