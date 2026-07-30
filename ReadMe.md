@@ -285,6 +285,50 @@ Linux 可直接粘贴 `/home/user/data.csv`、`~/data.csv` 或 `file:///home/use
 带空格的路径可以直接粘贴，也支持外层单引号或双引号。相对路径以 VisualWaveDrom
 工程目录为基准。路径读取只在 BAT/SH 服务模式可用，直接双击 HTML 时仍需使用文件选择器。
 
+### 按预设集合批量导入
+
+波形菜单中的 **导入波形数据预设集合** 用于从一个数据目录中查找并一次导入多路信号。
+此功能需要由 BAT/SH 启动的服务模式：
+
+1. 选择数据文件夹，再选择集合预设 JSON；Linux 没有图形文件选择器时也可以直接粘贴路径。
+2. 页面读取 `vars`，为每个变量生成输入框。
+3. 点击 **搜索**。程序把变量代入每条 `paths` 规则，在 `数据文件夹/folder` 中递归搜索文件，
+   并在窗口中列出文件、目标信号名和匹配状态。
+4. 每条规则必须恰好匹配一个文件，且生成的信号名不能重复，之后 **确定导入** 才会可用。
+5. 可以直接修改窗口中的预设 JSON。点击 **保存预设** 时，文件选择器默认定位到原预设路径。
+
+`import/SchemeCollection/example.json` 是可直接修改的示例：
+
+```json
+{
+  "vars": [
+    "channel",
+    "case"
+  ],
+  "paths": [
+    {
+      "folder": "Data",
+      "grepKeys": "^${channel}-${case}\\.txt$",
+      "hasSeq": true,
+      "name": "${channel}_${case}"
+    }
+  ]
+}
+```
+
+使用这份示例时，数据文件夹选择工程中的 `import`，`channel` 填 `basic`，`case` 塨
+`signal`，会匹配现有的 `import/Data/basic-signal.txt` 并导入为 `basic_signal`。
+
+- `vars`：需要用户填写的变量名列表。
+- `folder`：相对于本次选择的数据文件夹的搜索目录；可以为 `.`，且不能跳出所选目录。
+- `grepKeys`：匹配文件名的 Go 正则表达式。变量可写成 `${var}`、`{{var}}` 或 `{var}`；
+  用户输入的变量值按普通文本参与正则匹配，不会被当作额外正则语法。
+- `hasSeq`：`true` 表示第一列是序号，`false` 表示程序从 0 自动编号。
+- `name`：导入后的信号名，也可以使用变量。检测到复数数据时仍会自动生成 `_I` 和 `_Q` 两路。
+
+搜索只读取文件信息和少量样本；点击确定后才解析完整文件。整批解析成功后才统一修改当前波形图，
+因此缺失文件、重复匹配或某个文件解析失败不会留下半批数据。
+
 目录结构如下：
 
 ```text
@@ -294,6 +338,8 @@ import/
 │  ├─ basic-csv-index-data.json
 │  ├─ basic-tsv-index-data.json
 │  └─ single-column-data.json
+├─ SchemeCollection/       批量搜索与导入预设集合
+│  └─ example.json
 ├─ Data/                   建议存放待导入的数据文件
 │  ├─ basic-signal.txt
 │  ├─ basic-signal.csv

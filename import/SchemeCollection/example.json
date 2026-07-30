@@ -1,0 +1,14 @@
+{
+  "vars": [
+    "channel",
+    "case"
+  ],
+  "paths": [
+    {
+      "folder": "Data",
+      "grepKeys": "^${channel}-${case}\\.txt$",
+      "hasSeq": true,
+      "name": "${channel}_${case}"
+    }
+  ]
+}

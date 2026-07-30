@@ -439,6 +439,7 @@
 
     .wave-add-delete-row,
     .wave-copy-row,
+    .wave-collection-import-row,
     .wave-selection-clipboard-row,
     .wave-move-row,
     .wave-group-row,
@@ -446,6 +447,32 @@
       display: flex;
       gap: 6px;
       margin: 0 12px 8px;
+    }
+
+    .wave-collection-import-row .wave-collection-import-btn {
+      width: 100%;
+      min-width: 0;
+      padding: 8px 7px;
+      justify-content: center;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--surface-2);
+      color: var(--text-muted);
+      font-size: 0.76rem;
+      line-height: 1.25;
+      white-space: normal;
+    }
+
+    .wave-collection-import-row .wave-collection-import-btn:hover {
+      border-color: var(--accent);
+      background: var(--border);
+      color: var(--text);
+    }
+
+    .wave-collection-import-row .wave-collection-import-btn svg {
+      width: 16px;
+      height: 16px;
+      flex: 0 0 16px;
     }
 
     .wave-mode-delete-row {
@@ -1886,6 +1913,28 @@
       gap: 10px;
     }
 
+    .row-import-index-field {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      width: fit-content;
+      color: var(--text);
+      font-size: 0.78rem;
+      cursor: pointer;
+    }
+
+    .row-import-index-field input {
+      width: 16px;
+      height: 16px;
+      margin: 0;
+      accent-color: var(--accent);
+    }
+
+    .row-import-index-field input:disabled + span {
+      color: var(--text-muted);
+      cursor: default;
+    }
+
     .row-import-dialog .nav-move-options {
       max-height: min(28vh, 220px);
     }
@@ -1966,6 +2015,188 @@
       .row-import-signal-field {
         grid-template-columns: 1fr;
         gap: 6px;
+      }
+    }
+
+    .wave-collection-import-dialog {
+      width: min(100%, 980px);
+      max-height: calc(100vh - 28px);
+      display: flex;
+      flex-direction: column;
+    }
+
+    .wave-collection-import-body {
+      min-height: 0;
+      overflow-y: auto;
+    }
+
+    .wave-collection-path-field {
+      display: grid;
+      gap: 6px;
+    }
+
+    .wave-collection-path-field > span:first-child,
+    .wave-collection-section-title strong {
+      color: var(--text);
+      font-size: 0.78rem;
+      font-weight: 600;
+    }
+
+    .wave-collection-path-controls {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+    }
+
+    .wave-collection-preset-controls {
+      grid-template-columns: minmax(0, 1fr) auto auto;
+    }
+
+    .wave-collection-path-controls .modal-input {
+      min-width: 0;
+      font-family: Consolas, "Courier New", monospace;
+    }
+
+    .wave-collection-section {
+      display: grid;
+      gap: 7px;
+    }
+
+    .wave-collection-section-title {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .wave-collection-section-title span {
+      color: var(--text-muted);
+      font-size: 0.72rem;
+      text-align: right;
+      overflow-wrap: anywhere;
+    }
+
+    .wave-collection-preset-editor {
+      width: 100%;
+      min-height: 190px;
+      max-height: 330px;
+      resize: vertical;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      outline: none;
+      background: var(--surface-2);
+      color: var(--text);
+      font: 0.76rem/1.5 Consolas, "Courier New", monospace;
+      tab-size: 2;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
+    .wave-collection-preset-editor:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.14);
+    }
+
+    .wave-collection-vars {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px 12px;
+    }
+
+    .wave-collection-var-field {
+      display: grid;
+      grid-template-columns: minmax(80px, auto) minmax(0, 1fr);
+      align-items: center;
+      gap: 8px;
+    }
+
+    .wave-collection-var-field span {
+      color: var(--text);
+      font: 0.75rem/1.3 Consolas, "Courier New", monospace;
+      overflow-wrap: anywhere;
+    }
+
+    .wave-collection-results {
+      min-height: 74px;
+      max-height: 260px;
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      background: var(--surface);
+    }
+
+    .wave-collection-result {
+      display: grid;
+      grid-template-columns: minmax(130px, 0.75fr) minmax(180px, 1.4fr) auto;
+      align-items: center;
+      gap: 8px 12px;
+      padding: 9px 10px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .wave-collection-result:last-child {
+      border-bottom: 0;
+    }
+
+    .wave-collection-result-name {
+      min-width: 0;
+      color: var(--text);
+      font-size: 0.78rem;
+      font-weight: 600;
+      overflow-wrap: anywhere;
+    }
+
+    .wave-collection-result-path {
+      min-width: 0;
+      color: var(--text-muted);
+      font: 0.72rem/1.4 Consolas, "Courier New", monospace;
+      overflow-wrap: anywhere;
+    }
+
+    .wave-collection-result-state {
+      padding: 2px 6px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text-muted);
+      font-size: 0.68rem;
+      white-space: nowrap;
+    }
+
+    .wave-collection-result.is-ready .wave-collection-result-state {
+      border-color: var(--success);
+      color: var(--success);
+    }
+
+    .wave-collection-result.is-error .wave-collection-result-state {
+      border-color: var(--error);
+      color: var(--error);
+    }
+
+    .wave-collection-hint.is-info {
+      color: var(--text-muted);
+    }
+
+    @media (max-width: 720px) {
+      .wave-collection-preset-controls {
+        grid-template-columns: 1fr 1fr;
+      }
+
+      .wave-collection-preset-controls .modal-input {
+        grid-column: 1 / -1;
+      }
+
+      .wave-collection-vars {
+        grid-template-columns: 1fr;
+      }
+
+      .wave-collection-result {
+        grid-template-columns: 1fr auto;
+      }
+
+      .wave-collection-result-path {
+        grid-column: 1 / -1;
+        grid-row: 2;
       }
     }
 

@@ -412,7 +412,55 @@ func splitSampleColumns(line, delimiter string) []string {
 	}
 }
 
-func analyzeImportSample(fileName string, suppliedLines []string) map[string]any {
+func boolValue(value any, fallback bool) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		parsed, err := strconv.ParseBool(strings.TrimSpace(typed))
+		if err == nil {
+			return parsed
+		}
+	}
+	return fallback
+}
+
+func looksComplexLiteral(value string) bool {
+	text := strings.TrimSpace(value)
+	lower := strings.ToLower(text)
+	if strings.Contains(lower, "j") {
+		return true
+	}
+	if strings.Contains(lower, "i") &&
+		(strings.ContainsAny(lower, "+-") ||
+			regexp.MustCompile(`^[+-]?(?:\d|\.)+i$`).MatchString(lower)) {
+		return true
+	}
+	return (strings.HasPrefix(text, "(") && strings.HasSuffix(text, ")") &&
+		strings.Contains(text, ",")) ||
+		(strings.HasPrefix(text, "[") && strings.HasSuffix(text, "]") &&
+			strings.Contains(text, ","))
+}
+
+func likelyImportHeader(row []string) bool {
+	if len(row) >= 2 &&
+		strings.EqualFold(strings.TrimSpace(row[0]), "i") &&
+		strings.EqualFold(strings.TrimSpace(row[1]), "q") {
+		return true
+	}
+	headerNames := map[string]bool{
+		"index": true, "idx": true, "sequence": true, "seq": true, "time": true,
+		"sample": true, "value": true, "data": true, "real": true, "imag": true,
+	}
+	for _, value := range row {
+		if headerNames[strings.ToLower(strings.TrimSpace(value))] {
+			return true
+		}
+	}
+	return false
+}
+
+func analyzeImportSample(fileName string, suppliedLines []string, hasIndexOverride ...bool) map[string]any {
 	firstLines := append([]string{}, suppliedLines...)
 	if len(firstLines) > importSampleLineLimit {
 		firstLines = firstLines[:importSampleLineLimit]
@@ -420,18 +468,26 @@ func analyzeImportSample(fileName string, suppliedLines []string) map[string]any
 	meaningful := make([]string, 0, len(firstLines))
 	for _, line := range firstLines {
 		trimmed := strings.TrimSpace(line)
-		if trimmed != "" && !strings.HasPrefix(trimmed, "#") && !strings.HasPrefix(trimmed, "//") {
+		if trimmed != "" && !strings.HasPrefix(trimmed, "#") &&
+			!strings.HasPrefix(trimmed, "//") {
 			meaningful = append(meaningful, trimmed)
 		}
 	}
+	hasIndex := len(hasIndexOverride) > 0 && hasIndexOverride[0]
 	if len(meaningful) == 0 {
+		recommendedParser := "parse_single_column"
+		if hasIndex {
+			recommendedParser = "parse_index_data"
+		}
 		return map[string]any{
 			"firstLines": firstLines, "meaningfulLineCount": 0, "delimiter": "unknown",
-			"delimiterLabel": "无法判断", "columnCount": 0, "explicitIndex": false,
-			"headerLikely": false, "recommendedParser": "parse_index_data",
-			"reason": "前 5 行没有可分析的数据，建议先尝试通用序号/数据解析函数",
+			"delimiterLabel": "无法判断", "columnCount": 0, "dataColumnCount": 0,
+			"explicitIndex": hasIndex, "hasIndex": hasIndex, "complexDetected": false,
+			"headerLikely": false, "recommendedParser": recommendedParser,
+			"reason": "前 5 行没有可分析的数据，请检查文件内容",
 		}
 	}
+
 	delimiter := "single"
 	tabCount := 0
 	commaCount := 0
@@ -461,6 +517,7 @@ func analyzeImportSample(fileName string, suppliedLines []string) map[string]any
 			delimiter = "tab"
 		}
 	}
+
 	rows := make([][]string, len(meaningful))
 	columnCount := 0
 	for index, line := range meaningful {
@@ -470,11 +527,30 @@ func analyzeImportSample(fileName string, suppliedLines []string) map[string]any
 		}
 	}
 	indexPattern := regexp.MustCompile(`^\+?\d+$`)
-	headerLikely := len(rows) > 1 && len(rows[0]) > 1 && !indexPattern.MatchString(strings.TrimSpace(rows[0][0]))
-	if headerLikely {
+	if len(hasIndexOverride) == 0 {
+		hasIndex = columnCount > 1
+		previousIndex := -1
+		for _, row := range rows {
+			if len(row) < 2 || !indexPattern.MatchString(strings.TrimSpace(row[0])) {
+				hasIndex = false
+				break
+			}
+			value, _ := strconv.Atoi(strings.TrimPrefix(strings.TrimSpace(row[0]), "+"))
+			if value <= previousIndex {
+				hasIndex = false
+				break
+			}
+			previousIndex = value
+		}
+	}
+
+	headerLikely := len(rows) > 1 && likelyImportHeader(rows[0])
+	if hasIndex && len(rows) > 1 &&
+		!indexPattern.MatchString(strings.TrimSpace(rows[0][0])) {
+		headerLikely = true
 		for _, row := range rows[1:] {
 			if len(row) < 2 || !indexPattern.MatchString(strings.TrimSpace(row[0])) {
-				headerLikely = false
+				headerLikely = likelyImportHeader(rows[0])
 				break
 			}
 		}
@@ -483,36 +559,66 @@ func analyzeImportSample(fileName string, suppliedLines []string) map[string]any
 	if headerLikely {
 		dataRows = rows[1:]
 	}
-	explicitIndex := columnCount > 1 && len(dataRows) > 0
-	previousIndex := -1
-	for _, row := range dataRows {
-		if len(row) < 2 || !indexPattern.MatchString(strings.TrimSpace(row[0])) {
-			explicitIndex = false
-			break
+	indexValid := true
+	if hasIndex {
+		previousIndex := -1
+		for _, row := range dataRows {
+			if len(row) < 2 || !indexPattern.MatchString(strings.TrimSpace(row[0])) {
+				indexValid = false
+				break
+			}
+			value, _ := strconv.Atoi(strings.TrimPrefix(strings.TrimSpace(row[0]), "+"))
+			if value <= previousIndex {
+				indexValid = false
+				break
+			}
+			previousIndex = value
 		}
-		value, _ := strconv.Atoi(strings.TrimPrefix(strings.TrimSpace(row[0]), "+"))
-		if value <= previousIndex {
-			explicitIndex = false
-			break
-		}
-		previousIndex = value
 	}
-	recommendedParser := "parse_index_data"
-	if columnCount <= 1 {
-		recommendedParser = "parse_single_column"
-	} else if delimiter == "comma" {
-		recommendedParser = "parse_csv_index_data"
-	} else if delimiter == "tab" {
-		recommendedParser = "parse_tsv_index_data"
+
+	dataColumnCount := columnCount
+	if hasIndex && dataColumnCount > 0 {
+		dataColumnCount--
+	}
+	complexDetected := dataColumnCount >= 2
+	for _, row := range dataRows {
+		dataColumns := row
+		if hasIndex {
+			if len(row) < 2 {
+				continue
+			}
+			dataColumns = row[1:]
+		}
+		if len(dataColumns) == 1 && looksComplexLiteral(dataColumns[0]) {
+			complexDetected = true
+			break
+		}
+	}
+
+	recommendedParser := "parse_single_column"
+	if hasIndex {
+		recommendedParser = "parse_index_data"
+		if delimiter == "comma" {
+			recommendedParser = "parse_csv_index_data"
+		} else if delimiter == "tab" {
+			recommendedParser = "parse_tsv_index_data"
+		}
 	}
 	labels := map[string]string{
-		"single": "单列", "comma": "逗号分隔", "tab": "Tab 分隔", "whitespace": "空白分隔",
+		"single": "单列", "comma": "逗号分隔", "tab": "Tab 分隔",
+		"whitespace": "空白分隔",
 	}
 	details := []string{labels[delimiter], fmt.Sprintf("%d 列", columnCount)}
-	if explicitIndex {
-		details = append(details, "第一列为递增序号")
-	} else if columnCount > 1 {
-		details = append(details, "第一列未完全匹配递增序号")
+	if hasIndex {
+		details = append(details, "第一列按序号读取")
+		if !indexValid {
+			details = append(details, "序号格式需要检查")
+		}
+	} else {
+		details = append(details, "按数据行从 0 自动编号")
+	}
+	if complexDetected {
+		details = append(details, "检测到复数，将拆分为 I/Q 两路")
 	}
 	if headerLikely {
 		details = append(details, "首行可能是表头")
@@ -520,9 +626,12 @@ func analyzeImportSample(fileName string, suppliedLines []string) map[string]any
 	return map[string]any{
 		"firstLines": firstLines, "meaningfulLineCount": len(meaningful),
 		"delimiter": delimiter, "delimiterLabel": labels[delimiter],
-		"columnCount": columnCount, "explicitIndex": explicitIndex,
-		"headerLikely": headerLikely, "recommendedParser": recommendedParser,
-		"reason": "检测到" + strings.Join(details, "，") + "，建议使用 " + recommendedParser,
+		"columnCount": columnCount, "dataColumnCount": dataColumnCount,
+		"explicitIndex": hasIndex, "hasIndex": hasIndex, "indexValid": indexValid,
+		"complexDetected": complexDetected, "headerLikely": headerLikely,
+		"recommendedParser": recommendedParser,
+		"reason": "检测到" + strings.Join(details, "；") +
+			"；建议使用 " + recommendedParser,
 	}
 }
 
@@ -603,11 +712,40 @@ func normalizeSampleLines(payload map[string]any) []string {
 
 func (m *importManager) analyzeRequest(payload map[string]any) map[string]any {
 	catalog := m.listSchemes()
-	analysis := analyzeImportSample(stringValue(payload["fileName"]), normalizeSampleLines(payload))
+	var analysis map[string]any
+	if rawHasIndex, supplied := payload["hasIndex"]; supplied {
+		analysis = analyzeImportSample(
+			stringValue(payload["fileName"]),
+			normalizeSampleLines(payload),
+			boolValue(rawHasIndex, false),
+		)
+	} else {
+		analysis = analyzeImportSample(
+			stringValue(payload["fileName"]),
+			normalizeSampleLines(payload),
+		)
+	}
 	return map[string]any{
 		"analysis": analysis, "recommended": recommendScheme(catalog.Schemes, analysis),
 		"schemes": catalog.Schemes, "invalid": catalog.Invalid,
 	}
+}
+
+func normalizeParserSignalResult(result map[string]any) error {
+	wave, waveOK := result["wave"].(string)
+	data, dataOK := result["data"].([]any)
+	if !waveOK || !dataOK {
+		return errors.New("Python parser result must contain wave and data")
+	}
+	if len([]rune(wave)) > importMaxWaveColumns {
+		return fmt.Errorf("imported waveform exceeds %d columns", importMaxWaveColumns)
+	}
+	normalizedData := make([]string, len(data))
+	for index, value := range data {
+		normalizedData[index] = stringValue(value)
+	}
+	result["data"] = normalizedData
+	return nil
 }
 
 func (m *importManager) runParser(mapping importMapping, python pythonRuntime) (map[string]any, error) {
@@ -650,19 +788,34 @@ func (m *importManager) runParser(mapping importMapping, python pythonRuntime) (
 	if err = json.Unmarshal(stdout.Bytes(), &result); err != nil {
 		return nil, fmt.Errorf("Python parser returned invalid JSON: %w", err)
 	}
-	wave, waveOK := result["wave"].(string)
-	data, dataOK := result["data"].([]any)
-	if !waveOK || !dataOK {
-		return nil, errors.New("Python parser result must contain wave and data")
+	if !boolValue(result["complexDetected"], false) {
+		if err = normalizeParserSignalResult(result); err != nil {
+			return nil, err
+		}
+		return result, nil
 	}
-	if len([]rune(wave)) > importMaxWaveColumns {
-		return nil, fmt.Errorf("imported waveform exceeds %d columns", importMaxWaveColumns)
+	rawChannels, ok := result["channels"].([]any)
+	if !ok || len(rawChannels) != 2 {
+		return nil, errors.New("complex parser result must contain I and Q channels")
 	}
-	normalizedData := make([]string, len(data))
-	for index, value := range data {
-		normalizedData[index] = stringValue(value)
+	channels := make([]map[string]any, 0, len(rawChannels))
+	seenSuffixes := make(map[string]bool)
+	for _, rawChannel := range rawChannels {
+		channel, ok := rawChannel.(map[string]any)
+		if !ok {
+			return nil, errors.New("complex parser channel must be an object")
+		}
+		suffix := stringValue(channel["suffix"])
+		if (suffix != "_I" && suffix != "_Q") || seenSuffixes[suffix] {
+			return nil, errors.New("complex parser channels must use unique _I and _Q suffixes")
+		}
+		if err = normalizeParserSignalResult(channel); err != nil {
+			return nil, err
+		}
+		seenSuffixes[suffix] = true
+		channels = append(channels, channel)
 	}
-	result["data"] = normalizedData
+	result["channels"] = channels
 	return result, nil
 }
 
@@ -682,6 +835,32 @@ func importUpdate(mapping importMapping, result map[string]any, signalName strin
 	}
 }
 
+func importUpdates(
+	mapping importMapping,
+	result map[string]any,
+	signalName string,
+) ([]map[string]any, error) {
+	if !boolValue(result["complexDetected"], false) {
+		return []map[string]any{importUpdate(mapping, result, signalName)}, nil
+	}
+	channels, ok := result["channels"].([]map[string]any)
+	if !ok || len(channels) != 2 {
+		return nil, errors.New("complex parser result is missing I/Q channels")
+	}
+	updates := make([]map[string]any, 0, len(channels))
+	for _, channel := range channels {
+		suffix := stringValue(channel["suffix"])
+		if suffix != "_I" && suffix != "_Q" {
+			return nil, errors.New("complex parser returned an invalid channel suffix")
+		}
+		update := importUpdate(mapping, channel, signalName+suffix)
+		update["complexDetected"] = true
+		update["complexComponent"] = stringValue(channel["component"])
+		updates = append(updates, update)
+	}
+	return updates, nil
+}
+
 func (m *importManager) runScheme(schemeID string) (map[string]any, error) {
 	python := m.pythonRuntime()
 	if !python.Available {
@@ -697,7 +876,11 @@ func (m *importManager) runScheme(schemeID string) (map[string]any, error) {
 		if runErr != nil {
 			return nil, runErr
 		}
-		updates = append(updates, importUpdate(mapping, result, mapping.Signal))
+		mappingUpdates, updateErr := importUpdates(mapping, result, mapping.Signal)
+		if updateErr != nil {
+			return nil, updateErr
+		}
+		updates = append(updates, mappingUpdates...)
 	}
 	return map[string]any{
 		"scheme": publicScheme(scheme), "pythonVersion": python.Version, "updates": updates,
@@ -825,6 +1008,7 @@ func (m *importManager) runSourceFile(
 	signalName string,
 	sourcePath string,
 	displayName string,
+	hasIndex bool,
 ) (map[string]any, error) {
 	python := m.pythonRuntime()
 	if !python.Available {
@@ -859,9 +1043,10 @@ func (m *importManager) runSourceFile(
 	if displayName == "" || displayName == "." {
 		displayName = filepath.Base(sourcePath)
 	}
-	analysis := analyzeImportSample(displayName, lines)
+	analysis := analyzeImportSample(displayName, lines, hasIndex)
 	source := scheme.Mappings[mappingIndex]
 	options := cloneJSONValue(source.Options, map[string]any{}).(map[string]any)
+	options["hasIndex"] = hasIndex
 	headerLikely, _ := analysis["headerLikely"].(bool)
 	if _, supplied := options["skipRows"]; headerLikely && !supplied {
 		options["skipRows"] = 1
@@ -874,12 +1059,18 @@ func (m *importManager) runSourceFile(
 	if err != nil {
 		return nil, err
 	}
-	update := importUpdate(effective, result, signalName)
-	update["createIfMissing"] = true
+	updates, err := importUpdates(effective, result, signalName)
+	if err != nil {
+		return nil, err
+	}
+	for _, update := range updates {
+		update["createIfMissing"] = true
+	}
 	return map[string]any{
 		"scheme": publicScheme(scheme), "mappingIndex": mappingIndex,
 		"parser": source.Parser, "pythonVersion": python.Version, "analysis": analysis,
-		"updates": []map[string]any{update},
+		"baseSignalName": signalName, "complexDetected": boolValue(result["complexDetected"], false),
+		"updates": updates,
 	}, nil
 }
 
@@ -889,6 +1080,7 @@ func (m *importManager) runUploaded(
 	signalName string,
 	fileName string,
 	data []byte,
+	hasIndex bool,
 ) (map[string]any, error) {
 	if len(data) == 0 {
 		return nil, errors.New("uploaded waveform data file is empty")
@@ -906,7 +1098,8 @@ func (m *importManager) runUploaded(
 	if err = os.WriteFile(tempPath, data, 0o600); err != nil {
 		return nil, err
 	}
-	return m.runSourceFile(schemeID, mappingIndex, signalName, tempPath, uploadedName)
+	return m.runSourceFile(
+		schemeID, mappingIndex, signalName, tempPath, uploadedName, hasIndex)
 }
 
 func (m *importManager) runLocalFile(
@@ -914,6 +1107,7 @@ func (m *importManager) runLocalFile(
 	mappingIndex int,
 	signalName string,
 	sourcePath string,
+	hasIndex bool,
 ) (map[string]any, error) {
 	return m.runSourceFile(
 		schemeID,
@@ -921,5 +1115,6 @@ func (m *importManager) runLocalFile(
 		signalName,
 		sourcePath,
 		filepath.Base(sourcePath),
+		hasIndex,
 	)
 }

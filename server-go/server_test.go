@@ -91,6 +91,39 @@ func TestDecimalSingleColumnSampleUsesSingleColumnParser(t *testing.T) {
 	}
 }
 
+func TestComplexSampleWithoutIndexUsesIQChannels(t *testing.T) {
+	analysis := analyzeImportSample("complex.csv", []string{
+		"1.25,-2.5", "2.5,-1.25", "3.75,0",
+	}, false)
+	if parser := stringValue(analysis["recommendedParser"]); parser != "parse_single_column" {
+		t.Fatalf("recommended parser = %q, expected parse_single_column", parser)
+	}
+	if explicit, _ := analysis["explicitIndex"].(bool); explicit {
+		t.Fatal("unchecked sequence option must use automatic row numbering")
+	}
+	if complexDetected, _ := analysis["complexDetected"].(bool); !complexDetected {
+		t.Fatal("two data columns must be detected as complex I/Q data")
+	}
+}
+
+func TestComplexSampleWithIndexUsesIndexedParser(t *testing.T) {
+	analysis := analyzeImportSample("complex.tsv", []string{
+		"index\tI\tQ", "4\t1.25\t-2.5", "8\t2.5\t-1.25",
+	}, true)
+	if parser := stringValue(analysis["recommendedParser"]); parser != "parse_tsv_index_data" {
+		t.Fatalf("recommended parser = %q, expected parse_tsv_index_data", parser)
+	}
+	if explicit, _ := analysis["explicitIndex"].(bool); !explicit {
+		t.Fatal("checked sequence option must use the first column as the index")
+	}
+	if complexDetected, _ := analysis["complexDetected"].(bool); !complexDetected {
+		t.Fatal("indexed I/Q columns must be detected as complex data")
+	}
+	if headerLikely, _ := analysis["headerLikely"].(bool); !headerLikely {
+		t.Fatal("index/I/Q heading must be detected")
+	}
+}
+
 func TestSameRunningServiceRequiresCurrentAPIVersion(t *testing.T) {
 	root := t.TempDir()
 	instance := &service{config: config{

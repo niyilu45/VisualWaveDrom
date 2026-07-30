@@ -28,7 +28,7 @@ import (
 const (
 	appID                      = "VisualWaveDrom"
 	protocolScheme             = "visualwavedrom"
-	serviceAPIVersion          = 2
+	serviceAPIVersion          = 4
 	defaultPort                = 4173
 	maxWaveLibraryRequestBytes = 256 * 1024 * 1024
 	importMaxUploadBytes       = 128 * 1024 * 1024
@@ -817,6 +817,7 @@ func (s *service) handleImportPreview(writer http.ResponseWriter, request *http.
 			intValue(payload["mappingIndex"], -1),
 			stringValue(payload["signalName"]),
 			sourcePath,
+			boolValue(payload["hasIndex"], false),
 		)
 		if err != nil {
 			sendJSON(writer, 400, map[string]any{"error": err.Error()})
@@ -836,7 +837,8 @@ func (s *service) handleImportPreview(writer http.ResponseWriter, request *http.
 	mappingIndex, _ := strconv.Atoi(request.URL.Query().Get("mappingIndex"))
 	result, err := s.imports.runUploaded(
 		request.URL.Query().Get("schemeId"), mappingIndex,
-		request.URL.Query().Get("signalName"), request.URL.Query().Get("fileName"), data)
+		request.URL.Query().Get("signalName"), request.URL.Query().Get("fileName"), data,
+		boolValue(request.URL.Query().Get("hasIndex"), false))
 	if err != nil {
 		sendJSON(writer, 400, map[string]any{"error": err.Error()})
 		return
@@ -1170,6 +1172,7 @@ func (s *service) routes() http.Handler {
 	mux.HandleFunc("/api/import-wave-analyze", method(http.MethodPost, s.handleImportAnalyze))
 	mux.HandleFunc("/api/import-wave-preview", method(http.MethodPost, s.handleImportPreview))
 	mux.HandleFunc("/api/import-wave-row", method(http.MethodPost, s.handleImportRow))
+	mux.HandleFunc("/api/import-wave-collection", method(http.MethodPost, s.handleImportCollection))
 	mux.HandleFunc("/api/wave-libraries", method(http.MethodGet, s.handleLibraries))
 	mux.HandleFunc("/api/wave-library", s.handleWaveLibrary)
 	mux.HandleFunc("/api/wave-library-state", method(http.MethodPatch, s.handleLibraryState))

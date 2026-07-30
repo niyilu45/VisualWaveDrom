@@ -48,7 +48,7 @@ def _split_line(line, delimiter):
     if delimiter in ("tab", "tsv", "\\t", "\t"):
         return next(csv.reader([line], delimiter="\t"))
     if delimiter in ("space", "whitespace"):
-        return re.split(r"\s+", line.strip(), maxsplit=1)
+        return re.split(r"\s+", line.strip())
     if delimiter not in ("", "auto", None):
         delimiter_text = str(delimiter)
         if len(delimiter_text) != 1:
@@ -58,7 +58,7 @@ def _split_line(line, delimiter):
         return next(csv.reader([line], delimiter="\t"))
     if "," in line:
         return next(csv.reader([line], delimiter=","))
-    return re.split(r"\s+", line.strip(), maxsplit=1)
+    return re.split(r"\s+", line.strip())
 
 
 def _data_rows(text, options):
@@ -83,9 +83,9 @@ def _data_rows(text, options):
             raise FileProcError("line %d cannot be parsed: %s" % (line_number, error))
         if not columns or (len(columns) == 1 and columns[0] == ""):
             continue
-        if len(columns) > 2:
+        if len(columns) > 4:
             raise FileProcError(
-                "line %d has more than two columns; quote delimiters inside data values"
+                "line %d has more than four columns; quote delimiters inside data values"
                 % line_number
             )
         rows.append((line_number, columns))
@@ -133,6 +133,44 @@ def _normalize_value(value, options):
     return "=", mapped
 
 
+def _boolean_option(options, name):
+    if name not in options:
+        return None
+    value = options.get(name)
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in ("true", "1", "yes", "on"):
+        return True
+    if text in ("false", "0", "no", "off"):
+        return False
+    raise FileProcError("%s must be true or false" % name)
+
+
+def _component_pair(real_value, imag_value):
+    real_text = str(real_value).strip()
+    imag_text = str(imag_value).strip()
+    if real_text.startswith("(") or real_text.startswith("["):
+        real_text = real_text[1:].strip()
+    if imag_text.endswith(")") or imag_text.endswith("]"):
+        imag_text = imag_text[:-1].strip()
+    return {"real": real_text, "imag": imag_text}
+
+
+def _value_from_columns(columns, line_number):
+    if len(columns) == 1:
+        return columns[0]
+    if len(columns) == 2:
+        return _component_pair(columns[0], columns[1])
+    joined = "".join(columns)
+    if "j" in joined.lower() or "i" in joined.lower():
+        return joined
+    raise FileProcError(
+        "line %d has too many data columns; complex data needs I/Q columns or a+bj"
+        % line_number
+    )
+
+
 def parse_index_data(file_path, options=None):
     opts = dict(options or {})
     rows = _data_rows(_read_text(file_path, opts), opts)
@@ -141,11 +179,15 @@ def parse_index_data(file_path, options=None):
         raise FileProcError("maxColumns must be at least 1")
     if len(rows) > max_columns:
         raise FileProcError("source file exceeds maxColumns")
+    forced_has_index = _boolean_option(opts, "hasIndex")
     column_counts = set(len(columns) for _, columns in rows)
-    has_single_column = 1 in column_counts
-    has_index_column = any(count >= 2 for count in column_counts)
-    if has_single_column and has_index_column:
-        raise FileProcError("single-column and indexed rows cannot be mixed")
+    if forced_has_index is None:
+        has_single_column = 1 in column_counts
+        has_index_column = any(count >= 2 for count in column_counts)
+        if has_single_column and has_index_column:
+            raise FileProcError("single-column and indexed rows cannot be mixed")
+    else:
+        has_index_column = forced_has_index
 
     points = []
     if has_index_column:
@@ -161,16 +203,20 @@ def parse_index_data(file_path, options=None):
                     "line %d sequence number must be greater than %d" % (line_number, previous_index)
                 )
             previous_index = index
+            if len(columns) < 2:
+                raise FileProcError(
+                    "line %d needs a data column after the sequence number" % line_number
+                )
             points.append({
                 "index": index,
-                "value": columns[1],
+                "value": _value_from_columns(columns[1:], line_number),
                 "lineNumber": line_number
             })
     else:
         points = [
             {
                 "index": index,
-                "value": columns[0],
+                "value": _value_from_columns(columns, line_number),
                 "lineNumber": line_number
             }
             for index, (line_number, columns) in enumerate(rows)
@@ -196,10 +242,11 @@ def parse_tsv_index_data(file_path, options=None):
 
 
 def parse_single_column(file_path, options=None):
-    result = parse_index_data(file_path, options)
-    if result["explicitIndex"]:
-        raise FileProcError("parse_single_column requires a one-column source file")
-    return result
+    opts = dict(options or {})
+    if _boolean_option(opts, "hasIndex"):
+        raise FileProcError("parse_single_column cannot be used when the file contains a sequence column")
+    opts["hasIndex"] = False
+    return parse_index_data(file_path, opts)
 
 
 def _validated_points(parsed_signal, options):
@@ -230,17 +277,74 @@ def _validated_points(parsed_signal, options):
                 % (point_number, previous_index)
             )
         previous_index = index
+        value = point.get("value", "")
+        if isinstance(value, dict):
+            if "real" not in value or "imag" not in value:
+                raise FileProcError(
+                    "parsed point %d complex value needs real and imag fields" % point_number
+                )
+            value = {
+                "real": str(value.get("real", "")).strip(),
+                "imag": str(value.get("imag", "")).strip()
+            }
+        else:
+            value = str(value)
         normalized.append({
             "index": index,
-            "value": str(point.get("value", "")),
+            "value": value,
             "lineNumber": point.get("lineNumber")
         })
     return normalized
 
 
-def complete_previous_value(parsed_signal, options=None):
-    opts = dict(options or {})
-    points = _validated_points(parsed_signal, opts)
+_NUMBER_TEXT = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
+_PAIR_PATTERN = re.compile(
+    r"^\s*[\(\[]\s*(%s)\s*[,;]\s*(%s)\s*[\)\]]\s*$"
+    % (_NUMBER_TEXT, _NUMBER_TEXT)
+)
+
+
+def _normalized_number_text(value):
+    try:
+        number = float(str(value).strip())
+    except (TypeError, ValueError):
+        raise FileProcError("complex component is not numeric: %s" % value)
+    if number != number or number in (float("inf"), float("-inf")):
+        raise FileProcError("complex component must be finite: %s" % value)
+    if number.is_integer():
+        return str(int(number))
+    return "%.15g" % number
+
+
+def _complex_components(value):
+    if isinstance(value, dict):
+        return (
+            _normalized_number_text(value.get("real", "")),
+            _normalized_number_text(value.get("imag", ""))
+        )
+    raw = str(value).strip()
+    pair_match = _PAIR_PATTERN.match(raw)
+    if pair_match:
+        return (
+            _normalized_number_text(pair_match.group(1)),
+            _normalized_number_text(pair_match.group(2))
+        )
+    normalized = re.sub(r"\s+", "", raw)
+    normalized = normalized.replace("I", "j").replace("i", "j").replace("J", "j")
+    if "j" not in normalized:
+        return None
+    try:
+        number = complex(normalized)
+    except (TypeError, ValueError):
+        raise FileProcError("invalid complex value: %s" % raw)
+    return (
+        _normalized_number_text(number.real),
+        _normalized_number_text(number.imag)
+    )
+
+
+def _complete_scalar_signal(parsed_signal, points, options):
+    opts = options
     fill_leading = str(opts.get("fillLeading", opts.get("fillMissing", "x")) or "x")
     fill_gap = str(opts.get("fillGap") or ".")
     if len(fill_leading) != 1 or fill_leading not in WAVE_SYMBOLS:
@@ -313,6 +417,63 @@ def complete_previous_value(parsed_signal, options=None):
         )
         result["sampleKind"] = "digital" if symbols_only else "bus"
     return result
+
+
+def complete_previous_value(parsed_signal, options=None):
+    opts = dict(options or {})
+    points = _validated_points(parsed_signal, opts)
+    detected_components = []
+    complex_detected = False
+    for point in points:
+        components = _complex_components(point["value"])
+        detected_components.append(components)
+        if components is not None:
+            complex_detected = True
+
+    if not complex_detected:
+        result = _complete_scalar_signal(parsed_signal, points, opts)
+        result["complexDetected"] = False
+        return result
+
+    real_points = []
+    imag_points = []
+    for point, components in zip(points, detected_components):
+        if components is None:
+            raw_value = str(point["value"]).strip()
+            if len(raw_value) == 1 and raw_value in WAVE_SYMBOLS:
+                components = (raw_value, raw_value)
+            else:
+                components = (_normalized_number_text(raw_value), "0")
+        common = {
+            "index": point["index"],
+            "lineNumber": point.get("lineNumber")
+        }
+        real_point = dict(common)
+        real_point["value"] = components[0]
+        imag_point = dict(common)
+        imag_point["value"] = components[1]
+        real_points.append(real_point)
+        imag_points.append(imag_point)
+
+    component_base = {
+        "explicitIndex": bool(parsed_signal.get("explicitIndex"))
+    }
+    component_options = dict(opts)
+    component_options["valueMode"] = "data"
+    real_result = _complete_scalar_signal(component_base, real_points, component_options)
+    imag_result = _complete_scalar_signal(component_base, imag_points, component_options)
+    real_result["suffix"] = "_I"
+    real_result["component"] = "I"
+    imag_result["suffix"] = "_Q"
+    imag_result["component"] = "Q"
+    return {
+        "complexDetected": True,
+        "channels": [real_result, imag_result],
+        "pointCount": len(points),
+        "firstIndex": points[0]["index"],
+        "lastIndex": points[-1]["index"],
+        "explicitIndex": bool(parsed_signal.get("explicitIndex"))
+    }
 
 
 FILE_PARSERS = {
