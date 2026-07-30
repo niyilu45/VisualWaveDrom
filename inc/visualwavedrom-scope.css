@@ -283,6 +283,7 @@ body.scope-wave-view > #vim-help-modal {
 }
 
 .scope-signal-row {
+  position: relative;
   display: grid;
   grid-template-columns: 12px minmax(0, 1fr) 68px;
   align-items: center;
@@ -310,6 +311,48 @@ body.scope-wave-view > #vim-help-modal {
 .scope-signal-row:focus-visible {
   outline: 2px solid #2f73bf;
   outline-offset: -2px;
+}
+
+.scope-row-resize-handle {
+  position: absolute;
+  z-index: 3;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 9px;
+  cursor: ns-resize;
+  touch-action: none;
+  user-select: none;
+}
+
+.scope-row-resize-handle::after {
+  position: absolute;
+  right: 22px;
+  bottom: 3px;
+  left: 22px;
+  height: 2px;
+  border-radius: 1px;
+  background: #9aa2ab;
+  content: "";
+  opacity: 0.55;
+}
+
+.scope-row-resize-handle:hover::after,
+.scope-row-resize-handle.active::after,
+.scope-row-resize-handle:focus-visible::after {
+  background: #2f73bf;
+  opacity: 1;
+}
+
+.scope-row-resize-handle:focus-visible {
+  outline: 2px solid #2f73bf;
+  outline-offset: -2px;
+}
+
+body.scope-row-resizing,
+body.scope-row-resizing * {
+  cursor: ns-resize !important;
+  user-select: none !important;
 }
 
 .scope-swatch {

@@ -2,7 +2,9 @@
   'use strict';
 
   const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260730-scope-v6';
-  const ROW_HEIGHT = 84;
+  const DEFAULT_ROW_HEIGHT = 84;
+  const MIN_ANALOG_ROW_HEIGHT = 56;
+  const MAX_ANALOG_ROW_HEIGHT = 480;
   const AXIS_HEIGHT = 38;
   const OVERVIEW_HEIGHT = 76;
   const MAX_HISTORY = 100;
@@ -131,6 +133,8 @@
       this.meta = null;
       this.modes = {};
       this.analogFormats = {};
+      this.rowHeights = [];
+      this.rowOffsets = [0];
       this.windowData = null;
       this.simplified = null;
       this.outputContent = '';
@@ -151,6 +155,7 @@
       this.windowRequestSequence = 0;
       this.buildSequence = 0;
       this.drag = null;
+      this.rowResize = null;
       this.rowStart = 0;
       this.rowEnd = 0;
       this.resizeObserver = null;
@@ -175,6 +180,8 @@
           row.detectedMode === 'analog' ? 'float' : 'unsigned'
         );
       });
+      this.rowHeights = this.meta.rows.map(() => DEFAULT_ROW_HEIGHT);
+      this.rebuildRowOffsets();
       this.viewStart = 0;
       this.viewEnd = this.meta.totalColumns;
       this.cursorA = 0;
@@ -427,24 +434,48 @@
         const nextMode = select.value;
         if (this.modes[rowIndex] === nextMode) return;
         if (this.simplified) this.pushHistory();
+        const scrollTop = this.plotViewport.scrollTop;
         this.cursorNavigationSequence += 1;
         this.modes[rowIndex] = nextMode;
-        this.setActiveCursorRow(rowIndex);
+        this.activeCursorRow = rowIndex;
+        this.renderSignalRows();
+        this.plotViewport.scrollTop = scrollTop;
+        this.signalScroll.scrollTop = this.plotViewport.scrollTop;
         this.updateAnalogControls();
         this.scheduleWindowRequest();
         void this.runSimplify(false);
       });
 
+      this.signalList.addEventListener('pointerdown', (event) => {
+        const handle = event.target.closest('[data-scope-row-resize]');
+        if (!handle) return;
+        this.startRowResize(event, handle);
+      });
+      this.signalList.addEventListener('pointermove', (event) => this.moveRowResize(event));
+      this.signalList.addEventListener('pointerup', (event) => this.finishRowResize(event));
+      this.signalList.addEventListener('pointercancel', (event) => this.finishRowResize(event));
       this.signalList.addEventListener('click', (event) => {
-        if (event.target.closest('select')) return;
+        if (event.target.closest('select, [data-scope-row-resize]')) return;
         const row = event.target.closest('[data-scope-signal-row]');
         if (!row) return;
         this.setActiveCursorRow(Number(row.dataset.scopeSignalRow));
       });
       this.signalList.addEventListener('keydown', (event) => {
+        const handle = event.target.closest('[data-scope-row-resize]');
+        if (handle && /^(ArrowUp|ArrowDown|Home)$/.test(event.key)) {
+          event.preventDefault();
+          const rowIndex = Number(handle.dataset.scopeRowResize);
+          const nextHeight = event.key === 'Home'
+            ? DEFAULT_ROW_HEIGHT
+            : this.rowHeight(rowIndex) + (event.key === 'ArrowUp' ? -8 : 8);
+          this.setAnalogRowHeight(rowIndex, nextHeight, handle);
+          this.setStatus('已将 ' + this.meta.rows[rowIndex].name
+            + ' 行高设为 ' + this.rowHeight(rowIndex) + ' px');
+          return;
+        }
         if (event.key !== 'Enter' && event.key !== ' ') return;
         const row = event.target.closest('[data-scope-signal-row]');
-        if (!row || event.target.closest('select')) return;
+        if (!row || event.target.closest('select, [data-scope-row-resize]')) return;
         event.preventDefault();
         this.setActiveCursorRow(Number(row.dataset.scopeSignalRow));
       });
@@ -500,14 +531,57 @@
       this.statusEl.classList.toggle('error', !!error);
     }
 
+    rowHeight(rowIndex) {
+      if (this.modes[rowIndex] !== 'analog') return DEFAULT_ROW_HEIGHT;
+      return clamp(
+        Math.round(Number(this.rowHeights[rowIndex]) || DEFAULT_ROW_HEIGHT),
+        MIN_ANALOG_ROW_HEIGHT,
+        MAX_ANALOG_ROW_HEIGHT
+      );
+    }
+
+    rebuildRowOffsets() {
+      const offsets = [0];
+      const rowCount = this.meta && this.meta.rows ? this.meta.rows.length : 0;
+      for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+        offsets.push(offsets[rowIndex] + this.rowHeight(rowIndex));
+      }
+      this.rowOffsets = offsets;
+      if (this.plotSpacer) {
+        this.plotSpacer.style.height = offsets[offsets.length - 1] + 'px';
+      }
+    }
+
+    rowTop(rowIndex) {
+      return this.rowOffsets[rowIndex] || 0;
+    }
+
+    rowIndexAtOffset(offset) {
+      const rowCount = this.meta && this.meta.rows ? this.meta.rows.length : 0;
+      if (!rowCount) return 0;
+      const target = Math.max(0, Number(offset) || 0);
+      if (target >= this.rowOffsets[rowCount]) return rowCount;
+      let low = 0;
+      let high = rowCount;
+      while (low < high) {
+        const middle = (low + high) >> 1;
+        if (this.rowOffsets[middle + 1] <= target) low = middle + 1;
+        else high = middle;
+      }
+      return low;
+    }
+
     renderSignalRows() {
+      this.rebuildRowOffsets();
       this.signalList.innerHTML = this.meta.rows.map((row) => {
         const group = row.groups && row.groups.length ? row.groups.join(' / ') : '';
+        const rowHeight = this.rowHeight(row.index);
+        const analogMode = this.modes[row.index] === 'analog';
         return `
-          <div class="scope-signal-row${row.index === this.activeCursorRow ? ' active' : ''}"
+          <div class="scope-signal-row${row.index === this.activeCursorRow ? ' active' : ''}${analogMode ? ' scope-signal-row-analog' : ''}"
               data-row-index="${row.index}" data-scope-signal-row="${row.index}"
               tabindex="0" aria-label="选择信号 ${escapeHtml(row.name)}"
-              style="height:${ROW_HEIGHT}px">
+              style="height:${rowHeight}px">
             <span class="scope-swatch" style="background:${COLORS[row.index % COLORS.length]}"></span>
             <span class="scope-signal-name" title="${escapeHtml(row.name)}">
               ${group ? `<small>${escapeHtml(group)}</small>` : ''}
@@ -522,10 +596,16 @@
               <option value="bus"${this.modes[row.index] === 'bus' ? ' selected' : ''}>总线</option>
               <option value="analog"${this.modes[row.index] === 'analog' ? ' selected' : ''}>模拟</option>
             </select>
+            ${analogMode ? `
+              <span class="scope-row-resize-handle" data-scope-row-resize="${row.index}"
+                  role="separator" aria-orientation="horizontal"
+                  aria-label="调整 ${escapeHtml(row.name)} 行高"
+                  aria-valuemin="${MIN_ANALOG_ROW_HEIGHT}" aria-valuemax="${MAX_ANALOG_ROW_HEIGHT}"
+                  aria-valuenow="${rowHeight}" tabindex="0" title="拖动调整模拟波形行高"></span>
+            ` : ''}
           </div>
         `;
       }).join('');
-      this.plotSpacer.style.height = (this.meta.rows.length * ROW_HEIGHT) + 'px';
       if (this.cursorAButton) {
         this.updateCursorControls();
         void this.updateCursorReadout();
@@ -569,9 +649,80 @@
     visibleRows() {
       const scrollTop = this.plotViewport.scrollTop;
       const height = Math.max(1, this.plotViewport.clientHeight);
-      const start = clamp(Math.floor(scrollTop / ROW_HEIGHT), 0, this.meta.rows.length);
-      const end = clamp(Math.ceil((scrollTop + height) / ROW_HEIGHT) + 1, start, this.meta.rows.length);
+      const rowCount = this.meta.rows.length;
+      const firstVisible = this.rowIndexAtOffset(scrollTop);
+      const lastVisible = this.rowIndexAtOffset(scrollTop + height);
+      const start = clamp(firstVisible - 1, 0, rowCount);
+      const end = clamp(lastVisible + 2, start, rowCount);
       return { start, end };
+    }
+
+    setAnalogRowHeight(rowIndex, height, handle) {
+      if (this.modes[rowIndex] !== 'analog') return false;
+      const nextHeight = clamp(
+        Math.round(Number(height) || DEFAULT_ROW_HEIGHT),
+        MIN_ANALOG_ROW_HEIGHT,
+        MAX_ANALOG_ROW_HEIGHT
+      );
+      if (this.rowHeight(rowIndex) === nextHeight) return false;
+      this.rowHeights[rowIndex] = nextHeight;
+      const row = this.signalList.querySelector(
+        '[data-scope-signal-row="' + rowIndex + '"]'
+      );
+      if (row) row.style.height = nextHeight + 'px';
+      const resizeHandle = handle || (row && row.querySelector('[data-scope-row-resize]'));
+      if (resizeHandle) resizeHandle.setAttribute('aria-valuenow', String(nextHeight));
+      this.rebuildRowOffsets();
+      this.positionPlotCanvas();
+      this.scheduleWindowRequest();
+      this.draw();
+      return true;
+    }
+
+    startRowResize(event, handle) {
+      const rowIndex = Number(handle.dataset.scopeRowResize);
+      if (!Number.isInteger(rowIndex) || this.modes[rowIndex] !== 'analog') return;
+      event.preventDefault();
+      event.stopPropagation();
+      this.rowResize = {
+        pointerId: event.pointerId,
+        rowIndex,
+        startY: event.clientY,
+        startHeight: this.rowHeight(rowIndex),
+        handle
+      };
+      handle.classList.add('active');
+      document.body.classList.add('scope-row-resizing');
+      try { handle.setPointerCapture(event.pointerId); } catch (_error) {}
+      this.setActiveCursorRow(rowIndex);
+      this.log('scope-row-resize', {
+        phase: 'start',
+        rowIndex,
+        height: this.rowResize.startHeight
+      });
+    }
+
+    moveRowResize(event) {
+      if (!this.rowResize || this.rowResize.pointerId !== event.pointerId) return;
+      event.preventDefault();
+      const nextHeight = this.rowResize.startHeight + event.clientY - this.rowResize.startY;
+      this.setAnalogRowHeight(this.rowResize.rowIndex, nextHeight, this.rowResize.handle);
+    }
+
+    finishRowResize(event) {
+      if (!this.rowResize || this.rowResize.pointerId !== event.pointerId) return;
+      const resize = this.rowResize;
+      try { resize.handle.releasePointerCapture(event.pointerId); } catch (_error) {}
+      resize.handle.classList.remove('active');
+      document.body.classList.remove('scope-row-resizing');
+      this.rowResize = null;
+      const height = this.rowHeight(resize.rowIndex);
+      this.setStatus('已将 ' + this.meta.rows[resize.rowIndex].name + ' 行高设为 ' + height + ' px');
+      this.log('scope-row-resize', {
+        phase: 'complete',
+        rowIndex: resize.rowIndex,
+        height
+      });
     }
 
     async requestWindow() {
@@ -1059,13 +1210,14 @@
       if (this.windowData) {
         this.windowData.rows.forEach((rowResult) => {
           const rowIndex = rowResult.index;
-          const rowTop = rowIndex * ROW_HEIGHT - scrollTop;
-          if (rowTop > height || rowTop + ROW_HEIGHT < 0) return;
+          const rowHeight = this.rowHeight(rowIndex);
+          const rowTop = this.rowTop(rowIndex) - scrollTop;
+          if (rowTop > height || rowTop + rowHeight < 0) return;
           const color = COLORS[rowIndex % COLORS.length];
           context.strokeStyle = '#dfe2e6';
           context.beginPath();
-          context.moveTo(0, rowTop + ROW_HEIGHT - 0.5);
-          context.lineTo(width, rowTop + ROW_HEIGHT - 0.5);
+          context.moveTo(0, rowTop + rowHeight - 0.5);
+          context.lineTo(width, rowTop + rowHeight - 0.5);
           context.stroke();
           const simplifiedRow = this.simplified && this.simplified.model.rows[rowIndex];
           if (this.showOriginal && !simplifiedRow) {
@@ -1074,7 +1226,7 @@
               rowResult,
               rowIndex,
               rowTop + 3,
-              rowTop + ROW_HEIGHT - 3,
+              rowTop + rowHeight - 3,
               width,
               color
             );
@@ -1084,21 +1236,21 @@
             context.textAlign = 'left';
             context.textBaseline = 'top';
             context.fillText('原', 4, rowTop + 3);
-            context.fillText('简', 4, rowTop + ROW_HEIGHT / 2 + 3);
+            context.fillText('简', 4, rowTop + rowHeight / 2 + 3);
             this.drawSegments(
               context,
               rowResult,
               rowIndex,
               rowTop + 2,
-              rowTop + ROW_HEIGHT / 2 - 2,
+              rowTop + rowHeight / 2 - 2,
               width,
               color
             );
             this.drawSimplifiedRow(
               context,
               rowIndex,
-              rowTop + ROW_HEIGHT / 2 + 2,
-              rowTop + ROW_HEIGHT - 3,
+              rowTop + rowHeight / 2 + 2,
+              rowTop + rowHeight - 3,
               width,
               color
             );
@@ -1107,7 +1259,7 @@
               context,
               rowIndex,
               rowTop + 3,
-              rowTop + ROW_HEIGHT - 3,
+              rowTop + rowHeight - 3,
               width,
               color
             );
@@ -1274,9 +1426,14 @@
         return;
       }
       const absoluteY = y + this.plotViewport.scrollTop;
-      const rowIndex = clamp(Math.floor(absoluteY / ROW_HEIGHT), 0, this.meta.rows.length - 1);
-      const rowLocalY = absoluteY - rowIndex * ROW_HEIGHT;
-      const selectPoint = this.simplified && (!this.showOriginal || rowLocalY >= ROW_HEIGHT / 2)
+      const rowIndex = clamp(
+        this.rowIndexAtOffset(absoluteY),
+        0,
+        this.meta.rows.length - 1
+      );
+      const rowHeight = this.rowHeight(rowIndex);
+      const rowLocalY = absoluteY - this.rowTop(rowIndex);
+      const selectPoint = this.simplified && (!this.showOriginal || rowLocalY >= rowHeight / 2)
         ? { rowIndex, column }
         : null;
       this.drag = {
@@ -1980,6 +2137,8 @@
             row.detectedMode === 'analog' ? 'float' : 'unsigned'
           );
         });
+        this.rowHeights = this.meta.rows.map(() => DEFAULT_ROW_HEIGHT);
+        this.rebuildRowOffsets();
         this.viewStart = 0;
         this.viewEnd = this.meta.totalColumns;
         this.cursorA = clamp(
