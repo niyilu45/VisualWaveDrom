@@ -5,6 +5,7 @@ import argparse
 import csv
 import io
 import json
+import os
 import re
 import sys
 
@@ -484,17 +485,122 @@ FILE_PARSERS = {
 }
 
 
+def _normalized_path(value):
+    return os.path.normcase(os.path.realpath(os.path.abspath(value)))
+
+
+def _search_python_regex(payload):
+    if not isinstance(payload, dict):
+        raise FileProcError("regex search input must be an object")
+    raw_roots = payload.get("scanRoots")
+    raw_rules = payload.get("rules")
+    if not isinstance(raw_roots, list) or not isinstance(raw_rules, list):
+        raise FileProcError("regex search requires scanRoots and rules arrays")
+    try:
+        max_visited = int(payload.get("maxVisitedFiles"))
+        max_matches = int(payload.get("maxMatchesPerRule"))
+    except (TypeError, ValueError):
+        raise FileProcError("regex search limits must be integers")
+    if max_visited < 1 or max_matches < 1:
+        raise FileProcError("regex search limits must be positive")
+
+    rules = []
+    matches = {}
+    for position, raw_rule in enumerate(raw_rules):
+        if not isinstance(raw_rule, dict):
+            raise FileProcError("regex search rule %d must be an object" % position)
+        try:
+            entry_index = int(raw_rule.get("entryIndex"))
+        except (TypeError, ValueError):
+            raise FileProcError("regex search rule %d has an invalid entryIndex" % position)
+        search_path = _normalized_path(str(raw_rule.get("searchPath") or ""))
+        pattern_text = raw_rule.get("pattern")
+        if not isinstance(pattern_text, str):
+            raise FileProcError("regex search rule %d pattern must be a string" % position)
+        try:
+            pattern = re.compile(pattern_text)
+        except re.error as error:
+            raise FileProcError(
+                "paths[%d].grepKeys is invalid Python re syntax: %s"
+                % (entry_index, error)
+            )
+        rules.append({
+            "entryIndex": entry_index,
+            "searchPath": search_path,
+            "pattern": pattern
+        })
+        matches[entry_index] = []
+
+    visited = 0
+    for raw_root in raw_roots:
+        scan_root = _normalized_path(str(raw_root or ""))
+        active_rules = [
+            rule for rule in rules
+            if rule["searchPath"] == scan_root
+        ]
+        try:
+            with os.scandir(scan_root) as directory_entries:
+                for directory_entry in directory_entries:
+                    if not directory_entry.is_file(follow_symlinks=False):
+                        continue
+                    file_name = directory_entry.name
+                    source_path = directory_entry.path
+                    visited += 1
+                    if visited > max_visited:
+                        raise FileProcError(
+                            "search folders contain more than %d files" % max_visited
+                        )
+                    for rule in active_rules:
+                        if rule["pattern"].search(file_name) is None:
+                            continue
+                        rule_matches = matches[rule["entryIndex"]]
+                        if len(rule_matches) >= max_matches:
+                            raise FileProcError(
+                                "paths[%d] matched more than %d files"
+                                % (rule["entryIndex"], max_matches)
+                            )
+                        rule_matches.append(source_path)
+        except OSError as error:
+            raise FileProcError("cannot search folder: %s" % error)
+
+    return {
+        "visitedFiles": visited,
+        "matches": [
+            {"entryIndex": rule["entryIndex"], "paths": matches[rule["entryIndex"]]}
+            for rule in rules
+        ]
+    }
+
+
 def _parse_args(argv):
     parser = argparse.ArgumentParser(description="VisualWaveDrom row waveform file parser")
+    parser.add_argument(
+        "--mode",
+        choices=("parse", "regex-search"),
+        default="parse",
+        help="operation mode"
+    )
     parser.add_argument("--parser", help="registered file parser function name")
     parser.add_argument("--function", dest="legacy_parser", help=argparse.SUPPRESS)
-    parser.add_argument("--file", required=True, help="source data file")
+    parser.add_argument("--file", help="source data file")
     parser.add_argument("--options-json", default="{}", help="parser options as JSON")
     return parser.parse_args(argv)
 
 
 def main(argv=None):
     args = _parse_args(argv)
+    if args.mode == "regex-search":
+        try:
+            payload = json.load(sys.stdin)
+        except (TypeError, ValueError) as error:
+            raise FileProcError("regex search input is invalid JSON: %s" % error)
+        result = _search_python_regex(payload)
+        sys.stdout.write(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+        sys.stdout.write("\n")
+        return 0
+
+    if not args.file:
+        raise FileProcError("--file is required")
     parser_name = args.parser or args.legacy_parser
     if not parser_name:
         raise FileProcError("--parser is required")

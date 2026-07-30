@@ -7,8 +7,8 @@
   <script src="inc/skins/default.js?v=20260712"></script>
   <script src="inc/wavedrom.min.js?v=20260712"></script>
   <link rel="stylesheet" href="inc/codemirror.css?v=5.65.21">
-  <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260730-scope-v4">
-  <link rel="stylesheet" href="inc/visualwavedrom-scope.css?v=20260730-scope-v17">
+  <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260731-impeccable-ui-v2">
+  <link rel="stylesheet" href="inc/visualwavedrom-scope.css?v=20260731-scope-v22">
 </head>
 <body>
   <div class="app" id="app">
@@ -665,6 +665,8 @@
               autocomplete="off" spellcheck="false" placeholder="请选择或粘贴预设 JSON 路径">
             <button type="button" class="modal-btn" id="wave-collection-load-preset">读取预设</button>
             <button type="button" class="modal-btn" id="wave-collection-pick-preset">选择预设</button>
+            <input type="file" id="wave-collection-preset-file"
+              accept=".json,application/json" hidden>
           </span>
         </label>
         <section class="wave-collection-section">
@@ -672,8 +674,10 @@
             <strong>预设内容</strong>
             <span id="wave-collection-preset-state">尚未读取预设</span>
           </div>
-          <textarea class="wave-collection-preset-editor" id="wave-collection-preset-editor"
-            spellcheck="false" aria-label="预设 JSON 内容"></textarea>
+          <div class="wave-collection-preset-editor-shell">
+            <textarea class="wave-collection-preset-editor" id="wave-collection-preset-editor"
+              spellcheck="false" aria-label="预设 JSON 内容"></textarea>
+          </div>
         </section>
         <section class="wave-collection-section">
           <div class="wave-collection-section-title">
@@ -728,9 +732,9 @@
     <script src="inc/visualwavedrom-vim.js?v=20260724-vim-insert-delete-v1"></script>
     <script src="inc/visualwavedrom-bigdata.js?v=20260729-bigdata-v1"></script>
     <script src="inc/visualwavedrom-json-bigdata.js?v=20260729-json-bigdata-v5"></script>
-    <script src="inc/visualwavedrom-scope-worker.js?v=20260730-scope-v15"></script>
-    <script src="inc/visualwavedrom-scope.js?v=20260730-scope-v17"></script>
-    <script src="inc/visualwavedrom-import-collection.js?v=20260730-import-collection-v1"></script>
-    <script src="inc/visualwavedrom-app.js?v=20260730-client-session-v3"></script>
+    <script src="inc/visualwavedrom-scope-worker.js?v=20260731-scope-v16"></script>
+    <script src="inc/visualwavedrom-scope.js?v=20260731-scope-v24"></script>
+    <script src="inc/visualwavedrom-import-collection.js?v=20260731-code-pairs-v1"></script>
+    <script src="inc/visualwavedrom-app.js?v=20260731-code-pairs-v2"></script>
 </body>
 </html>

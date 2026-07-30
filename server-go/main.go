@@ -127,16 +127,18 @@ type libraryListItem struct {
 }
 
 type service struct {
-	config        config
-	store         *sqliteStore
-	imports       *importManager
-	sqliteVersion string
-	activeScheme  string
-	httpServer    *http.Server
-	clientMu      sync.Mutex
-	clients       map[string]clientLease
-	shutdownTimer *time.Timer
-	stateMu       sync.Mutex
+	config                config
+	store                 *sqliteStore
+	imports               *importManager
+	sqliteVersion         string
+	activeScheme          string
+	httpServer            *http.Server
+	clientMu              sync.Mutex
+	clients               map[string]clientLease
+	shutdownTimer         *time.Timer
+	stateMu               sync.Mutex
+	collectionSearchMu    sync.Mutex
+	collectionSearchCache map[string]collectionSearchCacheEntry
 }
 
 type clientLease struct {
@@ -248,7 +250,8 @@ func newService(configuration config) (*service, error) {
 	instance := &service{
 		config: configuration, store: store, imports: newImportManager(configuration.rootDir),
 		sqliteVersion: sqliteVersion, activeScheme: protocolScheme,
-		clients: make(map[string]clientLease),
+		clients:               make(map[string]clientLease),
+		collectionSearchCache: make(map[string]collectionSearchCacheEntry),
 	}
 	if err = instance.ensureWaveDirectory(); err != nil {
 		return nil, err

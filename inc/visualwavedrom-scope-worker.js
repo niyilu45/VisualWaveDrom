@@ -336,7 +336,7 @@ function stateKind(character) {
 }
 
 function normalizedDigitalState(character, previous) {
-  const value = String(character || '').toLowerCase();
+  const value = String(character == null ? '' : character).toLowerCase();
   if (value === '1' || value === 'h') return '1';
   if (value === '0' || value === 'l') return '0';
   if (value === 'z') return 'z';

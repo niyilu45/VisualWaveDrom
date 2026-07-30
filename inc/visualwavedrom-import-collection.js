@@ -2,9 +2,56 @@
   'use strict';
 
   const EMPTY_PRESET = {
-    vars: [],
     paths: []
   };
+  const SEARCH_GUTTER = 'vwd-collection-search-gutter';
+  const LAST_STATE_STORAGE_KEY = 'visualwavedrom.importCollection.lastState.v1';
+  const VARIABLE_NAME_PATTERN = /^[\p{L}_][\p{L}\p{N}_.-]*$/u;
+  const PYTHON_VARIABLE_NAME_PATTERN = /^[\p{L}_][\p{L}\p{N}_]*$/u;
+  const LEGACY_TEMPLATE_VARIABLE_PATTERN =
+    /\$\{([\p{L}_][\p{L}\p{N}_.-]*)\}|\{\{([\p{L}_][\p{L}\p{N}_.-]*)\}\}|\{([\p{L}_][\p{L}\p{N}_.-]*)\}/gu;
+
+  function parsePythonFString(template) {
+    const text = String(template || '').trim();
+    const match = /^(?:[fF][rR]?|[rR][fF])(["'])([\s\S]*)\1$/.exec(text);
+    return match ? { body: match[2], isFString: true } : { body: text, isFString: false };
+  }
+
+  function extractTemplateVariables(template) {
+    const names = [];
+    const seen = new Set();
+    const parsed = parsePythonFString(template);
+    if (parsed.isFString) {
+      for (let index = 0; index < parsed.body.length; index += 1) {
+        if (parsed.body[index] !== '{') continue;
+        if (parsed.body[index + 1] === '{') {
+          index += 1;
+          continue;
+        }
+        const end = parsed.body.indexOf('}', index + 1);
+        if (end < 0) break;
+        const name = parsed.body.slice(index + 1, end).trim();
+        if (PYTHON_VARIABLE_NAME_PATTERN.test(name) && !seen.has(name)) {
+          seen.add(name);
+          names.push(name);
+        }
+        index = end;
+      }
+      return names;
+    }
+    parsed.body.replace(
+      LEGACY_TEMPLATE_VARIABLE_PATTERN,
+      (match, dollarName, doubleBraceName, braceName) => {
+        const name = dollarName || doubleBraceName || braceName;
+        if (name && !seen.has(name)) {
+          seen.add(name);
+          names.push(name);
+        }
+        return match;
+      }
+    );
+    return names;
+  }
 
   function create(options) {
     const settings = options || {};
@@ -16,7 +63,9 @@
     const pickRootButton = document.getElementById('wave-collection-pick-root');
     const pickPresetButton = document.getElementById('wave-collection-pick-preset');
     const loadPresetButton = document.getElementById('wave-collection-load-preset');
+    const presetFileInput = document.getElementById('wave-collection-preset-file');
     const presetEditor = document.getElementById('wave-collection-preset-editor');
+    const presetEditorShell = presetEditor.closest('.wave-collection-preset-editor-shell');
     const presetState = document.getElementById('wave-collection-preset-state');
     const variablesHost = document.getElementById('wave-collection-vars');
     const resultsHost = document.getElementById('wave-collection-results');
@@ -32,6 +81,14 @@
     let originalPresetPath = '';
     let searchResult = null;
     let editorParseTimer = 0;
+    let progressTimer = 0;
+    let progressStartedAt = 0;
+    let progressMessage = '';
+    let presetCodeEditor = null;
+    let presetResizeObserver = null;
+    let syncingPresetCodeEditor = false;
+    let selectedBrowserPresetFile = null;
+    let rememberStateTimer = 0;
     const variableValues = new Map();
 
     function debug(payload) {
@@ -47,6 +104,342 @@
     function setHint(message, isError) {
       hint.textContent = message || '';
       hint.classList.toggle('is-info', !!message && !isError);
+    }
+
+    function progressNow() {
+      return window.performance && typeof window.performance.now === 'function'
+        ? window.performance.now()
+        : Date.now();
+    }
+
+    function renderProgress() {
+      if (!progressStartedAt || !progressMessage) return;
+      const seconds = Math.max(0, Math.floor((progressNow() - progressStartedAt) / 1000));
+      setHint(progressMessage + (seconds ? '（已等待 ' + seconds + ' 秒，程序仍在处理）' : ''), false);
+    }
+
+    function startProgress(message) {
+      clearInterval(progressTimer);
+      progressStartedAt = progressNow();
+      progressMessage = message;
+      renderProgress();
+      progressTimer = window.setInterval(renderProgress, 1000);
+    }
+
+    function updateProgress(message) {
+      progressMessage = message;
+      renderProgress();
+    }
+
+    function stopProgress() {
+      clearInterval(progressTimer);
+      progressTimer = 0;
+      progressStartedAt = 0;
+      progressMessage = '';
+    }
+
+    function getPresetEditorValue() {
+      return presetCodeEditor ? presetCodeEditor.getValue() : presetEditor.value;
+    }
+
+    function scanJsonStringEnd(text, start) {
+      let index = start + 1;
+      while (index < text.length) {
+        if (text[index] === '\\') {
+          index += 2;
+          continue;
+        }
+        if (text[index] === '"') return index + 1;
+        index += 1;
+      }
+      return text.length;
+    }
+
+    function skipJsonWhitespace(text, start) {
+      let index = start;
+      while (index < text.length && /\s/.test(text[index])) index += 1;
+      return index;
+    }
+
+    function scanJsonValueEnd(text, start) {
+      let index = skipJsonWhitespace(text, start);
+      if (text[index] === '"') return scanJsonStringEnd(text, index);
+      if (text[index] !== '{' && text[index] !== '[') {
+        while (index < text.length && !/[,}\]]/.test(text[index])) index += 1;
+        return index;
+      }
+      const stack = [text[index] === '{' ? '}' : ']'];
+      index += 1;
+      while (index < text.length && stack.length) {
+        const char = text[index];
+        if (char === '"') {
+          index = scanJsonStringEnd(text, index);
+          continue;
+        }
+        if (char === '{') stack.push('}');
+        else if (char === '[') stack.push(']');
+        else if (char === stack[stack.length - 1]) stack.pop();
+        index += 1;
+      }
+      return index;
+    }
+
+    function lineNumberAt(text, position) {
+      let line = 1;
+      for (let index = 0; index < position; index += 1) {
+        if (text[index] === '\n') line += 1;
+      }
+      return line;
+    }
+
+    function findPresetPathObjectLines(text) {
+      try {
+        let index = skipJsonWhitespace(text, 0);
+        if (text[index] !== '{') return [];
+        index += 1;
+        while (index < text.length) {
+          index = skipJsonWhitespace(text, index);
+          if (text[index] === '}') return [];
+          if (text[index] !== '"') return [];
+          const keyStart = index;
+          const keyEnd = scanJsonStringEnd(text, keyStart);
+          const key = JSON.parse(text.slice(keyStart, keyEnd));
+          index = skipJsonWhitespace(text, keyEnd);
+          if (text[index] !== ':') return [];
+          index = skipJsonWhitespace(text, index + 1);
+          if (key === 'paths' && text[index] === '[') {
+            const lines = [];
+            index += 1;
+            while (index < text.length) {
+              index = skipJsonWhitespace(text, index);
+              if (text[index] === ']') return lines;
+              lines.push(lineNumberAt(text, index));
+              index = skipJsonWhitespace(text, scanJsonValueEnd(text, index));
+              if (text[index] === ',') {
+                index += 1;
+                continue;
+              }
+              if (text[index] === ']') return lines;
+              return [];
+            }
+            return lines;
+          }
+          index = skipJsonWhitespace(text, scanJsonValueEnd(text, index));
+          if (text[index] === ',') {
+            index += 1;
+            continue;
+          }
+          if (text[index] === '}') return [];
+          return [];
+        }
+      } catch (_error) {
+        return [];
+      }
+      return [];
+    }
+
+    function clearSearchMarkers() {
+      if (presetCodeEditor) presetCodeEditor.clearGutter(SEARCH_GUTTER);
+    }
+
+    function renderSearchMarkers(payload) {
+      if (!presetCodeEditor) return;
+      clearSearchMarkers();
+      const lines = findPresetPathObjectLines(getPresetEditorValue());
+      const entries = Array.isArray(payload && payload.entries) ? payload.entries : [];
+      const markersByLine = new Map();
+      entries.forEach((entry, fallbackIndex) => {
+        const entryIndex = Number.isInteger(Number(entry.index))
+          ? Number(entry.index)
+          : fallbackIndex;
+        const lineNumber = lines[entryIndex];
+        if (!lineNumber) return;
+        const matches = Array.isArray(entry.matches) ? entry.matches : [];
+        let state = 'missing';
+        let symbol = '!';
+        let label = '未搜索到文件';
+        if (matches.length === 1) {
+          state = 'matched';
+          symbol = '✓';
+          label = '搜索到 1 个文件';
+        } else if (matches.length > 1) {
+          state = 'multiple';
+          label = '搜索到 ' + matches.length + ' 个文件，默认取第一个';
+        }
+        if (!markersByLine.has(lineNumber)) markersByLine.set(lineNumber, []);
+        markersByLine.get(lineNumber).push({ state, symbol, label });
+      });
+      markersByLine.forEach((items, lineNumber) => {
+        const marker = document.createElement('span');
+        marker.className = 'wave-collection-search-markers';
+        marker.title = items.map((item) => item.label).join('；');
+        marker.setAttribute('aria-label', marker.title);
+        items.forEach((item) => {
+          const symbol = document.createElement('span');
+          symbol.className = 'wave-collection-search-marker is-' + item.state;
+          symbol.textContent = item.symbol;
+          marker.appendChild(symbol);
+        });
+        presetCodeEditor.setGutterMarker(lineNumber - 1, SEARCH_GUTTER, marker);
+      });
+    }
+
+    function setPresetEditorValue(value) {
+      const text = String(value == null ? '' : value);
+      clearSearchMarkers();
+      presetEditor.value = text;
+      if (!presetCodeEditor || presetCodeEditor.getValue() === text) return;
+      syncingPresetCodeEditor = true;
+      try {
+        presetCodeEditor.setValue(text);
+        presetCodeEditor.clearHistory();
+      } finally {
+        syncingPresetCodeEditor = false;
+      }
+    }
+
+    function readRememberedState() {
+      try {
+        const raw = window.localStorage.getItem(LAST_STATE_STORAGE_KEY);
+        if (!raw) return null;
+        const value = JSON.parse(raw);
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+        return {
+          rootPath: String(value.rootPath || ''),
+          presetPath: String(value.presetPath || ''),
+          originalPresetPath: String(value.originalPresetPath || ''),
+          presetText: typeof value.presetText === 'string' ? value.presetText : '',
+          variables: value.variables && typeof value.variables === 'object'
+            && !Array.isArray(value.variables) ? value.variables : {}
+        };
+      } catch (error) {
+        debug({ phase: 'state-read-error', message: error.message || String(error) });
+        return null;
+      }
+    }
+
+    function rememberState(reason) {
+      clearTimeout(rememberStateTimer);
+      rememberStateTimer = 0;
+      collectVariableValues();
+      const variables = {};
+      variableValues.forEach((value, name) => {
+        variables[name] = String(value == null ? '' : value);
+      });
+      const state = {
+        rootPath: String(rootPathInput.value || '').trim(),
+        presetPath: String(presetPathInput.value || '').trim(),
+        originalPresetPath: String(originalPresetPath || '').trim(),
+        presetText: getPresetEditorValue(),
+        variables
+      };
+      try {
+        window.localStorage.setItem(LAST_STATE_STORAGE_KEY, JSON.stringify(state));
+        debug({
+          phase: 'state-saved',
+          reason: reason || 'changed',
+          hasRootPath: !!state.rootPath,
+          hasPresetPath: !!state.presetPath,
+          presetLength: state.presetText.length,
+          variableCount: Object.keys(variables).length
+        });
+      } catch (error) {
+        debug({ phase: 'state-save-error', message: error.message || String(error) });
+      }
+      return state;
+    }
+
+    function scheduleRememberState(reason) {
+      clearTimeout(rememberStateTimer);
+      rememberStateTimer = setTimeout(() => {
+        rememberState(reason);
+      }, 250);
+    }
+
+    function restoreRememberedState() {
+      const state = readRememberedState();
+      if (!state) return false;
+      const defaultPresetText = JSON.stringify(EMPTY_PRESET, null, 2);
+      if (!state.rootPath && !state.presetPath
+          && (!state.presetText || state.presetText === defaultPresetText)) {
+        return false;
+      }
+      rootPathInput.value = state.rootPath;
+      presetPathInput.value = state.presetPath;
+      originalPresetPath = state.originalPresetPath;
+      if (selectedBrowserPresetFile
+          && selectedBrowserPresetFile.name !== state.presetPath) {
+        selectedBrowserPresetFile = null;
+      }
+      variableValues.clear();
+      Object.keys(state.variables).forEach((name) => {
+        variableValues.set(name, String(state.variables[name] || ''));
+      });
+      setPresetEditorValue(
+        state.presetText || defaultPresetText
+      );
+      debug({
+        phase: 'state-restored',
+        hasRootPath: !!state.rootPath,
+        hasPresetPath: !!state.presetPath,
+        presetLength: state.presetText.length,
+        variableCount: variableValues.size
+      });
+      return true;
+    }
+
+    function ensurePresetCodeEditor() {
+      if (window.VWDCodeEditorPairs) {
+        window.VWDCodeEditorPairs.attachTextArea(presetEditor, {
+          canEdit: () => !busy,
+          onWrap: (details) => {
+            debug(Object.assign({
+              phase: 'wrap-selection',
+              editor: 'preset-textarea'
+            }, details));
+          }
+        });
+      }
+      if (presetCodeEditor || !window.CodeMirror || !presetEditorShell) {
+        return presetCodeEditor;
+      }
+      presetCodeEditor = window.CodeMirror.fromTextArea(presetEditor, {
+        mode: { name: 'javascript', json: true },
+        lineNumbers: true,
+        gutters: [SEARCH_GUTTER, 'CodeMirror-linenumbers'],
+        lineWrapping: true,
+        indentUnit: 2,
+        tabSize: 2,
+        indentWithTabs: false,
+        viewportMargin: 20
+      });
+      presetCodeEditor.setSize('100%', '100%');
+      const input = presetCodeEditor.getInputField();
+      if (input) input.setAttribute('aria-label', '预设 JSON 内容');
+      if (window.VWDCodeEditorPairs) {
+        window.VWDCodeEditorPairs.attachCodeMirror(presetCodeEditor, {
+          canEdit: () => !busy,
+          onWrap: (details) => {
+            debug(Object.assign({
+              phase: 'wrap-selection',
+              editor: 'preset'
+            }, details));
+          }
+        });
+      }
+      presetCodeEditor.on('change', (editor) => {
+        if (syncingPresetCodeEditor) return;
+        presetEditor.value = editor.getValue();
+        clearSearchMarkers();
+        scheduleEditorParse();
+      });
+      if (window.ResizeObserver) {
+        presetResizeObserver = new window.ResizeObserver(() => {
+          if (presetCodeEditor && !modal.hidden) presetCodeEditor.refresh();
+        });
+        presetResizeObserver.observe(presetEditorShell);
+      }
+      return presetCodeEditor;
     }
 
     async function post(action, payload) {
@@ -78,20 +471,15 @@
       resultSummary.textContent = '';
     }
 
-    function collectVariableValues(requireComplete) {
+    function collectVariableValues() {
       const values = {};
-      const missing = [];
       variablesHost.querySelectorAll('input[data-variable-name]').forEach((input) => {
         const name = input.dataset.variableName;
         const value = String(input.value || '').trim();
         variableValues.set(name, value);
-        values[name] = value;
-        if (!value) missing.push(name);
+        values[name] = value || '0';
       });
-      if (requireComplete && missing.length) {
-        throw new Error('请填写变量：' + missing.join('、'));
-      }
-      return { values, missing };
+      return { values, missing: [] };
     }
 
     function invalidateSearch(reason) {
@@ -99,6 +487,7 @@
         debug({ phase: 'search-invalidated', reason: reason || 'changed' });
       }
       searchResult = null;
+      clearSearchMarkers();
       setEmptyResults('预设、目录或变量已变化，请重新搜索');
       updateButtons();
     }
@@ -109,7 +498,7 @@
       if (!variableNames.length) {
         const empty = document.createElement('div');
         empty.className = 'modal-empty-state';
-        empty.textContent = '此预设没有变量';
+        empty.textContent = 'grepKeys 中没有模板变量';
         variablesHost.appendChild(empty);
         return;
       }
@@ -125,9 +514,11 @@
         input.autocomplete = 'off';
         input.spellcheck = false;
         input.value = variableValues.get(name) || '';
+        input.placeholder = '留空按 0';
         input.addEventListener('input', () => {
           variableValues.set(name, input.value);
           invalidateSearch('variable-change');
+          scheduleRememberState('variable-change');
         });
         label.appendChild(title);
         label.appendChild(input);
@@ -139,15 +530,21 @@
       if (!value || typeof value !== 'object' || Array.isArray(value)) {
         throw new Error('预设顶层必须是 JSON 对象');
       }
-      if (!Array.isArray(value.vars)) throw new Error('vars 必须是列表');
+      if (value.vars !== undefined && !Array.isArray(value.vars)) {
+        throw new Error('vars 必须是列表；也可以省略并由 grepKeys 自动提取');
+      }
       if (!Array.isArray(value.paths)) throw new Error('paths 必须是列表');
       const names = new Set();
-      value.vars.forEach((name, index) => {
+      (value.vars || []).forEach((name, index) => {
         if (typeof name !== 'string' || !name.trim()) {
           throw new Error('vars[' + index + '] 必须是非空字符串');
         }
-        if (names.has(name.trim())) throw new Error('vars 中变量名不能重复');
-        names.add(name.trim());
+        const normalizedName = name.trim();
+        if (!VARIABLE_NAME_PATTERN.test(normalizedName)) {
+          throw new Error('vars[' + index + '] 不是有效变量名');
+        }
+        if (names.has(normalizedName)) throw new Error('vars 中变量名不能重复');
+        names.add(normalizedName);
       });
       value.paths.forEach((entry, index) => {
         if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
@@ -165,19 +562,21 @@
         if (typeof entry.name !== 'string' || !entry.name.trim()) {
           throw new Error('paths[' + index + '].name 必须是非空字符串');
         }
+        extractTemplateVariables(entry.grepKeys).forEach((name) => names.add(name));
       });
+      value.vars = Array.from(names);
       return value;
     }
 
     function parseEditor(showError) {
       try {
-        const nextPreset = validatePresetShape(JSON.parse(presetEditor.value));
+        const nextPreset = validatePresetShape(JSON.parse(getPresetEditorValue()));
         const previousVariables = parsedPreset && Array.isArray(parsedPreset.vars)
           ? parsedPreset.vars.join('\u0000')
           : '';
         const nextVariables = nextPreset.vars.join('\u0000');
         parsedPreset = nextPreset;
-        presetState.textContent = nextPreset.vars.length + ' 个变量，'
+        presetState.textContent = '从 grepKeys 自动识别 ' + nextPreset.vars.length + ' 个变量，'
           + nextPreset.paths.length + ' 条搜索规则';
         if (previousVariables !== nextVariables || !variablesHost.childElementCount) {
           renderVariables(nextPreset.vars);
@@ -196,6 +595,7 @@
 
     function scheduleEditorParse() {
       clearTimeout(editorParseTimer);
+      scheduleRememberState('preset-editor-change');
       editorParseTimer = setTimeout(() => {
         editorParseTimer = 0;
         invalidateSearch('preset-editor-change');
@@ -204,13 +604,17 @@
     }
 
     function updateButtons() {
-      const variables = collectVariableValues(false);
+      collectVariableValues();
       const hasRoot = !!String(rootPathInput.value || '').trim();
       const hasPresetPath = !!String(presetPathInput.value || '').trim();
-      const canSearch = !!parsedPreset && hasRoot && !variables.missing.length;
+      const canSearch = !!parsedPreset && hasRoot;
       rootPathInput.disabled = busy;
       presetPathInput.disabled = busy;
       presetEditor.disabled = busy;
+      if (presetCodeEditor) {
+        presetCodeEditor.setOption('readOnly', busy ? 'nocursor' : false);
+        presetCodeEditor.getWrapperElement().setAttribute('aria-disabled', String(busy));
+      }
       pickRootButton.disabled = busy;
       pickPresetButton.disabled = busy;
       loadPresetButton.disabled = busy || !hasPresetPath;
@@ -225,6 +629,7 @@
 
     function setBusy(nextBusy, action) {
       busy = nextBusy;
+      if (!nextBusy) stopProgress();
       searchButton.textContent = nextBusy && action === 'search' ? '正在搜索…' : '搜索';
       confirmButton.textContent = nextBusy && action === 'import' ? '正在导入…' : '确定导入';
       savePresetButton.textContent = nextBusy && action === 'save' ? '正在保存…' : '保存预设';
@@ -238,7 +643,9 @@
         const matches = Array.isArray(entry.matches) ? entry.matches : [];
         const row = document.createElement('div');
         row.className = 'wave-collection-result '
-          + (entry.status === 'matched' ? 'is-ready' : 'is-error');
+          + (entry.status === 'matched'
+            ? 'is-ready'
+            : (entry.status === 'multiple' ? 'is-warning' : 'is-error'));
         const name = document.createElement('div');
         name.className = 'wave-collection-result-name';
         name.textContent = String(entry.name || '未命名信号')
@@ -249,7 +656,11 @@
           path.textContent = matches[0].path;
           path.title = '正则：' + String(entry.resolvedPattern || '');
         } else if (matches.length > 1) {
-          path.textContent = matches.slice(0, 4).map((item) => item.relativePath).join('；')
+          path.textContent = '默认选择：' + matches[0].relativePath
+            + (matches.length > 1
+              ? '；其他候选：' + matches.slice(1, 4)
+                .map((item) => item.relativePath).join('；')
+              : '')
             + (matches.length > 4 ? '；…' : '');
           path.title = matches.map((item) => item.path).join('\n');
         } else {
@@ -259,18 +670,26 @@
         const state = document.createElement('span');
         state.className = 'wave-collection-result-state';
         if (entry.status === 'matched') state.textContent = '已匹配';
-        else if (entry.status === 'multiple') state.textContent = matches.length + ' 个匹配';
-        else if (entry.status === 'folder-missing') state.textContent = '目录不存在';
-        else state.textContent = '未匹配';
+        else if (entry.status === 'multiple') state.textContent = matches.length + ' 个匹配，取第 1 个';
+        else if (entry.status === 'folder-missing') state.textContent = '目录不存在，跳过';
+        else state.textContent = '未匹配，跳过';
         row.appendChild(name);
         row.appendChild(path);
         row.appendChild(state);
         resultsHost.appendChild(row);
       });
       if (!entries.length) setEmptyResults('预设中没有搜索规则');
+      renderSearchMarkers(payload);
+      const multipleCount = entries.filter((entry) => entry.status === 'multiple').length;
+      const skippedCount = entries.filter((entry) =>
+        entry.status === 'missing' || entry.status === 'folder-missing').length;
       resultSummary.textContent = payload.ready
-        ? ('已找到 ' + Number(payload.resultCount || 0) + ' 个文件，可以导入')
-        : ('共 ' + entries.length + ' 条规则，请修正未匹配或多匹配项');
+        ? ('已选择 ' + Number(payload.resultCount || 0) + ' 个文件，可以导入'
+          + (skippedCount ? '；跳过 ' + skippedCount + ' 条未匹配规则' : '')
+          + (multipleCount ? '；' + multipleCount + ' 条规则默认取第一个' : ''))
+        : (Number(payload.resultCount || 0) > 0
+          ? '存在重复信号名，请修改后重新搜索'
+          : '没有找到可导入的文件');
     }
 
     async function pickPath(kind, initialPath) {
@@ -285,29 +704,84 @@
     async function loadPreset(pathValue) {
       const path = String(pathValue || '').trim();
       if (!path || busy) return;
+      if (selectedBrowserPresetFile && path === selectedBrowserPresetFile.name) {
+        await loadBrowserPreset(selectedBrowserPresetFile);
+        return;
+      }
       setBusy(true, 'load');
-      setHint('正在读取预设文件…', false);
+      startProgress('正在读取预设文件…');
+      const startedAt = progressStartedAt;
       debug({ phase: 'preset-load-start', path });
       try {
         const payload = await post('load', { presetPath: path });
+        selectedBrowserPresetFile = null;
         originalPresetPath = String(payload.presetPath || path);
         presetPathInput.value = originalPresetPath;
-        presetEditor.value = JSON.stringify(payload.preset || EMPTY_PRESET, null, 2);
+        setPresetEditorValue(JSON.stringify(payload.preset || EMPTY_PRESET, null, 2));
         variableValues.clear();
         parsedPreset = null;
         parseEditor(true);
         invalidateSearch('preset-loaded');
-        setHint('预设已读取，请填写变量并选择数据文件夹', false);
+        rememberState('preset-loaded');
+        setHint('预设已读取；变量从 grepKeys 自动识别，留空按 0 匹配', false);
         debug({
           phase: 'preset-load-complete',
           path: originalPresetPath,
           variableCount: parsedPreset ? parsedPreset.vars.length : 0,
-          pathCount: parsedPreset ? parsedPreset.paths.length : 0
+          pathCount: parsedPreset ? parsedPreset.paths.length : 0,
+          durationMs: Math.round(progressNow() - startedAt)
         });
       } catch (error) {
         setHint(error.message || String(error), true);
         status(false, '读取预设集合失败：' + (error.message || String(error)));
         debug({ phase: 'preset-load-error', message: error.message || String(error) });
+      } finally {
+        setBusy(false, '');
+      }
+    }
+
+    async function loadBrowserPreset(file) {
+      if (!file || busy) return;
+      setBusy(true, 'load');
+      startProgress('正在读取预设文件…');
+      const startedAt = progressStartedAt;
+      debug({
+        phase: 'preset-browser-load-start',
+        name: file.name,
+        size: file.size
+      });
+      try {
+        if (file.size > 2 * 1024 * 1024) {
+          throw new Error('预设 JSON 文件不能超过 2 MB');
+        }
+        const text = String(await file.text()).replace(/^\uFEFF/, '');
+        const preset = validatePresetShape(JSON.parse(text));
+        selectedBrowserPresetFile = file;
+        originalPresetPath = '';
+        presetPathInput.value = file.name;
+        setPresetEditorValue(JSON.stringify(preset, null, 2));
+        variableValues.clear();
+        parsedPreset = null;
+        parseEditor(true);
+        invalidateSearch('preset-browser-loaded');
+        rememberState('preset-browser-loaded');
+        setHint('已读取预设文件：' + file.name, false);
+        debug({
+          phase: 'preset-browser-load-complete',
+          name: file.name,
+          variableCount: preset.vars.length,
+          pathCount: preset.paths.length,
+          durationMs: Math.round(progressNow() - startedAt)
+        });
+      } catch (error) {
+        selectedBrowserPresetFile = null;
+        setHint(error.message || String(error), true);
+        status(false, '读取预设集合失败：' + (error.message || String(error)));
+        debug({
+          phase: 'preset-browser-load-error',
+          name: file.name,
+          message: error.message || String(error)
+        });
       } finally {
         setBusy(false, '');
       }
@@ -321,6 +795,7 @@
         if (selected) {
           rootPathInput.value = selected;
           invalidateSearch('root-selected');
+          rememberState('root-selected');
         }
       } catch (error) {
         setHint((error.message || String(error)) + '；也可以直接粘贴文件夹路径', true);
@@ -330,27 +805,21 @@
     }
 
     async function choosePreset() {
-      if (busy) return;
-      setBusy(true, 'pick');
-      try {
-        const selected = await pickPath('preset', presetPathInput.value);
-        setBusy(false, '');
-        if (selected) await loadPreset(selected);
-        return;
-      } catch (error) {
-        setHint((error.message || String(error)) + '；也可以直接粘贴预设路径', true);
-      } finally {
-        setBusy(false, '');
-      }
+      if (busy || !presetFileInput) return;
+      presetFileInput.value = '';
+      debug({ phase: 'preset-browser-picker-open' });
+      presetFileInput.click();
     }
 
     async function savePreset() {
       const preset = parseEditor(true);
       if (!preset || busy) return;
       setBusy(true, 'save');
-      setHint('请选择预设保存路径…', false);
+      startProgress('请选择预设保存路径…');
+      const startedAt = progressStartedAt;
       try {
-        const initialPath = originalPresetPath || presetPathInput.value;
+        const initialPath = originalPresetPath
+          || (selectedBrowserPresetFile ? '' : presetPathInput.value);
         const selected = await pickPath('save-preset', initialPath);
         if (!selected) return;
         const payload = await post('save', {
@@ -359,11 +828,16 @@
         });
         originalPresetPath = String(payload.presetPath || selected);
         presetPathInput.value = originalPresetPath;
-        presetEditor.value = JSON.stringify(payload.preset || preset, null, 2);
+        setPresetEditorValue(JSON.stringify(payload.preset || preset, null, 2));
         parseEditor(false);
+        rememberState('preset-saved');
         setHint('预设已保存：' + originalPresetPath, false);
         status(true, '预设集合已保存');
-        debug({ phase: 'preset-save-complete', path: originalPresetPath });
+        debug({
+          phase: 'preset-save-complete',
+          path: originalPresetPath,
+          durationMs: Math.round(progressNow() - startedAt)
+        });
       } catch (error) {
         setHint(error.message || String(error), true);
         status(false, '保存预设集合失败：' + (error.message || String(error)));
@@ -378,7 +852,7 @@
       if (!preset || busy) return;
       let variables;
       try {
-        variables = collectVariableValues(true).values;
+        variables = collectVariableValues().values;
       } catch (error) {
         setHint(error.message, true);
         return;
@@ -389,21 +863,43 @@
         return;
       }
       setBusy(true, 'search');
-      setHint('正在搜索匹配文件…', false);
+      startProgress('正在建立文件索引并匹配规则…');
+      const startedAt = progressStartedAt;
       setEmptyResults('正在搜索…');
       debug({ phase: 'search-start', rootPath, variables });
       try {
         const payload = await post('search', { rootPath, preset, variables });
         searchResult = payload;
         renderSearchResults(payload);
+        const searchDetails = '扫描 ' + Number(payload.visitedFiles || 0)
+          + ' 个文件、' + Number(payload.scanCount || 0) + ' 个目录根，耗时 '
+          + Number(payload.durationMs || Math.round(progressNow() - startedAt)) + ' ms';
+        const multipleCount = Array.isArray(payload.entries)
+          ? payload.entries.filter((entry) => entry.status === 'multiple').length
+          : 0;
+        const skippedCount = Array.isArray(payload.entries)
+          ? payload.entries.filter((entry) =>
+            entry.status === 'missing' || entry.status === 'folder-missing').length
+          : 0;
         setHint(payload.ready
-          ? '搜索完成，确认结果后点击“确定导入”'
-          : '搜索结果不唯一，请修改变量或预设正则后重新搜索', !payload.ready);
+          ? ('搜索完成：' + searchDetails + '。确认结果后点击“确定导入”'
+            + (skippedCount ? '；' + skippedCount + ' 条未匹配规则将被跳过' : '')
+            + (multipleCount ? '；多匹配规则已默认选择第一个文件' : ''))
+          : ('搜索完成：' + searchDetails
+            + (Number(payload.resultCount || 0) > 0
+              ? '。请修改重复信号名'
+              : '。没有找到可导入文件')), !payload.ready);
         debug({
           phase: 'search-complete',
           ready: !!payload.ready,
           resultCount: payload.resultCount,
-          entryCount: Array.isArray(payload.entries) ? payload.entries.length : 0
+          entryCount: Array.isArray(payload.entries) ? payload.entries.length : 0,
+          visitedFiles: payload.visitedFiles,
+          scanCount: payload.scanCount,
+          regexEngine: payload.regexEngine,
+          serverDurationMs: payload.durationMs,
+          clientDurationMs: Math.round(progressNow() - startedAt),
+          hasSearchToken: !!payload.searchToken
         });
       } catch (error) {
         searchResult = null;
@@ -422,7 +918,7 @@
       if (!preset) return;
       let variables;
       try {
-        variables = collectVariableValues(true).values;
+        variables = collectVariableValues().values;
       } catch (error) {
         setHint(error.message, true);
         return;
@@ -432,10 +928,23 @@
         ? settings.getContextToken()
         : '';
       setBusy(true, 'import');
-      setHint('正在重新校验文件并批量解析波形…', false);
-      debug({ phase: 'import-start', rootPath, variables });
+      const fileCount = Number(searchResult.resultCount || 0);
+      startProgress('正在核对并解析 ' + fileCount + ' 个文件…');
+      const startedAt = progressStartedAt;
+      debug({
+        phase: 'import-start',
+        rootPath,
+        variables,
+        fileCount,
+        hasSearchToken: !!searchResult.searchToken
+      });
       try {
-        const payload = await post('import', { rootPath, preset, variables });
+        const payload = await post('import', {
+          rootPath,
+          preset,
+          variables,
+          searchToken: searchResult.searchToken || ''
+        });
         if (typeof settings.getContextToken === 'function'
             && settings.getContextToken() !== contextToken) {
           throw new Error('解析期间波形图或波形库已切换，请重新搜索');
@@ -443,6 +952,7 @@
         if (typeof settings.applyImport !== 'function') {
           throw new Error('批量导入处理函数未初始化');
         }
+        updateProgress('文件解析完成，正在写入当前波形图…');
         const result = await settings.applyImport(payload);
         setHint('', false);
         status(
@@ -455,7 +965,11 @@
           phase: 'import-complete',
           changed: result.changed,
           updateCount: result.count,
-          createdCount: result.createdCount
+          createdCount: result.createdCount,
+          workerCount: payload.workerCount,
+          parseDurationMs: payload.parseDurationMs,
+          serverDurationMs: payload.durationMs,
+          clientDurationMs: Math.round(progressNow() - startedAt)
         });
         busy = false;
         close();
@@ -476,34 +990,50 @@
       }
       busy = false;
       parsedPreset = null;
-      originalPresetPath = '';
       searchResult = null;
-      variableValues.clear();
-      rootPathInput.value = '';
-      presetPathInput.value = '';
-      presetEditor.value = JSON.stringify(EMPTY_PRESET, null, 2);
-      presetState.textContent = '尚未读取预设';
+      const restored = restoreRememberedState();
+      if (!restored) {
+        originalPresetPath = '';
+        selectedBrowserPresetFile = null;
+        variableValues.clear();
+        rootPathInput.value = '';
+        presetPathInput.value = '';
+        setPresetEditorValue(JSON.stringify(EMPTY_PRESET, null, 2));
+      }
+      presetState.textContent = restored ? '正在恢复上次预设' : '尚未读取预设';
       variablesHost.innerHTML = '';
       renderVariables([]);
-      setEmptyResults('选择数据文件夹和预设 JSON 文件');
-      setHint('', false);
+      setEmptyResults(restored
+        ? '已恢复上次输入，请重新搜索'
+        : '选择数据文件夹和预设 JSON 文件');
       modal.hidden = false;
+      ensurePresetCodeEditor();
       parseEditor(false);
+      setHint(restored ? '已恢复上次的数据文件夹和预设 JSON' : '', false);
       updateButtons();
-      requestAnimationFrame(() => presetPathInput.focus());
-      debug({ phase: 'modal-open' });
+      requestAnimationFrame(() => {
+        if (presetCodeEditor) presetCodeEditor.refresh();
+        presetPathInput.focus();
+      });
+      debug({ phase: 'modal-open', restored });
     }
 
     function close() {
       if (busy) return;
+      rememberState('modal-close');
       modal.hidden = true;
       clearTimeout(editorParseTimer);
       editorParseTimer = 0;
+      stopProgress();
       debug({ phase: 'modal-close' });
     }
 
     pickRootButton.addEventListener('click', () => { void chooseRoot(); });
     pickPresetButton.addEventListener('click', () => { void choosePreset(); });
+    presetFileInput.addEventListener('change', () => {
+      const file = presetFileInput.files && presetFileInput.files[0];
+      if (file) void loadBrowserPreset(file);
+    });
     loadPresetButton.addEventListener('click', () => { void loadPreset(presetPathInput.value); });
     savePresetButton.addEventListener('click', () => { void savePreset(); });
     searchButton.addEventListener('click', () => { void searchFiles(); });
@@ -512,8 +1042,13 @@
     presetEditor.addEventListener('input', scheduleEditorParse);
     rootPathInput.addEventListener('input', () => {
       invalidateSearch('root-path-change');
+      scheduleRememberState('root-path-change');
     });
-    presetPathInput.addEventListener('input', updateButtons);
+    presetPathInput.addEventListener('input', () => {
+      selectedBrowserPresetFile = null;
+      scheduleRememberState('preset-path-change');
+      updateButtons();
+    });
     presetPathInput.addEventListener('keydown', (event) => {
       if (event.key !== 'Enter' || busy) return;
       event.preventDefault();

@@ -22,6 +22,105 @@ function getDefaultJson() {
   return defaultJsonCache;
 }
 
+if (!window.VWDCodeEditorPairs) {
+  (function installCodeEditorPairs(global) {
+    'use strict';
+
+    const pairs = Object.freeze({
+      '"': '"',
+      "'": "'",
+      '[': ']',
+      '{': '}',
+      '(': ')'
+    });
+    const attachedCodeMirrors = new WeakSet();
+    const attachedTextAreas = new WeakSet();
+
+    function canHandle(options) {
+      return !options || typeof options.canEdit !== 'function' || options.canEdit() !== false;
+    }
+
+    function notify(options, details) {
+      if (options && typeof options.onWrap === 'function') options.onWrap(details);
+    }
+
+    function wrapCodeMirrorSelection(editor, opening, options) {
+      const closing = pairs[opening];
+      const readOnly = editor && editor.getOption ? editor.getOption('readOnly') : false;
+      if (!closing || !editor || readOnly === true || readOnly === 'nocursor'
+          || !canHandle(options) || !editor.somethingSelected()) return false;
+      const selections = editor.getSelections();
+      editor.operation(() => {
+        editor.replaceSelections(selections.map((text) => (
+          text ? opening + text + closing : opening
+        )), 'end', 'vwd-pair-wrap');
+      });
+      notify(options, {
+        opening,
+        closing,
+        selectionCount: selections.filter((text) => text.length > 0).length,
+        selectedLength: selections.reduce((total, text) => total + text.length, 0)
+      });
+      return true;
+    }
+
+    function attachCodeMirror(editor, options) {
+      if (!editor || attachedCodeMirrors.has(editor)) return false;
+      attachedCodeMirrors.add(editor);
+      editor.on('keydown', (cm, event) => {
+        if (!event || event.defaultPrevented || event.isComposing
+            || event.ctrlKey || event.metaKey || event.altKey || !pairs[event.key]) return;
+        if (String(cm.getOption('keyMap') || 'default') === 'vim') return;
+        if (!wrapCodeMirrorSelection(cm, event.key, options)) return;
+        event.preventDefault();
+        event.stopPropagation();
+      });
+      return true;
+    }
+
+    function wrapTextAreaSelection(textarea, opening, options) {
+      const closing = pairs[opening];
+      if (!closing || !textarea || textarea.disabled || textarea.readOnly || !canHandle(options)) {
+        return false;
+      }
+      const start = Number(textarea.selectionStart);
+      const end = Number(textarea.selectionEnd);
+      if (!Number.isFinite(start) || !Number.isFinite(end) || start === end) return false;
+      const selected = textarea.value.slice(start, end);
+      textarea.setRangeText(opening + selected + closing, start, end, 'end');
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      notify(options, {
+        opening,
+        closing,
+        selectionCount: 1,
+        selectedLength: selected.length
+      });
+      return true;
+    }
+
+    function attachTextArea(textarea, options) {
+      if (!textarea || attachedTextAreas.has(textarea)) return false;
+      attachedTextAreas.add(textarea);
+      textarea.addEventListener('keydown', (event) => {
+        if (!event || event.defaultPrevented || event.isComposing
+            || event.ctrlKey || event.metaKey || event.altKey || !pairs[event.key]) return;
+        if (!wrapTextAreaSelection(textarea, event.key, options)) return;
+        event.preventDefault();
+        event.stopPropagation();
+      });
+      return true;
+    }
+
+    global.VWDCodeEditorPairs = Object.freeze({
+      pairs,
+      attachCodeMirror,
+      attachTextArea,
+      wrapCodeMirrorSelection,
+      wrapTextAreaSelection
+    });
+  })(window);
+}
+
     const WAVE_UNIT_WIDTH = 20;
     const HSCALE_MIN = 1;
     const HSCALE_MAX = 20;
@@ -12111,6 +12210,17 @@ ${lines.join('\n')}`;
     }
 
     function initCodeMirrorEditor() {
+      if (window.VWDCodeEditorPairs && editor) {
+        window.VWDCodeEditorPairs.attachTextArea(editor, {
+          canEdit: () => jsonDocumentViewMode === 'full' && !isJsonViewReadOnly(),
+          onWrap: (details) => {
+            vwdDebugLog('code-editor', Object.assign({
+              phase: 'wrap-selection',
+              editor: 'json-textarea'
+            }, details));
+          }
+        });
+      }
       if (codeMirrorEditor || !window.CodeMirror || !editor) return false;
       const vimEnabled = !!(vimController && vimController.getState().enabled);
       const initialKeyMap = vimEnabled && CodeMirror.keyMap && CodeMirror.keyMap.vim ? 'vim' : 'default';
@@ -12132,6 +12242,17 @@ ${lines.join('\n')}`;
         'cursorScrollMargin',
         Math.max(0, codeMirrorEditor.defaultTextHeight() * 2)
       );
+      if (window.VWDCodeEditorPairs) {
+        window.VWDCodeEditorPairs.attachCodeMirror(codeMirrorEditor, {
+          canEdit: () => jsonDocumentViewMode === 'full' && !isJsonViewReadOnly(),
+          onWrap: (details) => {
+            vwdDebugLog('code-editor', Object.assign({
+              phase: 'wrap-selection',
+              editor: 'json'
+            }, details));
+          }
+        });
+      }
       if (editorWrapper) editorWrapper.classList.add('codemirror-active');
 
       codeMirrorEditor.on('beforeChange', (cm, change) => {

@@ -293,43 +293,64 @@ Linux 可直接粘贴 `/home/user/data.csv`、`~/data.csv` 或 `file:///home/use
 此功能需要由 BAT/SH 启动的服务模式：
 
 1. 选择数据文件夹，再选择集合预设 JSON；Linux 没有图形文件选择器时也可以直接粘贴路径。
-2. 页面读取 `vars`，为每个变量生成输入框。
-3. 点击 **搜索**。程序把变量代入每条 `paths` 规则，在 `数据文件夹/folder` 中递归搜索文件，
-   并在窗口中列出文件、目标信号名和匹配状态。
-4. 每条规则必须恰好匹配一个文件，且生成的信号名不能重复，之后 **确定导入** 才会可用。
+2. 页面从每条 `grepKeys` 中自动提取 `{var}` 变量，
+   不需要手写 `vars`。变量输入框可以留空，留空时按 `0` 参与匹配。
+3. 点击 **搜索**。程序把变量代入每条 `paths` 规则，只搜索 `数据文件夹/folder`
+   当前层的文件，不进入其子目录，并在窗口中列出文件、目标信号名和匹配状态。
+4. 未匹配到文件的规则会被跳过；只要至少一条规则找到文件，且生成的信号名不重复，
+   **确定导入** 就会可用。
 5. 可以直接修改窗口中的预设 JSON。点击 **保存预设** 时，文件选择器默认定位到原预设路径。
 
 `import/SchemeCollection/example.json` 是可直接修改的示例：
 
 ```json
 {
-  "vars": [
-    "channel",
-    "case"
-  ],
   "paths": [
     {
       "folder": "Data",
-      "grepKeys": "^${channel}-${case}\\.txt$",
+      "grepKeys": "^{channel}-{case}\\.txt$",
       "hasSeq": true,
-      "name": "${channel}_${case}"
+      "name": "{channel}_{case}_txt"
+    },
+    {
+      "folder": "Data",
+      "grepKeys": "^{channel}-{case}\\.csv$",
+      "hasSeq": true,
+      "name": "{channel}_{case}_csv"
+    },
+    {
+      "folder": "Data",
+      "grepKeys": "^{channel}-{case}\\.tsv$",
+      "hasSeq": true,
+      "name": "{channel}_{case}_tsv"
     }
   ]
 }
 ```
 
-使用这份示例时，数据文件夹选择工程中的 `import`，`channel` 填 `basic`，`case` 塨
-`signal`，会匹配现有的 `import/Data/basic-signal.txt` 并导入为 `basic_signal`。
+使用这份示例时，数据文件夹选择工程中的 `import`，页面会从 `grepKeys` 自动识别
+`channel` 和 `case`。填入 `basic`、`signal` 后，会同时匹配
+`import/Data/basic-signal.txt`、`.csv` 和 `.tsv`，并导入为
+`basic_signal_txt`、`basic_signal_csv` 和 `basic_signal_tsv` 三路信号。
 
-- `vars`：需要用户填写的变量名列表。
+- `vars`：可选的旧版兼容字段；通常无需填写，变量名会按照在 `grepKeys` 中首次出现的
+  顺序自动提取。
 - `folder`：相对于本次选择的数据文件夹的搜索目录；可以为 `.`，且不能跳出所选目录。
-- `grepKeys`：匹配文件名的 Go 正则表达式。变量可写成 `${var}`、`{{var}}` 或 `{var}`；
-  用户输入的变量值按普通文本参与正则匹配，不会被当作额外正则语法。
+- `grepKeys`：匹配文件名的 Python `re` 正则表达式，行为等价于
+  `re.compile(resolvedGrepKeys).search(fileName)`。支持前后向断言、命名分组和反向引用等
+  Python `re` 语法。包含变量时直接写成 `SeqConvOutC{idx}`，程序会自动按 f-string
+  模板解析并识别 `{idx}`，不需要添加 `f` 前缀或额外引号。用户输入的变量值按普通
+  文本参与正则匹配，不会被当作额外正则语法；变量值留空时按 `0` 处理。数字正则量词
+  会原样保留，例如 `^A\\d{2}_{idx}$` 中只有 `{idx}` 被视为变量。
+- 搜索后，预设行号左侧用红色 `!` 表示未匹配、绿色 `✓` 表示唯一匹配、黄色
+  `!` 表示匹配到多个文件。多匹配不会阻止导入，程序按相对路径排序并默认使用
+  第一个文件。
 - `hasSeq`：`true` 表示第一列是序号，`false` 表示程序从 0 自动编号。
 - `name`：导入后的信号名，也可以使用变量。检测到复数数据时仍会自动生成 `_I` 和 `_Q` 两路。
 
-搜索只读取文件信息和少量样本；点击确定后才解析完整文件。整批解析成功后才统一修改当前波形图，
-因此缺失文件、重复匹配或某个文件解析失败不会留下半批数据。
+搜索只读取文件信息和少量样本；点击确定后才解析完整文件。未匹配文件会跳过，多匹配规则
+默认采用排序后的第一个文件；已匹配文件整批解析成功后才统一修改当前波形图，因此某个文件
+解析失败不会留下半批数据。
 
 目录结构如下：
 

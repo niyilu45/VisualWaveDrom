@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260730-scope-v15';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260731-scope-v16';
   const DEFAULT_ROW_HEIGHT = 42;
   const MIN_ANALOG_ROW_HEIGHT = 28;
   const MAX_ANALOG_ROW_HEIGHT = 480;
@@ -10,6 +10,7 @@
   const AXIS_HEIGHT = 38;
   const OVERVIEW_HEIGHT = 76;
   const MAX_HISTORY = 100;
+  const CURSOR_HIT_RADIUS = 10;
   const COLOR_PRESETS = [
     { name: '绿色', value: '#07853d' },
     { name: '青色', value: '#0097a7' },
@@ -256,7 +257,12 @@
       this.cursorB = null;
       this.activeCursor = 'A';
       this.activeCursorRow = 0;
-      this.cursorMode = false;
+      this.connectionMode = false;
+      this.connectionDraftStart = null;
+      this.connectionHover = null;
+      this.connections = [];
+      this.selectedConnectionId = '';
+      this.connectionSequence = 0;
       this.showOriginal = false;
       this.cursorInspectSequence = 0;
       this.cursorNavigationSequence = 0;
@@ -281,6 +287,7 @@
       this.saveInFlight = false;
       this.styleControlRow = null;
       this.stylePopoverAnchor = null;
+      this.columnBackgroundPopoverAnchor = null;
       this.columnBackgroundColor = BACKGROUND_COLOR_PRESETS[0].value;
       this.rowStart = 0;
       this.rowEnd = 0;
@@ -378,10 +385,8 @@
             <span id="scope-library-name"></span>
           </div>
           <div class="scope-toolbar-group" aria-label="视图控制">
-            <button type="button" class="scope-icon-btn" id="scope-zoom-in" title="放大">+</button>
-            <button type="button" class="scope-icon-btn" id="scope-zoom-out" title="缩小">−</button>
-            <button type="button" class="scope-command-btn" id="scope-fit">适应窗口</button>
-            <button type="button" class="scope-command-btn" id="scope-cursors">游标测量</button>
+            <button type="button" class="scope-command-btn" id="scope-connections"
+                aria-pressed="false">连接线</button>
             <button type="button" class="scope-command-btn" id="scope-original-data"
                 aria-pressed="false" title="显示或隐藏原始数据">原始数据 Off</button>
           </div>
@@ -434,11 +439,10 @@
             </label>
             <button type="button" class="scope-command-btn" id="scope-style-use-cursors"
                 title="使用 A、B 游标之间的列">使用 A-B</button>
-            <span class="scope-toolbar-label">列背景</span>
-            <div class="scope-color-presets scope-background-presets"
-                id="scope-column-background-presets"
-                role="group" aria-label="指定列背景预设颜色">${columnBackgroundPresetButtons}</div>
-            <button type="button" class="scope-command-btn" id="scope-column-background-apply">应用列背景</button>
+            <button type="button" class="scope-command-btn" id="scope-column-background-apply"
+                aria-haspopup="dialog" aria-expanded="false"
+                aria-controls="scope-column-background-popover"
+                title="选择预设颜色并应用到当前选区">列背景</button>
             <button type="button" class="scope-command-btn" id="scope-column-background-clear">清除列背景</button>
           </div>
           <div class="scope-toolbar-group scope-simplify-controls">
@@ -483,7 +487,20 @@
               <div id="scope-signal-list"></div>
             </div>
             <div class="scope-overview-label">
-              <strong>全局预览</strong>
+              <div class="scope-overview-label-header">
+                <strong>全局预览</strong>
+                <div class="scope-overview-zoom-controls" aria-label="全局预览缩放">
+                  <button type="button"
+                      class="scope-icon-btn scope-overview-zoom-btn"
+                      id="scope-zoom-in" title="放大" aria-label="放大全局预览">+</button>
+                  <button type="button"
+                      class="scope-icon-btn scope-overview-zoom-btn"
+                      id="scope-zoom-out" title="缩小" aria-label="缩小全局预览">−</button>
+                  <button type="button"
+                      class="scope-command-btn scope-overview-fit-btn"
+                      id="scope-fit">适应窗口</button>
+                </div>
+              </div>
               <span>拖动定位</span>
             </div>
           </aside>
@@ -543,8 +560,23 @@
                 id="scope-row-background-presets"
                 role="group" aria-label="整行背景预设颜色">${rowBackgroundPresetButtons}</div>
             <button type="button" class="scope-icon-btn scope-small-icon" id="scope-row-background-clear"
-                title="清除整行背景色" aria-label="清除整行背景色">×</button>
+              title="清除整行背景色" aria-label="清除整行背景色">×</button>
           </div>
+        </div>
+        <div class="scope-style-popover scope-column-background-popover"
+            id="scope-column-background-popover" role="dialog"
+            aria-labelledby="scope-column-background-popover-title" hidden>
+          <div class="scope-style-popover-header">
+            <strong id="scope-column-background-popover-title">选区背景</strong>
+            <button type="button" class="scope-icon-btn scope-small-icon"
+                id="scope-column-background-popover-close"
+                title="关闭" aria-label="关闭列背景颜色选择">×</button>
+          </div>
+          <p class="scope-column-background-summary"
+              id="scope-column-background-summary"></p>
+          <div class="scope-color-presets scope-background-presets scope-column-background-palette"
+              id="scope-column-background-presets"
+              role="group" aria-label="选区背景预设颜色">${columnBackgroundPresetButtons}</div>
         </div>
       `;
       document.body.appendChild(root);
@@ -564,7 +596,7 @@
       this.rangeStartInput = root.querySelector('#scope-range-start');
       this.rangeEndInput = root.querySelector('#scope-range-end');
       this.outputTitleInput = root.querySelector('#scope-output-title');
-      this.cursorButton = root.querySelector('#scope-cursors');
+      this.connectionButton = root.querySelector('#scope-connections');
       this.originalDataButton = root.querySelector('#scope-original-data');
       this.cursorAButton = root.querySelector('#scope-cursor-a');
       this.cursorBButton = root.querySelector('#scope-cursor-b');
@@ -593,6 +625,14 @@
       this.columnBackgroundPresets = root.querySelector('#scope-column-background-presets');
       this.columnBackgroundApplyButton = root.querySelector('#scope-column-background-apply');
       this.columnBackgroundClearButton = root.querySelector('#scope-column-background-clear');
+      this.columnBackgroundPopover = root.querySelector('#scope-column-background-popover');
+      this.columnBackgroundPopoverTitle = root.querySelector(
+        '#scope-column-background-popover-title'
+      );
+      this.columnBackgroundSummary = root.querySelector('#scope-column-background-summary');
+      this.columnBackgroundPopoverCloseButton = root.querySelector(
+        '#scope-column-background-popover-close'
+      );
       this.statusEl = root.querySelector('#scope-status');
       this.metricsEl = root.querySelector('#scope-metrics');
       this.measurementsEl = root.querySelector('#scope-measurements');
@@ -614,7 +654,7 @@
       this.root.querySelector('#scope-zoom-in').addEventListener('click', () => this.zoom(0.5));
       this.root.querySelector('#scope-zoom-out').addEventListener('click', () => this.zoom(2));
       this.root.querySelector('#scope-fit').addEventListener('click', () => this.fit());
-      this.cursorButton.addEventListener('click', () => this.toggleCursorMode());
+      this.connectionButton.addEventListener('click', () => this.toggleConnectionMode());
       this.originalDataButton.addEventListener('click', () => this.toggleOriginalData());
       this.cursorAButton.addEventListener('click', () => this.setActiveCursor('A', true));
       this.cursorBButton.addEventListener('click', () => this.setActiveCursor('B', true));
@@ -667,18 +707,27 @@
         if (!button || button.disabled) return;
         this.columnBackgroundColor = button.dataset.scopeColumnBackground;
         this.updateStyleControls();
+        this.applyColumnBackground(false);
+        this.closeColumnBackgroundPopover(true);
+      });
+      this.columnBackgroundPopoverCloseButton.addEventListener('click', () => {
+        this.closeColumnBackgroundPopover(true);
       });
       this.styleUseCursorsButton.addEventListener('click', () => this.useCursorColumnSelection());
       this.columnBackgroundApplyButton.addEventListener('click', () => {
-        this.applyColumnBackground(false);
+        this.openColumnBackgroundPopover(this.columnBackgroundApplyButton);
       });
       this.columnBackgroundClearButton.addEventListener('click', () => {
         this.applyColumnBackground(true);
       });
+      this.styleColumnsInput.addEventListener('input', () => {
+        this.closeColumnBackgroundPopover();
+        this.updateColumnBackgroundAvailability();
+      });
       this.styleColumnsInput.addEventListener('keydown', (event) => {
         if (event.key !== 'Enter') return;
         event.preventDefault();
-        this.applyColumnBackground(false);
+        this.openColumnBackgroundPopover(this.columnBackgroundApplyButton);
       });
       this.root.querySelector('#scope-use-view').addEventListener('click', () => this.useCurrentViewRange());
       this.root.querySelector('#scope-simplify').addEventListener('click', () => this.runSimplify(true));
@@ -762,6 +811,7 @@
 
       this.plotViewport.addEventListener('scroll', () => {
         this.closeStylePopover();
+        this.closeColumnBackgroundPopover();
         this.signalScroll.scrollTop = this.plotViewport.scrollTop;
         this.positionPlotCanvas();
         this.scheduleWindowRequest();
@@ -776,17 +826,56 @@
       this.plotCanvas.addEventListener('pointermove', (event) => this.onPlotPointerMove(event));
       this.plotCanvas.addEventListener('pointerup', (event) => this.onPlotPointerUp(event));
       this.plotCanvas.addEventListener('pointercancel', (event) => this.cancelPlotDrag(event));
+      this.plotCanvas.addEventListener('pointerleave', () => {
+        if (!this.drag) this.plotCanvas.classList.remove('cursor-hover');
+        if (!this.connectionHover || this.drag) return;
+        this.connectionHover = null;
+        this.draw();
+      });
       this.plotCanvas.addEventListener('wheel', (event) => this.onPlotWheel(event), { passive: false });
       this.overviewCanvas.addEventListener('pointerdown', (event) => this.onOverviewPointerDown(event));
       this.overviewCanvas.addEventListener('pointermove', (event) => this.onOverviewPointerMove(event));
       this.overviewCanvas.addEventListener('pointerup', (event) => this.finishOverviewDrag(event, false));
       this.overviewCanvas.addEventListener('pointercancel', (event) => this.finishOverviewDrag(event, true));
+      this.overviewCanvas.addEventListener('wheel', (event) => {
+        this.onOverviewWheel(event);
+      }, { passive: false });
       this.outputTitleInput.addEventListener('input', () => this.scheduleBuild());
 
       global.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape'
+            && this.columnBackgroundPopover
+            && !this.columnBackgroundPopover.hidden) {
+          event.preventDefault();
+          this.closeColumnBackgroundPopover(true);
+          return;
+        }
         if (event.key === 'Escape' && this.stylePopover && !this.stylePopover.hidden) {
           event.preventDefault();
           this.closeStylePopover();
+          return;
+        }
+        if (event.key === 'Escape' && this.connectionDraftStart) {
+          event.preventDefault();
+          this.connectionDraftStart = null;
+          this.connectionHover = null;
+          this.draw();
+          this.setStatus('已取消当前连接线起点');
+          this.log('scope-connection', { phase: 'draft-cancel' });
+          return;
+        }
+        if (event.key === 'Escape' && this.selectedConnectionId) {
+          event.preventDefault();
+          this.selectedConnectionId = '';
+          this.draw();
+          this.setStatus('已取消连接线选择');
+          this.log('scope-connection', { phase: 'selection-clear' });
+          return;
+        }
+        if (event.key === 'Escape' && this.connectionMode) {
+          event.preventDefault();
+          this.setConnectionMode(false);
+          this.setStatus('已退出连接线模式');
           return;
         }
         const target = event.target;
@@ -799,6 +888,9 @@
         } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'y') {
           event.preventDefault();
           this.redo();
+        } else if (event.key === 'Delete' && this.selectedConnectionId) {
+          event.preventDefault();
+          this.deleteSelectedConnection();
         } else if (event.key === 'Delete' && this.selectedPoint) {
           event.preventDefault();
           this.deleteSelectedPoint();
@@ -806,10 +898,16 @@
       });
 
       this.root.addEventListener('pointerdown', (event) => {
-        if (!this.stylePopover || this.stylePopover.hidden) return;
-        if (this.stylePopover.contains(event.target)
-            || event.target.closest('[data-scope-swatch-row]')) return;
-        this.closeStylePopover();
+        if (this.stylePopover && !this.stylePopover.hidden
+            && !this.stylePopover.contains(event.target)
+            && !event.target.closest('[data-scope-swatch-row]')) {
+          this.closeStylePopover();
+        }
+        if (this.columnBackgroundPopover && !this.columnBackgroundPopover.hidden
+            && !this.columnBackgroundPopover.contains(event.target)
+            && !event.target.closest('#scope-column-background-apply')) {
+          this.closeColumnBackgroundPopover();
+        }
       });
 
       if (typeof ResizeObserver === 'function') {
@@ -913,6 +1011,7 @@
 
     renderSignalRows() {
       this.closeStylePopover();
+      this.closeColumnBackgroundPopover();
       this.rebuildRowOffsets();
       this.signalList.innerHTML = this.meta.rows.map((row) => {
         const group = row.groups && row.groups.length ? row.groups.join(' / ') : '';
@@ -999,6 +1098,7 @@
           button.classList.remove('active');
           button.setAttribute('aria-pressed', 'false');
         });
+        this.updateColumnBackgroundAvailability();
         return;
       }
       const style = this.rowStyle(row.index);
@@ -1033,6 +1133,35 @@
         'aria-label',
         row.name + (count ? '，已设置 ' + count + ' 个列背景区间' : '')
       );
+      this.updateColumnBackgroundAvailability();
+    }
+
+    updateColumnBackgroundAvailability() {
+      if (!this.columnBackgroundApplyButton) return false;
+      const row = this.meta && this.meta.rows[this.activeCursorRow];
+      const columnText = this.styleColumnsInput
+        ? String(this.styleColumnsInput.value || '').trim()
+        : '';
+      const available = !!row && !!columnText;
+      this.columnBackgroundApplyButton.disabled = !available;
+      this.columnBackgroundClearButton.disabled = !available;
+      Array.from(
+        this.columnBackgroundPresets.querySelectorAll('[data-scope-column-background]')
+      ).forEach((button) => {
+        button.disabled = !available;
+      });
+      if (this.columnBackgroundPopoverTitle) {
+        this.columnBackgroundPopoverTitle.textContent = row
+          ? '选区背景 · ' + row.name
+          : '选区背景';
+      }
+      if (this.columnBackgroundSummary) {
+        this.columnBackgroundSummary.textContent = available
+          ? row.name + '：第 ' + columnText + ' 列'
+          : '请先在波形区域选择需要设置背景的列';
+      }
+      if (!available) this.closeColumnBackgroundPopover();
+      return available;
     }
 
     openStylePopover(rowIndex, anchor) {
@@ -1043,6 +1172,7 @@
       );
       if (!anchor || !this.meta.rows[index]) return;
       this.closeStylePopover();
+      this.closeColumnBackgroundPopover();
       this.setActiveCursorRow(index);
       this.stylePopoverAnchor = anchor;
       anchor.classList.add('active');
@@ -1072,6 +1202,77 @@
       this.stylePopover.style.top = top + 'px';
       this.stylePopover.style.visibility = '';
       this.setStatus('正在设置 ' + this.meta.rows[index].name + ' 的波形和背景颜色');
+    }
+
+    openColumnBackgroundPopover(anchor) {
+      const row = this.meta && this.meta.rows[this.activeCursorRow];
+      if (!anchor || !row || !this.updateColumnBackgroundAvailability()) {
+        this.setStatus('请先在波形区域选择需要设置背景的列', true);
+        return;
+      }
+      let selection;
+      try {
+        selection = parseColumnSelection(this.styleColumnsInput.value, this.meta.totalColumns);
+      } catch (error) {
+        this.setStatus(error.message || String(error), true);
+        this.styleColumnsInput.focus();
+        return;
+      }
+      this.closeStylePopover();
+      this.closeColumnBackgroundPopover();
+      this.columnBackgroundPopoverAnchor = anchor;
+      anchor.classList.add('active');
+      anchor.setAttribute('aria-expanded', 'true');
+      this.columnBackgroundSummary.textContent = row.name + '：第 ' + selection.map((range) => {
+        const first = range.start + 1;
+        const last = range.end;
+        return first === last ? String(first) : first + '-' + last;
+      }).join('、') + ' 列';
+      this.columnBackgroundPopover.hidden = false;
+      this.columnBackgroundPopover.style.visibility = 'hidden';
+      const anchorRect = anchor.getBoundingClientRect();
+      const popoverRect = this.columnBackgroundPopover.getBoundingClientRect();
+      const margin = 8;
+      const viewportWidth = Math.max(1, document.documentElement.clientWidth);
+      const viewportHeight = Math.max(1, document.documentElement.clientHeight);
+      let left = anchorRect.left;
+      let top = anchorRect.bottom + 6;
+      if (top + popoverRect.height > viewportHeight - margin) {
+        top = anchorRect.top - popoverRect.height - 6;
+      }
+      this.columnBackgroundPopover.style.left = clamp(
+        left,
+        margin,
+        Math.max(margin, viewportWidth - popoverRect.width - margin)
+      ) + 'px';
+      this.columnBackgroundPopover.style.top = clamp(
+        top,
+        margin,
+        Math.max(margin, viewportHeight - popoverRect.height - margin)
+      ) + 'px';
+      this.columnBackgroundPopover.style.visibility = '';
+      const activeButton = this.columnBackgroundPresets.querySelector(
+        '[data-scope-column-background].active'
+      );
+      const firstButton = this.columnBackgroundPresets.querySelector(
+        '[data-scope-column-background]'
+      );
+      const focusTarget = activeButton || firstButton;
+      if (focusTarget) focusTarget.focus({ preventScroll: true });
+      this.setStatus('请选择 ' + row.name + ' 选中区域的背景颜色');
+    }
+
+    closeColumnBackgroundPopover(restoreFocus) {
+      if (!this.columnBackgroundPopover || this.columnBackgroundPopover.hidden) return;
+      const anchor = this.columnBackgroundPopoverAnchor;
+      if (anchor) {
+        anchor.classList.remove('active');
+        anchor.setAttribute('aria-expanded', 'false');
+      }
+      this.columnBackgroundPopoverAnchor = null;
+      this.columnBackgroundPopover.hidden = true;
+      this.columnBackgroundPopover.style.visibility = '';
+      if (restoreFocus && anchor) anchor.focus({ preventScroll: true });
     }
 
     closeStylePopover() {
@@ -1154,6 +1355,7 @@
         ? start
         : clamp(Math.ceil(right), start, maximum);
       this.styleColumnsInput.value = start === end ? String(start) : start + '-' + end;
+      this.updateColumnBackgroundAvailability();
       this.styleColumnsInput.focus();
       this.styleColumnsInput.select();
     }
@@ -1457,6 +1659,46 @@
       context.restore();
     }
 
+    drawUnknownDigitalSegment(context, x1, x2, yTop, yBottom, lineWidth, compact) {
+      const left = Math.min(x1, x2);
+      const right = Math.max(x1, x2);
+      const segmentWidth = Math.max(1, right - left);
+      const inset = Math.min(5, Math.max(1, (yBottom - yTop) * 0.2));
+      const highY = Math.min(yBottom, yTop + inset);
+      const lowY = Math.max(yTop, yBottom - inset);
+      const centerY = (highY + lowY) / 2;
+      const hatchWidth = compact ? 8 : 14;
+      context.save();
+      context.fillStyle = 'rgba(111, 118, 128, 0.14)';
+      context.fillRect(left, highY, segmentWidth, Math.max(1, lowY - highY));
+      context.strokeStyle = '#60666f';
+      context.lineWidth = lineWidth || 1.5;
+      context.beginPath();
+      context.moveTo(left, highY);
+      context.lineTo(right, highY);
+      context.moveTo(left, lowY);
+      context.lineTo(right, lowY);
+      if (segmentWidth >= (compact ? 3 : 7)) {
+        for (let hatchX = left; hatchX < right; hatchX += hatchWidth) {
+          const hatchRight = Math.min(right, hatchX + hatchWidth);
+          context.moveTo(hatchX, highY);
+          context.lineTo(hatchRight, lowY);
+          context.moveTo(hatchX, lowY);
+          context.lineTo(hatchRight, highY);
+        }
+      }
+      context.stroke();
+      if (!compact && segmentWidth >= 28) {
+        context.fillStyle = '#4f555d';
+        context.font = '600 10px "Segoe UI", sans-serif';
+        context.textAlign = 'center';
+        context.textBaseline = 'middle';
+        context.fillText('X', (left + right) / 2, centerY);
+      }
+      context.restore();
+      return centerY;
+    }
+
     drawDigitalDecorations(context, data, yTop, yBottom, width, color) {
       const highY = yTop + 5;
       const lowY = yBottom - 5;
@@ -1501,7 +1743,10 @@
           } else {
             const highY = yTop + 5;
             const lowY = yBottom - 5;
-            context.strokeStyle = bucket.unknown ? '#7b818a' : color;
+            if (bucket.unknown) {
+              this.drawUnknownDigitalSegment(context, x1, x2, yTop, yBottom, 1, true);
+            }
+            context.strokeStyle = color;
             context.beginPath();
             if (bucket.high) {
               context.moveTo(x1, highY);
@@ -1553,11 +1798,27 @@
           previousY = null;
           return;
         }
-        const y = segment.state === '1'
+        const state = String(
+          segment.state == null || segment.state === '' ? 'x' : segment.state
+        ).toLowerCase();
+        if (state === 'x') {
+          previousY = this.drawUnknownDigitalSegment(
+            context,
+            x1,
+            x2,
+            yTop,
+            yBottom,
+            1.5,
+            false
+          );
+          return;
+        }
+        const y = state === '1'
           ? yTop + 5
-          : (segment.state === '0' ? yBottom - 5 : (yTop + yBottom) / 2);
-        context.strokeStyle = segment.state === 'x' || segment.state === 'z' ? '#6f7680' : color;
+          : (state === '0' ? yBottom - 5 : (yTop + yBottom) / 2);
+        context.strokeStyle = state === 'z' ? '#6f7680' : color;
         context.lineWidth = 1.5;
+        context.setLineDash(state === 'z' ? [5, 3] : []);
         context.beginPath();
         if (previousY != null && Math.abs(previousY - y) > 0.5) {
           context.moveTo(x1, previousY);
@@ -1566,10 +1827,7 @@
         context.moveTo(x1, y);
         context.lineTo(x2, y);
         context.stroke();
-        if (segment.state === 'x' || segment.state === 'z') {
-          context.fillStyle = 'rgba(111, 118, 128, 0.12)';
-          context.fillRect(x1, yTop + 4, Math.max(1, x2 - x1), yBottom - yTop - 8);
-        }
+        context.setLineDash([]);
         previousY = y;
       });
       if (mode === 'digital') {
@@ -1737,12 +1995,28 @@
             previousY = secondY;
             return;
           }
-          const state = String(row.values[pointIndex] || 'x').toLowerCase();
+          const rawState = row.values[pointIndex];
+          const state = String(
+            rawState == null || rawState === '' ? 'x' : rawState
+          ).toLowerCase();
+          if (state === 'x') {
+            previousY = this.drawUnknownDigitalSegment(
+              context,
+              x1,
+              x2,
+              yTop,
+              yBottom,
+              1.7,
+              false
+            );
+            return;
+          }
           const y = state === '1'
             ? yTop + 5
             : (state === '0' ? yBottom - 5 : (yTop + yBottom) / 2);
-          context.strokeStyle = state === 'x' || state === 'z' ? '#6f7680' : color;
+          context.strokeStyle = state === 'z' ? '#6f7680' : color;
           context.lineWidth = 1.7;
+          context.setLineDash(state === 'z' ? [5, 3] : []);
           context.beginPath();
           if (previousY != null && Math.abs(previousY - y) > 0.5) {
             context.moveTo(x1, previousY);
@@ -1751,6 +2025,7 @@
           context.moveTo(x1, y);
           context.lineTo(x2, y);
           context.stroke();
+          context.setLineDash([]);
           previousY = y;
           if (!index && x1 > 0) {
             context.beginPath();
@@ -1807,9 +2082,159 @@
       });
     }
 
+    connectionPoint(column, rowIndex) {
+      return {
+        column: clamp(
+          Math.round(Number(column) || 0),
+          0,
+          Math.max(0, this.meta.totalColumns)
+        ),
+        rowIndex: clamp(
+          Math.floor(Number(rowIndex) || 0),
+          0,
+          Math.max(0, this.meta.rows.length - 1)
+        )
+      };
+    }
+
+    connectionPointForPosition(x, y, width) {
+      const absoluteY = y + this.plotViewport.scrollTop;
+      return this.connectionPoint(
+        this.columnForX(x, width),
+        this.rowIndexAtOffset(absoluteY)
+      );
+    }
+
+    connectionGeometry(connection, width) {
+      const start = connection.start;
+      const end = connection.end;
+      return {
+        x1: this.xForColumn(start.column, width),
+        y1: this.rowTop(start.rowIndex) - this.plotViewport.scrollTop
+          + this.rowHeight(start.rowIndex) / 2,
+        x2: this.xForColumn(end.column, width),
+        y2: this.rowTop(end.rowIndex) - this.plotViewport.scrollTop
+          + this.rowHeight(end.rowIndex) / 2
+      };
+    }
+
+    connectionCycleLabel(start, end) {
+      const cycles = Math.abs(end.column - start.column);
+      return cycles + ' cycle';
+    }
+
+    pointToSegmentDistance(px, py, x1, y1, x2, y2) {
+      const dx = x2 - x1;
+      const dy = y2 - y1;
+      const lengthSquared = dx * dx + dy * dy;
+      if (lengthSquared < 1e-9) return Math.hypot(px - x1, py - y1);
+      const ratio = clamp(
+        ((px - x1) * dx + (py - y1) * dy) / lengthSquared,
+        0,
+        1
+      );
+      return Math.hypot(px - (x1 + ratio * dx), py - (y1 + ratio * dy));
+    }
+
+    connectionAtPoint(x, y, width) {
+      for (let index = this.connections.length - 1; index >= 0; index -= 1) {
+        const connection = this.connections[index];
+        const geometry = this.connectionGeometry(connection, width);
+        if (this.pointToSegmentDistance(
+          x,
+          y,
+          geometry.x1,
+          geometry.y1,
+          geometry.x2,
+          geometry.y2
+        ) <= 7) {
+          return connection;
+        }
+      }
+      return null;
+    }
+
+    drawConnectionLabel(context, text, x, y, selected, width, height) {
+      context.font = '600 11px "Segoe UI", "Microsoft YaHei", sans-serif';
+      const labelWidth = Math.ceil(context.measureText(text).width) + 14;
+      const labelHeight = 20;
+      const centerX = clamp(x, labelWidth / 2 + 2, Math.max(labelWidth / 2 + 2, width - labelWidth / 2 - 2));
+      const centerY = clamp(y - 13, labelHeight / 2 + 2, Math.max(labelHeight / 2 + 2, height - labelHeight / 2 - 2));
+      const left = centerX - labelWidth / 2;
+      const top = centerY - labelHeight / 2;
+      context.fillStyle = selected ? '#eaf3ff' : 'rgba(255, 255, 255, 0.94)';
+      context.strokeStyle = selected ? '#1769aa' : '#69727d';
+      context.lineWidth = selected ? 1.5 : 1;
+      context.beginPath();
+      context.rect(left, top, labelWidth, labelHeight);
+      context.fill();
+      context.stroke();
+      context.fillStyle = selected ? '#0d4f88' : '#31363d';
+      context.textAlign = 'center';
+      context.textBaseline = 'middle';
+      context.fillText(text, centerX, centerY);
+    }
+
+    drawConnection(context, connection, width, height, selected, preview) {
+      const geometry = this.connectionGeometry(connection, width);
+      const minX = Math.min(geometry.x1, geometry.x2);
+      const maxX = Math.max(geometry.x1, geometry.x2);
+      const minY = Math.min(geometry.y1, geometry.y2);
+      const maxY = Math.max(geometry.y1, geometry.y2);
+      if (maxX < -10 || minX > width + 10 || maxY < -10 || minY > height + 10) return;
+      context.save();
+      context.strokeStyle = preview ? '#6e7781' : (selected ? '#1769aa' : '#3f4852');
+      context.fillStyle = preview ? '#ffffff' : (selected ? '#1769aa' : '#3f4852');
+      context.lineWidth = selected ? 3 : 2;
+      if (preview) context.setLineDash([6, 4]);
+      context.beginPath();
+      context.moveTo(geometry.x1, geometry.y1);
+      context.lineTo(geometry.x2, geometry.y2);
+      context.stroke();
+      context.setLineDash([]);
+      [ [geometry.x1, geometry.y1], [geometry.x2, geometry.y2] ].forEach((point) => {
+        context.beginPath();
+        context.arc(point[0], point[1], selected ? 4.5 : 3.5, 0, Math.PI * 2);
+        context.fill();
+        if (preview) {
+          context.strokeStyle = '#6e7781';
+          context.stroke();
+        }
+      });
+      this.drawConnectionLabel(
+        context,
+        this.connectionCycleLabel(connection.start, connection.end),
+        (geometry.x1 + geometry.x2) / 2,
+        (geometry.y1 + geometry.y2) / 2,
+        selected,
+        width,
+        height
+      );
+      context.restore();
+    }
+
+    drawConnections(context, width, height) {
+      this.connections.forEach((connection) => {
+        this.drawConnection(
+          context,
+          connection,
+          width,
+          height,
+          connection.id === this.selectedConnectionId,
+          false
+        );
+      });
+      if (!this.connectionMode || !this.connectionDraftStart) return;
+      const end = this.connectionHover || this.connectionDraftStart;
+      this.drawConnection(context, {
+        start: this.connectionDraftStart,
+        end
+      }, width, height, false, true);
+    }
+
     drawColumnSelection(context, width, height) {
       const selection = this.columnSelection;
-      if (this.cursorMode || !selection || !this.meta.rows[selection.rowIndex]) return;
+      if (!selection || !this.meta.rows[selection.rowIndex]) return;
       const rowTop = this.rowTop(selection.rowIndex) - this.plotViewport.scrollTop;
       const rowHeight = this.rowHeight(selection.rowIndex);
       if (rowTop >= height || rowTop + rowHeight <= 0) return;
@@ -1915,6 +2340,7 @@
         });
       }
       this.drawColumnSelection(context, width, height);
+      this.drawConnections(context, width, height);
       this.drawCursors(context, width, height);
       this.drawOverview();
     }
@@ -1972,9 +2398,24 @@
               previousY = secondY;
               return;
             }
-            const y = String(value) === '1'
+            const state = String(value == null || value === '' ? 'x' : value).toLowerCase();
+            if (state === 'x') {
+              previousY = this.drawUnknownDigitalSegment(
+                context,
+                x1,
+                x2,
+                yTop,
+                yBottom,
+                1,
+                true
+              );
+              return;
+            }
+            const y = state === '1'
               ? yTop
-              : (String(value) === '0' ? yBottom : (yTop + yBottom) / 2);
+              : (state === '0' ? yBottom : (yTop + yBottom) / 2);
+            context.strokeStyle = state === 'z' ? '#6f7680' : color;
+            context.setLineDash(state === 'z' ? [3, 2] : []);
             context.beginPath();
             if (previousY != null && Math.abs(previousY - y) > 0.25) {
               context.moveTo(x1, previousY);
@@ -1983,6 +2424,7 @@
             context.moveTo(x1, y);
             context.lineTo(x2, y);
             context.stroke();
+            context.setLineDash([]);
             previousY = y;
           });
         } else {
@@ -2094,6 +2536,8 @@
         const last = end;
         this.styleColumnsInput.value = first === last ? String(first) : first + '-' + last;
       }
+      this.closeColumnBackgroundPopover();
+      this.updateColumnBackgroundAvailability();
     }
 
     onPlotPointerDown(event) {
@@ -2122,9 +2566,9 @@
         this.plotCanvas.setPointerCapture(event.pointerId);
         return;
       }
-      if (this.cursorMode) {
-        const hitCursor = this.cursorAtX(x, rect.width);
-        if (hitCursor) this.setActiveCursor(hitCursor, false);
+      const hitCursor = this.cursorAtX(x, rect.width);
+      if (hitCursor) {
+        this.setActiveCursor(hitCursor);
         this.setActiveCursorRow(rowIndex);
         this.drag = {
           kind: 'cursor',
@@ -2132,16 +2576,33 @@
           startX: event.clientX,
           rowIndex,
           column,
-          moved: false,
-          relocate: !hitCursor
+          moved: false
         };
-        if (!hitCursor) {
-          this.setActiveCursorPosition(Math.round(column * 2) / 2, true);
-        }
+        this.plotCanvas.classList.remove('cursor-hover');
         this.plotCanvas.classList.add('dragging-cursor');
         this.plotCanvas.setPointerCapture(event.pointerId);
         return;
       }
+      if (this.connectionMode) {
+        this.handleConnectionPoint(this.connectionPointForPosition(x, y, rect.width));
+        return;
+      }
+      const hitConnection = this.connectionAtPoint(x, y, rect.width);
+      if (hitConnection) {
+        this.selectedConnectionId = hitConnection.id;
+        this.columnSelection = null;
+        this.selectedPoint = null;
+        this.updatePointEditor();
+        this.draw();
+        this.setStatus('已选择连接线：' + hitConnection.label + '，按 Del 删除');
+        this.log('scope-connection', {
+          phase: 'select',
+          id: hitConnection.id,
+          label: hitConnection.label
+        });
+        return;
+      }
+      if (this.selectedConnectionId) this.selectedConnectionId = '';
       const columnIndex = this.columnIndexForX(x, rect.width);
       this.setActiveCursorRow(rowIndex);
       this.updateColumnSelection(rowIndex, columnIndex, columnIndex);
@@ -2166,10 +2627,24 @@
     }
 
     onPlotPointerMove(event) {
-      if (!this.drag || this.drag.pointerId !== event.pointerId) return;
-      event.preventDefault();
       const rect = this.plotCanvas.getBoundingClientRect();
       const x = event.clientX - rect.left;
+      if (!this.drag) {
+        this.plotCanvas.classList.toggle('cursor-hover', !!this.cursorAtX(x, rect.width));
+        if (this.connectionMode && this.connectionDraftStart) {
+          const y = event.clientY - rect.top;
+          const next = this.connectionPointForPosition(x, y, rect.width);
+          if (!this.connectionHover
+              || next.column !== this.connectionHover.column
+              || next.rowIndex !== this.connectionHover.rowIndex) {
+            this.connectionHover = next;
+            this.draw();
+          }
+        }
+        return;
+      }
+      if (this.drag.pointerId !== event.pointerId) return;
+      event.preventDefault();
       if (this.drag.kind === 'cursor') {
         const column = this.columnForX(x, rect.width);
         if (Math.abs(event.clientX - this.drag.startX) > 2) this.drag.moved = true;
@@ -2209,9 +2684,9 @@
       const drag = this.drag;
       try { this.plotCanvas.releasePointerCapture(event.pointerId); } catch (_error) {}
       this.drag = null;
-      this.plotCanvas.classList.remove('dragging-pan', 'dragging-cursor');
+      this.plotCanvas.classList.remove('dragging-pan', 'dragging-cursor', 'cursor-hover');
       if (drag.kind === 'cursor') {
-        if (drag.moved || drag.relocate) {
+        if (drag.moved) {
           void this.snapActiveCursorPosition(drag.column, drag.rowIndex);
         } else {
           void this.updateCursorReadout();
@@ -2244,7 +2719,7 @@
       if (!this.drag || this.drag.pointerId !== event.pointerId) return;
       try { this.plotCanvas.releasePointerCapture(event.pointerId); } catch (_error) {}
       this.drag = null;
-      this.plotCanvas.classList.remove('dragging-pan', 'dragging-cursor');
+      this.plotCanvas.classList.remove('dragging-pan', 'dragging-cursor', 'cursor-hover');
       this.draw();
     }
 
@@ -2323,6 +2798,17 @@
       this.updateOverviewDrag(event.clientX);
     }
 
+    onOverviewWheel(event) {
+      if (!this.meta || !this.meta.totalColumns) return;
+      event.preventDefault();
+      if (this.overviewDrag) return;
+      this.zoom(event.deltaY < 0 ? 0.8 : 1.25);
+      this.setStatus(
+        '当前窗口：第 ' + (Math.floor(this.viewStart) + 1)
+        + '-' + Math.ceil(this.viewEnd) + ' 列'
+      );
+    }
+
     finishOverviewDrag(event, canceled) {
       if (!this.overviewDrag || this.overviewDrag.pointerId !== event.pointerId) return;
       if (!canceled) this.updateOverviewDrag(event.clientX);
@@ -2340,11 +2826,102 @@
       }
     }
 
-    toggleCursorMode() {
-      this.setCursorMode(!this.cursorMode);
-      this.setStatus(this.cursorMode
-        ? '游标测量：拖动 A/B 游标，或在波形中按住拖动定位'
-        : '已退出游标测量，可拖动选择连续多列');
+    toggleConnectionMode() {
+      this.setConnectionMode(!this.connectionMode);
+      this.setStatus(this.connectionMode
+        ? '连接线模式：依次单击起点和终点，端点吸附到 cycle 边界'
+        : '已退出连接线模式；单击连接线可选中，按 Del 删除');
+    }
+
+    setConnectionMode(enabled) {
+      const next = !!enabled;
+      this.connectionMode = next;
+      if (this.connectionMode) {
+        this.columnSelection = null;
+        this.selectedPoint = null;
+        this.selectedConnectionId = '';
+        this.updatePointEditor();
+      } else {
+        this.connectionDraftStart = null;
+        this.connectionHover = null;
+      }
+      this.connectionButton.classList.toggle('active', this.connectionMode);
+      this.connectionButton.setAttribute('aria-pressed', String(this.connectionMode));
+      this.connectionButton.textContent = this.connectionMode ? '退出连接线' : '连接线';
+      this.plotCanvas.classList.toggle('connection-mode', this.connectionMode);
+      this.draw();
+      this.log('scope-connection', {
+        phase: 'mode',
+        enabled: this.connectionMode
+      });
+    }
+
+    handleConnectionPoint(point) {
+      if (!this.connectionDraftStart) {
+        this.selectedConnectionId = '';
+        this.connectionDraftStart = point;
+        this.connectionHover = point;
+        this.draw();
+        this.setStatus(
+          '连接线起点：第 ' + (point.rowIndex + 1) + ' 行，cycle ' + point.column
+          + '；请选择终点'
+        );
+        this.log('scope-connection', {
+          phase: 'start',
+          rowIndex: point.rowIndex,
+          column: point.column
+        });
+        return;
+      }
+      const start = this.connectionDraftStart;
+      if (start.column === point.column && start.rowIndex === point.rowIndex) {
+        this.setStatus('起点和终点不能完全重合，请重新选择终点', true);
+        return;
+      }
+      const id = 'scope-connection-' + (++this.connectionSequence);
+      const connection = {
+        id,
+        start,
+        end: point,
+        label: this.connectionCycleLabel(start, point)
+      };
+      this.pushHistory();
+      this.connections.push(connection);
+      this.selectedConnectionId = id;
+      this.connectionDraftStart = null;
+      this.connectionHover = null;
+      this.draw();
+      this.setStatus(
+        '已添加连接线：' + connection.label
+        + '；可继续选择起点，按 Del 删除当前连接线'
+      );
+      this.log('scope-connection', {
+        phase: 'create',
+        id,
+        start,
+        end: point,
+        cycles: Math.abs(point.column - start.column)
+      });
+    }
+
+    deleteSelectedConnection() {
+      const id = this.selectedConnectionId;
+      if (!id) return;
+      const index = this.connections.findIndex((connection) => connection.id === id);
+      if (index < 0) {
+        this.selectedConnectionId = '';
+        return;
+      }
+      this.pushHistory();
+      const removed = this.connections.splice(index, 1)[0];
+      this.selectedConnectionId = '';
+      this.draw();
+      this.setStatus('已删除连接线：' + removed.label);
+      this.log('scope-connection', {
+        phase: 'delete',
+        id: removed.id,
+        label: removed.label
+      });
     }
 
     toggleOriginalData() {
@@ -2356,15 +2933,6 @@
       this.setStatus(this.showOriginal ? '已显示原始数据对比' : '已隐藏原始数据');
     }
 
-    setCursorMode(enabled) {
-      this.cursorMode = !!enabled;
-      if (this.cursorMode) this.columnSelection = null;
-      this.cursorButton.classList.toggle('active', this.cursorMode);
-      this.cursorButton.textContent = this.cursorMode ? '退出游标测量' : '游标测量';
-      this.plotCanvas.classList.toggle('cursor-mode', this.cursorMode);
-      this.draw();
-    }
-
     activeCursorColumn() {
       return this.activeCursor === 'B' ? this.cursorB : this.cursorA;
     }
@@ -2373,7 +2941,9 @@
       const candidates = [
         { name: 'A', x: this.xForColumn(this.cursorA, width) },
         { name: 'B', x: this.xForColumn(this.cursorB, width) }
-      ].filter((cursor) => Number.isFinite(cursor.x) && Math.abs(cursor.x - x) <= 7);
+      ].filter((cursor) => (
+        Number.isFinite(cursor.x) && Math.abs(cursor.x - x) <= CURSOR_HIT_RADIUS
+      ));
       if (!candidates.length) return '';
       if (candidates.length > 1
           && Math.abs(candidates[0].x - candidates[1].x) < 1) {
@@ -2383,16 +2953,21 @@
       return candidates[0].name;
     }
 
-    setActiveCursor(name, enableMode) {
+    setActiveCursor(name, centerView) {
       const next = name === 'B' ? 'B' : 'A';
       this.cursorNavigationSequence += 1;
       this.activeCursor = next;
-      if (enableMode) this.setCursorMode(true);
       this.updateCursorControls();
       this.updateMeasurements();
       void this.updateCursorReadout();
+      const column = next === 'B' ? this.cursorB : this.cursorA;
+      if (centerView) {
+        this.centerViewOnColumn(column);
+      }
       this.draw();
-      this.setStatus('当前工作游标：' + next);
+      this.setStatus(centerView && column != null
+        ? '当前工作游标：' + next + '，视图已定位到 ' + this.formatTime(column)
+        : '当前工作游标：' + next);
     }
 
     setActiveCursorPosition(column, realtimeReadout) {
@@ -2587,17 +3162,29 @@
       }
     }
 
-    ensureCursorVisible(column) {
-      if (column >= this.viewStart && column <= this.viewEnd) return;
-      const span = this.viewEnd - this.viewStart;
-      const start = clamp(
-        column - span / 2,
-        0,
-        Math.max(0, this.meta.totalColumns - span)
+    centerViewOnColumn(column) {
+      const numericColumn = Number(column);
+      if (!this.meta || !Number.isFinite(numericColumn)) return false;
+      const totalColumns = Math.max(1, this.meta.totalColumns);
+      const span = Math.min(
+        Math.max(1e-9, this.viewEnd - this.viewStart),
+        totalColumns
       );
+      const start = clamp(
+        numericColumn - span / 2,
+        0,
+        Math.max(0, totalColumns - span)
+      );
+      if (Math.abs(start - this.viewStart) < 1e-9) return false;
       this.viewStart = start;
       this.viewEnd = start + span;
       this.scheduleWindowRequest();
+      return true;
+    }
+
+    ensureCursorVisible(column) {
+      if (column >= this.viewStart && column <= this.viewEnd) return;
+      this.centerViewOnColumn(column);
     }
 
     async navigateActiveCursor(kind, direction) {
@@ -2840,6 +3427,9 @@
         rowHeights: this.rowHeights.slice(),
         lockedColumns: Array.from(this.lockedColumns),
         selectedPoint: this.selectedPoint ? Object.assign({}, this.selectedPoint) : null,
+        connections: clone(this.connections),
+        selectedConnectionId: this.selectedConnectionId,
+        connectionSequence: this.connectionSequence,
         outputTitle: this.outputTitleInput.value,
         presentationDraftDirty: this.presentationDraftDirty,
         dataDraftDirty: this.dataDraftDirty
@@ -2858,6 +3448,16 @@
         : this.rowHeights;
       this.lockedColumns = new Set(snapshot.lockedColumns || []);
       this.selectedPoint = snapshot.selectedPoint ? Object.assign({}, snapshot.selectedPoint) : null;
+      this.connections = clone(snapshot.connections || []);
+      this.selectedConnectionId = this.connections.some(
+        (connection) => connection.id === snapshot.selectedConnectionId
+      ) ? snapshot.selectedConnectionId : '';
+      this.connectionSequence = Math.max(
+        Number(snapshot.connectionSequence) || 0,
+        this.connections.length
+      );
+      this.connectionDraftStart = null;
+      this.connectionHover = null;
       this.outputTitleInput.value = snapshot.outputTitle || this.simplified.model.title;
       this.presentationDraftDirty = !!snapshot.presentationDraftDirty;
       this.dataDraftDirty = !!snapshot.dataDraftDirty;

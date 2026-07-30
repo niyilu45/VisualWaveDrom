@@ -748,6 +748,58 @@ func normalizeParserSignalResult(result map[string]any) error {
 	return nil
 }
 
+func (m *importManager) runCollectionRegexSearch(
+	request collectionRegexSearchRequest,
+) (collectionRegexSearchResponse, error) {
+	python := m.pythonRuntime()
+	if !python.Available {
+		return collectionRegexSearchResponse{}, errors.New(python.Error)
+	}
+	if info, err := os.Stat(m.fileProcPath); err != nil || info.IsDir() {
+		return collectionRegexSearchResponse{}, errors.New("import/inc/fileProc.py was not found")
+	}
+	input, err := json.Marshal(request)
+	if err != nil {
+		return collectionRegexSearchResponse{}, err
+	}
+	args := append(append([]string{}, python.PrefixArgs...),
+		m.fileProcPath, "--mode", "regex-search")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	command := exec.CommandContext(ctx, python.Command, args...)
+	command.Dir = m.rootDir
+	command.Stdin = bytes.NewReader(input)
+	var stdout, stderr bytes.Buffer
+	limit := &outputLimit{maximum: importMaxOutputBytes}
+	command.Stdout = &limitedOutputBuffer{buffer: &stdout, limit: limit}
+	command.Stderr = &limitedOutputBuffer{buffer: &stderr, limit: limit}
+	err = command.Run()
+	if ctx.Err() == context.DeadlineExceeded {
+		return collectionRegexSearchResponse{},
+			errors.New("Python regex search timed out after 120 seconds")
+	}
+	if limit.exceeded {
+		return collectionRegexSearchResponse{},
+			fmt.Errorf("regex search output is larger than %d bytes", importMaxOutputBytes)
+	}
+	if err != nil {
+		detail := strings.TrimSpace(stderr.String())
+		if detail == "" {
+			detail = strings.TrimSpace(stdout.String())
+		}
+		if detail == "" {
+			detail = err.Error()
+		}
+		return collectionRegexSearchResponse{}, errors.New(detail)
+	}
+	var response collectionRegexSearchResponse
+	if err = json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		return collectionRegexSearchResponse{},
+			fmt.Errorf("Python regex matcher returned invalid JSON: %w", err)
+	}
+	return response, nil
+}
+
 func (m *importManager) runParser(mapping importMapping, python pythonRuntime) (map[string]any, error) {
 	if info, err := os.Stat(m.fileProcPath); err != nil || info.IsDir() {
 		return nil, errors.New("import/inc/fileProc.py was not found")

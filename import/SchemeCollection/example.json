@@ -1,14 +1,17 @@
 {
-  "vars": [
-    "channel",
-    "case"
-  ],
+  "vars": [],
   "paths": [
     {
-      "folder": "Data",
-      "grepKeys": "^${channel}-${case}\\.txt$",
-      "hasSeq": true,
-      "name": "${channel}_${case}"
+      "folder": ".",
+      "grepKeys": "SeqConvOutC.*",
+      "hasSeq": false,
+      "name": "SeqConvOutC"
+    },
+    {
+      "folder": ".",
+      "grepKeys": "SeqConvOutC.*",
+      "hasSeq": false,
+      "name": "SeqConvOutD"
     }
   ]
 }

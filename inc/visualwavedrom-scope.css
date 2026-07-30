@@ -525,19 +525,49 @@ body.scope-row-resizing * {
   display: flex;
   flex-direction: column;
   justify-content: center;
-  gap: 2px;
-  padding: 0 12px;
+  gap: 5px;
+  padding: 0 8px;
   border-top: 1px solid #c9cdd2;
   color: #444950;
   background: #eef0f2;
 }
 
+.scope-overview-label-header {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
 .scope-overview-label strong {
+  flex: 0 0 auto;
   font-size: 12px;
 }
 
 .scope-overview-label span {
   color: #737981;
+  font-size: 10px;
+}
+
+.scope-overview-zoom-controls {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.scope-overview-zoom-btn {
+  width: 24px;
+  height: 24px;
+  min-height: 24px;
+  font-size: 15px;
+  line-height: 22px;
+}
+
+.scope-overview-fit-btn {
+  min-height: 24px;
+  padding: 2px 6px;
   font-size: 10px;
 }
 
@@ -576,8 +606,8 @@ body.scope-row-resizing * {
   cursor: crosshair;
 }
 
-.scope-plot.cursor-mode,
-.scope-plot.cursor-mode:active {
+.scope-plot.connection-mode,
+.scope-plot.connection-mode:active {
   cursor: crosshair;
 }
 
@@ -586,6 +616,8 @@ body.scope-row-resizing * {
   cursor: grabbing;
 }
 
+.scope-plot.cursor-hover,
+.scope-plot.cursor-hover:active,
 .scope-plot.dragging-cursor,
 .scope-plot.dragging-cursor:active {
   cursor: ew-resize;
@@ -700,6 +732,31 @@ body.scope-row-resizing * {
   color: #555b63;
   font-size: 11px;
   font-weight: 600;
+}
+
+.scope-column-background-popover {
+  width: min(248px, calc(100vw - 16px));
+}
+
+.scope-column-background-summary {
+  margin: 8px 0 0;
+  color: #555b63;
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.scope-column-background-palette {
+  display: grid;
+  grid-template-columns: repeat(4, 30px);
+  gap: 8px;
+  padding-top: 9px;
+}
+
+.scope-column-background-palette .scope-color-preset {
+  width: 30px;
+  height: 30px;
+  flex-basis: 30px;
 }
 
 .scope-statusbar {
