@@ -2466,15 +2466,20 @@
       const minimum = Math.min(1, this.meta.totalColumns);
       const nextSpan = clamp(span * factor, minimum, this.meta.totalColumns);
       const activeCursorColumn = this.activeCursorColumn();
-      const cursorCenter = activeCursorColumn == null ? NaN : Number(activeCursorColumn);
-      let start;
-      if (Number.isFinite(cursorCenter)) {
-        start = cursorCenter - nextSpan / 2;
-      } else {
-        const anchor = anchorColumn == null ? (this.viewStart + this.viewEnd) / 2 : anchorColumn;
-        const ratio = span > 0 ? (anchor - this.viewStart) / span : 0.5;
-        start = anchor - nextSpan * ratio;
-      }
+      const cursorAnchor = activeCursorColumn == null ? NaN : Number(activeCursorColumn);
+      const explicitAnchor = anchorColumn == null ? NaN : Number(anchorColumn);
+      const viewCenter = (this.viewStart + this.viewEnd) / 2;
+      const anchor = Number.isFinite(explicitAnchor)
+        ? explicitAnchor
+        : (Number.isFinite(cursorAnchor)
+            && cursorAnchor >= this.viewStart
+            && cursorAnchor <= this.viewEnd
+          ? cursorAnchor
+          : viewCenter);
+      const ratio = span > 0
+        ? clamp((anchor - this.viewStart) / span, 0, 1)
+        : 0.5;
+      let start = anchor - nextSpan * ratio;
       start = clamp(start, 0, Math.max(0, this.meta.totalColumns - nextSpan));
       this.viewStart = start;
       this.viewEnd = start + nextSpan;

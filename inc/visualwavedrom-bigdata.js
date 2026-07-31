@@ -127,6 +127,11 @@
   function sliceSignalObject(signal, start, end, rows) {
     const copy = Object.assign({}, signal);
     const waveSlice = sliceWave(signal, start, end);
+    if (signal.scope && typeof signal.scope === 'object' && !Array.isArray(signal.scope)
+        && Array.isArray(signal.scope.samples)) {
+      copy.scope = Object.assign({}, signal.scope);
+      delete copy.scope.samples;
+    }
 
     if (Object.prototype.hasOwnProperty.call(signal, 'wave')) {
       copy.wave = waveSlice.wave;

@@ -2137,8 +2137,22 @@
       color: #758596;
     }
 
+    .wave-collection-preset-editor-shell .vwd-collection-json-error-gutter {
+      width: 16px;
+    }
+
     .wave-collection-preset-editor-shell .vwd-collection-search-gutter {
       width: 18px;
+    }
+
+    .wave-collection-json-error-marker {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 16px;
+      height: 100%;
+      color: var(--error);
+      font: 900 0.84rem/1 Consolas, "Courier New", monospace;
     }
 
     .wave-collection-search-markers {
@@ -2161,6 +2175,10 @@
 
     .wave-collection-search-marker.is-multiple {
       color: var(--warning);
+    }
+
+    .wave-collection-search-marker.is-duplicate {
+      color: var(--error);
     }
 
     .wave-collection-preset-editor-shell .CodeMirror-lines {

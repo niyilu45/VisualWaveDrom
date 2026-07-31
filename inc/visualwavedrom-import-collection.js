@@ -2,8 +2,17 @@
   'use strict';
 
   const EMPTY_PRESET = {
-    paths: []
+    paths: [
+      {
+        folder: '.',
+        grepKeys: '^signal\\.txt$',
+        hasSeq: false,
+        name: 'signal'
+      }
+    ]
   };
+  const LEGACY_EMPTY_PRESET_TEXT = JSON.stringify({ paths: [] }, null, 2);
+  const JSON_ERROR_GUTTER = 'vwd-collection-json-error-gutter';
   const SEARCH_GUTTER = 'vwd-collection-search-gutter';
   const LAST_STATE_STORAGE_KEY = 'visualwavedrom.importCollection.lastState.v1';
   const VARIABLE_NAME_PATTERN = /^[\p{L}_][\p{L}\p{N}_.-]*$/u;
@@ -192,7 +201,7 @@
       return line;
     }
 
-    function findPresetPathObjectLines(text) {
+    function findPresetPathObjectRanges(text) {
       try {
         let index = skipJsonWhitespace(text, 0);
         if (text[index] !== '{') return [];
@@ -208,21 +217,23 @@
           if (text[index] !== ':') return [];
           index = skipJsonWhitespace(text, index + 1);
           if (key === 'paths' && text[index] === '[') {
-            const lines = [];
+            const ranges = [];
             index += 1;
             while (index < text.length) {
               index = skipJsonWhitespace(text, index);
-              if (text[index] === ']') return lines;
-              lines.push(lineNumberAt(text, index));
-              index = skipJsonWhitespace(text, scanJsonValueEnd(text, index));
+              if (text[index] === ']') return ranges;
+              const start = index;
+              const end = scanJsonValueEnd(text, index);
+              ranges.push({ start, end, line: lineNumberAt(text, start) });
+              index = skipJsonWhitespace(text, end);
               if (text[index] === ',') {
                 index += 1;
                 continue;
               }
-              if (text[index] === ']') return lines;
+              if (text[index] === ']') return ranges;
               return [];
             }
-            return lines;
+            return ranges;
           }
           index = skipJsonWhitespace(text, scanJsonValueEnd(text, index));
           if (text[index] === ',') {
@@ -236,6 +247,117 @@
         return [];
       }
       return [];
+    }
+
+    function findPresetPathObjectLines(text) {
+      return findPresetPathObjectRanges(text).map((range) => range.line);
+    }
+
+    function findJsonObjectKeyLine(text, range, expectedKey) {
+      if (!range || text[range.start] !== '{') return 0;
+      let index = range.start + 1;
+      while (index < range.end) {
+        index = skipJsonWhitespace(text, index);
+        if (text[index] === '}') return 0;
+        if (text[index] !== '"') return 0;
+        const keyStart = index;
+        const keyEnd = scanJsonStringEnd(text, keyStart);
+        let key;
+        try {
+          key = JSON.parse(text.slice(keyStart, keyEnd));
+        } catch (_error) {
+          return 0;
+        }
+        index = skipJsonWhitespace(text, keyEnd);
+        if (text[index] !== ':') return 0;
+        index = skipJsonWhitespace(text, index + 1);
+        if (key === expectedKey) return lineNumberAt(text, keyStart);
+        index = skipJsonWhitespace(text, scanJsonValueEnd(text, index));
+        if (text[index] === ',') {
+          index += 1;
+          continue;
+        }
+        if (text[index] === '}') return 0;
+        return 0;
+      }
+      return 0;
+    }
+
+    function findRootKeyLine(text, expectedKey) {
+      const start = skipJsonWhitespace(text, 0);
+      if (text[start] !== '{') return 0;
+      return findJsonObjectKeyLine(text, {
+        start,
+        end: scanJsonValueEnd(text, start)
+      }, expectedKey);
+    }
+
+    function validationError(message, jsonPath) {
+      const error = new Error(message);
+      error.jsonPath = jsonPath || '';
+      return error;
+    }
+
+    function findValidationErrorLine(text, jsonPath) {
+      const path = String(jsonPath || '');
+      const pathMatch = /^paths\[(\d+)\](?:\.([A-Za-z0-9_-]+))?$/.exec(path);
+      if (pathMatch) {
+        const range = findPresetPathObjectRanges(text)[Number(pathMatch[1])];
+        if (!range) return findRootKeyLine(text, 'paths');
+        return pathMatch[2]
+          ? (findJsonObjectKeyLine(text, range, pathMatch[2]) || range.line)
+          : range.line;
+      }
+      if (/^vars(?:\[\d+\])?$/.test(path)) return findRootKeyLine(text, 'vars');
+      if (path === 'paths' || path === 'vars') return findRootKeyLine(text, path);
+      return 0;
+    }
+
+    function jsonErrorLocation(error, text) {
+      const source = String(text || '');
+      const validationLine = findValidationErrorLine(source, error && error.jsonPath);
+      if (validationLine > 0) return { line: validationLine, column: 1 };
+
+      const message = String(error && error.message || error || '');
+      const lineMatch = /\bline\s+(\d+)(?:\s+column\s+(\d+))?/i.exec(message);
+      if (lineMatch) {
+        return {
+          line: Math.max(1, Number(lineMatch[1]) || 1),
+          column: Math.max(1, Number(lineMatch[2]) || 1)
+        };
+      }
+      const positionMatch = /\bposition\s+(\d+)/i.exec(message);
+      if (positionMatch) {
+        const position = Math.max(0, Math.min(source.length, Number(positionMatch[1]) || 0));
+        const lineStart = source.lastIndexOf('\n', Math.max(0, position - 1)) + 1;
+        return {
+          line: lineNumberAt(source, position),
+          column: Math.max(1, position - lineStart + 1)
+        };
+      }
+      return { line: 1, column: 1 };
+    }
+
+    function clearJsonErrorMarker() {
+      if (presetCodeEditor) presetCodeEditor.clearGutter(JSON_ERROR_GUTTER);
+    }
+
+    function renderJsonErrorMarker(error, text) {
+      if (!presetCodeEditor) return null;
+      clearJsonErrorMarker();
+      const location = jsonErrorLocation(error, text);
+      const marker = document.createElement('span');
+      marker.className = 'wave-collection-json-error-marker';
+      marker.textContent = '×';
+      marker.title = '第 ' + location.line + ' 行：'
+        + String(error && error.message || error || 'JSON 错误');
+      marker.setAttribute('aria-label', marker.title);
+      presetCodeEditor.setGutterMarker(
+        Math.max(0, location.line - 1),
+        JSON_ERROR_GUTTER,
+        marker
+      );
+      return location;
     }
 
     function clearSearchMarkers() {
@@ -258,7 +380,11 @@
         let state = 'missing';
         let symbol = '!';
         let label = '未搜索到文件';
-        if (matches.length === 1) {
+        if (entry.status === 'duplicate-name') {
+          state = 'duplicate';
+          symbol = '×';
+          label = entry.message || 'name 重复';
+        } else if (matches.length === 1) {
           state = 'matched';
           symbol = '✓';
           label = '搜索到 1 个文件';
@@ -287,6 +413,7 @@
     function setPresetEditorValue(value) {
       const text = String(value == null ? '' : value);
       clearSearchMarkers();
+      clearJsonErrorMarker();
       presetEditor.value = text;
       if (!presetCodeEditor || presetCodeEditor.getValue() === text) return;
       syncingPresetCodeEditor = true;
@@ -361,7 +488,9 @@
       if (!state) return false;
       const defaultPresetText = JSON.stringify(EMPTY_PRESET, null, 2);
       if (!state.rootPath && !state.presetPath
-          && (!state.presetText || state.presetText === defaultPresetText)) {
+          && (!state.presetText
+            || state.presetText === defaultPresetText
+            || state.presetText === LEGACY_EMPTY_PRESET_TEXT)) {
         return false;
       }
       rootPathInput.value = state.rootPath;
@@ -406,7 +535,7 @@
       presetCodeEditor = window.CodeMirror.fromTextArea(presetEditor, {
         mode: { name: 'javascript', json: true },
         lineNumbers: true,
-        gutters: [SEARCH_GUTTER, 'CodeMirror-linenumbers'],
+        gutters: [JSON_ERROR_GUTTER, SEARCH_GUTTER, 'CodeMirror-linenumbers'],
         lineWrapping: true,
         indentUnit: 2,
         tabSize: 2,
@@ -431,7 +560,23 @@
         if (syncingPresetCodeEditor) return;
         presetEditor.value = editor.getValue();
         clearSearchMarkers();
+        clearJsonErrorMarker();
         scheduleEditorParse();
+      });
+      presetCodeEditor.on('keydown', (editor, event) => {
+        if (!event || event.altKey || !(event.ctrlKey || event.metaKey)) return;
+        const key = String(event.key || '').toLowerCase();
+        const undoRequested = key === 'z' && !event.shiftKey;
+        const redoRequested = (key === 'z' && event.shiftKey) || key === 'y';
+        if (!undoRequested && !redoRequested) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (undoRequested) editor.undo();
+        else editor.redo();
+        debug({
+          phase: 'preset-editor-history',
+          action: undoRequested ? 'undo' : 'redo'
+        });
       });
       if (window.ResizeObserver) {
         presetResizeObserver = new window.ResizeObserver(() => {
@@ -528,39 +673,55 @@
 
     function validatePresetShape(value) {
       if (!value || typeof value !== 'object' || Array.isArray(value)) {
-        throw new Error('预设顶层必须是 JSON 对象');
+        throw validationError('预设顶层必须是 JSON 对象', '');
       }
       if (value.vars !== undefined && !Array.isArray(value.vars)) {
-        throw new Error('vars 必须是列表；也可以省略并由 grepKeys 自动提取');
+        throw validationError('vars 必须是列表；也可以省略并由 grepKeys 自动提取', 'vars');
       }
-      if (!Array.isArray(value.paths)) throw new Error('paths 必须是列表');
+      if (!Array.isArray(value.paths)) {
+        throw validationError('paths 必须是列表', 'paths');
+      }
       const names = new Set();
       (value.vars || []).forEach((name, index) => {
         if (typeof name !== 'string' || !name.trim()) {
-          throw new Error('vars[' + index + '] 必须是非空字符串');
+          throw validationError('vars[' + index + '] 必须是非空字符串', 'vars[' + index + ']');
         }
         const normalizedName = name.trim();
         if (!VARIABLE_NAME_PATTERN.test(normalizedName)) {
-          throw new Error('vars[' + index + '] 不是有效变量名');
+          throw validationError('vars[' + index + '] 不是有效变量名', 'vars[' + index + ']');
         }
-        if (names.has(normalizedName)) throw new Error('vars 中变量名不能重复');
+        if (names.has(normalizedName)) {
+          throw validationError('vars 中变量名不能重复', 'vars[' + index + ']');
+        }
         names.add(normalizedName);
       });
       value.paths.forEach((entry, index) => {
         if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
-          throw new Error('paths[' + index + '] 必须是字典');
+          throw validationError('paths[' + index + '] 必须是字典', 'paths[' + index + ']');
         }
         if (typeof entry.folder !== 'string') {
-          throw new Error('paths[' + index + '].folder 必须是字符串');
+          throw validationError(
+            'paths[' + index + '].folder 必须是字符串',
+            'paths[' + index + '].folder'
+          );
         }
         if (typeof entry.grepKeys !== 'string' || !entry.grepKeys) {
-          throw new Error('paths[' + index + '].grepKeys 必须是非空正则字符串');
+          throw validationError(
+            'paths[' + index + '].grepKeys 必须是非空正则字符串',
+            'paths[' + index + '].grepKeys'
+          );
         }
         if (typeof entry.hasSeq !== 'boolean') {
-          throw new Error('paths[' + index + '].hasSeq 必须是布尔值');
+          throw validationError(
+            'paths[' + index + '].hasSeq 必须是布尔值',
+            'paths[' + index + '].hasSeq'
+          );
         }
         if (typeof entry.name !== 'string' || !entry.name.trim()) {
-          throw new Error('paths[' + index + '].name 必须是非空字符串');
+          throw validationError(
+            'paths[' + index + '].name 必须是非空字符串',
+            'paths[' + index + '].name'
+          );
         }
         extractTemplateVariables(entry.grepKeys).forEach((name) => names.add(name));
       });
@@ -569,8 +730,9 @@
     }
 
     function parseEditor(showError) {
+      const editorText = getPresetEditorValue();
       try {
-        const nextPreset = validatePresetShape(JSON.parse(getPresetEditorValue()));
+        const nextPreset = validatePresetShape(JSON.parse(editorText));
         const previousVariables = parsedPreset && Array.isArray(parsedPreset.vars)
           ? parsedPreset.vars.join('\u0000')
           : '';
@@ -581,13 +743,21 @@
         if (previousVariables !== nextVariables || !variablesHost.childElementCount) {
           renderVariables(nextPreset.vars);
         }
+        clearJsonErrorMarker();
         setHint('', false);
         updateButtons();
         return nextPreset;
       } catch (error) {
         parsedPreset = null;
         presetState.textContent = '预设 JSON 有错误';
-        if (showError) setHint(error.message || String(error), true);
+        const location = renderJsonErrorMarker(error, editorText);
+        if (showError) {
+          setHint(
+            (location ? ('第 ' + location.line + ' 行：') : '')
+              + (error.message || String(error)),
+            true
+          );
+        }
         updateButtons();
         return null;
       }
@@ -671,6 +841,7 @@
         state.className = 'wave-collection-result-state';
         if (entry.status === 'matched') state.textContent = '已匹配';
         else if (entry.status === 'multiple') state.textContent = matches.length + ' 个匹配，取第 1 个';
+        else if (entry.status === 'duplicate-name') state.textContent = 'name重复';
         else if (entry.status === 'folder-missing') state.textContent = '目录不存在，跳过';
         else state.textContent = '未匹配，跳过';
         row.appendChild(name);

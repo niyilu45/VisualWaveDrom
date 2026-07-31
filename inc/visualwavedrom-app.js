@@ -385,6 +385,7 @@ if (!window.VWDCodeEditorPairs) {
     let jsonDocumentViewMode = 'full';
     let jsonDocumentMetrics = null;
     let jsonDocumentSource = null;
+    let jsonDocumentSourceText = '';
     let jsonViewDocumentKey = '';
     let jsonViewModeExplicitForDocument = '';
     let jsonWindowView = null;
@@ -437,6 +438,10 @@ if (!window.VWDCodeEditorPairs) {
     };
     let pendingFormatRenderCallbacks = [];
     let pendingFormatCompletionCallbacks = [];
+    let signalSourceMapCacheText = null;
+    let signalSourceMapCache = null;
+    let groupSourceMapCacheText = null;
+    let groupSourceMapCache = null;
     let groupPickActive = false;
     let groupPickStartIndex = -1;
     let wavePaintModeActive = false;
@@ -2773,6 +2778,7 @@ ${lines.join('\n')}`;
           jsonDocumentViewMode = 'full';
           jsonDocumentMetrics = null;
           jsonDocumentSource = null;
+          jsonDocumentSourceText = '';
           jsonWindowView = null;
           jsonWindowViewDirty = false;
           setCodeMirrorDisplayValue(editor.value, {
@@ -2802,6 +2808,7 @@ ${lines.join('\n')}`;
 
       jsonDocumentMetrics = metrics;
       jsonDocumentSource = source;
+      jsonDocumentSourceText = editor.value;
       refreshingJsonDocumentView = true;
       try {
         if (jsonDocumentViewMode === 'summary') {
@@ -3078,8 +3085,15 @@ ${lines.join('\n')}`;
         : requestAnimationFrame(runFormat);
     }
     function buildSignalSourceMap(jsonText) {
+      if (signalSourceMapCacheText === jsonText && signalSourceMapCache) {
+        return signalSourceMapCache;
+      }
       const bounds = findSignalArrayBounds(jsonText);
-      if (!bounds) return [];
+      if (!bounds) {
+        signalSourceMapCacheText = jsonText;
+        signalSourceMapCache = [];
+        return signalSourceMapCache;
+      }
       const map = [];
 
       function skipSpaceComma(pos, endPos) {
@@ -3125,6 +3139,8 @@ ${lines.join('\n')}`;
         if (next <= cursor) break;
         cursor = next;
       }
+      signalSourceMapCacheText = jsonText;
+      signalSourceMapCache = map;
       return map;
     }
 
@@ -3162,8 +3178,15 @@ ${lines.join('\n')}`;
     }
 
     function buildGroupSourceMap(jsonText) {
+      if (groupSourceMapCacheText === jsonText && groupSourceMapCache) {
+        return groupSourceMapCache;
+      }
       const bounds = findSignalArrayBounds(jsonText);
-      if (!bounds) return [];
+      if (!bounds) {
+        groupSourceMapCacheText = jsonText;
+        groupSourceMapCache = [];
+        return groupSourceMapCache;
+      }
 
       const groups = [];
       let rowCursor = 0;
@@ -3255,6 +3278,8 @@ ${lines.join('\n')}`;
         index += 1;
       }
 
+      groupSourceMapCacheText = jsonText;
+      groupSourceMapCache = groups;
       return groups;
     }
 
@@ -3730,9 +3755,18 @@ ${lines.join('\n')}`;
       const text = value == null ? '' : String(value);
       const opts = options || {};
       if (!isApplyingHistory && editor.value !== text) compactPendingEditorHistory(text);
+      if (editor.value !== text) {
+        signalSourceMapCacheText = null;
+        signalSourceMapCache = null;
+        groupSourceMapCacheText = null;
+        groupSourceMapCache = null;
+        jsonDocumentSourceText = '';
+        jsonDocumentSource = null;
+      }
       cancelCodeMirrorSync();
       editor.value = text;
-      if (codeMirrorEditor) {
+      if (codeMirrorEditor
+          && !(opts.deferLargeRefresh && text.length >= JSON_LARGE_TEXT_THRESHOLD)) {
         refreshJsonDocumentView({
           preserveCursor: !!opts.preserveCursor,
           clearHistory: opts.clearCodeMirrorHistory !== false,
@@ -3805,7 +3839,7 @@ ${lines.join('\n')}`;
 
     function applyEditorChange(newText, selStart, selEnd, options) {
       const opts = options || {};
-      setEditorValue(newText);
+      setEditorValue(newText, { deferLargeRefresh: !opts.skipRender });
       setEditorHistoryBaseline(newText);
       setEditorSelection(selStart, selEnd ?? selStart, !opts.skipFocus && keyboardInputScope === 'json');
       updateLineNumbers();
@@ -3821,7 +3855,7 @@ ${lines.join('\n')}`;
       } else {
         scheduleRenderWaveform(newText, opts.onRenderComplete);
       }
-      if (opts.skipSyncPersist) {
+      if (opts.skipSyncPersist || newText.length >= JSON_LARGE_TEXT_THRESHOLD) {
         debouncedPersistEditorJson();
       } else {
         saveEditorJsonToStorage(newText);
@@ -4068,13 +4102,13 @@ ${lines.join('\n')}`;
       const api = getBigWaveApi();
       if (!api || !fullSource || typeof fullSource !== 'object') {
         resetBigWaveViewport('module-unavailable');
-        return null;
+        return { window: null, metrics: suppliedMetrics || null };
       }
       const metrics = suppliedMetrics || api.measureSource(fullSource);
       const totalColumns = Math.max(0, Number(metrics && metrics.maxWaveLength) || 0);
       if (totalColumns < BIG_WAVE_COLUMN_THRESHOLD) {
         resetBigWaveViewport('below-threshold');
-        return null;
+        return { window: null, metrics };
       }
 
       const documentKey = getBigWaveDocumentKey();
@@ -4107,7 +4141,7 @@ ${lines.join('\n')}`;
         signalCount: metrics.signalCount,
         crossingEdges: bigWaveViewportState.window.crossingEdges.length
       });
-      return bigWaveViewportState.window;
+      return { window: bigWaveViewportState.window, metrics };
     }
 
     function updateBigWaveNavigatorReadout(startOverride) {
@@ -10336,14 +10370,15 @@ ${lines.join('\n')}`;
     }
 
     function handleWavePanelShiftWheel(e) {
-      if (!e.shiftKey || e.ctrlKey || e.metaKey) return false;
+      const horizontalGesture = e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY);
+      if (!horizontalGesture || e.ctrlKey || e.metaKey) return false;
       const target = e.target;
       if (!target || !(target instanceof Element) || !wavePanel.contains(target)) return false;
       if (target.closest && target.closest('.wave-text-edit-overlay, .wave-document-description-editor')) return false;
       if (bigWaveViewportState.enabled
           && bigWaveViewportState.window
           && target.closest('.wave-container') === waveContainer) {
-        const rawDelta = Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
+        const rawDelta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
         if (!rawDelta) return false;
         const deltaScale = e.deltaMode === 1
           ? 3
@@ -10354,7 +10389,7 @@ ${lines.join('\n')}`;
           (bigWaveViewportState.pendingStart >= 0
             ? bigWaveViewportState.pendingStart
             : bigWaveViewportState.start) + columnDelta,
-          'shift-wheel',
+          'horizontal-wheel',
           false
         );
         return true;
@@ -10364,7 +10399,7 @@ ${lines.join('\n')}`;
       const maxLeft = Math.max(0, horizontalScroller.scrollWidth - horizontalScroller.clientWidth);
       if (maxLeft <= 4) return false;
 
-      const rawDelta = Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
+      const rawDelta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
       if (!rawDelta) return false;
       const deltaScale = e.deltaMode === 1
         ? 20
@@ -13950,22 +13985,20 @@ ${lines.join('\n')}`;
           formatPromise: Promise.resolve(true)
         };
       }
-      let resolveFormat;
-      const formatPromise = new Promise((resolve) => {
-        resolveFormat = resolve;
-      });
       const selectionStart = editor.selectionStart;
       const selectionEnd = editor.selectionEnd;
       exitWavePaintMode('row-import');
       pushUndoBeforeChange(newText);
-      applyEditorChange(newText, selectionStart, selectionEnd, { skipFocus: true });
-      scheduleFormatAfterWaveChange(resolveFormat);
+      applyEditorChange(newText, selectionStart, selectionEnd, {
+        skipFocus: true,
+        skipSyncPersist: true
+      });
       return {
         changed: true,
         count: prepared.length,
         createdCount,
         extendedColumns,
-        formatPromise
+        formatPromise: Promise.resolve(true)
       };
     }
 
@@ -15443,6 +15476,8 @@ ${lines.join('\n')}`;
               signalCount: preparedAnalysis.metrics && preparedAnalysis.metrics.signalCount,
               maxWaveLength: preparedAnalysis.metrics && preparedAnalysis.metrics.maxWaveLength
             });
+          } else if (jsonDocumentSourceText === jsonText && jsonDocumentSource) {
+            source = jsonDocumentSource;
           } else {
             source = JSON.parse(jsonText);
           }
@@ -15459,18 +15494,17 @@ ${lines.join('\n')}`;
         }
 
         const fullSource = source;
-        const bigWaveWindow = prepareBigWaveRender(
+        const preparedWave = prepareBigWaveRender(
           fullSource,
           preparedAnalysis && preparedAnalysis.text === jsonText
             ? preparedAnalysis.metrics
             : null
         );
+        const bigWaveWindow = preparedWave.window;
         if (!jsonWindowViewDirty) {
           refreshJsonDocumentView({
             source: documentSource,
-            metrics: preparedAnalysis && preparedAnalysis.text === jsonText
-              ? preparedAnalysis.metrics
-              : null,
+            metrics: preparedWave.metrics,
             preserveCursor: jsonDocumentViewMode === 'full',
             clearHistory: false
           });
@@ -15579,6 +15613,9 @@ ${lines.join('\n')}`;
     const handledUndoRedoShortcutEvents = new WeakSet();
 
     function handleUndoRedoShortcut(e) {
+      const target = e && e.target && e.target.closest ? e.target : null;
+      const collectionModal = target && target.closest('#wave-collection-import-modal');
+      if (collectionModal && !collectionModal.hidden) return false;
       if (handledUndoRedoShortcutEvents.has(e)) return true;
       if (isUndoShortcut(e)) {
         handledUndoRedoShortcutEvents.add(e);

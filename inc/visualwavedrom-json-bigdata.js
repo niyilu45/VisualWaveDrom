@@ -25,6 +25,16 @@
     return JSON.parse(JSON.stringify(value));
   }
 
+  function cloneScopeForWindow(scope) {
+    if (!isObject(scope)) return cloneValue(scope);
+    const copy = {};
+    Object.keys(scope).forEach(function (key) {
+      if (key === 'samples' && Array.isArray(scope.samples)) return;
+      copy[key] = cloneValue(scope[key]);
+    });
+    return copy;
+  }
+
   function clampInteger(value, minimum, maximum) {
     const number = Number.isFinite(Number(value)) ? Math.floor(Number(value)) : minimum;
     return Math.max(minimum, Math.min(maximum, number));
@@ -112,6 +122,10 @@
         return;
       }
       if (key === 'data') return;
+      if (key === 'scope') {
+        copy.scope = cloneScopeForWindow(signal.scope);
+        return;
+      }
       copy[key] = cloneValue(signal[key]);
     });
 
@@ -180,10 +194,27 @@
     };
   }
 
+  function mergeWindowScope(fullScope, windowScope) {
+    if (!isObject(windowScope)) return cloneValue(windowScope);
+    const result = {};
+    if (isObject(fullScope)
+        && Array.isArray(fullScope.samples)
+        && !Object.prototype.hasOwnProperty.call(windowScope, 'samples')) {
+      result.samples = fullScope.samples;
+    }
+    Object.keys(windowScope).forEach(function (key) {
+      result[key] = cloneValue(windowScope[key]);
+    });
+    return result;
+  }
+
   function copyEditableSignalFields(fullSignal, windowSignal) {
     const result = {};
     Object.keys(fullSignal).forEach(function (key) {
-      if (key !== 'children') result[key] = cloneValue(fullSignal[key]);
+      if (key === 'children') return;
+      result[key] = key === 'scope' && isObject(fullSignal.scope)
+        ? fullSignal.scope
+        : cloneValue(fullSignal[key]);
     });
     Object.keys(result).forEach(function (key) {
       if (key === 'wave' || key === 'node' || key === 'data') return;
@@ -191,7 +222,9 @@
     });
     Object.keys(windowSignal).forEach(function (key) {
       if (key === 'children' || key === 'wave' || key === 'node' || key === 'data') return;
-      result[key] = cloneValue(windowSignal[key]);
+      result[key] = key === 'scope'
+        ? mergeWindowScope(fullSignal.scope, windowSignal.scope)
+        : cloneValue(windowSignal[key]);
     });
     return result;
   }
