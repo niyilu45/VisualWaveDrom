@@ -134,7 +134,7 @@ if (!window.VWDCodeEditorPairs) {
     const BIG_WAVE_MIN_WINDOW_COLUMNS = 24;
     const BIG_WAVE_MAX_WINDOW_COLUMNS = 320;
     const BIG_WAVE_WINDOW_PADDING_PX = 190;
-    const BIG_WAVE_SCROLL_DEBOUNCE_MS = 48;
+    const BIG_WAVE_SCROLL_THROTTLE_MS = 32;
     const JSON_WRAP_DISABLE_COLUMN_THRESHOLD = 200;
     const JSON_LARGE_TEXT_THRESHOLD = 250000;
     const JSON_EDITOR_SYNC_DEBOUNCE_MS = 360;
@@ -431,8 +431,10 @@ if (!window.VWDCodeEditorPairs) {
       start: 0,
       size: 0,
       pendingStart: -1,
+      pendingReason: '',
       renderTimer: null,
       navigator: null,
+      navigatorCanvas: null,
       syncingNavigator: false,
       resizeObserver: null
     };
@@ -4060,15 +4062,14 @@ ${lines.join('\n')}`;
         bigWaveViewportState.resizeObserver = null;
       }
       const navigatorEl = bigWaveViewportState.navigator;
-      const previousHost = navigatorEl && navigatorEl.closest
-        ? navigatorEl.closest('.wave-document-canvas')
-        : null;
+      const previousHost = bigWaveViewportState.navigatorCanvas;
       if (navigatorEl && navigatorEl.isConnected) navigatorEl.remove();
       if (previousHost) previousHost.classList.remove('vwd-big-wave-active');
       const currentHost = waveContainer.closest('.wave-document-canvas');
       if (currentHost) currentHost.classList.remove('vwd-big-wave-active');
       waveContainer.classList.remove('vwd-big-wave-window');
       bigWaveViewportState.navigator = null;
+      bigWaveViewportState.navigatorCanvas = null;
     }
 
     function resetBigWaveViewport(reason) {
@@ -4082,6 +4083,7 @@ ${lines.join('\n')}`;
       bigWaveViewportState.start = 0;
       bigWaveViewportState.size = 0;
       bigWaveViewportState.pendingStart = -1;
+      bigWaveViewportState.pendingReason = '';
       if (wasEnabled) {
         vwdDebugLog('big-wave', { phase: 'disabled', reason: reason || '' });
       }
@@ -4117,6 +4119,7 @@ ${lines.join('\n')}`;
       if (documentChanged) {
         bigWaveViewportState.start = 0;
         bigWaveViewportState.pendingStart = -1;
+        bigWaveViewportState.pendingReason = '';
       }
       const maxStart = Math.max(0, totalColumns - size);
       bigWaveViewportState.start = Math.max(0, Math.min(maxStart, bigWaveViewportState.start));
@@ -4150,7 +4153,9 @@ ${lines.join('\n')}`;
       if (!navigatorEl || !windowMeta) return;
       const start = Math.max(0, Math.min(windowMeta.maxStart, Number.isFinite(startOverride)
         ? startOverride
-        : bigWaveViewportState.start));
+        : (bigWaveViewportState.pendingStart >= 0
+          ? bigWaveViewportState.pendingStart
+          : bigWaveViewportState.start)));
       const end = Math.min(windowMeta.totalColumns, start + bigWaveViewportState.size);
       const readout = navigatorEl.querySelector('.vwd-big-wave-range');
       if (readout) {
@@ -4160,6 +4165,62 @@ ${lines.join('\n')}`;
       const next = navigatorEl.querySelector('[data-big-wave-action="next"]');
       if (previous) previous.disabled = start <= 0;
       if (next) next.disabled = start >= windowMeta.maxStart;
+    }
+
+    function jumpToBigWaveColumn(rawValue, source) {
+      if (!bigWaveViewportState.enabled || !bigWaveViewportState.window) return false;
+      const navigatorEl = bigWaveViewportState.navigator;
+      const input = navigatorEl
+        ? navigatorEl.querySelector('.vwd-big-wave-jump-input')
+        : null;
+      const text = String(rawValue == null ? '' : rawValue).trim();
+      const requestedColumn = Number(text);
+      const totalColumns = Math.max(1, bigWaveViewportState.window.totalColumns);
+
+      if (!text || !Number.isFinite(requestedColumn) || !Number.isInteger(requestedColumn)) {
+        if (input) {
+          input.classList.add('invalid');
+          input.focus();
+          input.select();
+        }
+        setStatus(false, '请输入 1 至 ' + totalColumns + ' 之间的整数列号');
+        vwdDebugLog('big-wave', {
+          phase: 'jump-rejected',
+          source: source || '',
+          value: text,
+          totalColumns
+        });
+        return false;
+      }
+
+      const safeColumn = Math.max(1, Math.min(totalColumns, requestedColumn));
+      const columnIndex = safeColumn - 1;
+      const centeredStart = columnIndex - Math.floor(bigWaveViewportState.size / 2);
+      const targetStart = Math.max(
+        0,
+        Math.min(bigWaveViewportState.window.maxStart, centeredStart)
+      );
+      if (input) {
+        input.value = String(safeColumn);
+        input.classList.remove('invalid');
+        input.classList.toggle('range-adjusted', safeColumn !== requestedColumn);
+      }
+      scheduleBigWaveViewportStart(targetStart, 'jump-to-column', true);
+      setStatus(
+        true,
+        safeColumn === requestedColumn
+          ? ('已跳转到第 ' + safeColumn + ' 列')
+          : ('列号超出范围，已跳转到第 ' + safeColumn + ' 列')
+      );
+      vwdDebugLog('big-wave', {
+        phase: 'jump',
+        source: source || '',
+        requestedColumn,
+        safeColumn,
+        targetStart,
+        totalColumns
+      });
+      return true;
     }
 
     function scheduleBigWaveViewportStart(nextStart, reason, immediate) {
@@ -4177,13 +4238,15 @@ ${lines.join('\n')}`;
       if (start === currentTarget) return false;
 
       bigWaveViewportState.pendingStart = start;
+      bigWaveViewportState.pendingReason = reason || '';
       updateBigWaveNavigatorReadout(start);
-      clearBigWaveRenderTimer();
       const applyStart = function () {
         bigWaveViewportState.renderTimer = null;
         if (!bigWaveViewportState.enabled || bigWaveViewportState.pendingStart < 0) return;
         const requestedStart = bigWaveViewportState.pendingStart;
+        const requestedReason = bigWaveViewportState.pendingReason;
         bigWaveViewportState.pendingStart = -1;
+        bigWaveViewportState.pendingReason = '';
         if (requestedStart === bigWaveViewportState.start) return;
         bigWaveViewportState.start = requestedStart;
         lastRenderedWaveText = null;
@@ -4196,14 +4259,21 @@ ${lines.join('\n')}`;
         } : null;
         vwdDebugLog('big-wave', {
           phase: 'window-change',
-          reason: reason || '',
+          reason: requestedReason,
           start: requestedStart,
           size: bigWaveViewportState.size
         });
         scheduleRenderWaveform(text, null, analysis);
       };
-      if (immediate) applyStart();
-      else bigWaveViewportState.renderTimer = setTimeout(applyStart, BIG_WAVE_SCROLL_DEBOUNCE_MS);
+      if (immediate) {
+        clearBigWaveRenderTimer();
+        applyStart();
+      } else if (bigWaveViewportState.renderTimer === null) {
+        bigWaveViewportState.renderTimer = setTimeout(
+          applyStart,
+          BIG_WAVE_SCROLL_THROTTLE_MS
+        );
+      }
       return true;
     }
 
@@ -4219,114 +4289,218 @@ ${lines.join('\n')}`;
       return scheduleBigWaveViewportStart(nextStart, reason || 'ensure-column-visible', true);
     }
 
+    function placeBigWaveNavigator(navigatorEl) {
+      if (!navigatorEl || !navigatorEl.isConnected) return;
+      const canvas = waveContainer.closest('.wave-document-canvas');
+      const previousCanvas = bigWaveViewportState.navigatorCanvas;
+      if (previousCanvas && previousCanvas !== canvas) {
+        previousCanvas.classList.remove('vwd-big-wave-active');
+      }
+      if (canvas) {
+        canvas.classList.add('vwd-big-wave-active');
+        if (navigatorEl.parentElement !== canvas.parentElement
+            || navigatorEl.previousElementSibling !== canvas) {
+          canvas.insertAdjacentElement('afterend', navigatorEl);
+        }
+      } else if (navigatorEl.parentElement !== waveContainer.parentElement
+          || navigatorEl.previousElementSibling !== waveContainer) {
+        waveContainer.insertAdjacentElement('afterend', navigatorEl);
+      }
+      bigWaveViewportState.navigatorCanvas = canvas || null;
+    }
+
     function renderBigWaveNavigator() {
-      removeBigWaveNavigator();
-      if (!bigWaveViewportState.enabled || !bigWaveViewportState.window) return;
+      if (!bigWaveViewportState.enabled || !bigWaveViewportState.window) {
+        removeBigWaveNavigator();
+        return;
+      }
       const windowMeta = bigWaveViewportState.window;
       const host = getBigWaveHost();
+      const navigatorHost = host && host.classList.contains('wave-document-canvas')
+        ? host.parentElement
+        : host;
       if (host && host.classList.contains('wave-document-canvas')) {
         host.classList.add('vwd-big-wave-active');
       }
       waveContainer.classList.add('vwd-big-wave-window');
 
-      const navigatorEl = document.createElement('div');
-      navigatorEl.className = 'vwd-big-wave-navigator';
-      navigatorEl.setAttribute('role', 'group');
-      navigatorEl.setAttribute('aria-label', '大波形列窗口');
+      let navigatorEl = bigWaveViewportState.navigator;
+      const needsNavigator = !navigatorEl
+        || !navigatorEl.isConnected
+        || navigatorEl.parentElement !== navigatorHost;
+      if (needsNavigator) {
+        removeBigWaveNavigator();
+        if (host && host.classList.contains('wave-document-canvas')) {
+          host.classList.add('vwd-big-wave-active');
+        }
+        waveContainer.classList.add('vwd-big-wave-window');
 
-      const controls = document.createElement('div');
-      controls.className = 'vwd-big-wave-controls';
-      const previous = document.createElement('button');
-      previous.type = 'button';
-      previous.dataset.bigWaveAction = 'previous';
-      previous.textContent = '‹';
-      previous.title = '向前移动一个窗口';
-      previous.setAttribute('aria-label', '向前移动一个窗口');
-      const range = document.createElement('span');
-      range.className = 'vwd-big-wave-range';
-      const crossing = document.createElement('span');
-      crossing.className = 'vwd-big-wave-crossing';
-      crossing.textContent = windowMeta.crossingEdges.length
-        ? ('跨窗口连接 ' + windowMeta.crossingEdges.length)
-        : '';
-      const next = document.createElement('button');
-      next.type = 'button';
-      next.dataset.bigWaveAction = 'next';
-      next.textContent = '›';
-      next.title = '向后移动一个窗口';
-      next.setAttribute('aria-label', '向后移动一个窗口');
-      controls.append(previous, range, crossing, next);
+        navigatorEl = document.createElement('div');
+        navigatorEl.className = 'vwd-big-wave-navigator';
+        navigatorEl.setAttribute('role', 'group');
+        navigatorEl.setAttribute('aria-label', '大波形列窗口');
 
-      const scroller = document.createElement('div');
-      scroller.className = 'vwd-big-wave-scroll';
-      scroller.setAttribute('role', 'scrollbar');
-      scroller.setAttribute('aria-orientation', 'horizontal');
-      scroller.setAttribute('aria-valuemin', '0');
-      scroller.setAttribute('aria-valuemax', String(windowMeta.maxStart));
-      scroller.setAttribute('aria-valuenow', String(windowMeta.start));
-      const spacer = document.createElement('div');
-      spacer.className = 'vwd-big-wave-scroll-spacer';
+        const controls = document.createElement('div');
+        controls.className = 'vwd-big-wave-controls';
+        const previous = document.createElement('button');
+        previous.type = 'button';
+        previous.dataset.bigWaveAction = 'previous';
+        previous.textContent = '‹';
+        previous.title = '向前移动一个窗口';
+        previous.setAttribute('aria-label', '向前移动一个窗口');
+        const range = document.createElement('span');
+        range.className = 'vwd-big-wave-range';
+        const crossing = document.createElement('span');
+        crossing.className = 'vwd-big-wave-crossing';
+        const jump = document.createElement('form');
+        jump.className = 'vwd-big-wave-jump';
+        jump.noValidate = true;
+        const jumpInput = document.createElement('input');
+        jumpInput.type = 'text';
+        jumpInput.className = 'vwd-big-wave-jump-input';
+        jumpInput.inputMode = 'numeric';
+        jumpInput.pattern = '[0-9]*';
+        jumpInput.placeholder = '列号';
+        jumpInput.title = '输入列号后按回车或点击跳转';
+        jumpInput.setAttribute('aria-label', '跳转到指定列');
+        const jumpButton = document.createElement('button');
+        jumpButton.type = 'submit';
+        jumpButton.className = 'vwd-big-wave-jump-button';
+        jumpButton.textContent = '跳转';
+        jumpButton.title = '跳转到输入的列号';
+        jump.append(jumpInput, jumpButton);
+        const next = document.createElement('button');
+        next.type = 'button';
+        next.dataset.bigWaveAction = 'next';
+        next.textContent = '›';
+        next.title = '向后移动一个窗口';
+        next.setAttribute('aria-label', '向后移动一个窗口');
+        controls.append(previous, range, crossing, jump, next);
+
+        const scroller = document.createElement('div');
+        scroller.className = 'vwd-big-wave-scroll';
+        scroller.setAttribute('role', 'scrollbar');
+        scroller.setAttribute('aria-orientation', 'horizontal');
+        scroller.setAttribute('aria-valuemin', '0');
+        const spacer = document.createElement('div');
+        spacer.className = 'vwd-big-wave-scroll-spacer';
+        scroller.appendChild(spacer);
+        navigatorEl.append(controls, scroller);
+        waveContainer.insertAdjacentElement('afterend', navigatorEl);
+        bigWaveViewportState.navigator = navigatorEl;
+        placeBigWaveNavigator(navigatorEl);
+
+        previous.addEventListener('click', function () {
+          scheduleBigWaveViewportStart(
+            bigWaveViewportState.start - bigWaveViewportState.size,
+            'previous-window',
+            true
+          );
+        });
+        next.addEventListener('click', function () {
+          scheduleBigWaveViewportStart(
+            bigWaveViewportState.start + bigWaveViewportState.size,
+            'next-window',
+            true
+          );
+        });
+        jump.addEventListener('submit', function (event) {
+          event.preventDefault();
+          event.stopPropagation();
+          vwdDebugLog('big-wave', {
+            phase: 'jump-submit',
+            value: jumpInput.value
+          });
+          jumpToBigWaveColumn(jumpInput.value, 'submit');
+        });
+        jumpInput.addEventListener('input', function () {
+          jumpInput.classList.remove('invalid', 'range-adjusted');
+        });
+        jumpInput.addEventListener('keydown', function (event) {
+          vwdDebugLog('big-wave', {
+            phase: 'jump-keydown',
+            key: event.key || '',
+            code: event.code || '',
+            value: jumpInput.value
+          });
+          event.stopPropagation();
+          if (event.key === 'Enter') {
+            event.preventDefault();
+            jumpToBigWaveColumn(jumpInput.value, 'enter');
+          } else if (event.key === 'Escape') {
+            event.preventDefault();
+            jumpInput.blur();
+          }
+        });
+        scroller.addEventListener('scroll', function () {
+          if (bigWaveViewportState.syncingNavigator
+              || bigWaveViewportState.navigator !== navigatorEl
+              || !bigWaveViewportState.window) return;
+          const maxScroll = Math.max(1, scroller.scrollWidth - scroller.clientWidth);
+          const ratio = Math.max(0, Math.min(1, scroller.scrollLeft / maxScroll));
+          const nextStart = Math.round(ratio * bigWaveViewportState.window.maxStart);
+          scroller.setAttribute('aria-valuenow', String(nextStart));
+          scheduleBigWaveViewportStart(nextStart, 'virtual-scroll', false);
+        }, { passive: true });
+      }
+      placeBigWaveNavigator(navigatorEl);
+
+      const crossing = navigatorEl.querySelector('.vwd-big-wave-crossing');
+      if (crossing) {
+        crossing.textContent = windowMeta.crossingEdges.length
+          ? ('跨窗口连接 ' + windowMeta.crossingEdges.length)
+          : '';
+      }
+      const jumpInput = navigatorEl.querySelector('.vwd-big-wave-jump-input');
+      if (jumpInput) {
+        jumpInput.setAttribute('aria-valuemin', '1');
+        jumpInput.setAttribute('aria-valuemax', String(windowMeta.totalColumns));
+      }
+      const scroller = navigatorEl.querySelector('.vwd-big-wave-scroll');
+      const spacer = navigatorEl.querySelector('.vwd-big-wave-scroll-spacer');
       const virtualWidth = Math.min(8000000, Math.max(640, windowMeta.totalColumns * 4));
-      spacer.style.width = virtualWidth + 'px';
-      scroller.appendChild(spacer);
-      navigatorEl.append(controls, scroller);
-      waveContainer.appendChild(navigatorEl);
-      bigWaveViewportState.navigator = navigatorEl;
+      if (spacer) spacer.style.width = virtualWidth + 'px';
+      if (scroller) {
+        scroller.setAttribute('aria-valuemax', String(windowMeta.maxStart));
+        scroller.setAttribute('aria-valuenow', String(bigWaveViewportState.start));
+      }
       updateBigWaveNavigatorReadout();
 
-      previous.addEventListener('click', function () {
-        scheduleBigWaveViewportStart(
-          bigWaveViewportState.start - bigWaveViewportState.size,
-          'previous-window',
-          true
-        );
-      });
-      next.addEventListener('click', function () {
-        scheduleBigWaveViewportStart(
-          bigWaveViewportState.start + bigWaveViewportState.size,
-          'next-window',
-          true
-        );
-      });
-      scroller.addEventListener('scroll', function () {
-        if (bigWaveViewportState.syncingNavigator || !bigWaveViewportState.window) return;
-        const maxScroll = Math.max(1, scroller.scrollWidth - scroller.clientWidth);
-        const ratio = Math.max(0, Math.min(1, scroller.scrollLeft / maxScroll));
-        const nextStart = Math.round(ratio * bigWaveViewportState.window.maxStart);
-        scroller.setAttribute('aria-valuenow', String(nextStart));
-        scheduleBigWaveViewportStart(nextStart, 'virtual-scroll', false);
-      }, { passive: true });
-
       requestAnimationFrame(function () {
-        if (!scroller.isConnected || !bigWaveViewportState.window) return;
+        if (!scroller || !scroller.isConnected || !bigWaveViewportState.window) return;
         const maxScroll = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
+        const targetStart = bigWaveViewportState.pendingStart >= 0
+          ? bigWaveViewportState.pendingStart
+          : bigWaveViewportState.start;
         const ratio = bigWaveViewportState.window.maxStart > 0
-          ? bigWaveViewportState.start / bigWaveViewportState.window.maxStart
+          ? targetStart / bigWaveViewportState.window.maxStart
           : 0;
         bigWaveViewportState.syncingNavigator = true;
         scroller.scrollLeft = maxScroll * ratio;
-        scroller.setAttribute('aria-valuenow', String(bigWaveViewportState.start));
+        scroller.setAttribute('aria-valuenow', String(targetStart));
         requestAnimationFrame(function () {
           bigWaveViewportState.syncingNavigator = false;
         });
       });
 
-      if (typeof ResizeObserver === 'function' && host) {
+      if (typeof ResizeObserver === 'function' && host && !bigWaveViewportState.resizeObserver) {
         let previousWidth = host.clientWidth;
         bigWaveViewportState.resizeObserver = new ResizeObserver(function () {
-          if (!bigWaveViewportState.enabled || !bigWaveViewportState.fullSource) return;
+          if (!bigWaveViewportState.enabled
+              || !bigWaveViewportState.fullSource
+              || !bigWaveViewportState.window) return;
           const currentWidth = host.clientWidth;
           if (Math.abs(currentWidth - previousWidth) < 24) return;
           previousWidth = currentWidth;
           const nextSize = calculateBigWaveWindowSize(
             bigWaveViewportState.fullSource,
-            windowMeta.totalColumns
+            bigWaveViewportState.window.totalColumns
           );
           if (nextSize === bigWaveViewportState.size) return;
           bigWaveViewportState.size = nextSize;
           bigWaveViewportState.start = Math.min(
             bigWaveViewportState.start,
-            Math.max(0, windowMeta.totalColumns - nextSize)
+            Math.max(0, bigWaveViewportState.window.totalColumns - nextSize)
           );
           lastRenderedWaveText = null;
           scheduleRenderWaveform(editor.value, null, {
@@ -15439,7 +15613,18 @@ ${lines.join('\n')}`;
         syncHscaleInputFromJson(jsonText, lastRenderedWaveSource);
         applyNavVisibilityToWave();
         renderConnectionEdgeList(lastRenderedWaveSource);
-        if (bigWaveViewportState.enabled) updateBigWaveNavigatorReadout();
+        if (bigWaveViewportState.enabled) {
+          const activeDocumentKey = getBigWaveDocumentKey();
+          if (bigWaveViewportState.documentKey !== activeDocumentKey) {
+            vwdDebugLog('big-wave', {
+              phase: 'document-key-sync',
+              previous: bigWaveViewportState.documentKey,
+              next: activeDocumentKey
+            });
+            bigWaveViewportState.documentKey = activeDocumentKey;
+          }
+          updateBigWaveNavigatorReadout();
+        }
         vwdDebugLog('performance', { phase: 'active-render-cache-hit', textLength: jsonText.length });
         return true;
       }
@@ -16901,8 +17086,13 @@ ${lines.join('\n')}`;
     }
 
     function mountWaveContainerOutsideLibrary() {
-      if (!wavePanel || waveContainer.parentNode === wavePanel) return;
-      wavePanel.insertBefore(waveContainer, waveLibraryContainer);
+      if (!wavePanel) return;
+      if (waveContainer.parentNode !== wavePanel) {
+        wavePanel.insertBefore(waveContainer, waveLibraryContainer);
+      }
+      if (bigWaveViewportState.enabled && bigWaveViewportState.navigator) {
+        placeBigWaveNavigator(bigWaveViewportState.navigator);
+      }
     }
 
     function updateWaveDocumentCard(entry, tag, isEditingDocument) {
@@ -16925,6 +17115,9 @@ ${lines.join('\n')}`;
         entry.previewQueued = false;
         waveContainer.hidden = false;
         entry.previewHost.replaceChildren(waveContainer);
+        if (bigWaveViewportState.enabled && bigWaveViewportState.navigator) {
+          placeBigWaveNavigator(bigWaveViewportState.navigator);
+        }
         setWavePreviewLoadingState(entry, false);
         syncWaveDocumentDescriptionWidth(waveContainer);
         setupFrozenWaveLabels(waveContainer);
@@ -18592,6 +18785,7 @@ ${lines.join('\n')}`;
     });
 
     document.addEventListener('keydown', (e) => {
+      if (e.target && e.target.closest && e.target.closest('.vwd-big-wave-jump')) return;
       if (vimController && vimController.handleKeydown(e)) return;
       if (handleUndoRedoShortcut(e)) return;
       if (handleWaveClipboardShortcut(e)) return;
@@ -18987,6 +19181,9 @@ ${lines.join('\n')}`;
       });
       window.__vwdSetBigWaveStart = (columnIndex) => (
         scheduleBigWaveViewportStart(columnIndex, 'debug-api', true)
+      );
+      window.__vwdJumpBigWaveColumn = (columnNumber) => (
+        jumpToBigWaveColumn(columnNumber, 'debug-api')
       );
       window.__vwdGetVimState = () => ({
         controller: vimController ? vimController.getState() : null,
