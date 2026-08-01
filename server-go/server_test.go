@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -144,6 +145,253 @@ func TestComplexSampleWithIndexUsesIndexedParser(t *testing.T) {
 	}
 	if headerLikely, _ := analysis["headerLikely"].(bool); !headerLikely {
 		t.Fatal("index/I/Q heading must be detected")
+	}
+}
+
+func TestTableImportUsesSelectedHeaderAndSplitsComplexSignals(t *testing.T) {
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := newImportManager(filepath.Dir(workingDirectory))
+	if python := manager.pythonRuntime(); !python.Available {
+		t.Skip("Python runtime is not available")
+	}
+	sourcePath := filepath.Join(t.TempDir(), "signals.csv")
+	data := "generated table\nclk,bus,iq\n0,wifi,1+2j\n1,proj,3-4j\n0,done,5+0j\n"
+	if err = os.WriteFile(sourcePath, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := manager.runTableLocalFile(sourcePath, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updates, ok := result["updates"].([]map[string]any)
+	if !ok {
+		t.Fatalf("table updates have unexpected type: %T", result["updates"])
+	}
+	expectedNames := []string{"clk", "bus", "iq_I", "iq_Q"}
+	if len(updates) != len(expectedNames) {
+		t.Fatalf("update count = %d, expected %d", len(updates), len(expectedNames))
+	}
+	for index, expected := range expectedNames {
+		if name := stringValue(updates[index]["signal"]); name != expected {
+			t.Fatalf("update %d signal = %q, expected %q", index, name, expected)
+		}
+	}
+	if pointCount := intValue(result["pointCount"], 0); pointCount != 3 {
+		t.Fatalf("point count = %d, expected 3", pointCount)
+	}
+	if !boolValue(result["complexDetected"], false) {
+		t.Fatal("complex table column was not detected")
+	}
+}
+
+func TestTableImportOnlyParsesEnabledColumnsAndAppliesNames(t *testing.T) {
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := newImportManager(filepath.Dir(workingDirectory))
+	if python := manager.pythonRuntime(); !python.Available {
+		t.Skip("Python runtime is not available")
+	}
+	sourcePath := filepath.Join(t.TempDir(), "signals.csv")
+	data := "clk,bus,iq\n0,wifi,1+2j\n1,proj,3-4j\n"
+	if err = os.WriteFile(sourcePath, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := manager.runTableLocalFileWithOptions(sourcePath, tableImportOptions{
+		HeaderRow: 1,
+		Delimiter: "comma",
+		Columns: []collectionColumnConfig{
+			{Source: "clk", Enabled: false, Name: "clk"},
+			{Source: "bus", Enabled: true, Name: "payload"},
+			{Source: "iq", Enabled: true, Name: "feedback"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updates, ok := result["updates"].([]map[string]any)
+	if !ok {
+		t.Fatalf("table updates have unexpected type: %T", result["updates"])
+	}
+	expected := []string{"payload", "feedback_I", "feedback_Q"}
+	if len(updates) != len(expected) {
+		t.Fatalf("update count = %d, expected %d", len(updates), len(expected))
+	}
+	for index, name := range expected {
+		if actual := stringValue(updates[index]["signal"]); actual != name {
+			t.Fatalf("update %d signal = %q, expected %q", index, actual, name)
+		}
+	}
+}
+
+func TestTableImportFiltersRowsUsingDisabledControlColumn(t *testing.T) {
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := newImportManager(filepath.Dir(workingDirectory))
+	if python := manager.pythonRuntime(); !python.Available {
+		t.Skip("Python runtime is not available")
+	}
+	sourcePath := filepath.Join(t.TempDir(), "signals.csv")
+	data := "Value,CurSt\n10,0\n11,1\n12,2\n13,3\n"
+	if err = os.WriteFile(sourcePath, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := manager.runTableLocalFileWithOptions(sourcePath, tableImportOptions{
+		HeaderRow: 1,
+		Delimiter: "comma",
+		Columns: []collectionColumnConfig{
+			{Source: "Value", Enabled: true, Name: "Value"},
+			{Source: "CurSt", Enabled: false, Name: "CurSt", Filter: ">=1&&<=2"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pointCount := intValue(result["pointCount"], 0); pointCount != 2 {
+		t.Fatalf("filtered point count = %d, expected 2", pointCount)
+	}
+	if filtered := intValue(result["filteredOutRowCount"], 0); filtered != 2 {
+		t.Fatalf("filtered row count = %d, expected 2", filtered)
+	}
+	updates, ok := result["updates"].([]map[string]any)
+	if !ok || len(updates) != 1 || stringValue(updates[0]["signal"]) != "Value" {
+		t.Fatalf("unexpected filtered updates: %#v", result["updates"])
+	}
+	labels, ok := updates[0]["data"].([]string)
+	if !ok || len(labels) != 2 || labels[0] != "11" || labels[1] != "12" {
+		t.Fatalf("filtered values = %#v, expected [11 12]", updates[0]["data"])
+	}
+	if wave := stringValue(updates[0]["wave"]); wave != "==x." {
+		t.Fatalf("filtered wave = %q, expected reindexed data followed by unknowns %q", wave, "==x.")
+	}
+	samples, ok := updates[0]["samples"].([]any)
+	if !ok || len(samples) != 4 || intValue(samples[0], 0) != 11 ||
+		intValue(samples[1], 0) != 12 || samples[2] != nil || samples[3] != nil {
+		t.Fatalf("filtered samples = %#v, expected [11 12 nil nil]", updates[0]["samples"])
+	}
+}
+
+func TestTableImportRecognizesMultiStateIntegerColumnAsData(t *testing.T) {
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := newImportManager(filepath.Dir(workingDirectory))
+	if python := manager.pythonRuntime(); !python.Available {
+		t.Skip("Python runtime is not available")
+	}
+	sourcePath := filepath.Join(t.TempDir(), "states.csv")
+	data := "CurSt\n1\n1\n2\n2\n"
+	if err = os.WriteFile(sourcePath, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := manager.runTableLocalFile(sourcePath, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updates, ok := result["updates"].([]map[string]any)
+	if !ok || len(updates) != 1 {
+		t.Fatalf("unexpected state updates: %#v", result["updates"])
+	}
+	if wave := stringValue(updates[0]["wave"]); wave != "=.=." {
+		t.Fatalf("CurSt wave = %q, expected data waveform %q", wave, "=.=.")
+	}
+	labels, ok := updates[0]["data"].([]string)
+	if !ok || len(labels) != 2 || labels[0] != "1" || labels[1] != "2" {
+		t.Fatalf("CurSt labels = %#v, expected [1 2]", updates[0]["data"])
+	}
+	if kind := stringValue(updates[0]["sampleKind"]); kind != "bus" {
+		t.Fatalf("CurSt sample kind = %q, expected bus", kind)
+	}
+
+	filtered, err := manager.runTableLocalFileWithOptions(sourcePath, tableImportOptions{
+		HeaderRow: 1,
+		Delimiter: "comma",
+		Columns: []collectionColumnConfig{
+			{Source: "CurSt", Enabled: true, Name: "CurSt", Filter: "=1"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	filteredUpdates, ok := filtered["updates"].([]map[string]any)
+	if !ok || len(filteredUpdates) != 1 {
+		t.Fatalf("unexpected filtered state updates: %#v", filtered["updates"])
+	}
+	if wave := stringValue(filteredUpdates[0]["wave"]); wave != "=.x." {
+		t.Fatalf("filtered CurSt wave = %q, expected reindexed data and unknown tail %q", wave, "=.x.")
+	}
+	if kind := stringValue(filteredUpdates[0]["sampleKind"]); kind != "bus" {
+		t.Fatalf("filtered CurSt sample kind = %q, expected bus", kind)
+	}
+}
+
+func TestTableImportUsesContinuationForAdjacentEqualValues(t *testing.T) {
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := newImportManager(filepath.Dir(workingDirectory))
+	if python := manager.pythonRuntime(); !python.Available {
+		t.Skip("Python runtime is not available")
+	}
+	sourcePath := filepath.Join(t.TempDir(), "repeated-signals.csv")
+	data := "CurSt,BusState,StateName\n0,10,IDLE\n0,10,IDLE\n1,20,RUN\n1,20,RUN\n"
+	if err = os.WriteFile(sourcePath, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := manager.runTableLocalFile(sourcePath, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updates, ok := result["updates"].([]map[string]any)
+	if !ok || len(updates) != 3 {
+		t.Fatalf("unexpected repeated-value updates: %#v", result["updates"])
+	}
+	if wave := stringValue(updates[0]["wave"]); wave != "0.1." {
+		t.Fatalf("CurSt wave = %q, expected %q", wave, "0.1.")
+	}
+	for _, index := range []int{1, 2} {
+		if wave := stringValue(updates[index]["wave"]); wave != "=.=." {
+			t.Fatalf("update %d wave = %q, expected %q", index, wave, "=.=.")
+		}
+	}
+	if labels, ok := updates[1]["data"].([]string); !ok || len(labels) != 2 || labels[0] != "10" || labels[1] != "20" {
+		t.Fatalf("BusState data = %#v, expected [10 20]", updates[1]["data"])
+	}
+	if labels, ok := updates[2]["data"].([]string); !ok || len(labels) != 2 || labels[0] != "IDLE" || labels[1] != "RUN" {
+		t.Fatalf("StateName data = %#v, expected [IDLE RUN]", updates[2]["data"])
+	}
+}
+
+func TestTableImportRejectsInvalidColumnFilter(t *testing.T) {
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := newImportManager(filepath.Dir(workingDirectory))
+	if python := manager.pythonRuntime(); !python.Available {
+		t.Skip("Python runtime is not available")
+	}
+	sourcePath := filepath.Join(t.TempDir(), "signals.csv")
+	if err = os.WriteFile(sourcePath, []byte("CurSt\n1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = manager.runTableLocalFileWithOptions(sourcePath, tableImportOptions{
+		HeaderRow: 1,
+		Delimiter: "comma",
+		Columns: []collectionColumnConfig{
+			{Source: "CurSt", Enabled: true, Name: "CurSt", Filter: ">=ready"},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "filter for CurSt requires a numeric value") {
+		t.Fatalf("invalid filter returned an unclear error: %v", err)
 	}
 }
 

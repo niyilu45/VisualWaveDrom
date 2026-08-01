@@ -1,17 +1,21 @@
 {
+  "InnerType": "VisualWaveDrom.BatchWaveImportPreset",
   "vars": [],
   "paths": [
     {
-      "folder": ".",
-      "grepKeys": "SeqConvOutC.*",
-      "hasSeq": false,
-      "name": "SeqConvOutC"
+      "usrGen": {
+        "folder": ".",
+        "grepKeys": "^SeqConvOutC.*\\.txt$",
+        "name": "SeqConvOutC"
+      },
+      "autoGen": {}
     },
     {
-      "folder": ".",
-      "grepKeys": "SeqConvOutC.*",
-      "hasSeq": false,
-      "name": "SeqConvOutD"
+      "usrGen": {
+        "folder": ".",
+        "grepKeys": "^capture.*\\.csv$"
+      },
+      "autoGen": {}
     }
   ]
 }

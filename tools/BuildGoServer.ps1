@@ -69,7 +69,9 @@ try {
     }
 
     $checksumLines = Get-ChildItem -LiteralPath $outputDirectory -File |
-        Where-Object { $_.Name -like "VisualWaveDrom-server*" } |
+        Where-Object {
+            $_.Name -like "VisualWaveDrom-server*" -and -not $_.Name.EndsWith("~")
+        } |
         Sort-Object Name |
         ForEach-Object {
             $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()

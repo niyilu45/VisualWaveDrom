@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -12,6 +15,7 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,15 +23,22 @@ import (
 )
 
 const (
-	collectionPresetMaxBytes    = 1024 * 1024
-	collectionMaxVariables      = 64
-	collectionMaxPaths          = 128
-	collectionMaxVisitedFiles   = 100000
-	collectionMaxMatchesPerPath = 100
-	collectionMaxTotalColumns   = 20 * 1000 * 1000
-	collectionSearchCacheLimit  = 32
-	collectionParserWorkers     = 4
-	collectionSearchCacheTTL    = 10 * time.Minute
+	collectionPresetMaxBytes     = 1024 * 1024
+	collectionMaxVariables       = 64
+	collectionMaxPaths           = 128
+	collectionMaxVisitedFiles    = 100000
+	collectionMaxMatchesPerPath  = 100
+	collectionMaxTotalColumns    = 20 * 1000 * 1000
+	collectionSearchCacheLimit   = 32
+	collectionParserWorkers      = 4
+	collectionSearchCacheTTL     = 10 * time.Minute
+	collectionPresetInnerType    = "VisualWaveDrom.BatchWaveImportPreset"
+	collectionPresetScanLimit    = 100000
+	collectionPresetResultLimit  = 2000
+	collectionPreviewRowLimit    = 5
+	collectionPreviewColumnLimit = 32
+	collectionPreviewCellLimit   = 120
+	collectionMaxFilterLength    = 512
 )
 
 var collectionVariableNamePattern = regexp.MustCompile(`^[\p{L}_][\p{L}\p{N}_.-]*$`)
@@ -40,15 +51,67 @@ var collectionUnresolvedVariablePattern = regexp.MustCompile(
 )
 
 type collectionPresetPath struct {
-	Folder   string `json:"folder"`
-	GrepKeys string `json:"grepKeys"`
-	HasSeq   bool   `json:"hasSeq"`
-	Name     string `json:"name"`
+	UsrGen  collectionRuleConfig `json:"usrGen"`
+	AutoGen collectionRuleConfig `json:"autoGen"`
+
+	// Effective values keep the search/import code and legacy tests simple.
+	Folder     string                   `json:"-"`
+	GrepKeys   string                   `json:"-"`
+	HasSeq     bool                     `json:"-"`
+	Name       string                   `json:"-"`
+	ImportMode string                   `json:"-"`
+	HeaderRow  int                      `json:"-"`
+	Delimiter  string                   `json:"-"`
+	Parser     string                   `json:"-"`
+	Columns    []collectionColumnConfig `json:"-"`
+	SchemaHash string                   `json:"-"`
+}
+
+type collectionColumnConfig struct {
+	Source  string `json:"source"`
+	Enabled bool   `json:"enabled"`
+	Name    string `json:"name,omitempty"`
+	Filter  string `json:"filter,omitempty"`
+}
+
+type collectionRuleConfig struct {
+	Folder     string                   `json:"folder,omitempty"`
+	GrepKeys   string                   `json:"grepKeys,omitempty"`
+	Name       string                   `json:"name,omitempty"`
+	ImportMode string                   `json:"importMode,omitempty"`
+	HeaderRow  int                      `json:"headerRow,omitempty"`
+	Delimiter  string                   `json:"delimiter,omitempty"`
+	HasSeq     *bool                    `json:"hasSeq,omitempty"`
+	Parser     string                   `json:"parser,omitempty"`
+	Columns    []collectionColumnConfig `json:"columns,omitempty"`
+	SchemaHash string                   `json:"schemaHash,omitempty"`
 }
 
 type collectionPreset struct {
 	Vars  []string               `json:"vars"`
 	Paths []collectionPresetPath `json:"paths"`
+}
+
+type collectionPresetFile struct {
+	InnerType string                 `json:"InnerType"`
+	Vars      []string               `json:"vars"`
+	Paths     []collectionPresetPath `json:"paths"`
+}
+
+type collectionPresetDiscoveryEntry struct {
+	RelativePath string `json:"relativePath"`
+	FileName     string `json:"fileName"`
+	Size         int64  `json:"size"`
+	ModifiedAt   string `json:"modifiedAt"`
+}
+
+type collectionPresetDiscoveryResult struct {
+	Entries      []collectionPresetDiscoveryEntry `json:"entries"`
+	ResultCount  int                              `json:"resultCount"`
+	VisitedFiles int                              `json:"visitedFiles"`
+	SkippedFiles int                              `json:"skippedFiles,omitempty"`
+	Truncated    bool                             `json:"truncated,omitempty"`
+	DurationMS   int64                            `json:"durationMs"`
 }
 
 type collectionFileMatch struct {
@@ -60,16 +123,27 @@ type collectionFileMatch struct {
 }
 
 type collectionSearchEntry struct {
-	Index           int                   `json:"index"`
-	Folder          string                `json:"folder"`
-	SearchPath      string                `json:"searchPath"`
-	GrepKeys        string                `json:"grepKeys"`
-	ResolvedPattern string                `json:"resolvedPattern"`
-	HasSeq          bool                  `json:"hasSeq"`
-	Name            string                `json:"name"`
-	Status          string                `json:"status"`
-	Message         string                `json:"message,omitempty"`
-	Matches         []collectionFileMatch `json:"matches"`
+	Index            int                      `json:"index"`
+	Folder           string                   `json:"folder"`
+	SearchPath       string                   `json:"searchPath"`
+	GrepKeys         string                   `json:"grepKeys"`
+	ResolvedPattern  string                   `json:"resolvedPattern"`
+	HasSeq           bool                     `json:"hasSeq"`
+	Name             string                   `json:"name"`
+	ImportMode       string                   `json:"importMode"`
+	HeaderRow        int                      `json:"headerRow,omitempty"`
+	Delimiter        string                   `json:"delimiter,omitempty"`
+	Parser           string                   `json:"parser,omitempty"`
+	Columns          []collectionColumnConfig `json:"columns,omitempty"`
+	SchemaHash       string                   `json:"schemaHash,omitempty"`
+	OutputNames      []string                 `json:"outputNames,omitempty"`
+	PreviewColumns   []string                 `json:"previewColumns,omitempty"`
+	PreviewRows      [][]string               `json:"previewRows,omitempty"`
+	PreviewTruncated bool                     `json:"previewTruncated,omitempty"`
+	AutoGenChanged   bool                     `json:"autoGenChanged,omitempty"`
+	Status           string                   `json:"status"`
+	Message          string                   `json:"message,omitempty"`
+	Matches          []collectionFileMatch    `json:"matches"`
 }
 
 type collectionSearchResult struct {
@@ -145,6 +219,263 @@ func anyList(value any) ([]any, bool) {
 	default:
 		return nil, false
 	}
+}
+
+func collectionOptionalString(
+	raw map[string]any,
+	key string,
+	fieldPath string,
+) (string, error) {
+	value, supplied := raw[key]
+	if !supplied || value == nil {
+		return "", nil
+	}
+	text, ok := value.(string)
+	if !ok {
+		return "", fmt.Errorf("%s.%s must be a string", fieldPath, key)
+	}
+	return strings.TrimSpace(text), nil
+}
+
+func collectionOptionalInt(
+	raw map[string]any,
+	key string,
+	fieldPath string,
+) (int, error) {
+	value, supplied := raw[key]
+	if !supplied || value == nil {
+		return 0, nil
+	}
+	var parsed int
+	switch typed := value.(type) {
+	case float64:
+		parsed = int(typed)
+		if float64(parsed) != typed {
+			return 0, fmt.Errorf("%s.%s must be an integer", fieldPath, key)
+		}
+	case int:
+		parsed = typed
+	case json.Number:
+		value64, err := typed.Int64()
+		if err != nil {
+			return 0, fmt.Errorf("%s.%s must be an integer", fieldPath, key)
+		}
+		parsed = int(value64)
+	default:
+		return 0, fmt.Errorf("%s.%s must be an integer", fieldPath, key)
+	}
+	if parsed < 0 {
+		return 0, fmt.Errorf("%s.%s must not be negative", fieldPath, key)
+	}
+	return parsed, nil
+}
+
+func normalizeCollectionColumns(
+	value any,
+	renamesValue any,
+	fieldPath string,
+) ([]collectionColumnConfig, error) {
+	if value == nil {
+		return nil, nil
+	}
+	rawColumns, ok := anyList(value)
+	if !ok {
+		return nil, fmt.Errorf("%s.columns must be an array", fieldPath)
+	}
+	renames := map[string]string{}
+	if renamesValue != nil {
+		rawRenames, renameOK := renamesValue.(map[string]any)
+		if !renameOK {
+			return nil, fmt.Errorf("%s.renames must be an object", fieldPath)
+		}
+		for source, rawName := range rawRenames {
+			name, nameOK := rawName.(string)
+			if !nameOK {
+				return nil, fmt.Errorf("%s.renames.%s must be a string", fieldPath, source)
+			}
+			renames[source] = strings.TrimSpace(name)
+		}
+	}
+	columns := make([]collectionColumnConfig, 0, len(rawColumns))
+	seenSources := make(map[string]bool)
+	for index, rawColumn := range rawColumns {
+		column := collectionColumnConfig{Enabled: true}
+		switch typed := rawColumn.(type) {
+		case string:
+			column.Source = strings.TrimSpace(typed)
+			column.Name = renames[column.Source]
+		case map[string]any:
+			source, sourceOK := typed["source"].(string)
+			if !sourceOK {
+				return nil, fmt.Errorf("%s.columns[%d].source must be a string", fieldPath, index)
+			}
+			column.Source = strings.TrimSpace(source)
+			if enabled, supplied := typed["enabled"]; supplied {
+				value, enabledOK := enabled.(bool)
+				if !enabledOK {
+					return nil, fmt.Errorf("%s.columns[%d].enabled must be true or false", fieldPath, index)
+				}
+				column.Enabled = value
+			}
+			if name, supplied := typed["name"]; supplied {
+				value, nameOK := name.(string)
+				if !nameOK {
+					return nil, fmt.Errorf("%s.columns[%d].name must be a string", fieldPath, index)
+				}
+				column.Name = strings.TrimSpace(value)
+			}
+			if filter, supplied := typed["filter"]; supplied {
+				value, filterOK := filter.(string)
+				if !filterOK {
+					return nil, fmt.Errorf("%s.columns[%d].filter must be a string", fieldPath, index)
+				}
+				column.Filter = strings.TrimSpace(value)
+				if utf8.RuneCountInString(column.Filter) > collectionMaxFilterLength {
+					return nil, fmt.Errorf(
+						"%s.columns[%d].filter cannot exceed %d characters",
+						fieldPath, index, collectionMaxFilterLength,
+					)
+				}
+			}
+		default:
+			return nil, fmt.Errorf("%s.columns[%d] must be a string or object", fieldPath, index)
+		}
+		if column.Source == "" {
+			return nil, fmt.Errorf("%s.columns[%d].source must not be empty", fieldPath, index)
+		}
+		if seenSources[column.Source] {
+			return nil, fmt.Errorf("%s.columns contains duplicate source %s", fieldPath, column.Source)
+		}
+		if column.Name == "" {
+			column.Name = column.Source
+		}
+		if _, err := normalizeSignalName(column.Name); err != nil {
+			return nil, fmt.Errorf("%s.columns[%d].name: %w", fieldPath, index, err)
+		}
+		seenSources[column.Source] = true
+		columns = append(columns, column)
+	}
+	return columns, nil
+}
+
+func normalizeCollectionRuleConfig(
+	raw map[string]any,
+	fieldPath string,
+	autoGenerated bool,
+) (collectionRuleConfig, error) {
+	config := collectionRuleConfig{}
+	var err error
+	if config.Folder, err = collectionOptionalString(raw, "folder", fieldPath); err != nil {
+		return config, err
+	}
+	if config.GrepKeys, err = collectionOptionalString(raw, "grepKeys", fieldPath); err != nil {
+		return config, err
+	}
+	if config.Name, err = collectionOptionalString(raw, "name", fieldPath); err != nil {
+		return config, err
+	}
+	if config.ImportMode, err = collectionOptionalString(raw, "importMode", fieldPath); err != nil {
+		return config, err
+	}
+	config.ImportMode = strings.ToLower(config.ImportMode)
+	if config.ImportMode != "" && config.ImportMode != "single" && config.ImportMode != "table" {
+		return config, fmt.Errorf("%s.importMode must be single or table", fieldPath)
+	}
+	if config.HeaderRow, err = collectionOptionalInt(raw, "headerRow", fieldPath); err != nil {
+		return config, err
+	}
+	if config.Delimiter, err = collectionOptionalString(raw, "delimiter", fieldPath); err != nil {
+		return config, err
+	}
+	if len(config.Delimiter) > 1 {
+		normalizedDelimiter := strings.ToLower(config.Delimiter)
+		allowed := map[string]bool{
+			"auto": true, "comma": true, "csv": true, "tab": true,
+			"tsv": true, "whitespace": true, "space": true, "single": true,
+			"unknown": true,
+		}
+		if !allowed[normalizedDelimiter] {
+			if autoGenerated {
+				config.Delimiter = ""
+			} else {
+				return config, fmt.Errorf(
+					"%s.delimiter %q is not supported", fieldPath, config.Delimiter)
+			}
+		} else {
+			config.Delimiter = normalizedDelimiter
+		}
+	}
+	if config.Parser, err = collectionOptionalString(raw, "parser", fieldPath); err != nil {
+		return config, err
+	}
+	if config.SchemaHash, err = collectionOptionalString(raw, "schemaHash", fieldPath); err != nil {
+		return config, err
+	}
+	if rawHasSeq, supplied := raw["hasSeq"]; supplied {
+		hasSeq, ok := rawHasSeq.(bool)
+		if !ok {
+			return config, fmt.Errorf("%s.hasSeq must be true or false", fieldPath)
+		}
+		config.HasSeq = &hasSeq
+	}
+	config.Columns, err = normalizeCollectionColumns(raw["columns"], raw["renames"], fieldPath)
+	if err != nil {
+		return config, err
+	}
+	return config, nil
+}
+
+func effectiveCollectionPresetPath(
+	usrGen collectionRuleConfig,
+	autoGen collectionRuleConfig,
+) collectionPresetPath {
+	effective := collectionPresetPath{UsrGen: usrGen, AutoGen: autoGen}
+	effective.Folder = usrGen.Folder
+	if effective.Folder == "" {
+		effective.Folder = autoGen.Folder
+	}
+	if effective.Folder == "" {
+		effective.Folder = "."
+	}
+	effective.GrepKeys = usrGen.GrepKeys
+	if effective.GrepKeys == "" {
+		effective.GrepKeys = autoGen.GrepKeys
+	}
+	effective.Name = usrGen.Name
+	if effective.Name == "" {
+		effective.Name = autoGen.Name
+	}
+	effective.ImportMode = usrGen.ImportMode
+	if effective.ImportMode == "" {
+		effective.ImportMode = autoGen.ImportMode
+	}
+	effective.HeaderRow = usrGen.HeaderRow
+	if effective.HeaderRow == 0 {
+		effective.HeaderRow = autoGen.HeaderRow
+	}
+	effective.Delimiter = usrGen.Delimiter
+	if effective.Delimiter == "" {
+		effective.Delimiter = autoGen.Delimiter
+	}
+	effective.Parser = usrGen.Parser
+	if effective.Parser == "" {
+		effective.Parser = autoGen.Parser
+	}
+	effective.SchemaHash = usrGen.SchemaHash
+	if effective.SchemaHash == "" {
+		effective.SchemaHash = autoGen.SchemaHash
+	}
+	if usrGen.HasSeq != nil {
+		effective.HasSeq = *usrGen.HasSeq
+	} else if autoGen.HasSeq != nil {
+		effective.HasSeq = *autoGen.HasSeq
+	}
+	if len(usrGen.Columns) > 0 {
+		effective.Columns = append([]collectionColumnConfig{}, usrGen.Columns...)
+	} else {
+		effective.Columns = append([]collectionColumnConfig{}, autoGen.Columns...)
+	}
+	return effective
 }
 
 func parseCollectionPythonFString(template string) (string, bool) {
@@ -254,28 +585,64 @@ func normalizeCollectionPreset(value any) (collectionPreset, error) {
 		if !ok {
 			return collectionPreset{}, fmt.Errorf("paths[%d] must be an object", index)
 		}
-		folder, folderOK := entry["folder"].(string)
-		grepKeys, grepOK := entry["grepKeys"].(string)
-		name, nameOK := entry["name"].(string)
-		hasSeq, sequenceOK := entry["hasSeq"].(bool)
-		grepKeys = strings.TrimSpace(grepKeys)
-		name = strings.TrimSpace(name)
-		if !folderOK {
-			return collectionPreset{}, fmt.Errorf("paths[%d].folder must be a string", index)
+		usrRaw := map[string]any{}
+		autoRaw := map[string]any{}
+		_, nestedUsr := entry["usrGen"]
+		_, nestedAuto := entry["autoGen"]
+		if nestedUsr || nestedAuto {
+			if rawUsr, supplied := entry["usrGen"]; supplied {
+				var valid bool
+				usrRaw, valid = rawUsr.(map[string]any)
+				if !valid {
+					return collectionPreset{}, fmt.Errorf("paths[%d].usrGen must be an object", index)
+				}
+			}
+			if rawAuto, supplied := entry["autoGen"]; supplied {
+				var valid bool
+				autoRaw, valid = rawAuto.(map[string]any)
+				if !valid {
+					return collectionPreset{}, fmt.Errorf("paths[%d].autoGen must be an object", index)
+				}
+			}
+		} else {
+			// Legacy presets are migrated without changing their single-signal behavior.
+			for _, key := range []string{"folder", "grepKeys", "name"} {
+				if value, supplied := entry[key]; supplied {
+					usrRaw[key] = value
+				}
+			}
+			autoRaw["importMode"] = "single"
+			if value, supplied := entry["hasSeq"]; supplied {
+				autoRaw["hasSeq"] = value
+			}
 		}
-		if !grepOK || grepKeys == "" {
-			return collectionPreset{}, fmt.Errorf("paths[%d].grepKeys must be a non-empty regex string", index)
+		usrGen, configErr := normalizeCollectionRuleConfig(
+			usrRaw, fmt.Sprintf("paths[%d].usrGen", index), false)
+		if configErr != nil {
+			return collectionPreset{}, configErr
 		}
-		if !sequenceOK {
-			return collectionPreset{}, fmt.Errorf("paths[%d].hasSeq must be true or false", index)
+		autoGen, configErr := normalizeCollectionRuleConfig(
+			autoRaw, fmt.Sprintf("paths[%d].autoGen", index), true)
+		if configErr != nil {
+			return collectionPreset{}, configErr
 		}
-		if !nameOK || name == "" {
-			return collectionPreset{}, fmt.Errorf("paths[%d].name must be a non-empty string", index)
+		if usrGen.Folder == "" {
+			usrGen.Folder = "."
 		}
-		if len(folder) > 2048 || len(grepKeys) > 4096 || len(name) > 256 {
+		if usrGen.GrepKeys == "" {
+			return collectionPreset{}, fmt.Errorf(
+				"paths[%d].usrGen.grepKeys must be a non-empty regex string", index)
+		}
+		if len(usrGen.Folder) > 2048 || len(usrGen.GrepKeys) > 4096 ||
+			len(usrGen.Name) > 256 {
 			return collectionPreset{}, fmt.Errorf("paths[%d] contains an overlong value", index)
 		}
-		for _, variableName := range extractCollectionTemplateVariables(grepKeys) {
+		if usrGen.Name != "" {
+			if _, nameErr := normalizeSignalName(usrGen.Name); nameErr != nil {
+				return collectionPreset{}, fmt.Errorf("paths[%d].usrGen.name: %w", index, nameErr)
+			}
+		}
+		for _, variableName := range extractCollectionTemplateVariables(usrGen.GrepKeys) {
 			if seenVariables[variableName] {
 				continue
 			}
@@ -288,9 +655,10 @@ func normalizeCollectionPreset(value any) (collectionPreset, error) {
 			seenVariables[variableName] = true
 			preset.Vars = append(preset.Vars, variableName)
 		}
-		preset.Paths = append(preset.Paths, collectionPresetPath{
-			Folder: folder, GrepKeys: grepKeys, HasSeq: hasSeq, Name: name,
-		})
+		preset.Paths = append(
+			preset.Paths,
+			effectiveCollectionPresetPath(usrGen, autoGen),
+		)
 	}
 	return preset, nil
 }
@@ -540,10 +908,164 @@ func saveCollectionPreset(
 	if info, statErr := os.Stat(resolved); statErr == nil && info.IsDir() {
 		return "", errors.New("preset save path points to a directory")
 	}
-	if err = writeJSONAtomically(resolved, preset); err != nil {
+	stored := collectionPresetFile{
+		InnerType: collectionPresetInnerType,
+		Vars:      preset.Vars,
+		Paths:     preset.Paths,
+	}
+	if err = writeJSONAtomically(resolved, stored); err != nil {
 		return "", err
 	}
 	return resolved, nil
+}
+
+func readCollectionPresetInnerType(path string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > collectionPresetMaxBytes {
+		return "", errors.New("preset file has an unsupported size or type")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	var marker struct {
+		InnerType string `json:"InnerType"`
+	}
+	if err = json.Unmarshal(data, &marker); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(marker.InnerType), nil
+}
+
+func discoverCollectionPresets(
+	rawRootPath string,
+	baseDir string,
+) (collectionPresetDiscoveryResult, error) {
+	startedAt := time.Now()
+	result := collectionPresetDiscoveryResult{
+		Entries: []collectionPresetDiscoveryEntry{},
+	}
+	rootPath, err := resolveCollectionRoot(rawRootPath, baseDir)
+	if err != nil {
+		return result, err
+	}
+	scanLimitReached := errors.New("collection preset scan limit reached")
+	err = filepath.WalkDir(rootPath, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			if samePath(path, rootPath) {
+				return walkErr
+			}
+			result.SkippedFiles++
+			if entry != nil && entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		result.VisitedFiles++
+		if result.VisitedFiles > collectionPresetScanLimit {
+			result.Truncated = true
+			return scanLimitReached
+		}
+		if !strings.EqualFold(filepath.Ext(entry.Name()), ".json") {
+			return nil
+		}
+		innerType, markerErr := readCollectionPresetInnerType(path)
+		if markerErr != nil || innerType != collectionPresetInnerType {
+			return nil
+		}
+		if len(result.Entries) >= collectionPresetResultLimit {
+			result.Truncated = true
+			return scanLimitReached
+		}
+		info, infoErr := entry.Info()
+		if infoErr != nil {
+			result.SkippedFiles++
+			return nil
+		}
+		relativePath, relativeErr := filepath.Rel(rootPath, path)
+		if relativeErr != nil || relativePath == "." || relativePath == ".." ||
+			strings.HasPrefix(relativePath, ".."+string(os.PathSeparator)) {
+			result.SkippedFiles++
+			return nil
+		}
+		result.Entries = append(result.Entries, collectionPresetDiscoveryEntry{
+			RelativePath: filepath.ToSlash(relativePath),
+			FileName:     entry.Name(),
+			Size:         info.Size(),
+			ModifiedAt:   info.ModTime().UTC().Format(timeFormatRFC3339Nano),
+		})
+		return nil
+	})
+	if err != nil && !errors.Is(err, scanLimitReached) {
+		return collectionPresetDiscoveryResult{}, err
+	}
+	sort.Slice(result.Entries, func(left, right int) bool {
+		return strings.ToLower(result.Entries[left].RelativePath) <
+			strings.ToLower(result.Entries[right].RelativePath)
+	})
+	result.ResultCount = len(result.Entries)
+	result.DurationMS = time.Since(startedAt).Milliseconds()
+	return result, nil
+}
+
+func resolveDiscoveredCollectionPreset(
+	rawRootPath string,
+	rawRelativePath string,
+	baseDir string,
+) (string, string, error) {
+	rootPath, err := resolveCollectionRoot(rawRootPath, baseDir)
+	if err != nil {
+		return "", "", err
+	}
+	relativePath := filepath.Clean(filepath.FromSlash(strings.TrimSpace(rawRelativePath)))
+	if relativePath == "." || filepath.IsAbs(relativePath) || filepath.VolumeName(relativePath) != "" {
+		return "", "", errors.New("preset relative path is invalid")
+	}
+	candidate := canonicalExistingPath(filepath.Join(rootPath, relativePath))
+	containedPath, err := filepath.Rel(rootPath, candidate)
+	if err != nil || containedPath == ".." || strings.HasPrefix(containedPath, ".."+string(os.PathSeparator)) {
+		return "", "", errors.New("preset path is outside the search folder")
+	}
+	presetPath, err := resolveCollectionPresetFile(candidate, baseDir)
+	if err != nil {
+		return "", "", err
+	}
+	innerType, err := readCollectionPresetInnerType(presetPath)
+	if err != nil || innerType != collectionPresetInnerType {
+		return "", "", errors.New("selected file is not a batch waveform import preset")
+	}
+	normalizedRelative, err := filepath.Rel(rootPath, presetPath)
+	if err != nil || normalizedRelative == ".." ||
+		strings.HasPrefix(normalizedRelative, ".."+string(os.PathSeparator)) {
+		return "", "", errors.New("preset path is outside the search folder")
+	}
+	return presetPath, filepath.ToSlash(normalizedRelative), nil
+}
+
+func loadDiscoveredCollectionPreset(
+	rawRootPath string,
+	rawRelativePath string,
+	baseDir string,
+) (collectionPreset, string, string, error) {
+	presetPath, relativePath, err := resolveDiscoveredCollectionPreset(
+		rawRootPath, rawRelativePath, baseDir)
+	if err != nil {
+		return collectionPreset{}, "", "", err
+	}
+	preset, resolvedPath, err := loadCollectionPreset(presetPath, baseDir)
+	if err != nil {
+		return collectionPreset{}, "", "", err
+	}
+	return preset, resolvedPath, relativePath, nil
 }
 
 const timeFormatRFC3339Nano = "2006-01-02T15:04:05.999999999Z07:00"
@@ -660,6 +1182,533 @@ func scanCollectionFiles(
 	return nil
 }
 
+type collectionHeaderCandidate struct {
+	HeaderRow int
+	Delimiter string
+	Headers   []string
+	Score     int
+}
+
+func readCollectionPreviewLines(sourcePath string) ([]string, error) {
+	file, err := os.Open(sourcePath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), 512*1024)
+	lines := make([]string, 0, 32)
+	for scanner.Scan() && len(lines) < 256 {
+		lines = append(lines, strings.TrimSuffix(scanner.Text(), "\r"))
+	}
+	if err = scanner.Err(); err != nil {
+		return nil, err
+	}
+	return lines, nil
+}
+
+func collectionDelimiterForLine(line, fileName string) string {
+	if countDelimitedColumns(line, '\t') > 1 {
+		return "tab"
+	}
+	if countDelimitedColumns(line, ',') > 1 {
+		return "comma"
+	}
+	if len(strings.Fields(line)) > 1 {
+		return "whitespace"
+	}
+	switch strings.ToLower(filepath.Ext(fileName)) {
+	case ".csv":
+		return "comma"
+	case ".tsv":
+		return "tab"
+	default:
+		return "single"
+	}
+}
+
+func collectionSplitColumns(line, delimiter string) []string {
+	delimiter = strings.ToLower(strings.TrimSpace(delimiter))
+	switch delimiter {
+	case "csv":
+		delimiter = "comma"
+	case "tsv":
+		delimiter = "tab"
+	case "space":
+		delimiter = "whitespace"
+	}
+	if len(delimiter) == 1 && delimiter != " " {
+		parts := strings.Split(strings.TrimSpace(line), delimiter)
+		for index := range parts {
+			parts[index] = strings.TrimSpace(parts[index])
+		}
+		return parts
+	}
+	return splitSampleColumns(line, delimiter)
+}
+
+func collectionHeaderCellsValid(headers []string) bool {
+	if len(headers) < 2 {
+		return false
+	}
+	seen := make(map[string]bool, len(headers))
+	textual := 0
+	numberPattern := regexp.MustCompile(`^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$`)
+	for _, rawHeader := range headers {
+		header := strings.TrimSpace(rawHeader)
+		if header == "" || seen[header] {
+			return false
+		}
+		seen[header] = true
+		if !numberPattern.MatchString(header) && !looksComplexLiteral(header) {
+			textual++
+		}
+	}
+	return textual > 0 && textual*2 >= len(headers)
+}
+
+func collectionHeaderAt(
+	lines []string,
+	fileName string,
+	headerRow int,
+	delimiter string,
+) (collectionHeaderCandidate, bool) {
+	if headerRow < 1 || headerRow > len(lines) {
+		return collectionHeaderCandidate{}, false
+	}
+	line := strings.TrimSpace(lines[headerRow-1])
+	if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
+		return collectionHeaderCandidate{}, false
+	}
+	if delimiter == "" || delimiter == "auto" {
+		delimiter = collectionDelimiterForLine(line, fileName)
+	}
+	if delimiter == "single" {
+		return collectionHeaderCandidate{}, false
+	}
+	headers := collectionSplitColumns(line, delimiter)
+	if !collectionHeaderCellsValid(headers) {
+		return collectionHeaderCandidate{}, false
+	}
+	matchingRows := 0
+	for index := headerRow; index < len(lines) && matchingRows < 3; index++ {
+		candidate := strings.TrimSpace(lines[index])
+		if candidate == "" || strings.HasPrefix(candidate, "#") ||
+			strings.HasPrefix(candidate, "//") {
+			continue
+		}
+		if len(collectionSplitColumns(candidate, delimiter)) == len(headers) {
+			matchingRows++
+		}
+	}
+	if matchingRows == 0 {
+		return collectionHeaderCandidate{}, false
+	}
+	return collectionHeaderCandidate{
+		HeaderRow: headerRow,
+		Delimiter: delimiter,
+		Headers:   headers,
+		Score:     matchingRows*4 + len(headers),
+	}, true
+}
+
+func detectCollectionHeader(
+	lines []string,
+	fileName string,
+	preferredRow int,
+	preferredDelimiter string,
+) (collectionHeaderCandidate, bool) {
+	if preferredRow > 0 {
+		if candidate, ok := collectionHeaderAt(
+			lines, fileName, preferredRow, preferredDelimiter); ok {
+			candidate.Score += 100
+			return candidate, true
+		}
+	}
+	best := collectionHeaderCandidate{}
+	limit := len(lines)
+	if limit > 32 {
+		limit = 32
+	}
+	for index := 0; index < limit; index++ {
+		candidate, ok := collectionHeaderAt(lines, fileName, index+1, "auto")
+		if !ok {
+			continue
+		}
+		if index == 0 {
+			candidate.Score++
+		}
+		if strings.EqualFold(filepath.Ext(fileName), ".csv") &&
+			candidate.Delimiter == "comma" {
+			candidate.Score += 2
+		}
+		if strings.EqualFold(filepath.Ext(fileName), ".tsv") &&
+			candidate.Delimiter == "tab" {
+			candidate.Score += 2
+		}
+		if candidate.Score > best.Score {
+			best = candidate
+		}
+	}
+	return best, best.Score > 0
+}
+
+func collectionSchemaHash(mode, delimiter string, headers []string) string {
+	payload := mode + "\x00" + delimiter + "\x00" + strings.Join(headers, "\x00")
+	sum := sha256.Sum256([]byte(payload))
+	return fmt.Sprintf("%x", sum[:8])
+}
+
+func mergeCollectionColumns(
+	headers []string,
+	existing []collectionColumnConfig,
+) []collectionColumnConfig {
+	bySource := make(map[string]collectionColumnConfig, len(existing))
+	for _, column := range existing {
+		bySource[column.Source] = column
+	}
+	merged := make([]collectionColumnConfig, 0, len(headers))
+	for _, source := range headers {
+		column, found := bySource[source]
+		if !found {
+			column = collectionColumnConfig{Source: source, Enabled: true, Name: source}
+		}
+		column.Source = source
+		if strings.TrimSpace(column.Name) == "" {
+			column.Name = source
+		}
+		merged = append(merged, column)
+	}
+	return merged
+}
+
+func collectionDefaultSignalName(fileName string) string {
+	name := strings.TrimSuffix(filepath.Base(fileName), filepath.Ext(fileName))
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "signal"
+	}
+	return name
+}
+
+func collectionPreviewCell(value string) string {
+	runes := []rune(strings.TrimSpace(value))
+	if len(runes) <= collectionPreviewCellLimit {
+		return string(runes)
+	}
+	return string(runes[:collectionPreviewCellLimit]) + "..."
+}
+
+type collectionPreviewFilterClause struct {
+	operator       string
+	operand        string
+	operandNumber  float64
+	operandNumeric bool
+}
+
+type collectionPreviewFilter struct {
+	columnIndex int
+	groups      [][]collectionPreviewFilterClause
+}
+
+func collectionFilterNumber(value string) (float64, bool) {
+	number, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+	return number, err == nil && !math.IsNaN(number) && !math.IsInf(number, 0)
+}
+
+func collectionFilterOperand(value string) (string, error) {
+	text := strings.TrimSpace(value)
+	if len(text) < 2 || text[0] != text[len(text)-1] ||
+		(text[0] != '\'' && text[0] != '"') {
+		return text, nil
+	}
+	if text[0] == '"' {
+		var decoded string
+		if err := json.Unmarshal([]byte(text), &decoded); err != nil {
+			return "", errors.New("filter contains an invalid quoted value")
+		}
+		return decoded, nil
+	}
+	body := text[1 : len(text)-1]
+	body = strings.ReplaceAll(body, `\'`, `'`)
+	body = strings.ReplaceAll(body, `\\`, `\`)
+	return body, nil
+}
+
+func compileCollectionPreviewFilter(
+	expression string,
+	source string,
+) ([][]collectionPreviewFilterClause, error) {
+	text := strings.TrimSpace(expression)
+	if text == "" {
+		return nil, nil
+	}
+	groups := make([][]collectionPreviewFilterClause, 0)
+	for _, rawGroup := range strings.Split(text, "||") {
+		if strings.TrimSpace(rawGroup) == "" {
+			return nil, fmt.Errorf("filter for %s contains an empty OR condition", source)
+		}
+		clauses := make([]collectionPreviewFilterClause, 0)
+		for _, rawClause := range strings.Split(rawGroup, "&&") {
+			clauseText := strings.TrimSpace(rawClause)
+			if clauseText == "" {
+				return nil, fmt.Errorf("filter for %s contains an empty AND condition", source)
+			}
+			operator := "=="
+			operandText := clauseText
+			for _, candidate := range []string{"==", "!=", ">=", "<=", ">", "<", "="} {
+				if strings.HasPrefix(clauseText, candidate) {
+					operator = candidate
+					operandText = strings.TrimSpace(clauseText[len(candidate):])
+					break
+				}
+			}
+			if operandText == "" {
+				return nil, fmt.Errorf("filter for %s is missing a comparison value", source)
+			}
+			operand, err := collectionFilterOperand(operandText)
+			if err != nil {
+				return nil, err
+			}
+			operandNumber, operandNumeric := collectionFilterNumber(operand)
+			if (operator == ">" || operator == ">=" || operator == "<" || operator == "<=") &&
+				!operandNumeric {
+				return nil, fmt.Errorf(
+					"filter for %s requires a numeric value after %s", source, operator)
+			}
+			clauses = append(clauses, collectionPreviewFilterClause{
+				operator: operator, operand: operand,
+				operandNumber: operandNumber, operandNumeric: operandNumeric,
+			})
+		}
+		groups = append(groups, clauses)
+	}
+	return groups, nil
+}
+
+func collectionPreviewFilterClauseMatches(
+	value string,
+	clause collectionPreviewFilterClause,
+) bool {
+	valueText := strings.TrimSpace(value)
+	valueNumber, valueNumeric := collectionFilterNumber(valueText)
+	if clause.operator == "=" || clause.operator == "==" || clause.operator == "!=" {
+		matched := valueText == clause.operand
+		if valueNumeric && clause.operandNumeric {
+			matched = valueNumber == clause.operandNumber
+		}
+		if clause.operator == "!=" {
+			return !matched
+		}
+		return matched
+	}
+	if !valueNumeric {
+		return false
+	}
+	switch clause.operator {
+	case ">":
+		return valueNumber > clause.operandNumber
+	case ">=":
+		return valueNumber >= clause.operandNumber
+	case "<":
+		return valueNumber < clause.operandNumber
+	default:
+		return valueNumber <= clause.operandNumber
+	}
+}
+
+func collectionPreviewFilterMatches(value string, groups [][]collectionPreviewFilterClause) bool {
+	for _, group := range groups {
+		matched := true
+		for _, clause := range group {
+			if !collectionPreviewFilterClauseMatches(value, clause) {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
+}
+
+func collectionTablePreview(
+	lines []string,
+	headerRow int,
+	delimiter string,
+	headers []string,
+	configuredColumns []collectionColumnConfig,
+) ([]string, [][]string, bool, error) {
+	columnCount := len(headers)
+	truncated := columnCount > collectionPreviewColumnLimit
+	if columnCount > collectionPreviewColumnLimit {
+		columnCount = collectionPreviewColumnLimit
+	}
+	columns := make([]string, columnCount)
+	for index := 0; index < columnCount; index++ {
+		columns[index] = collectionPreviewCell(headers[index])
+	}
+	headerIndexes := make(map[string]int, len(headers))
+	for index, header := range headers {
+		headerIndexes[header] = index
+	}
+	filters := make([]collectionPreviewFilter, 0)
+	for _, column := range configuredColumns {
+		if strings.TrimSpace(column.Filter) == "" {
+			continue
+		}
+		columnIndex, found := headerIndexes[column.Source]
+		if !found {
+			return nil, nil, false, fmt.Errorf(
+				"selected table column is missing: %s", column.Source)
+		}
+		groups, err := compileCollectionPreviewFilter(column.Filter, column.Source)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		filters = append(filters, collectionPreviewFilter{
+			columnIndex: columnIndex,
+			groups:      groups,
+		})
+	}
+	rows := make([][]string, 0, collectionPreviewRowLimit)
+	for index := headerRow; index < len(lines) && len(rows) < collectionPreviewRowLimit; index++ {
+		line := strings.TrimSpace(lines[index])
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
+			continue
+		}
+		values := collectionSplitColumns(line, delimiter)
+		matches := true
+		for _, filter := range filters {
+			value := ""
+			if filter.columnIndex < len(values) {
+				value = values[filter.columnIndex]
+			}
+			if !collectionPreviewFilterMatches(value, filter.groups) {
+				matches = false
+				break
+			}
+		}
+		if !matches {
+			continue
+		}
+		row := make([]string, columnCount)
+		for column := 0; column < columnCount && column < len(values); column++ {
+			row[column] = collectionPreviewCell(values[column])
+		}
+		rows = append(rows, row)
+	}
+	return columns, rows, truncated, nil
+}
+
+func prepareCollectionEntry(
+	rule collectionPresetPath,
+	match collectionFileMatch,
+	forcedHeaderRow int,
+) (collectionPresetPath, collectionSearchEntry, error) {
+	lines, err := readCollectionPreviewLines(match.Path)
+	if err != nil {
+		return rule, collectionSearchEntry{}, err
+	}
+	prepared := rule
+	entry := collectionSearchEntry{
+		Index: -1, Name: rule.Name, HasSeq: rule.HasSeq,
+		Columns: []collectionColumnConfig{}, OutputNames: []string{},
+	}
+	preferredRow := rule.HeaderRow
+	if forcedHeaderRow > 0 {
+		preferredRow = forcedHeaderRow
+	}
+	header, tableDetected := detectCollectionHeader(
+		lines, match.FileName, preferredRow, rule.Delimiter)
+	mode := rule.UsrGen.ImportMode
+	if forcedHeaderRow > 0 {
+		mode = "table"
+	} else if mode == "" {
+		if tableDetected {
+			mode = "table"
+		} else {
+			mode = "single"
+		}
+	}
+	if mode == "table" {
+		if !tableDetected {
+			return rule, entry, errors.New("无法识别表格标题行，请修改标题行")
+		}
+		columns := mergeCollectionColumns(header.Headers, rule.Columns)
+		autoGen := rule.AutoGen
+		autoGen.ImportMode = "table"
+		autoGen.HeaderRow = header.HeaderRow
+		autoGen.Delimiter = header.Delimiter
+		autoGen.Parser = "parse_table_data"
+		autoGen.Columns = columns
+		autoGen.SchemaHash = collectionSchemaHash("table", header.Delimiter, header.Headers)
+		autoGen.HasSeq = nil
+		prepared = effectiveCollectionPresetPath(rule.UsrGen, autoGen)
+		entry.Name = rule.Name
+		if entry.Name == "" {
+			entry.Name = collectionDefaultSignalName(match.FileName)
+		}
+		entry.ImportMode = "table"
+		entry.HeaderRow = header.HeaderRow
+		entry.Delimiter = header.Delimiter
+		entry.Parser = autoGen.Parser
+		entry.Columns = columns
+		entry.SchemaHash = autoGen.SchemaHash
+		previewColumns, previewRows, previewTruncated, previewErr := collectionTablePreview(
+			lines, header.HeaderRow, header.Delimiter, header.Headers, columns)
+		if previewErr != nil {
+			return rule, entry, previewErr
+		}
+		entry.PreviewColumns = previewColumns
+		entry.PreviewRows = previewRows
+		entry.PreviewTruncated = previewTruncated
+		for _, column := range columns {
+			if column.Enabled {
+				entry.OutputNames = append(entry.OutputNames, column.Name)
+			}
+		}
+	} else {
+		analysis := analyzeImportSample(match.FileName, lines)
+		hasSeq := boolValue(analysis["hasIndex"], rule.HasSeq)
+		if rule.UsrGen.HasSeq != nil || rule.AutoGen.HasSeq != nil {
+			hasSeq = rule.HasSeq
+		}
+		autoGen := rule.AutoGen
+		autoGen.ImportMode = "single"
+		autoGen.HeaderRow = 0
+		autoGen.Delimiter = stringValue(analysis["delimiter"])
+		autoGen.Parser = stringValue(analysis["recommendedParser"])
+		autoGen.Columns = nil
+		autoGen.SchemaHash = collectionSchemaHash(
+			"single", autoGen.Delimiter,
+			[]string{fmt.Sprintf("%d", intValue(analysis["columnCount"], 0))},
+		)
+		autoGen.HasSeq = &hasSeq
+		prepared = effectiveCollectionPresetPath(rule.UsrGen, autoGen)
+		entry.Name = rule.Name
+		if entry.Name == "" {
+			entry.Name = collectionDefaultSignalName(match.FileName)
+		}
+		if normalized, nameErr := normalizeSignalName(entry.Name); nameErr == nil {
+			entry.Name = normalized
+		} else {
+			return rule, entry, nameErr
+		}
+		entry.HasSeq = hasSeq
+		entry.ImportMode = "single"
+		entry.Delimiter = autoGen.Delimiter
+		entry.Parser = autoGen.Parser
+		entry.SchemaHash = autoGen.SchemaHash
+		entry.OutputNames = []string{entry.Name}
+	}
+	before, _ := json.Marshal(rule.AutoGen)
+	after, _ := json.Marshal(prepared.AutoGen)
+	entry.AutoGenChanged = string(before) != string(after)
+	return prepared, entry, nil
+}
+
 func searchCollectionFiles(
 	rawRootPath string,
 	baseDir string,
@@ -688,13 +1737,16 @@ func searchCollectionFiles(
 		if expandErr != nil {
 			return collectionSearchResult{}, fmt.Errorf("paths[%d].grepKeys: %w", index, expandErr)
 		}
-		signalName, expandErr := expandCollectionTemplate(rule.Name, preset, variables, false)
-		if expandErr != nil {
-			return collectionSearchResult{}, fmt.Errorf("paths[%d].name: %w", index, expandErr)
-		}
-		signalName, expandErr = normalizeSignalName(signalName)
-		if expandErr != nil {
-			return collectionSearchResult{}, fmt.Errorf("paths[%d].name: %w", index, expandErr)
+		signalName := ""
+		if rule.Name != "" {
+			signalName, expandErr = expandCollectionTemplate(rule.Name, preset, variables, false)
+			if expandErr != nil {
+				return collectionSearchResult{}, fmt.Errorf("paths[%d].name: %w", index, expandErr)
+			}
+			signalName, expandErr = normalizeSignalName(signalName)
+			if expandErr != nil {
+				return collectionSearchResult{}, fmt.Errorf("paths[%d].name: %w", index, expandErr)
+			}
 		}
 		if strings.TrimSpace(folder) == "" {
 			folder = "."
@@ -745,19 +1797,55 @@ func searchCollectionFiles(
 			}
 		case 1:
 			entry.Status = "matched"
-			result.ResultCount++
 		default:
 			entry.Status = "multiple"
 			entry.Message = "匹配到多个文件，默认选择排序后的第一个文件"
-			result.ResultCount++
 		}
+		if entry.Status != "matched" && entry.Status != "multiple" {
+			continue
+		}
+		runtimeRule := preset.Paths[entry.Index]
+		runtimeRule.Name = entry.Name
+		preparedRule, preparedEntry, prepareErr := prepareCollectionEntry(
+			runtimeRule, entry.Matches[0], 0)
+		if prepareErr != nil {
+			entry.Status = "config-error"
+			entry.Message = prepareErr.Error()
+			entry.ImportMode = runtimeRule.ImportMode
+			entry.HeaderRow = runtimeRule.HeaderRow
+			entry.Delimiter = runtimeRule.Delimiter
+			entry.Parser = runtimeRule.Parser
+			entry.Columns = runtimeRule.Columns
+			continue
+		}
+		preset.Paths[entry.Index] = effectiveCollectionPresetPath(
+			preset.Paths[entry.Index].UsrGen,
+			preparedRule.AutoGen,
+		)
+		entry.Name = preparedEntry.Name
+		entry.HasSeq = preparedEntry.HasSeq
+		entry.ImportMode = preparedEntry.ImportMode
+		entry.HeaderRow = preparedEntry.HeaderRow
+		entry.Delimiter = preparedEntry.Delimiter
+		entry.Parser = preparedEntry.Parser
+		entry.Columns = preparedEntry.Columns
+		entry.SchemaHash = preparedEntry.SchemaHash
+		entry.OutputNames = preparedEntry.OutputNames
+		entry.PreviewColumns = preparedEntry.PreviewColumns
+		entry.PreviewRows = preparedEntry.PreviewRows
+		entry.PreviewTruncated = preparedEntry.PreviewTruncated
+		entry.AutoGenChanged = preparedEntry.AutoGenChanged
+		result.ResultCount++
 	}
+	result.Preset = preset
 	result.Ready = result.ResultCount > 0
 
 	nameEntries := make(map[string][]int)
 	for index, entry := range result.Entries {
 		if entry.Status == "matched" || entry.Status == "multiple" {
-			nameEntries[entry.Name] = append(nameEntries[entry.Name], index)
+			for _, name := range entry.OutputNames {
+				nameEntries[name] = append(nameEntries[name], index)
+			}
 		}
 	}
 	for name, indexes := range nameEntries {
@@ -779,12 +1867,17 @@ func collectionSearchSignature(
 	preset collectionPreset,
 	variables map[string]string,
 ) string {
+	usrGen := make([]collectionRuleConfig, len(preset.Paths))
+	for index, rule := range preset.Paths {
+		usrGen[index] = rule.UsrGen
+	}
 	payload := struct {
-		RootPath  string            `json:"rootPath"`
-		Preset    collectionPreset  `json:"preset"`
-		Variables map[string]string `json:"variables"`
+		RootPath  string                 `json:"rootPath"`
+		Vars      []string               `json:"vars"`
+		UsrGen    []collectionRuleConfig `json:"usrGen"`
+		Variables map[string]string      `json:"variables"`
 	}{
-		RootPath: rootPath, Preset: preset, Variables: variables,
+		RootPath: rootPath, Vars: preset.Vars, UsrGen: usrGen, Variables: variables,
 	}
 	data, _ := json.Marshal(payload)
 	sum := sha256.Sum256(data)
@@ -830,8 +1923,12 @@ func (s *service) rememberCollectionSearch(
 	return result
 }
 
-func validateCachedCollectionFiles(result collectionSearchResult) error {
-	if !result.Ready {
+func validateCachedCollectionFiles(
+	result collectionSearchResult,
+	requireReady ...bool,
+) error {
+	mustBeReady := len(requireReady) == 0 || requireReady[0]
+	if mustBeReady && !result.Ready {
 		return errors.New("cached search results are incomplete")
 	}
 	matchedCount := 0
@@ -842,8 +1939,7 @@ func validateCachedCollectionFiles(result collectionSearchResult) error {
 			}
 			continue
 		}
-		if (entry.Status != "matched" && entry.Status != "multiple") ||
-			len(entry.Matches) < 1 {
+		if len(entry.Matches) < 1 {
 			return errors.New("cached search results are incomplete")
 		}
 		matchedCount++
@@ -861,7 +1957,7 @@ func validateCachedCollectionFiles(result collectionSearchResult) error {
 			return fmt.Errorf("matched file changed after searching: %s", match.RelativePath)
 		}
 	}
-	if matchedCount == 0 || matchedCount != result.ResultCount {
+	if matchedCount == 0 || (mustBeReady && matchedCount != result.ResultCount) {
 		return errors.New("cached search result count is invalid")
 	}
 	return nil
@@ -872,6 +1968,7 @@ func (s *service) cachedCollectionSearch(
 	rawRootPath string,
 	preset collectionPreset,
 	variables map[string]string,
+	requireReady ...bool,
 ) (collectionSearchResult, error) {
 	token = strings.TrimSpace(token)
 	if token == "" {
@@ -895,7 +1992,7 @@ func (s *service) cachedCollectionSearch(
 	if cached.signature != signature {
 		return collectionSearchResult{}, errors.New("folder, variables, or preset changed; search again")
 	}
-	if err = validateCachedCollectionFiles(cached.result); err != nil {
+	if err = validateCachedCollectionFiles(cached.result, requireReady...); err != nil {
 		return collectionSearchResult{}, fmt.Errorf("%w; search again", err)
 	}
 	return cached.result, nil
@@ -905,6 +2002,7 @@ func (s *service) parseCollectionEntry(
 	catalog importCatalog,
 	search collectionSearchResult,
 	entry collectionSearchEntry,
+	rule collectionPresetPath,
 ) collectionImportEntryResult {
 	match := entry.Matches[0]
 	sourcePath := canonicalExistingPath(match.Path)
@@ -913,24 +2011,49 @@ func (s *service) parseCollectionEntry(
 			err: errors.New("a matched file moved outside the selected data folder"),
 		}
 	}
-	lines, err := readImportSampleLines(sourcePath)
+	rule.Name = entry.Name
+	preparedRule, preparedEntry, err := prepareCollectionEntry(rule, match, 0)
 	if err != nil {
-		return collectionImportEntryResult{err: err}
+		return collectionImportEntryResult{err: fmt.Errorf("%s: %w", match.RelativePath, err)}
 	}
-	analysis := analyzeImportSample(match.FileName, lines, entry.HasSeq)
-	recommended := recommendScheme(catalog.Schemes, analysis)
-	if recommended == nil {
-		return collectionImportEntryResult{
-			err: fmt.Errorf("no parser preset can process %s", match.RelativePath),
+	var result map[string]any
+	var parser any
+	var analysis map[string]any
+	if preparedEntry.ImportMode == "table" {
+		result, err = s.imports.runTableLocalFileWithOptions(
+			sourcePath,
+			tableImportOptions{
+				HeaderRow: preparedRule.HeaderRow,
+				Delimiter: preparedRule.Delimiter,
+				Columns:   preparedRule.Columns,
+			},
+		)
+		parser = "parse_table_data"
+		analysis = map[string]any{
+			"importMode": "table", "headerRow": preparedRule.HeaderRow,
+			"delimiter": preparedRule.Delimiter,
 		}
+	} else {
+		lines, readErr := readImportSampleLines(sourcePath)
+		if readErr != nil {
+			return collectionImportEntryResult{err: readErr}
+		}
+		analysis = analyzeImportSample(match.FileName, lines, preparedRule.HasSeq)
+		recommended := recommendScheme(catalog.Schemes, analysis)
+		if recommended == nil {
+			return collectionImportEntryResult{
+				err: fmt.Errorf("no parser preset can process %s", match.RelativePath),
+			}
+		}
+		parser = recommended["parser"]
+		result, err = s.imports.runLocalFile(
+			stringValue(recommended["schemeId"]),
+			intValue(recommended["mappingIndex"], -1),
+			preparedEntry.Name,
+			sourcePath,
+			preparedRule.HasSeq,
+		)
 	}
-	result, err := s.imports.runLocalFile(
-		stringValue(recommended["schemeId"]),
-		intValue(recommended["mappingIndex"], -1),
-		entry.Name,
-		sourcePath,
-		entry.HasSeq,
-	)
 	if err != nil {
 		return collectionImportEntryResult{
 			err: fmt.Errorf("%s: %w", match.RelativePath, err),
@@ -946,8 +2069,9 @@ func (s *service) parseCollectionEntry(
 		updates: fileUpdates,
 		file: map[string]any{
 			"path": match.Path, "relativePath": match.RelativePath,
-			"signal": entry.Name, "hasSeq": entry.HasSeq,
-			"parser": recommended["parser"], "analysis": analysis,
+			"signal": preparedEntry.Name, "hasSeq": preparedRule.HasSeq,
+			"importMode": preparedEntry.ImportMode,
+			"parser":     parser, "analysis": analysis,
 			"updateCount": len(fileUpdates), "matchCount": len(entry.Matches),
 		},
 	}
@@ -961,16 +2085,13 @@ func (s *service) importCollectionFiles(
 ) (map[string]any, error) {
 	startedAt := time.Now()
 	search, err := s.cachedCollectionSearch(
-		searchToken, rawRootPath, preset, variables)
+		searchToken, rawRootPath, preset, variables, false)
 	if err != nil {
 		return nil, err
 	}
-	if !search.Ready {
-		return nil, errors.New("search results are incomplete or ambiguous; search again after editing the preset")
-	}
 	importEntries := make([]collectionSearchEntry, 0, search.ResultCount)
 	for _, entry := range search.Entries {
-		if entry.Status == "matched" || entry.Status == "multiple" {
+		if len(entry.Matches) > 0 {
 			importEntries = append(importEntries, entry)
 		}
 	}
@@ -1004,8 +2125,15 @@ func (s *service) importCollectionFiles(
 		go func() {
 			defer workers.Done()
 			for index := range jobs {
+				entry := importEntries[index]
+				if entry.Index < 0 || entry.Index >= len(preset.Paths) {
+					entryResults[index] = collectionImportEntryResult{
+						err: errors.New("collection rule index is invalid"),
+					}
+					continue
+				}
 				entryResults[index] = s.parseCollectionEntry(
-					catalog, search, importEntries[index])
+					catalog, search, entry, preset.Paths[entry.Index])
 			}
 		}()
 	}
@@ -1050,6 +2178,71 @@ func (s *service) importCollectionFiles(
 	}, nil
 }
 
+func (s *service) previewCollectionEntry(
+	rawRootPath string,
+	preset collectionPreset,
+	variables map[string]string,
+	searchToken string,
+	ruleIndex int,
+	headerRow int,
+) (map[string]any, error) {
+	if ruleIndex < 0 || ruleIndex >= len(preset.Paths) {
+		return nil, errors.New("preview rule index is invalid")
+	}
+	if headerRow < 1 {
+		return nil, errors.New("标题行必须大于或等于 1")
+	}
+	search, err := s.cachedCollectionSearch(
+		searchToken, rawRootPath, preset, variables, false)
+	if err != nil {
+		return nil, err
+	}
+	var cachedEntry *collectionSearchEntry
+	for index := range search.Entries {
+		if search.Entries[index].Index == ruleIndex && len(search.Entries[index].Matches) > 0 {
+			cachedEntry = &search.Entries[index]
+			break
+		}
+	}
+	if cachedEntry == nil {
+		return nil, errors.New("该规则没有可预览的匹配文件")
+	}
+	runtimeRule := preset.Paths[ruleIndex]
+	runtimeRule.Name = cachedEntry.Name
+	preparedRule, preparedEntry, err := prepareCollectionEntry(
+		runtimeRule, cachedEntry.Matches[0], headerRow)
+	if err != nil {
+		return nil, err
+	}
+	preset.Paths[ruleIndex] = effectiveCollectionPresetPath(
+		preset.Paths[ruleIndex].UsrGen,
+		preparedRule.AutoGen,
+	)
+	entry := *cachedEntry
+	entry.Name = preparedEntry.Name
+	entry.HasSeq = preparedEntry.HasSeq
+	entry.ImportMode = preparedEntry.ImportMode
+	entry.HeaderRow = preparedEntry.HeaderRow
+	entry.Delimiter = preparedEntry.Delimiter
+	entry.Parser = preparedEntry.Parser
+	entry.Columns = preparedEntry.Columns
+	entry.SchemaHash = preparedEntry.SchemaHash
+	entry.OutputNames = preparedEntry.OutputNames
+	entry.PreviewColumns = preparedEntry.PreviewColumns
+	entry.PreviewRows = preparedEntry.PreviewRows
+	entry.PreviewTruncated = preparedEntry.PreviewTruncated
+	entry.AutoGenChanged = preparedEntry.AutoGenChanged
+	if len(entry.Matches) == 1 {
+		entry.Status = "matched"
+	} else {
+		entry.Status = "multiple"
+	}
+	entry.Message = ""
+	return map[string]any{
+		"ok": true, "preset": preset, "entry": entry,
+	}, nil
+}
+
 func (s *service) handleImportCollection(writer http.ResponseWriter, request *http.Request) {
 	payload := make(map[string]any)
 	if err := decodeJSONBody(writer, request, 2*1024*1024, &payload); err != nil {
@@ -1090,6 +2283,28 @@ func (s *service) handleImportCollection(writer http.ResponseWriter, request *ht
 		sendJSON(writer, 200, map[string]any{
 			"ok": true, "presetPath": presetPath, "preset": preset,
 		})
+	case "scan-presets":
+		result, err := discoverCollectionPresets(
+			stringValue(payload["searchPath"]), s.config.rootDir)
+		if err != nil {
+			sendJSON(writer, 400, map[string]any{"error": err.Error()})
+			return
+		}
+		sendJSON(writer, 200, result)
+	case "load-discovered":
+		preset, presetPath, relativePath, err := loadDiscoveredCollectionPreset(
+			stringValue(payload["searchPath"]),
+			stringValue(payload["relativePath"]),
+			s.config.rootDir,
+		)
+		if err != nil {
+			sendJSON(writer, 400, map[string]any{"error": err.Error()})
+			return
+		}
+		sendJSON(writer, 200, map[string]any{
+			"ok": true, "presetPath": presetPath,
+			"relativePath": relativePath, "preset": preset,
+		})
 	case "save":
 		preset, err := normalizeCollectionPreset(payload["preset"])
 		if err != nil {
@@ -1105,7 +2320,7 @@ func (s *service) handleImportCollection(writer http.ResponseWriter, request *ht
 		sendJSON(writer, 200, map[string]any{
 			"ok": true, "presetPath": presetPath, "preset": preset,
 		})
-	case "search", "import":
+	case "search", "preview", "import":
 		preset, err := normalizeCollectionPreset(payload["preset"])
 		if err != nil {
 			sendJSON(writer, 400, map[string]any{"error": err.Error()})
@@ -1129,6 +2344,22 @@ func (s *service) handleImportCollection(writer http.ResponseWriter, request *ht
 				return
 			}
 			result = s.rememberCollectionSearch(result)
+			sendJSON(writer, 200, result)
+			return
+		}
+		if action == "preview" {
+			result, previewErr := s.previewCollectionEntry(
+				stringValue(payload["rootPath"]),
+				preset,
+				variables,
+				stringValue(payload["searchToken"]),
+				intValue(payload["index"], -1),
+				intValue(payload["headerRow"], 0),
+			)
+			if previewErr != nil {
+				sendJSON(writer, 400, map[string]any{"error": previewErr.Error()})
+				return
+			}
 			sendJSON(writer, 200, result)
 			return
 		}

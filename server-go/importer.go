@@ -748,6 +748,64 @@ func normalizeParserSignalResult(result map[string]any) error {
 	return nil
 }
 
+func normalizeCompletedParserResult(result map[string]any) error {
+	if !boolValue(result["complexDetected"], false) {
+		return normalizeParserSignalResult(result)
+	}
+	rawChannels, ok := result["channels"].([]any)
+	if !ok || len(rawChannels) != 2 {
+		return errors.New("complex parser result must contain I and Q channels")
+	}
+	channels := make([]map[string]any, 0, len(rawChannels))
+	seenSuffixes := make(map[string]bool)
+	for _, rawChannel := range rawChannels {
+		channel, ok := rawChannel.(map[string]any)
+		if !ok {
+			return errors.New("complex parser channel must be an object")
+		}
+		suffix := stringValue(channel["suffix"])
+		if (suffix != "_I" && suffix != "_Q") || seenSuffixes[suffix] {
+			return errors.New("complex parser channels must use unique _I and _Q suffixes")
+		}
+		if err := normalizeParserSignalResult(channel); err != nil {
+			return err
+		}
+		seenSuffixes[suffix] = true
+		channels = append(channels, channel)
+	}
+	result["channels"] = channels
+	return nil
+}
+
+func normalizeTableParserResult(result map[string]any) error {
+	rawSignals, ok := result["signals"].([]any)
+	if !ok || len(rawSignals) == 0 {
+		return errors.New("table parser result must contain signals")
+	}
+	signals := make([]map[string]any, 0, len(rawSignals))
+	seenNames := make(map[string]bool)
+	for _, rawSignal := range rawSignals {
+		signal, ok := rawSignal.(map[string]any)
+		if !ok {
+			return errors.New("table parser signal must be an object")
+		}
+		name, err := normalizeSignalName(stringValue(signal["name"]))
+		if err != nil {
+			return fmt.Errorf("table header: %w", err)
+		}
+		if seenNames[name] {
+			return fmt.Errorf("table header signal name is duplicated: %s", name)
+		}
+		if err = normalizeCompletedParserResult(signal); err != nil {
+			return fmt.Errorf("signal %s: %w", name, err)
+		}
+		signal["name"] = name
+		seenNames[name] = true
+		signals = append(signals, signal)
+	}
+	result["signals"] = signals
+	return nil
+}
 func (m *importManager) runCollectionRegexSearch(
 	request collectionRegexSearchRequest,
 ) (collectionRegexSearchResponse, error) {
@@ -840,34 +898,15 @@ func (m *importManager) runParser(mapping importMapping, python pythonRuntime) (
 	if err = json.Unmarshal(stdout.Bytes(), &result); err != nil {
 		return nil, fmt.Errorf("Python parser returned invalid JSON: %w", err)
 	}
-	if !boolValue(result["complexDetected"], false) {
-		if err = normalizeParserSignalResult(result); err != nil {
+	if boolValue(result["tableDetected"], false) {
+		if err = normalizeTableParserResult(result); err != nil {
 			return nil, err
 		}
 		return result, nil
 	}
-	rawChannels, ok := result["channels"].([]any)
-	if !ok || len(rawChannels) != 2 {
-		return nil, errors.New("complex parser result must contain I and Q channels")
+	if err = normalizeCompletedParserResult(result); err != nil {
+		return nil, err
 	}
-	channels := make([]map[string]any, 0, len(rawChannels))
-	seenSuffixes := make(map[string]bool)
-	for _, rawChannel := range rawChannels {
-		channel, ok := rawChannel.(map[string]any)
-		if !ok {
-			return nil, errors.New("complex parser channel must be an object")
-		}
-		suffix := stringValue(channel["suffix"])
-		if (suffix != "_I" && suffix != "_Q") || seenSuffixes[suffix] {
-			return nil, errors.New("complex parser channels must use unique _I and _Q suffixes")
-		}
-		if err = normalizeParserSignalResult(channel); err != nil {
-			return nil, err
-		}
-		seenSuffixes[suffix] = true
-		channels = append(channels, channel)
-	}
-	result["channels"] = channels
 	return result, nil
 }
 
@@ -909,6 +948,32 @@ func importUpdates(
 		update["complexDetected"] = true
 		update["complexComponent"] = stringValue(channel["component"])
 		updates = append(updates, update)
+	}
+	return updates, nil
+}
+
+func tableImportUpdates(mapping importMapping, result map[string]any) ([]map[string]any, error) {
+	signals, ok := result["signals"].([]map[string]any)
+	if !ok || len(signals) == 0 {
+		return nil, errors.New("table parser result is missing signals")
+	}
+	updates := make([]map[string]any, 0, len(signals))
+	seenNames := make(map[string]bool)
+	for _, signal := range signals {
+		baseName := stringValue(signal["name"])
+		signalUpdates, err := importUpdates(mapping, signal, baseName)
+		if err != nil {
+			return nil, err
+		}
+		for _, update := range signalUpdates {
+			name := stringValue(update["signal"])
+			if seenNames[name] {
+				return nil, fmt.Errorf("table creates duplicate signal name: %s", name)
+			}
+			seenNames[name] = true
+			update["createIfMissing"] = true
+			updates = append(updates, update)
+		}
 	}
 	return updates, nil
 }
@@ -1126,6 +1191,93 @@ func (m *importManager) runSourceFile(
 	}, nil
 }
 
+type tableImportOptions struct {
+	HeaderRow int
+	Delimiter string
+	Columns   []collectionColumnConfig
+}
+
+func (m *importManager) runTableSourceFileWithOptions(
+	sourcePath string,
+	displayName string,
+	tableOptions tableImportOptions,
+) (map[string]any, error) {
+	python := m.pythonRuntime()
+	if !python.Available {
+		return nil, errors.New(python.Error)
+	}
+	info, err := os.Stat(sourcePath)
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, errors.New("waveform table file is not available")
+	}
+	if info.Size() == 0 {
+		return nil, errors.New("waveform table file is empty")
+	}
+	if info.Size() > importMaxUploadBytes {
+		return nil, errors.New("waveform table file exceeds 128 MB")
+	}
+	if tableOptions.HeaderRow < 1 {
+		return nil, errors.New("table header row must be at least 1")
+	}
+	displayName = filepath.Base(strings.TrimSpace(displayName))
+	if displayName == "" || displayName == "." {
+		displayName = filepath.Base(sourcePath)
+	}
+	mapping := importMapping{
+		Parser:      "parse_table_data",
+		SourcePath:  sourcePath,
+		DisplayPath: displayName,
+		Options: map[string]any{
+			"headerRow":  tableOptions.HeaderRow,
+			"hasIndex":   false,
+			"maxColumns": importMaxWaveColumns,
+		},
+	}
+	if strings.TrimSpace(tableOptions.Delimiter) != "" {
+		mapping.Options["delimiter"] = tableOptions.Delimiter
+	}
+	if tableOptions.Columns != nil {
+		mapping.Options["columns"] = tableOptions.Columns
+	}
+	result, err := m.runParser(mapping, python)
+	if err != nil {
+		return nil, err
+	}
+	if !boolValue(result["tableDetected"], false) {
+		return nil, errors.New("Python parser did not return a waveform table")
+	}
+	updates, err := tableImportUpdates(mapping, result)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"importMode":          "table",
+		"headerRow":           tableOptions.HeaderRow,
+		"delimiter":           tableOptions.Delimiter,
+		"parser":              mapping.Parser,
+		"pythonVersion":       python.Version,
+		"pointCount":          intValue(result["pointCount"], 0),
+		"unfilteredRowCount":  intValue(result["unfilteredRowCount"], 0),
+		"filteredOutRowCount": intValue(result["filteredOutRowCount"], 0),
+		"tableSignalCount":    len(result["signals"].([]map[string]any)),
+		"complexDetected":     boolValue(result["complexDetected"], false),
+		"complexSignalNames":  result["complexSignalNames"],
+		"updates":             updates,
+	}, nil
+}
+
+func (m *importManager) runTableSourceFile(
+	sourcePath string,
+	displayName string,
+	headerRow int,
+) (map[string]any, error) {
+	return m.runTableSourceFileWithOptions(
+		sourcePath,
+		displayName,
+		tableImportOptions{HeaderRow: headerRow},
+	)
+}
+
 func (m *importManager) runUploaded(
 	schemeID string,
 	mappingIndex int,
@@ -1154,6 +1306,30 @@ func (m *importManager) runUploaded(
 		schemeID, mappingIndex, signalName, tempPath, uploadedName, hasIndex)
 }
 
+func (m *importManager) runTableUploaded(
+	fileName string,
+	data []byte,
+	headerRow int,
+) (map[string]any, error) {
+	if len(data) == 0 {
+		return nil, errors.New("uploaded waveform table file is empty")
+	}
+	if len(data) > importMaxUploadBytes {
+		return nil, errors.New("uploaded waveform table file exceeds 128 MB")
+	}
+	uploadedName := safeUploadName(fileName)
+	tempDirectory, err := os.MkdirTemp("", "visualwavedrom-table-import-")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(tempDirectory)
+	tempPath := filepath.Join(tempDirectory, uploadedName)
+	if err = os.WriteFile(tempPath, data, 0o600); err != nil {
+		return nil, err
+	}
+	return m.runTableSourceFile(tempPath, uploadedName, headerRow)
+}
+
 func (m *importManager) runLocalFile(
 	schemeID string,
 	mappingIndex int,
@@ -1168,5 +1344,23 @@ func (m *importManager) runLocalFile(
 		sourcePath,
 		filepath.Base(sourcePath),
 		hasIndex,
+	)
+}
+
+func (m *importManager) runTableLocalFile(
+	sourcePath string,
+	headerRow int,
+) (map[string]any, error) {
+	return m.runTableSourceFile(sourcePath, filepath.Base(sourcePath), headerRow)
+}
+
+func (m *importManager) runTableLocalFileWithOptions(
+	sourcePath string,
+	options tableImportOptions,
+) (map[string]any, error) {
+	return m.runTableSourceFileWithOptions(
+		sourcePath,
+		filepath.Base(sourcePath),
+		options,
 	)
 }

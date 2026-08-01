@@ -293,13 +293,16 @@ Linux 可直接粘贴 `/home/user/data.csv`、`~/data.csv` 或 `file:///home/use
 此功能需要由 BAT/SH 启动的服务模式：
 
 1. 选择数据文件夹，再选择集合预设 JSON；Linux 没有图形文件选择器时也可以直接粘贴路径。
-2. 页面从每条 `grepKeys` 中自动提取 `{var}` 变量，
+2. 页面从每条 `usrGen.grepKeys` 中自动提取 `{var}` 变量，
    不需要手写 `vars`。变量输入框可以留空，留空时按 `0` 参与匹配。
-3. 点击 **搜索**。程序把变量代入每条 `paths` 规则，只搜索 `数据文件夹/folder`
-   当前层的文件，不进入其子目录，并在窗口中列出文件、目标信号名和匹配状态。
-4. 未匹配到文件的规则会被跳过；只要至少一条规则找到文件，且生成的信号名不重复，
+3. 点击 **搜索**。程序把变量代入每条 `paths` 规则，只搜索
+   `数据文件夹/usrGen.folder` 当前层的文件，不进入其子目录。
+4. 程序读取文件开头的少量内容，自动判断单信号或带标题表格。表格会自动识别标题行；
+   预览中可以修正标题行、筛选列、全选/全不选、修改导入后的信号名，并为每列设置数据过滤条件。
+5. 未匹配到文件的规则会被跳过；只要至少一条规则找到文件，且生成的信号名不重复，
    **确定导入** 就会可用。
-5. 可以直接修改窗口中的预设 JSON。点击 **保存预设** 时，文件选择器默认定位到原预设路径。
+6. 可以直接修改窗口中的预设 JSON。点击 **保存预设** 时，`usrGen` 与当前确认后的
+   `autoGen` 会一起保存，文件选择器默认定位到原预设路径。
 
 `import/SchemeCollection/example.json` 是可直接修改的示例：
 
@@ -307,22 +310,19 @@ Linux 可直接粘贴 `/home/user/data.csv`、`~/data.csv` 或 `file:///home/use
 {
   "paths": [
     {
-      "folder": "Data",
-      "grepKeys": "^{channel}-{case}\\.txt$",
-      "hasSeq": true,
-      "name": "{channel}_{case}_txt"
+      "usrGen": {
+        "folder": "Data",
+        "grepKeys": "^{channel}-{case}\\.txt$",
+        "name": "{channel}_{case}_txt"
+      },
+      "autoGen": {}
     },
     {
-      "folder": "Data",
-      "grepKeys": "^{channel}-{case}\\.csv$",
-      "hasSeq": true,
-      "name": "{channel}_{case}_csv"
-    },
-    {
-      "folder": "Data",
-      "grepKeys": "^{channel}-{case}\\.tsv$",
-      "hasSeq": true,
-      "name": "{channel}_{case}_tsv"
+      "usrGen": {
+        "folder": "Data",
+        "grepKeys": "^{channel}-{case}\\.csv$"
+      },
+      "autoGen": {}
     }
   ]
 }
@@ -330,13 +330,15 @@ Linux 可直接粘贴 `/home/user/data.csv`、`~/data.csv` 或 `file:///home/use
 
 使用这份示例时，数据文件夹选择工程中的 `import`，页面会从 `grepKeys` 自动识别
 `channel` 和 `case`。填入 `basic`、`signal` 后，会同时匹配
-`import/Data/basic-signal.txt`、`.csv` 和 `.tsv`，并导入为
-`basic_signal_txt`、`basic_signal_csv` 和 `basic_signal_tsv` 三路信号。
+`import/Data/basic-signal.txt` 和 `.csv`。TXT 导入为 `basic_signal_txt`；CSV 的标题列
+会成为普通波形信号，用户可以在预览中决定导入哪些列。
 
 - `vars`：可选的旧版兼容字段；通常无需填写，变量名会按照在 `grepKeys` 中首次出现的
   顺序自动提取。
-- `folder`：相对于本次选择的数据文件夹的搜索目录；可以为 `.`，且不能跳出所选目录。
-- `grepKeys`：匹配文件名的 Python `re` 正则表达式，行为等价于
+- `usrGen`：用户维护的最小配置。程序不会自动改写其中的内容；通常只需填写
+  `folder`、`grepKeys`，单信号文件再填写 `name`。
+- `usrGen.folder`：相对于本次选择的数据文件夹的搜索目录；可以为 `.`，且不能跳出所选目录。
+- `usrGen.grepKeys`：匹配文件名的 Python `re` 正则表达式，行为等价于
   `re.compile(resolvedGrepKeys).search(fileName)`。支持前后向断言、命名分组和反向引用等
   Python `re` 语法。包含变量时直接写成 `SeqConvOutC{idx}`，程序会自动按 f-string
   模板解析并识别 `{idx}`，不需要添加 `f` 前缀或额外引号。用户输入的变量值按普通
@@ -345,8 +347,36 @@ Linux 可直接粘贴 `/home/user/data.csv`、`~/data.csv` 或 `file:///home/use
 - 搜索后，预设行号左侧用红色 `!` 表示未匹配、绿色 `✓` 表示唯一匹配、黄色
   `!` 表示匹配到多个文件。多匹配不会阻止导入，程序按相对路径排序并默认使用
   第一个文件。
-- `hasSeq`：`true` 表示第一列是序号，`false` 表示程序从 0 自动编号。
-- `name`：导入后的信号名，也可以使用变量。检测到复数数据时仍会自动生成 `_I` 和 `_Q` 两路。
+- `usrGen.name`：单信号文件导入后的信号名，也可以使用变量；省略时采用文件名。
+- `autoGen`：程序根据文件检测结果和预览选择生成的配置。单信号会记录解析方式及是否含序号；
+  表格会记录 `headerRow`、`delimiter`、`schemaHash` 和列规则。
+- `autoGen.columns`：每列以 `source`、`enabled`、`name` 和可选的 `filter` 保存。再次载入预设时会参考这些设置；
+  表格结构局部变化后，程序按 `source` 增量合并，保留仍存在列的勾选和改名，删除消失列，
+  并为新增列建立默认规则。不会整块重写既有选择。
+- `filter` 支持 `=`、`==`、`!=`、`>`、`>=`、`<`、`<=`，可用 `&&` 和 `||` 组合。
+  多列都设置条件时按“同时满足”筛选整行；未勾选导入的控制列也可以参与过滤。例如
+  `CurSt` 设置 `>=1&&<=2` 后，只保留 `CurSt` 位于 1 到 2 之间的行。
+
+例如，预览并改名后的表格配置可能为：
+
+```json
+"autoGen": {
+  "importMode": "table",
+  "headerRow": 2,
+  "delimiter": "comma",
+  "parser": "parse_table_data",
+  "columns": [
+    { "source": "rx_I", "enabled": true, "name": "feedback_I" },
+    { "source": "rx_Q", "enabled": true, "name": "feedback_Q" },
+    { "source": "CurSt", "enabled": false, "name": "CurSt", "filter": ">=1&&<=2" },
+    { "source": "debug", "enabled": false, "name": "debug" }
+  ],
+  "schemaHash": "..."
+}
+```
+
+旧版平铺的 `folder`、`grepKeys`、`hasSeq`、`name` 仍可读取；读取或保存后会迁移为
+`usrGen + autoGen` 结构。检测到复数数据时仍会自动生成 `_I` 和 `_Q` 两路。
 
 搜索只读取文件信息和少量样本；点击确定后才解析完整文件。未匹配文件会跳过，多匹配规则
 默认采用排序后的第一个文件；已匹配文件整批解析成功后才统一修改当前波形图，因此某个文件

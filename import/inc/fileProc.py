@@ -5,6 +5,7 @@ import argparse
 import csv
 import io
 import json
+import math
 import os
 import re
 import sys
@@ -16,6 +17,7 @@ import sys
 # missing indices and converts the point list into WaveDrom wave/data fields.
 WAVE_SYMBOLS = set("01xzpnPNhHlLuUdD.|=23456789")
 DATA_SYMBOLS = set("=23456789")
+DIGITAL_WAVE_SYMBOLS = WAVE_SYMBOLS.difference(DATA_SYMBOLS)
 
 
 class FileProcError(Exception):
@@ -250,6 +252,257 @@ def parse_single_column(file_path, options=None):
     return parse_index_data(file_path, opts)
 
 
+def _table_delimiter(header_line, options):
+    delimiter = options.get("delimiter", "auto")
+    if delimiter not in ("", "auto", None):
+        return delimiter
+    if "\t" in header_line:
+        return "tab"
+    if "," in header_line:
+        return "comma"
+    return "whitespace"
+
+
+def _filter_number(value):
+    try:
+        number = float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _filter_operand(value):
+    text = str(value).strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
+        if text[0] == '"':
+            try:
+                return str(json.loads(text))
+            except (TypeError, ValueError):
+                raise FileProcError("filter contains an invalid quoted value")
+        return text[1:-1].replace("\\'", "'").replace("\\\\", "\\")
+    return text
+
+
+def _compile_filter_condition(expression, source):
+    text = str(expression or "").strip()
+    if not text:
+        return []
+    groups = []
+    for raw_group in text.split("||"):
+        if not raw_group.strip():
+            raise FileProcError("filter for %s contains an empty OR condition" % source)
+        clauses = []
+        for raw_clause in raw_group.split("&&"):
+            clause = raw_clause.strip()
+            if not clause:
+                raise FileProcError("filter for %s contains an empty AND condition" % source)
+            match = re.match(r"^(==|!=|>=|<=|>|<|=)?\s*(.*)$", clause, re.S)
+            operator = match.group(1) or "=="
+            raw_operand = match.group(2).strip()
+            if not raw_operand:
+                raise FileProcError("filter for %s is missing a comparison value" % source)
+            operand = _filter_operand(raw_operand)
+            operand_number = _filter_number(operand)
+            if operator in (">", ">=", "<", "<=") and operand_number is None:
+                raise FileProcError(
+                    "filter for %s requires a numeric value after %s" % (source, operator)
+                )
+            clauses.append((operator, operand, operand_number))
+        groups.append(clauses)
+    return groups
+
+
+def _filter_clause_matches(value, clause):
+    operator, operand, operand_number = clause
+    value_text = str(value).strip()
+    value_number = _filter_number(value_text)
+    if operator in ("=", "==", "!="):
+        if value_number is not None and operand_number is not None:
+            matched = value_number == operand_number
+        else:
+            matched = value_text == operand
+        return not matched if operator == "!=" else matched
+    if value_number is None:
+        return False
+    if operator == ">":
+        return value_number > operand_number
+    if operator == ">=":
+        return value_number >= operand_number
+    if operator == "<":
+        return value_number < operand_number
+    return value_number <= operand_number
+
+
+def _filter_condition_matches(value, groups):
+    return any(all(_filter_clause_matches(value, clause) for clause in group)
+               for group in groups)
+
+
+def parse_table_data(file_path, options=None):
+    """Parse a header-based table into independently completed signals."""
+    opts = dict(options or {})
+    text = _read_text(file_path, opts)
+    lines = text.splitlines()
+    header_row = _positive_int(opts.get("headerRow"), "headerRow", 1)
+    if header_row < 1:
+        raise FileProcError("headerRow must be at least 1")
+    if header_row > len(lines):
+        raise FileProcError(
+            "header row %d exceeds the file's %d lines" % (header_row, len(lines))
+        )
+
+    raw_header = lines[header_row - 1]
+    if not raw_header.strip():
+        raise FileProcError("header row %d is empty" % header_row)
+    delimiter = _table_delimiter(raw_header, opts)
+    try:
+        headers = [str(value).strip() for value in _split_line(raw_header, delimiter)]
+    except (csv.Error, StopIteration) as error:
+        raise FileProcError("header row %d cannot be parsed: %s" % (header_row, error))
+    if not headers or (len(headers) == 1 and headers[0] == ""):
+        raise FileProcError("header row %d contains no signal names" % header_row)
+    max_signals = _positive_int(opts.get("maxSignals"), "maxSignals", 4096)
+    if max_signals < 1:
+        raise FileProcError("maxSignals must be at least 1")
+    if len(headers) > max_signals:
+        raise FileProcError("table contains more than %d signals" % max_signals)
+
+    seen_headers = set()
+    for column_index, header in enumerate(headers, 1):
+        if not header:
+            raise FileProcError("header column %d has an empty signal name" % column_index)
+        if header in seen_headers:
+            raise FileProcError("header signal name is duplicated: %s" % header)
+        seen_headers.add(header)
+
+    raw_column_rules = opts.get("columns")
+    selected_columns = []
+    filter_columns = []
+    if raw_column_rules is None:
+        selected_columns = [
+            {"source": header, "name": header, "index": index}
+            for index, header in enumerate(headers)
+        ]
+    else:
+        if not isinstance(raw_column_rules, list):
+            raise FileProcError("columns must be an array")
+        header_indexes = dict((header, index) for index, header in enumerate(headers))
+        seen_sources = set()
+        seen_names = set()
+        for rule_index, raw_rule in enumerate(raw_column_rules):
+            if not isinstance(raw_rule, dict):
+                raise FileProcError("columns[%d] must be an object" % rule_index)
+            source = str(raw_rule.get("source") or "").strip()
+            if not source:
+                raise FileProcError("columns[%d].source is required" % rule_index)
+            if source in seen_sources:
+                raise FileProcError("columns contains duplicate source: %s" % source)
+            seen_sources.add(source)
+            if source not in header_indexes:
+                raise FileProcError("selected table column is missing: %s" % source)
+            condition = str(raw_rule.get("filter") or "").strip()
+            if condition:
+                filter_columns.append({
+                    "source": source,
+                    "index": header_indexes[source],
+                    "condition": condition,
+                    "compiled": _compile_filter_condition(condition, source)
+                })
+            if not bool(raw_rule.get("enabled", True)):
+                continue
+            name = str(raw_rule.get("name") or source).strip()
+            if not name:
+                raise FileProcError("columns[%d].name is required" % rule_index)
+            if name in seen_names:
+                raise FileProcError("selected table signal name is duplicated: %s" % name)
+            seen_names.add(name)
+            selected_columns.append({
+                "source": source,
+                "name": name,
+                "index": header_indexes[source]
+            })
+        if not selected_columns:
+            raise FileProcError("select at least one table column")
+
+    prefixes = opts.get("commentPrefixes", ["#", "//"])
+    if not isinstance(prefixes, list):
+        raise FileProcError("commentPrefixes must be an array")
+    prefixes = [str(item) for item in prefixes if str(item)]
+    max_columns = _positive_int(opts.get("maxColumns"), "maxColumns", 10000000)
+    if max_columns < 1:
+        raise FileProcError("maxColumns must be at least 1")
+
+    signal_points = [[] for _ in selected_columns]
+    configured_value_mode = str(opts.get("valueMode") or "auto").lower()
+    signal_value_modes = [configured_value_mode for _ in selected_columns]
+    data_row_index = 0
+    source_data_row_count = 0
+    filtered_out_row_count = 0
+    for line_number, raw_line in enumerate(lines[header_row:], header_row + 1):
+        stripped = raw_line.strip()
+        if not stripped or any(stripped.startswith(prefix) for prefix in prefixes):
+            continue
+        try:
+            columns = [str(value).strip() for value in _split_line(raw_line, delimiter)]
+        except (csv.Error, StopIteration) as error:
+            raise FileProcError("line %d cannot be parsed: %s" % (line_number, error))
+        if len(columns) > len(headers):
+            raise FileProcError(
+                "line %d has %d columns but the header has %d"
+                % (line_number, len(columns), len(headers))
+            )
+        columns.extend([""] * (len(headers) - len(columns)))
+        source_data_row_count += 1
+        for selected_index, selected in enumerate(selected_columns):
+            if signal_value_modes[selected_index] != "auto":
+                continue
+            wave_symbol, _ = _normalize_value(columns[selected["index"]], opts)
+            if wave_symbol not in DIGITAL_WAVE_SYMBOLS:
+                signal_value_modes[selected_index] = "data"
+        if any(not _filter_condition_matches(columns[item["index"]], item["compiled"])
+               for item in filter_columns):
+            filtered_out_row_count += 1
+            continue
+        if data_row_index >= max_columns:
+            raise FileProcError("filtered table exceeds maxColumns")
+        for selected_index, selected in enumerate(selected_columns):
+            value = columns[selected["index"]]
+            signal_points[selected_index].append({
+                "index": data_row_index,
+                "value": value,
+                "lineNumber": line_number
+            })
+        data_row_index += 1
+
+    if data_row_index == 0:
+        if filter_columns and source_data_row_count:
+            raise FileProcError("table contains no data rows matching the column filters")
+        raise FileProcError("table contains no data rows after header row %d" % header_row)
+    return {
+        "tableDetected": True,
+        "headerRow": header_row,
+        "delimiter": delimiter,
+        "sourceHeaders": headers,
+        "sourceRowCount": data_row_index,
+        "unfilteredRowCount": source_data_row_count,
+        "filteredOutRowCount": filtered_out_row_count,
+        "signals": [
+            {
+                "name": selected["name"],
+                "sourceName": selected["source"],
+                "points": signal_points[index],
+                "explicitIndex": False,
+                "sourceRowCount": data_row_index,
+                "targetLength": source_data_row_count,
+                "fillGap": ".",
+                "fillTrailing": "x" if filter_columns else ".",
+                "valueMode": signal_value_modes[index]
+            }
+            for index, selected in enumerate(selected_columns)
+        ]
+    }
+
+
 def _validated_points(parsed_signal, options):
     if not isinstance(parsed_signal, dict):
         raise FileProcError("file parser must return an object")
@@ -332,7 +585,10 @@ def _complex_components(value):
         )
     normalized = re.sub(r"\s+", "", raw)
     normalized = normalized.replace("I", "j").replace("i", "j").replace("J", "j")
-    if "j" not in normalized:
+    if (
+        not normalized.endswith("j")
+        or re.match(r"^[0-9+\-.eEj]+$", normalized) is None
+    ):
         return None
     try:
         number = complex(normalized)
@@ -347,14 +603,41 @@ def _complex_components(value):
 def _complete_scalar_signal(parsed_signal, points, options):
     opts = options
     fill_leading = str(opts.get("fillLeading", opts.get("fillMissing", "x")) or "x")
-    fill_gap = str(opts.get("fillGap") or ".")
+    fill_gap = str(parsed_signal.get("fillGap", opts.get("fillGap") or ".") or ".")
+    fill_trailing = str(
+        parsed_signal.get("fillTrailing", opts.get("fillTrailing") or fill_gap) or fill_gap
+    )
     if len(fill_leading) != 1 or fill_leading not in WAVE_SYMBOLS:
         raise FileProcError("fillLeading must be one WaveDrom symbol")
     if len(fill_gap) != 1 or fill_gap not in WAVE_SYMBOLS:
         raise FileProcError("fillGap must be one WaveDrom symbol")
+    if len(fill_trailing) != 1 or fill_trailing not in WAVE_SYMBOLS:
+        raise FileProcError("fillTrailing must be one WaveDrom symbol")
 
     wave_parts = []
     data_values = []
+    previous_wave_state = None
+
+    def append_wave_state(wave_symbol, data_label=""):
+        nonlocal previous_wave_state
+        if wave_symbol == ".":
+            wave_parts.append(wave_symbol)
+            return
+        if wave_symbol == "|":
+            wave_parts.append(wave_symbol)
+            previous_wave_state = None
+            return
+
+        wave_state = (wave_symbol, data_label)
+        if previous_wave_state == wave_state:
+            wave_parts.append(".")
+            return
+
+        wave_parts.append(wave_symbol)
+        if wave_symbol in DATA_SYMBOLS:
+            data_values.append(data_label)
+        previous_wave_state = wave_state
+
     numeric_values = []
     all_numeric = True
     for point in points:
@@ -377,19 +660,29 @@ def _complete_scalar_signal(parsed_signal, points, options):
     for point_number, point in enumerate(points):
         index = point["index"]
         while cursor < index:
-            wave_parts.append(fill_gap if has_previous_value else fill_leading)
+            fill_symbol = fill_gap if has_previous_value else fill_leading
+            append_wave_state(fill_symbol)
             if all_numeric:
-                samples.append(previous_numeric_value if has_previous_value else None)
+                samples.append(
+                    previous_numeric_value
+                    if has_previous_value and fill_symbol == "."
+                    else None
+                )
             cursor += 1
         wave_symbol, data_label = _normalize_value(point["value"], opts)
-        wave_parts.append(wave_symbol)
-        if wave_symbol in DATA_SYMBOLS:
-            data_values.append(data_label)
+        append_wave_state(wave_symbol, data_label)
         if all_numeric:
             previous_numeric_value = numeric_values[point_number]
             samples.append(previous_numeric_value)
         cursor = index + 1
         has_previous_value = True
+
+    target_length = max(cursor, int(parsed_signal.get("targetLength") or cursor))
+    while cursor < target_length:
+        append_wave_state(fill_trailing)
+        if all_numeric:
+            samples.append(previous_numeric_value if fill_trailing == "." else None)
+        cursor += 1
 
     if not any(value != "" for value in data_values):
         data_values = []
@@ -404,12 +697,16 @@ def _complete_scalar_signal(parsed_signal, points, options):
     if all_numeric:
         numeric_states = set(value for value in numeric_values)
         result["samples"] = samples
-        result["sampleKind"] = (
-            "digital"
-            if numeric_states.issubset(set([0, 1]))
-            and str(opts.get("valueMode") or "auto").lower() != "data"
-            else "analog"
-        )
+        value_mode = str(opts.get("valueMode") or "auto").lower()
+        if value_mode == "data":
+            all_integer = all(float(value).is_integer() for value in numeric_values)
+            result["sampleKind"] = (
+                "bus" if all_integer and len(numeric_states) <= 16 else "analog"
+            )
+        else:
+            result["sampleKind"] = (
+                "digital" if numeric_states.issubset(set([0, 1])) else "analog"
+            )
     else:
         symbols_only = all(
             len(str(point["value"])) == 1
@@ -459,6 +756,9 @@ def complete_previous_value(parsed_signal, options=None):
     component_base = {
         "explicitIndex": bool(parsed_signal.get("explicitIndex"))
     }
+    for key in ("targetLength", "fillGap", "fillTrailing"):
+        if key in parsed_signal:
+            component_base[key] = parsed_signal[key]
     component_options = dict(opts)
     component_options["valueMode"] = "data"
     real_result = _complete_scalar_signal(component_base, real_points, component_options)
@@ -481,7 +781,8 @@ FILE_PARSERS = {
     "parse_index_data": parse_index_data,
     "parse_csv_index_data": parse_csv_index_data,
     "parse_tsv_index_data": parse_tsv_index_data,
-    "parse_single_column": parse_single_column
+    "parse_single_column": parse_single_column,
+    "parse_table_data": parse_table_data
 }
 
 
@@ -617,7 +918,31 @@ def main(argv=None):
     if not isinstance(options, dict):
         raise FileProcError("options-json must contain an object")
     parsed_signal = parser_function(args.file, options)
-    result = complete_previous_value(parsed_signal, options)
+    if parsed_signal.get("tableDetected"):
+        completed_signals = []
+        complex_signal_names = []
+        for table_signal in parsed_signal.get("signals", []):
+            signal_name = str(table_signal.get("name") or "").strip()
+            completion_options = dict(options)
+            if table_signal.get("valueMode"):
+                completion_options["valueMode"] = table_signal["valueMode"]
+            completed = complete_previous_value(table_signal, completion_options)
+            completed["name"] = signal_name
+            completed_signals.append(completed)
+            if completed.get("complexDetected"):
+                complex_signal_names.append(signal_name)
+        result = {
+            "tableDetected": True,
+            "headerRow": parsed_signal.get("headerRow"),
+            "pointCount": parsed_signal.get("sourceRowCount", 0),
+            "unfilteredRowCount": parsed_signal.get("unfilteredRowCount", 0),
+            "filteredOutRowCount": parsed_signal.get("filteredOutRowCount", 0),
+            "complexDetected": bool(complex_signal_names),
+            "complexSignalNames": complex_signal_names,
+            "signals": completed_signals
+        }
+    else:
+        result = complete_previous_value(parsed_signal, options)
     result["parser"] = parser_name
     result["completion"] = "complete_previous_value"
     sys.stdout.write(json.dumps(result, ensure_ascii=False, separators=(",", ":")))

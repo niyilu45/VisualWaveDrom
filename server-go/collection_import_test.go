@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -150,6 +151,394 @@ func TestCollectionPresetInfersVariablesFromGrepKeys(t *testing.T) {
 		if preset.Vars[index] != name {
 			t.Fatalf("inferred variables = %#v", preset.Vars)
 		}
+	}
+}
+
+func TestCollectionPresetMigratesLegacyAndPersistsAutoGen(t *testing.T) {
+	root := t.TempDir()
+	preset, err := normalizeCollectionPreset(collectionPresetValue(
+		[]any{},
+		map[string]any{
+			"folder": ".", "grepKeys": `^signal\.txt$`,
+			"hasSeq": false, "name": "signal",
+		},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preset.Paths[0].UsrGen.GrepKeys != `^signal\.txt$` ||
+		preset.Paths[0].AutoGen.ImportMode != "single" ||
+		preset.Paths[0].AutoGen.HasSeq == nil || *preset.Paths[0].AutoGen.HasSeq {
+		t.Fatalf("legacy preset was not migrated: %#v", preset.Paths[0])
+	}
+	presetPath, err := saveCollectionPreset("migrated.json", root, preset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(presetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err = json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	paths, _ := raw["paths"].([]any)
+	path, _ := paths[0].(map[string]any)
+	if raw["InnerType"] != collectionPresetInnerType {
+		t.Fatalf("saved preset did not include InnerType: %s", data)
+	}
+	if path["usrGen"] == nil || path["autoGen"] == nil || path["folder"] != nil {
+		t.Fatalf("saved preset did not use usrGen/autoGen: %s", data)
+	}
+}
+
+func TestCollectionPresetDiscoveryFiltersByInnerType(t *testing.T) {
+	root := t.TempDir()
+	nested := filepath.Join(root, "nested", "group")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	preset, err := normalizeCollectionPreset(collectionPresetValue(
+		[]any{},
+		map[string]any{"folder": ".", "grepKeys": `^signal\.txt$`, "name": "signal"},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	validPath, err := saveCollectionPreset(filepath.Join(nested, "valid.json"), root, preset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manualData, err := json.Marshal(collectionPresetValue(
+		[]any{},
+		map[string]any{"folder": ".", "grepKeys": `^manual\.txt$`, "name": "manual"},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manualPath := filepath.Join(root, "manual.json")
+	if err = os.WriteFile(manualPath, manualData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wrongType := []byte(`{"InnerType":"AnotherTool","vars":[],"paths":[]}`)
+	if err = os.WriteFile(filepath.Join(root, "wrong.json"), wrongType, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	discovered, err := discoverCollectionPresets(root, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if discovered.ResultCount != 1 || len(discovered.Entries) != 1 {
+		t.Fatalf("unexpected discovered presets: %#v", discovered)
+	}
+	wantRelative := filepath.ToSlash(filepath.Join("nested", "group", "valid.json"))
+	if discovered.Entries[0].RelativePath != wantRelative ||
+		filepath.IsAbs(discovered.Entries[0].RelativePath) {
+		t.Fatalf("discovery did not return a relative path: %#v", discovered.Entries[0])
+	}
+	loaded, loadedPath, relativePath, err := loadDiscoveredCollectionPreset(
+		root, wantRelative, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !samePath(loadedPath, validPath) || relativePath != wantRelative || len(loaded.Paths) != 1 {
+		t.Fatalf("unexpected discovered preset load: %q %q %#v", loadedPath, relativePath, loaded)
+	}
+	if _, _, _, err = loadDiscoveredCollectionPreset(root, "../manual.json", root); err == nil {
+		t.Fatal("expected traversal outside the preset search folder to fail")
+	}
+
+	manualPreset, _, err := loadCollectionPreset(manualPath, root)
+	if err != nil || len(manualPreset.Paths) != 1 {
+		t.Fatalf("manual preset without InnerType should still load: %#v %v", manualPreset, err)
+	}
+}
+
+func TestCollectionTableDetectionIncrementallyMergesColumns(t *testing.T) {
+	root := t.TempDir()
+	sourcePath := filepath.Join(root, "capture.csv")
+	if err := os.WriteFile(
+		sourcePath,
+		[]byte("generated table\na,b\n0,1\n1,2\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	preset, err := normalizeCollectionPreset(map[string]any{
+		"paths": []any{map[string]any{
+			"usrGen": map[string]any{
+				"folder": ".", "grepKeys": `^capture\.csv$`,
+			},
+			"autoGen": map[string]any{
+				"importMode": "table", "headerRow": 2, "delimiter": "comma",
+				"columns": []any{
+					map[string]any{"source": "a", "enabled": true, "name": "a"},
+					map[string]any{
+						"source": "b", "enabled": false, "name": "renamed_b",
+						"filter": ">=1&&<=2",
+					},
+					map[string]any{"source": "removed", "enabled": true, "name": "old"},
+				},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := searchCollectionFiles(
+		root, root, preset, map[string]string{}, runTestCollectionRegexSearch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := result.Entries[0]
+	if entry.ImportMode != "table" || entry.HeaderRow != 2 || len(entry.Columns) != 2 {
+		t.Fatalf("unexpected table preview: %#v", entry)
+	}
+	if entry.Columns[1].Source != "b" || entry.Columns[1].Enabled ||
+		entry.Columns[1].Name != "renamed_b" || entry.Columns[1].Filter != ">=1&&<=2" {
+		t.Fatalf("existing column settings were not preserved: %#v", entry.Columns)
+	}
+	if entry.SchemaHash == "" || result.Preset.Paths[0].AutoGen.SchemaHash == "" {
+		t.Fatal("detected schema was not persisted into autoGen")
+	}
+	savedPath, err := saveCollectionPreset("detected.json", root, result.Preset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	savedPreset, _, err := loadCollectionPreset(savedPath, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	savedColumns := savedPreset.Paths[0].AutoGen.Columns
+	if savedPreset.Paths[0].AutoGen.HeaderRow != 2 || len(savedColumns) != 2 ||
+		savedColumns[1].Enabled || savedColumns[1].Name != "renamed_b" ||
+		savedColumns[1].Filter != ">=1&&<=2" {
+		t.Fatalf("saved autoGen was not restored: %#v", savedPreset.Paths[0].AutoGen)
+	}
+
+	if err = os.WriteFile(
+		sourcePath,
+		[]byte("generated table\nb,c\n3,4\n5,6\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	result, err = searchCollectionFiles(
+		root, root, result.Preset, map[string]string{}, runTestCollectionRegexSearch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	columns := result.Entries[0].Columns
+	if len(columns) != 2 || columns[0].Source != "b" || columns[0].Enabled ||
+		columns[0].Name != "renamed_b" || columns[0].Filter != ">=1&&<=2" ||
+		columns[1].Source != "c" ||
+		!columns[1].Enabled || columns[1].Name != "c" {
+		t.Fatalf("changed table columns were not incrementally merged: %#v", columns)
+	}
+}
+
+func TestCollectionTablePreviewAppliesColumnFilters(t *testing.T) {
+	lines := []string{
+		"CurSt,Value",
+		"0,zero-a",
+		"0,zero-b",
+		"0,zero-c",
+		"0,zero-d",
+		"0,zero-e",
+		"1,one",
+		"2,two",
+		"3,three",
+	}
+	columns, rows, truncated, err := collectionTablePreview(
+		lines,
+		1,
+		"comma",
+		[]string{"CurSt", "Value"},
+		[]collectionColumnConfig{
+			{Source: "CurSt", Enabled: false, Name: "CurSt", Filter: ">=1&&<=2"},
+			{Source: "Value", Enabled: true, Name: "Value"},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if truncated || len(columns) != 2 || len(rows) != 2 {
+		t.Fatalf("unexpected filtered preview shape: %#v %#v", columns, rows)
+	}
+	if rows[0][0] != "1" || rows[0][1] != "one" ||
+		rows[1][0] != "2" || rows[1][1] != "two" {
+		t.Fatalf("preview did not apply CurSt filter: %#v", rows)
+	}
+}
+
+func TestCollectionCSVRedetectsStaleSingleModeAndBuildsPreview(t *testing.T) {
+	root := t.TempDir()
+	sourcePath := filepath.Join(root, "SeqMany.csv")
+	content := "\n\n\nSigA,SigB,CurSt\n" +
+		"0.128411,0.933530,0\n" +
+		"0.933530,0.933530,0\n" +
+		"1.678996,0.933530,0\n" +
+		"1.134207,1.604885,1\n" +
+		"1.107732,1.604885,1\n" +
+		"1.503390,1.604885,1\n"
+	if err := os.WriteFile(sourcePath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	preset, err := normalizeCollectionPreset(map[string]any{
+		"vars": []any{},
+		"paths": []any{map[string]any{
+			"usrGen": map[string]any{
+				"folder": ".", "grepKeys": "SeqMany.*",
+			},
+			"autoGen": map[string]any{
+				"importMode": "single", "delimiter": "comma",
+				"parser": "parse_single_column", "hasSeq": false,
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := searchCollectionFiles(
+		root, root, preset, map[string]string{}, runTestCollectionRegexSearch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := result.Entries[0]
+	if !result.Ready || entry.ImportMode != "table" || entry.HeaderRow != 4 ||
+		len(entry.Columns) != 3 || len(entry.PreviewColumns) != 3 ||
+		len(entry.PreviewRows) != collectionPreviewRowLimit {
+		t.Fatalf("CSV was not redetected as a previewable table: %#v", entry)
+	}
+	if entry.PreviewColumns[0] != "SigA" || entry.PreviewRows[0][0] != "0.128411" ||
+		entry.PreviewRows[0][2] != "0" {
+		t.Fatalf("unexpected CSV preview: %#v %#v", entry.PreviewColumns, entry.PreviewRows)
+	}
+	if result.Preset.Paths[0].AutoGen.ImportMode != "table" ||
+		result.Preset.Paths[0].AutoGen.Parser != "parse_table_data" {
+		t.Fatalf("table autoGen was not refreshed: %#v", result.Preset.Paths[0].AutoGen)
+	}
+}
+
+func TestCollectionSearchSignatureIgnoresAutoGenEdits(t *testing.T) {
+	preset, err := normalizeCollectionPreset(map[string]any{
+		"paths": []any{map[string]any{
+			"usrGen": map[string]any{
+				"folder": ".", "grepKeys": `^capture\.csv$`,
+			},
+			"autoGen": map[string]any{},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := collectionSearchSignature("root", preset, map[string]string{})
+	preset.Paths[0].AutoGen = collectionRuleConfig{
+		ImportMode: "table", HeaderRow: 2, Delimiter: "comma",
+		Columns: []collectionColumnConfig{{Source: "a", Enabled: false, Name: "renamed"}},
+	}
+	preset.Paths[0] = effectiveCollectionPresetPath(
+		preset.Paths[0].UsrGen, preset.Paths[0].AutoGen)
+	after := collectionSearchSignature("root", preset, map[string]string{})
+	if before != after {
+		t.Fatal("autoGen edits invalidated the cached file search")
+	}
+}
+
+func TestCollectionSingleColumnAutoGenCanBeSearchedAgain(t *testing.T) {
+	root := t.TempDir()
+	sourcePath := filepath.Join(root, "SeqConvOutC.txt")
+	if err := os.WriteFile(sourcePath, []byte("0.128411\n0.933530\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	preset, err := normalizeCollectionPreset(map[string]any{
+		"vars": []any{},
+		"paths": []any{map[string]any{
+			"usrGen": map[string]any{
+				"folder": ".", "grepKeys": "SeqConvOutC.*", "name": "SeqConvOutC",
+			},
+			"autoGen": map[string]any{},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := searchCollectionFiles(
+		root, root, preset, map[string]string{}, runTestCollectionRegexSearch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !first.Ready || first.ResultCount != 1 ||
+		first.Preset.Paths[0].AutoGen.Delimiter != "single" {
+		t.Fatalf("unexpected first search result: %#v", first)
+	}
+
+	encoded, err := json.Marshal(first.Preset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var generatedValue map[string]any
+	if err = json.Unmarshal(encoded, &generatedValue); err != nil {
+		t.Fatal(err)
+	}
+	generatedPreset, err := normalizeCollectionPreset(generatedValue)
+	if err != nil {
+		t.Fatalf("generated single-column preset could not be parsed again: %v", err)
+	}
+	second, err := searchCollectionFiles(
+		root, root, generatedPreset, map[string]string{}, runTestCollectionRegexSearch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !second.Ready || second.ResultCount != 1 ||
+		len(second.Entries) != 1 || second.Entries[0].Status != "matched" {
+		t.Fatalf("second search lost the original match: %#v", second)
+	}
+}
+
+func TestCollectionAutoGenDelimiterCompatibility(t *testing.T) {
+	for _, delimiter := range []string{"single", "unknown", "Comma"} {
+		preset, err := normalizeCollectionPreset(map[string]any{
+			"paths": []any{map[string]any{
+				"usrGen": map[string]any{
+					"folder": ".", "grepKeys": "signal.*",
+				},
+				"autoGen": map[string]any{"delimiter": delimiter},
+			}},
+		})
+		if err != nil {
+			t.Fatalf("generated delimiter %q was rejected: %v", delimiter, err)
+		}
+		if preset.Paths[0].AutoGen.Delimiter != strings.ToLower(delimiter) {
+			t.Fatalf("generated delimiter %q was not normalized: %#v", delimiter, preset.Paths[0])
+		}
+	}
+
+	preset, err := normalizeCollectionPreset(map[string]any{
+		"paths": []any{map[string]any{
+			"usrGen": map[string]any{
+				"folder": ".", "grepKeys": "signal.*",
+			},
+			"autoGen": map[string]any{"delimiter": "legacy-generated-value"},
+		}},
+	})
+	if err != nil || preset.Paths[0].AutoGen.Delimiter != "" {
+		t.Fatalf("unknown generated delimiter was not migrated: %#v %v", preset, err)
+	}
+
+	_, err = normalizeCollectionPreset(map[string]any{
+		"paths": []any{map[string]any{
+			"usrGen": map[string]any{
+				"folder": ".", "grepKeys": "signal.*",
+				"delimiter": "user-unsupported-value",
+			},
+			"autoGen": map[string]any{},
+		}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "user-unsupported-value") {
+		t.Fatalf("unsupported user delimiter did not produce a useful error: %v", err)
 	}
 }
 

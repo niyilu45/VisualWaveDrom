@@ -28,7 +28,7 @@ import (
 const (
 	appID                      = "VisualWaveDrom"
 	protocolScheme             = "visualwavedrom"
-	serviceAPIVersion          = 6
+	serviceAPIVersion          = 11
 	defaultPort                = 4173
 	maxWaveLibraryRequestBytes = 256 * 1024 * 1024
 	importMaxUploadBytes       = 128 * 1024 * 1024
@@ -934,6 +934,26 @@ func (s *service) handleImportAnalyze(writer http.ResponseWriter, request *http.
 		}
 	}
 	result := s.imports.analyzeRequest(payload)
+	importMode := strings.ToLower(strings.TrimSpace(stringValue(payload["importMode"])))
+	if importMode == "table" {
+		headerRow := intValue(payload["headerRow"], 1)
+		if headerRow < 1 {
+			sendJSON(writer, 400, map[string]any{"error": "table header row must be at least 1"})
+			return
+		}
+		if analysis, ok := result["analysis"].(map[string]any); ok {
+			analysis["hasIndex"] = false
+			analysis["explicitIndex"] = false
+			analysis["recommendedParser"] = "parse_table_data"
+			analysis["reason"] = fmt.Sprintf(
+				"表格模式；第 %d 行作为标题栏；每列标题作为信号名；数据从 0 自动编号",
+				headerRow,
+			)
+		}
+		result["recommended"] = nil
+		result["importMode"] = "table"
+		result["headerRow"] = headerRow
+	}
 	result["ok"] = true
 	result["python"] = s.imports.pythonRuntime()
 	if sourceFile != nil {
@@ -956,13 +976,21 @@ func (s *service) handleImportPreview(writer http.ResponseWriter, request *http.
 			sendJSON(writer, 400, map[string]any{"error": err.Error()})
 			return
 		}
-		result, err := s.imports.runLocalFile(
-			stringValue(payload["schemeId"]),
-			intValue(payload["mappingIndex"], -1),
-			stringValue(payload["signalName"]),
-			sourcePath,
-			boolValue(payload["hasIndex"], false),
-		)
+		var result map[string]any
+		if strings.EqualFold(stringValue(payload["importMode"]), "table") {
+			result, err = s.imports.runTableLocalFile(
+				sourcePath,
+				intValue(payload["headerRow"], 1),
+			)
+		} else {
+			result, err = s.imports.runLocalFile(
+				stringValue(payload["schemeId"]),
+				intValue(payload["mappingIndex"], -1),
+				stringValue(payload["signalName"]),
+				sourcePath,
+				boolValue(payload["hasIndex"], false),
+			)
+		}
 		if err != nil {
 			sendJSON(writer, 400, map[string]any{"error": err.Error()})
 			return
@@ -979,10 +1007,17 @@ func (s *service) handleImportPreview(writer http.ResponseWriter, request *http.
 		return
 	}
 	mappingIndex, _ := strconv.Atoi(request.URL.Query().Get("mappingIndex"))
-	result, err := s.imports.runUploaded(
-		request.URL.Query().Get("schemeId"), mappingIndex,
-		request.URL.Query().Get("signalName"), request.URL.Query().Get("fileName"), data,
-		boolValue(request.URL.Query().Get("hasIndex"), false))
+	var result map[string]any
+	if strings.EqualFold(request.URL.Query().Get("importMode"), "table") {
+		result, err = s.imports.runTableUploaded(
+			request.URL.Query().Get("fileName"), data,
+			intValue(request.URL.Query().Get("headerRow"), 1))
+	} else {
+		result, err = s.imports.runUploaded(
+			request.URL.Query().Get("schemeId"), mappingIndex,
+			request.URL.Query().Get("signalName"), request.URL.Query().Get("fileName"), data,
+			boolValue(request.URL.Query().Get("hasIndex"), false))
+	}
 	if err != nil {
 		sendJSON(writer, 400, map[string]any{"error": err.Error()})
 		return

@@ -4,10 +4,12 @@
   const EMPTY_PRESET = {
     paths: [
       {
-        folder: '.',
-        grepKeys: '^signal\\.txt$',
-        hasSeq: false,
-        name: 'signal'
+        usrGen: {
+          folder: '.',
+          grepKeys: '^signal\\.txt$',
+          name: 'signal'
+        },
+        autoGen: {}
       }
     ]
   };
@@ -15,6 +17,7 @@
   const JSON_ERROR_GUTTER = 'vwd-collection-json-error-gutter';
   const SEARCH_GUTTER = 'vwd-collection-search-gutter';
   const LAST_STATE_STORAGE_KEY = 'visualwavedrom.importCollection.lastState.v1';
+  const DEFAULT_PRESET_SEARCH_PATH = 'import/SchemeCollection';
   const VARIABLE_NAME_PATTERN = /^[\p{L}_][\p{L}\p{N}_.-]*$/u;
   const PYTHON_VARIABLE_NAME_PATTERN = /^[\p{L}_][\p{L}\p{N}_]*$/u;
   const LEGACY_TEMPLATE_VARIABLE_PATTERN =
@@ -62,14 +65,41 @@
     return names;
   }
 
+  function columnFilterError(value) {
+    const expression = String(value || '').trim();
+    if (!expression) return '';
+    const groups = expression.split('||');
+    for (let groupIndex = 0; groupIndex < groups.length; groupIndex += 1) {
+      if (!groups[groupIndex].trim()) return '“||”两侧都需要条件';
+      const clauses = groups[groupIndex].split('&&');
+      for (let clauseIndex = 0; clauseIndex < clauses.length; clauseIndex += 1) {
+        const clause = clauses[clauseIndex].trim();
+        if (!clause) return '“&&”两侧都需要条件';
+        const match = clause.match(/^(==|!=|>=|<=|>|<|=)?\s*(.*)$/s);
+        const operator = match && match[1] ? match[1] : '==';
+        const operand = match ? match[2].trim() : '';
+        if (!operand) return '比较值不能为空';
+        if ((operator === '>' || operator === '>=' || operator === '<' || operator === '<=')
+            && !Number.isFinite(Number(operand))) {
+          return '大小比较的值必须是数字';
+        }
+      }
+    }
+    return '';
+  }
+
   function create(options) {
     const settings = options || {};
     const modal = document.getElementById('wave-collection-import-modal');
     if (!modal) return null;
 
     const rootPathInput = document.getElementById('wave-collection-root-path');
+    const presetSearchPathInput = document.getElementById('wave-collection-preset-search-path');
     const presetPathInput = document.getElementById('wave-collection-preset-path');
     const pickRootButton = document.getElementById('wave-collection-pick-root');
+    const pickPresetRootButton = document.getElementById('wave-collection-pick-preset-root');
+    const scanPresetsButton = document.getElementById('wave-collection-scan-presets');
+    const presetDiscoveryHost = document.getElementById('wave-collection-preset-discovery');
     const pickPresetButton = document.getElementById('wave-collection-pick-preset');
     const loadPresetButton = document.getElementById('wave-collection-load-preset');
     const presetFileInput = document.getElementById('wave-collection-preset-file');
@@ -97,6 +127,8 @@
     let presetResizeObserver = null;
     let syncingPresetCodeEditor = false;
     let selectedBrowserPresetFile = null;
+    let selectedDiscoveredPreset = null;
+    let discoveredPresets = [];
     let rememberStateTimer = 0;
     const variableValues = new Map();
 
@@ -380,10 +412,10 @@
         let state = 'missing';
         let symbol = '!';
         let label = '未搜索到文件';
-        if (entry.status === 'duplicate-name') {
+        if (entry.status === 'duplicate-name' || entry.status === 'config-error') {
           state = 'duplicate';
           symbol = '×';
-          label = entry.message || 'name 重复';
+          label = entry.message || (entry.status === 'duplicate-name' ? 'name 重复' : '配置错误');
         } else if (matches.length === 1) {
           state = 'matched';
           symbol = '✓';
@@ -410,8 +442,9 @@
       });
     }
 
-    function setPresetEditorValue(value) {
+    function setPresetEditorValue(value, options) {
       const text = String(value == null ? '' : value);
+      const keepHistory = !!(options && options.keepHistory);
       clearSearchMarkers();
       clearJsonErrorMarker();
       presetEditor.value = text;
@@ -419,7 +452,7 @@
       syncingPresetCodeEditor = true;
       try {
         presetCodeEditor.setValue(text);
-        presetCodeEditor.clearHistory();
+        if (!keepHistory) presetCodeEditor.clearHistory();
       } finally {
         syncingPresetCodeEditor = false;
       }
@@ -433,8 +466,10 @@
         if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
         return {
           rootPath: String(value.rootPath || ''),
+          presetSearchPath: String(value.presetSearchPath || DEFAULT_PRESET_SEARCH_PATH),
           presetPath: String(value.presetPath || ''),
           originalPresetPath: String(value.originalPresetPath || ''),
+          discoveredPresetRelativePath: String(value.discoveredPresetRelativePath || ''),
           presetText: typeof value.presetText === 'string' ? value.presetText : '',
           variables: value.variables && typeof value.variables === 'object'
             && !Array.isArray(value.variables) ? value.variables : {}
@@ -455,8 +490,12 @@
       });
       const state = {
         rootPath: String(rootPathInput.value || '').trim(),
+        presetSearchPath: String(presetSearchPathInput.value || '').trim(),
         presetPath: String(presetPathInput.value || '').trim(),
         originalPresetPath: String(originalPresetPath || '').trim(),
+        discoveredPresetRelativePath: selectedDiscoveredPreset
+          ? selectedDiscoveredPreset.relativePath
+          : '',
         presetText: getPresetEditorValue(),
         variables
       };
@@ -494,8 +533,15 @@
         return false;
       }
       rootPathInput.value = state.rootPath;
+      presetSearchPathInput.value = state.presetSearchPath || DEFAULT_PRESET_SEARCH_PATH;
       presetPathInput.value = state.presetPath;
       originalPresetPath = state.originalPresetPath;
+      selectedDiscoveredPreset = state.discoveredPresetRelativePath
+        ? {
+          searchPath: presetSearchPathInput.value,
+          relativePath: state.discoveredPresetRelativePath
+        }
+        : null;
       if (selectedBrowserPresetFile
           && selectedBrowserPresetFile.name !== state.presetPath) {
         selectedBrowserPresetFile = null;
@@ -616,6 +662,61 @@
       resultSummary.textContent = '';
     }
 
+    function formatPresetSize(bytes) {
+      const size = Math.max(0, Number(bytes || 0));
+      if (size < 1024) return size + ' B';
+      return Math.max(1, Math.round(size / 1024)) + ' KB';
+    }
+
+    function updateDiscoveredPresetSelection() {
+      presetDiscoveryHost.querySelectorAll('[data-preset-relative-path]').forEach((button) => {
+        const selected = !!selectedDiscoveredPreset
+          && button.dataset.presetRelativePath === selectedDiscoveredPreset.relativePath;
+        button.classList.toggle('is-selected', selected);
+        button.setAttribute('aria-pressed', String(selected));
+      });
+    }
+
+    function clearPresetDiscovery() {
+      discoveredPresets = [];
+      presetDiscoveryHost.innerHTML = '';
+      presetDiscoveryHost.hidden = true;
+    }
+
+    function renderPresetDiscovery(payload) {
+      discoveredPresets = Array.isArray(payload && payload.entries) ? payload.entries : [];
+      presetDiscoveryHost.innerHTML = '';
+      presetDiscoveryHost.hidden = false;
+      if (!discoveredPresets.length) {
+        const empty = document.createElement('div');
+        empty.className = 'wave-collection-preset-discovery-empty';
+        empty.textContent = '没有找到可用的批量导入预设';
+        presetDiscoveryHost.appendChild(empty);
+        return;
+      }
+      discoveredPresets.forEach((entry) => {
+        const relativePath = String(entry.relativePath || '');
+        if (!relativePath) return;
+        const option = document.createElement('button');
+        option.type = 'button';
+        option.className = 'wave-collection-preset-option';
+        option.dataset.presetRelativePath = relativePath;
+        option.setAttribute('aria-pressed', 'false');
+        option.setAttribute('aria-label', '载入预设 ' + relativePath);
+        const path = document.createElement('code');
+        path.textContent = relativePath;
+        const meta = document.createElement('small');
+        meta.textContent = formatPresetSize(entry.size);
+        option.append(path, meta);
+        option.addEventListener('click', () => {
+          debug({ phase: 'preset-discovered-option-click', relativePath, busy });
+          void loadDiscoveredPreset(entry);
+        });
+        presetDiscoveryHost.appendChild(option);
+      });
+      updateDiscoveredPresetSelection();
+    }
+
     function collectVariableValues() {
       const values = {};
       variablesHost.querySelectorAll('input[data-variable-name]').forEach((input) => {
@@ -671,6 +772,122 @@
       });
     }
 
+    function normalizeColumnRules(value, renames, fieldPath) {
+      if (value === undefined) return [];
+      if (!Array.isArray(value)) {
+        throw validationError(fieldPath + '.columns 必须是列表', fieldPath + '.columns');
+      }
+      const renameMap = renames && typeof renames === 'object' && !Array.isArray(renames)
+        ? renames
+        : {};
+      const seen = new Set();
+      return value.map((rawColumn, index) => {
+        const path = fieldPath + '.columns[' + index + ']';
+        let source = '';
+        let enabled = true;
+        let name = '';
+        let filter = '';
+        if (typeof rawColumn === 'string') {
+          source = rawColumn.trim();
+          name = typeof renameMap[source] === 'string' ? renameMap[source].trim() : source;
+        } else if (rawColumn && typeof rawColumn === 'object' && !Array.isArray(rawColumn)) {
+          source = typeof rawColumn.source === 'string' ? rawColumn.source.trim() : '';
+          if (rawColumn.enabled !== undefined && typeof rawColumn.enabled !== 'boolean') {
+            throw validationError(path + '.enabled 必须是布尔值', path + '.enabled');
+          }
+          enabled = rawColumn.enabled !== false;
+          if (rawColumn.name !== undefined && typeof rawColumn.name !== 'string') {
+            throw validationError(path + '.name 必须是字符串', path + '.name');
+          }
+          name = typeof rawColumn.name === 'string' ? rawColumn.name.trim() : source;
+          if (rawColumn.filter !== undefined && typeof rawColumn.filter !== 'string') {
+            throw validationError(path + '.filter 必须是字符串', path + '.filter');
+          }
+          filter = typeof rawColumn.filter === 'string' ? rawColumn.filter.trim() : '';
+        } else {
+          throw validationError(path + ' 必须是字符串或字典', path);
+        }
+        if (!source) throw validationError(path + '.source 不能为空', path + '.source');
+        if (seen.has(source)) {
+          throw validationError(fieldPath + '.columns 中 source 不能重复', path + '.source');
+        }
+        seen.add(source);
+        const filterError = columnFilterError(filter);
+        if (filterError) {
+          throw validationError(path + '.filter：' + filterError, path + '.filter');
+        }
+        const normalized = { source, enabled, name: name || source };
+        if (filter) normalized.filter = filter;
+        return normalized;
+      });
+    }
+
+    function normalizeRuleConfig(value, fieldPath) {
+      if (value === undefined || value === null) return {};
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        throw validationError(fieldPath + ' 必须是字典', fieldPath);
+      }
+      const config = {};
+      ['folder', 'grepKeys', 'name', 'importMode', 'delimiter', 'parser', 'schemaHash']
+        .forEach((key) => {
+          if (value[key] === undefined) return;
+          if (typeof value[key] !== 'string') {
+            throw validationError(fieldPath + '.' + key + ' 必须是字符串', fieldPath + '.' + key);
+          }
+          const text = value[key].trim();
+          if (text) config[key] = text;
+        });
+      if (config.importMode && config.importMode !== 'single' && config.importMode !== 'table') {
+        throw validationError(fieldPath + '.importMode 必须是 single 或 table', fieldPath + '.importMode');
+      }
+      if (value.headerRow !== undefined) {
+        if (!Number.isInteger(value.headerRow) || value.headerRow < 0) {
+          throw validationError(fieldPath + '.headerRow 必须是非负整数', fieldPath + '.headerRow');
+        }
+        if (value.headerRow) config.headerRow = value.headerRow;
+      }
+      if (value.hasSeq !== undefined) {
+        if (typeof value.hasSeq !== 'boolean') {
+          throw validationError(fieldPath + '.hasSeq 必须是布尔值', fieldPath + '.hasSeq');
+        }
+        config.hasSeq = value.hasSeq;
+      }
+      const columns = normalizeColumnRules(value.columns, value.renames, fieldPath);
+      if (columns.length) config.columns = columns;
+      return config;
+    }
+
+    function normalizePresetPath(entry, index) {
+      const path = 'paths[' + index + ']';
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+        throw validationError(path + ' 必须是字典', path);
+      }
+      let usrGen;
+      let autoGen;
+      if (entry.usrGen !== undefined || entry.autoGen !== undefined) {
+        usrGen = normalizeRuleConfig(entry.usrGen, path + '.usrGen');
+        autoGen = normalizeRuleConfig(entry.autoGen, path + '.autoGen');
+      } else {
+        usrGen = normalizeRuleConfig({
+          folder: entry.folder,
+          grepKeys: entry.grepKeys,
+          name: entry.name
+        }, path + '.usrGen');
+        autoGen = normalizeRuleConfig({
+          importMode: 'single',
+          hasSeq: entry.hasSeq
+        }, path + '.autoGen');
+      }
+      if (!usrGen.folder) usrGen.folder = '.';
+      if (!usrGen.grepKeys) {
+        throw validationError(
+          path + '.usrGen.grepKeys 必须是非空正则字符串',
+          path + '.usrGen.grepKeys'
+        );
+      }
+      return { usrGen, autoGen };
+    }
+
     function validatePresetShape(value) {
       if (!value || typeof value !== 'object' || Array.isArray(value)) {
         throw validationError('预设顶层必须是 JSON 对象', '');
@@ -695,38 +912,11 @@
         }
         names.add(normalizedName);
       });
-      value.paths.forEach((entry, index) => {
-        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
-          throw validationError('paths[' + index + '] 必须是字典', 'paths[' + index + ']');
-        }
-        if (typeof entry.folder !== 'string') {
-          throw validationError(
-            'paths[' + index + '].folder 必须是字符串',
-            'paths[' + index + '].folder'
-          );
-        }
-        if (typeof entry.grepKeys !== 'string' || !entry.grepKeys) {
-          throw validationError(
-            'paths[' + index + '].grepKeys 必须是非空正则字符串',
-            'paths[' + index + '].grepKeys'
-          );
-        }
-        if (typeof entry.hasSeq !== 'boolean') {
-          throw validationError(
-            'paths[' + index + '].hasSeq 必须是布尔值',
-            'paths[' + index + '].hasSeq'
-          );
-        }
-        if (typeof entry.name !== 'string' || !entry.name.trim()) {
-          throw validationError(
-            'paths[' + index + '].name 必须是非空字符串',
-            'paths[' + index + '].name'
-          );
-        }
-        extractTemplateVariables(entry.grepKeys).forEach((name) => names.add(name));
+      const paths = value.paths.map((entry, index) => normalizePresetPath(entry, index));
+      paths.forEach((entry) => {
+        extractTemplateVariables(entry.usrGen.grepKeys).forEach((name) => names.add(name));
       });
-      value.vars = Array.from(names);
-      return value;
+      return { vars: Array.from(names), paths };
     }
 
     function parseEditor(showError) {
@@ -763,6 +953,116 @@
       }
     }
 
+    function adoptGeneratedPreset(value, reason) {
+      const normalized = validatePresetShape(value);
+      parsedPreset = normalized;
+      setPresetEditorValue(JSON.stringify(normalized, null, 2), { keepHistory: true });
+      presetState.textContent = '从 grepKeys 自动识别 ' + normalized.vars.length + ' 个变量，'
+        + normalized.paths.length + ' 条搜索规则；autoGen 已更新';
+      if (searchResult) searchResult.preset = normalized;
+      renderVariables(normalized.vars);
+      renderSearchMarkers(searchResult);
+      scheduleRememberState(reason || 'autogen-updated');
+      updateButtons();
+      return normalized;
+    }
+
+    function syncEntryAutoGen(entry, reason) {
+      if (!parsedPreset || !entry || !parsedPreset.paths[entry.index]) return;
+      const path = parsedPreset.paths[entry.index];
+      const autoGen = Object.assign({}, path.autoGen || {}, {
+        importMode: entry.importMode || 'single',
+        delimiter: entry.delimiter || 'auto',
+        parser: entry.parser || (entry.importMode === 'table'
+          ? 'parse_table_data'
+          : 'parse_single_column'),
+        schemaHash: entry.schemaHash || ''
+      });
+      if (entry.importMode === 'table') {
+        autoGen.headerRow = Math.max(1, Number(entry.headerRow || 1));
+        autoGen.columns = (entry.columns || []).map((column) => {
+          const normalized = {
+            source: String(column.source || ''),
+            enabled: column.enabled !== false,
+            name: String(column.name || column.source || '')
+          };
+          const filter = String(column.filter || '').trim();
+          if (filter) normalized.filter = filter;
+          return normalized;
+        });
+        delete autoGen.hasSeq;
+      } else {
+        autoGen.hasSeq = !!entry.hasSeq;
+        delete autoGen.headerRow;
+        delete autoGen.columns;
+      }
+      Object.keys(autoGen).forEach((key) => {
+        if (autoGen[key] === '') delete autoGen[key];
+      });
+      path.autoGen = autoGen;
+      entry.outputNames = entry.importMode === 'table'
+        ? (entry.columns || [])
+          .filter((column) => column.enabled !== false)
+          .map((column) => String(column.name || column.source || '').trim())
+          .filter(Boolean)
+        : [String(entry.name || '').trim()].filter(Boolean);
+      if (entry.status === 'duplicate-name') {
+        entry.status = Array.isArray(entry.matches) && entry.matches.length > 1
+          ? 'multiple'
+          : 'matched';
+        entry.message = '';
+      }
+      setPresetEditorValue(JSON.stringify(parsedPreset, null, 2), { keepHistory: true });
+      if (searchResult) searchResult.preset = parsedPreset;
+      renderSearchMarkers(searchResult);
+      scheduleRememberState(reason || 'autogen-edited');
+      updateButtons();
+    }
+
+    function collectionSelectionStatus() {
+      const entries = Array.isArray(searchResult && searchResult.entries)
+        ? searchResult.entries
+        : [];
+      const active = entries.filter((entry) =>
+        Array.isArray(entry.matches) && entry.matches.length > 0);
+      const errors = [];
+      const owners = new Map();
+      active.forEach((entry) => {
+        if (entry.status === 'config-error') {
+          errors.push(entry.message || ('第 ' + (entry.index + 1) + ' 条规则配置有误'));
+          return;
+        }
+        (entry.columns || []).forEach((column) => {
+          const filterError = columnFilterError(column.filter);
+          if (filterError) {
+            errors.push('信号 ' + String(column.source || column.name || '')
+              + ' 的过滤条件有误：' + filterError);
+          }
+        });
+        const names = entry.importMode === 'table'
+          ? (entry.columns || [])
+            .filter((column) => column.enabled !== false)
+            .map((column) => String(column.name || column.source || '').trim())
+          : [String(entry.name || '').trim()];
+        if (!names.length || names.some((name) => !name)) {
+          errors.push('第 ' + (entry.index + 1) + ' 条规则至少选择一个有效信号');
+          return;
+        }
+        names.forEach((name) => {
+          if (owners.has(name)) {
+            errors.push('信号名重复：' + name);
+          } else {
+            owners.set(name, entry.index);
+          }
+        });
+      });
+      return {
+        valid: active.length > 0 && errors.length === 0,
+        count: active.length,
+        errors
+      };
+    }
+
     function scheduleEditorParse() {
       clearTimeout(editorParseTimer);
       scheduleRememberState('preset-editor-change');
@@ -776,9 +1076,11 @@
     function updateButtons() {
       collectVariableValues();
       const hasRoot = !!String(rootPathInput.value || '').trim();
+      const hasPresetSearchPath = !!String(presetSearchPathInput.value || '').trim();
       const hasPresetPath = !!String(presetPathInput.value || '').trim();
       const canSearch = !!parsedPreset && hasRoot;
       rootPathInput.disabled = busy;
+      presetSearchPathInput.disabled = busy;
       presetPathInput.disabled = busy;
       presetEditor.disabled = busy;
       if (presetCodeEditor) {
@@ -786,6 +1088,8 @@
         presetCodeEditor.getWrapperElement().setAttribute('aria-disabled', String(busy));
       }
       pickRootButton.disabled = busy;
+      pickPresetRootButton.disabled = busy;
+      scanPresetsButton.disabled = busy || !hasPresetSearchPath;
       pickPresetButton.disabled = busy;
       loadPresetButton.disabled = busy || !hasPresetPath;
       variablesHost.querySelectorAll('input').forEach((input) => {
@@ -794,13 +1098,23 @@
       cancelButton.disabled = busy;
       savePresetButton.disabled = busy || !parsedPreset;
       searchButton.disabled = busy || !canSearch;
-      confirmButton.disabled = busy || !(searchResult && searchResult.ready);
+      const selection = collectionSelectionStatus();
+      confirmButton.disabled = busy || !selection.valid;
+      resultsHost.querySelectorAll('input, button').forEach((control) => {
+        control.disabled = busy;
+      });
+      presetDiscoveryHost.querySelectorAll('button').forEach((control) => {
+        control.disabled = busy;
+      });
     }
 
     function setBusy(nextBusy, action) {
       busy = nextBusy;
       if (!nextBusy) stopProgress();
-      searchButton.textContent = nextBusy && action === 'search' ? '正在搜索…' : '搜索';
+      searchButton.textContent = nextBusy && action === 'search' ? '正在搜索…' : '搜索数据';
+      scanPresetsButton.textContent = nextBusy && action === 'scan-presets'
+        ? '正在搜索…'
+        : '搜索预设';
       confirmButton.textContent = nextBusy && action === 'import' ? '正在导入…' : '确定导入';
       savePresetButton.textContent = nextBusy && action === 'save' ? '正在保存…' : '保存预设';
       updateButtons();
@@ -818,8 +1132,15 @@
             : (entry.status === 'multiple' ? 'is-warning' : 'is-error'));
         const name = document.createElement('div');
         name.className = 'wave-collection-result-name';
-        name.textContent = String(entry.name || '未命名信号')
-          + (entry.hasSeq ? '（含序号）' : '（自动编号）');
+        if (entry.importMode === 'table') {
+          const enabledCount = (entry.columns || [])
+            .filter((column) => column.enabled !== false).length;
+          name.textContent = String(entry.name || '表格文件') + '（表格，已选 '
+            + enabledCount + '/' + (entry.columns || []).length + ' 列）';
+        } else {
+          name.textContent = String(entry.name || '未命名信号')
+            + (entry.hasSeq ? '（含序号）' : '（自动编号）');
+        }
         const path = document.createElement('div');
         path.className = 'wave-collection-result-path';
         if (matches.length === 1) {
@@ -842,11 +1163,261 @@
         if (entry.status === 'matched') state.textContent = '已匹配';
         else if (entry.status === 'multiple') state.textContent = matches.length + ' 个匹配，取第 1 个';
         else if (entry.status === 'duplicate-name') state.textContent = 'name重复';
+        else if (entry.status === 'config-error') state.textContent = '配置错误';
         else if (entry.status === 'folder-missing') state.textContent = '目录不存在，跳过';
         else state.textContent = '未匹配，跳过';
         row.appendChild(name);
         row.appendChild(path);
         row.appendChild(state);
+        if (entry.importMode === 'table' && matches.length) {
+          const config = document.createElement('div');
+          config.className = 'wave-collection-table-config';
+
+          const headerControls = document.createElement('div');
+          headerControls.className = 'wave-collection-table-header';
+          const headerLabel = document.createElement('label');
+          headerLabel.textContent = '标题行';
+          const headerInput = document.createElement('input');
+          headerInput.type = 'number';
+          headerInput.className = 'modal-input wave-collection-header-row';
+          headerInput.min = '1';
+          headerInput.step = '1';
+          headerInput.value = String(Math.max(1, Number(entry.headerRow || 1)));
+          headerInput.setAttribute('aria-label', '表格标题所在行');
+          const applyHeader = document.createElement('button');
+          applyHeader.type = 'button';
+          applyHeader.className = 'modal-btn wave-collection-apply-header';
+          applyHeader.textContent = '应用预览';
+          const apply = () => {
+            const headerRow = Number(headerInput.value);
+            if (!Number.isInteger(headerRow) || headerRow < 1) {
+              setHint('标题行必须是大于或等于 1 的整数', true);
+              headerInput.focus();
+              return;
+            }
+            const invalidColumn = (entry.columns || []).find((column) =>
+              columnFilterError(column.filter));
+            if (invalidColumn) {
+              setHint(
+                '信号 ' + String(invalidColumn.source || '') + ' 的过滤条件有误：'
+                  + columnFilterError(invalidColumn.filter),
+                true
+              );
+              return;
+            }
+            syncEntryAutoGen(entry, 'table-preview-apply');
+            void previewEntryHeader(entry.index, headerRow);
+          };
+          applyHeader.addEventListener('click', apply);
+          headerInput.addEventListener('keydown', (event) => {
+            if (event.key !== 'Enter') return;
+            event.preventDefault();
+            apply();
+          });
+          headerLabel.appendChild(headerInput);
+          headerControls.appendChild(headerLabel);
+          const delimiter = document.createElement('span');
+          delimiter.className = 'wave-collection-table-meta';
+          delimiter.textContent = '分隔方式：' + String(entry.delimiter || '自动');
+          headerControls.appendChild(delimiter);
+          headerControls.appendChild(applyHeader);
+          config.appendChild(headerControls);
+
+          const previewColumns = Array.isArray(entry.previewColumns)
+            ? entry.previewColumns : [];
+          const previewRows = Array.isArray(entry.previewRows)
+            ? entry.previewRows : [];
+          if (previewColumns.length) {
+            const preview = document.createElement('section');
+            preview.className = 'wave-collection-table-preview';
+            preview.setAttribute('aria-label', 'CSV 数据预览');
+            const previewHeading = document.createElement('div');
+            previewHeading.className = 'wave-collection-preview-heading';
+            const previewTitle = document.createElement('strong');
+            previewTitle.textContent = '数据预览';
+            const previewMeta = document.createElement('span');
+            previewMeta.textContent = '前 ' + previewRows.length + ' 行'
+              + (entry.previewTruncated ? '，仅显示前 32 列' : '');
+            previewHeading.appendChild(previewTitle);
+            previewHeading.appendChild(previewMeta);
+            preview.appendChild(previewHeading);
+
+            const previewViewport = document.createElement('div');
+            previewViewport.className = 'wave-collection-preview-viewport';
+            const table = document.createElement('table');
+            const tableHead = document.createElement('thead');
+            const headerRow = document.createElement('tr');
+            previewColumns.forEach((column) => {
+              const cell = document.createElement('th');
+              cell.scope = 'col';
+              cell.textContent = String(column || '');
+              headerRow.appendChild(cell);
+            });
+            tableHead.appendChild(headerRow);
+            table.appendChild(tableHead);
+            const tableBody = document.createElement('tbody');
+            previewRows.forEach((values) => {
+              const dataRow = document.createElement('tr');
+              previewColumns.forEach((column, columnIndex) => {
+                const cell = document.createElement('td');
+                cell.textContent = String((values || [])[columnIndex] || '');
+                dataRow.appendChild(cell);
+              });
+              tableBody.appendChild(dataRow);
+            });
+            table.appendChild(tableBody);
+            previewViewport.appendChild(table);
+            preview.appendChild(previewViewport);
+            config.appendChild(preview);
+          }
+
+          const columnTools = document.createElement('div');
+          columnTools.className = 'wave-collection-column-tools';
+          const filter = document.createElement('input');
+          filter.type = 'search';
+          filter.className = 'modal-input wave-collection-column-filter';
+          filter.placeholder = '筛选列名';
+          filter.setAttribute('aria-label', '筛选表格列');
+          const selectAll = document.createElement('button');
+          selectAll.type = 'button';
+          selectAll.className = 'modal-btn';
+          selectAll.textContent = '全选';
+          const selectNone = document.createElement('button');
+          selectNone.type = 'button';
+          selectNone.className = 'modal-btn';
+          selectNone.textContent = '全不选';
+          columnTools.appendChild(filter);
+          columnTools.appendChild(selectAll);
+          columnTools.appendChild(selectNone);
+          config.appendChild(columnTools);
+
+          const columnsHost = document.createElement('div');
+          columnsHost.className = 'wave-collection-columns';
+          (entry.columns || []).forEach((column) => {
+            const columnRow = document.createElement('label');
+            columnRow.className = 'wave-collection-column';
+            columnRow.dataset.searchText = (String(column.source || '') + ' '
+              + String(column.name || '')).toLowerCase();
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.checked = column.enabled !== false;
+            checkbox.setAttribute('aria-label', '导入列 ' + String(column.source || ''));
+            const source = document.createElement('code');
+            source.textContent = String(column.source || '');
+            const rename = document.createElement('input');
+            rename.type = 'text';
+            rename.className = 'modal-input wave-collection-column-name';
+            rename.value = String(column.name || column.source || '');
+            rename.placeholder = '导入后的信号名';
+            rename.setAttribute('aria-label', String(column.source || '') + ' 导入后的信号名');
+            const condition = document.createElement('input');
+            condition.type = 'text';
+            condition.className = 'modal-input wave-collection-column-condition';
+            condition.value = String(column.filter || '');
+            condition.placeholder = '过滤条件，如 >=1&&<=2';
+            condition.setAttribute('aria-label', String(column.source || '') + ' 的过滤条件');
+            condition.title = '支持 =、!=、>、>=、<、<=，并可用 && 或 || 组合';
+            let renameSyncTimer = 0;
+            let conditionSyncTimer = 0;
+            const updateConditionState = () => {
+              const error = columnFilterError(condition.value);
+              condition.setAttribute('aria-invalid', error ? 'true' : 'false');
+              condition.title = error || '支持 =、!=、>、>=、<、<=，并可用 && 或 || 组合';
+              return error;
+            };
+            checkbox.addEventListener('change', () => {
+              column.enabled = checkbox.checked;
+              syncEntryAutoGen(entry, 'column-toggle');
+              renderSearchResults(payload);
+            });
+            rename.addEventListener('input', () => {
+              column.name = rename.value;
+              clearTimeout(renameSyncTimer);
+              if (!rename.value.trim()) {
+                updateButtons();
+                return;
+              }
+              renameSyncTimer = window.setTimeout(() => {
+                renameSyncTimer = 0;
+                syncEntryAutoGen(entry, 'column-rename-input');
+              }, 180);
+              updateButtons();
+            });
+            rename.addEventListener('change', () => {
+              clearTimeout(renameSyncTimer);
+              renameSyncTimer = 0;
+              column.name = rename.value.trim() || String(column.source || '');
+              syncEntryAutoGen(entry, 'column-rename');
+              renderSearchResults(payload);
+            });
+            condition.addEventListener('input', () => {
+              column.filter = condition.value;
+              clearTimeout(conditionSyncTimer);
+              const error = updateConditionState();
+              if (!error) {
+                conditionSyncTimer = window.setTimeout(() => {
+                  conditionSyncTimer = 0;
+                  syncEntryAutoGen(entry, 'column-filter-input');
+                }, 180);
+              }
+              updateButtons();
+            });
+            condition.addEventListener('change', () => {
+              clearTimeout(conditionSyncTimer);
+              conditionSyncTimer = 0;
+              column.filter = condition.value.trim();
+              condition.value = column.filter;
+              const error = updateConditionState();
+              if (error) {
+                setHint('信号 ' + String(column.source || '') + ' 的过滤条件有误：' + error, true);
+                updateButtons();
+                return;
+              }
+              setHint('', false);
+              syncEntryAutoGen(entry, 'column-filter');
+            });
+            columnRow.appendChild(checkbox);
+            columnRow.appendChild(source);
+            columnRow.appendChild(rename);
+            columnRow.appendChild(condition);
+            columnsHost.appendChild(columnRow);
+          });
+          const filterEmpty = document.createElement('div');
+          filterEmpty.className = 'wave-collection-column-filter-empty';
+          filterEmpty.textContent = '没有匹配的列';
+          filterEmpty.hidden = true;
+          columnsHost.appendChild(filterEmpty);
+          const visibleColumns = () => Array.from(
+            columnsHost.querySelectorAll('.wave-collection-column:not([hidden])')
+          );
+          filter.addEventListener('input', () => {
+            const query = filter.value.trim().toLowerCase();
+            columnsHost.querySelectorAll('.wave-collection-column').forEach((columnRow) => {
+              columnRow.hidden = !!query && !columnRow.dataset.searchText.includes(query);
+            });
+            filterEmpty.hidden = visibleColumns().length > 0;
+          });
+          filter.addEventListener('keydown', (event) => {
+            event.stopPropagation();
+            if (event.key === 'Enter') event.preventDefault();
+          });
+          const setVisibleSelection = (enabled) => {
+            visibleColumns().forEach((columnRow) => {
+              const checkbox = columnRow.querySelector('input[type="checkbox"]');
+              if (checkbox) checkbox.checked = enabled;
+            });
+            (entry.columns || []).forEach((column, index) => {
+              const columnRow = columnsHost.children[index];
+              if (columnRow && !columnRow.hidden) column.enabled = enabled;
+            });
+            syncEntryAutoGen(entry, enabled ? 'columns-select-all' : 'columns-select-none');
+            renderSearchResults(payload);
+          };
+          selectAll.addEventListener('click', () => setVisibleSelection(true));
+          selectNone.addEventListener('click', () => setVisibleSelection(false));
+          config.appendChild(columnsHost);
+          row.appendChild(config);
+        }
         resultsHost.appendChild(row);
       });
       if (!entries.length) setEmptyResults('预设中没有搜索规则');
@@ -854,13 +1425,48 @@
       const multipleCount = entries.filter((entry) => entry.status === 'multiple').length;
       const skippedCount = entries.filter((entry) =>
         entry.status === 'missing' || entry.status === 'folder-missing').length;
-      resultSummary.textContent = payload.ready
-        ? ('已选择 ' + Number(payload.resultCount || 0) + ' 个文件，可以导入'
+      const selection = collectionSelectionStatus();
+      payload.ready = selection.valid;
+      resultSummary.textContent = selection.valid
+        ? ('已选择 ' + selection.count + ' 个文件，可以导入'
           + (skippedCount ? '；跳过 ' + skippedCount + ' 条未匹配规则' : '')
           + (multipleCount ? '；' + multipleCount + ' 条规则默认取第一个' : ''))
-        : (Number(payload.resultCount || 0) > 0
-          ? '存在重复信号名，请修改后重新搜索'
+        : (selection.count > 0
+          ? (selection.errors[0] || '请检查导入配置')
           : '没有找到可导入的文件');
+      updateButtons();
+    }
+
+    async function previewEntryHeader(entryIndex, headerRow) {
+      if (busy || !searchResult || !parsedPreset) return;
+      const variables = collectVariableValues().values;
+      setBusy(true, 'preview');
+      startProgress('正在应用标题行和列筛选条件…');
+      try {
+        const payload = await post('preview', {
+          rootPath: String(rootPathInput.value || '').trim(),
+          preset: parsedPreset,
+          variables,
+          searchToken: searchResult.searchToken || '',
+          index: entryIndex,
+          headerRow
+        });
+        const normalized = adoptGeneratedPreset(payload.preset, 'header-row-preview');
+        const position = searchResult.entries.findIndex((entry) => entry.index === entryIndex);
+        if (position >= 0) searchResult.entries[position] = payload.entry;
+        searchResult.preset = normalized;
+        renderSearchResults(searchResult);
+        setHint('已更新标题、列配置和筛选后的数据预览', false);
+        debug({ phase: 'table-preview-complete', entryIndex, headerRow });
+      } catch (error) {
+        setHint(error.message || String(error), true);
+        debug({
+          phase: 'table-preview-error', entryIndex, headerRow,
+          message: error.message || String(error)
+        });
+      } finally {
+        setBusy(false, '');
+      }
     }
 
     async function pickPath(kind, initialPath) {
@@ -875,6 +1481,16 @@
     async function loadPreset(pathValue) {
       const path = String(pathValue || '').trim();
       if (!path || busy) return;
+      if (selectedDiscoveredPreset
+          && path === selectedDiscoveredPreset.relativePath
+          && String(presetSearchPathInput.value || '').trim()
+            === selectedDiscoveredPreset.searchPath) {
+        const entry = discoveredPresets.find((item) => (
+          String(item.relativePath || '') === selectedDiscoveredPreset.relativePath
+        )) || { relativePath: selectedDiscoveredPreset.relativePath };
+        await loadDiscoveredPreset(entry);
+        return;
+      }
       if (selectedBrowserPresetFile && path === selectedBrowserPresetFile.name) {
         await loadBrowserPreset(selectedBrowserPresetFile);
         return;
@@ -886,6 +1502,8 @@
       try {
         const payload = await post('load', { presetPath: path });
         selectedBrowserPresetFile = null;
+        selectedDiscoveredPreset = null;
+        updateDiscoveredPresetSelection();
         originalPresetPath = String(payload.presetPath || path);
         presetPathInput.value = originalPresetPath;
         setPresetEditorValue(JSON.stringify(payload.preset || EMPTY_PRESET, null, 2));
@@ -911,6 +1529,51 @@
       }
     }
 
+    async function loadDiscoveredPreset(entry) {
+      const searchPath = String(presetSearchPathInput.value || '').trim();
+      const relativePath = String(entry && entry.relativePath || '').trim();
+      if (!searchPath || !relativePath || busy) return;
+      setBusy(true, 'load');
+      startProgress('正在读取搜索到的预设…');
+      const startedAt = progressStartedAt;
+      debug({ phase: 'preset-discovered-load-start', relativePath });
+      try {
+        const payload = await post('load-discovered', { searchPath, relativePath });
+        selectedBrowserPresetFile = null;
+        selectedDiscoveredPreset = {
+          searchPath,
+          relativePath: String(payload.relativePath || relativePath)
+        };
+        originalPresetPath = String(payload.presetPath || '');
+        presetPathInput.value = selectedDiscoveredPreset.relativePath;
+        setPresetEditorValue(JSON.stringify(payload.preset || EMPTY_PRESET, null, 2));
+        variableValues.clear();
+        parsedPreset = null;
+        parseEditor(true);
+        invalidateSearch('preset-discovered-loaded');
+        updateDiscoveredPresetSelection();
+        rememberState('preset-discovered-loaded');
+        setHint('已读取预设：' + selectedDiscoveredPreset.relativePath, false);
+        debug({
+          phase: 'preset-discovered-load-complete',
+          relativePath: selectedDiscoveredPreset.relativePath,
+          variableCount: parsedPreset ? parsedPreset.vars.length : 0,
+          pathCount: parsedPreset ? parsedPreset.paths.length : 0,
+          durationMs: Math.round(progressNow() - startedAt)
+        });
+      } catch (error) {
+        setHint(error.message || String(error), true);
+        status(false, '读取预设集合失败：' + (error.message || String(error)));
+        debug({
+          phase: 'preset-discovered-load-error',
+          relativePath,
+          message: error.message || String(error)
+        });
+      } finally {
+        setBusy(false, '');
+      }
+    }
+
     async function loadBrowserPreset(file) {
       if (!file || busy) return;
       setBusy(true, 'load');
@@ -928,6 +1591,8 @@
         const text = String(await file.text()).replace(/^\uFEFF/, '');
         const preset = validatePresetShape(JSON.parse(text));
         selectedBrowserPresetFile = file;
+        selectedDiscoveredPreset = null;
+        updateDiscoveredPresetSelection();
         originalPresetPath = '';
         presetPathInput.value = file.name;
         setPresetEditorValue(JSON.stringify(preset, null, 2));
@@ -975,6 +1640,68 @@
       }
     }
 
+    async function choosePresetRoot() {
+      if (busy) return;
+      setBusy(true, 'pick');
+      try {
+        const selected = await pickPath('folder', presetSearchPathInput.value);
+        if (selected) {
+          presetSearchPathInput.value = selected;
+          selectedDiscoveredPreset = null;
+          clearPresetDiscovery();
+          rememberState('preset-search-root-selected');
+        }
+      } catch (error) {
+        setHint((error.message || String(error)) + '；也可以直接粘贴搜索目录', true);
+      } finally {
+        setBusy(false, '');
+      }
+    }
+
+    async function scanPresets() {
+      const searchPath = String(presetSearchPathInput.value || '').trim();
+      if (!searchPath || busy) {
+        if (!searchPath) setHint('请先设置预设搜索目录', true);
+        return;
+      }
+      setBusy(true, 'scan-presets');
+      startProgress('正在递归搜索批量导入预设…');
+      const startedAt = progressStartedAt;
+      presetDiscoveryHost.hidden = false;
+      presetDiscoveryHost.innerHTML = '';
+      const loading = document.createElement('div');
+      loading.className = 'wave-collection-preset-discovery-empty';
+      loading.textContent = '正在搜索预设…';
+      presetDiscoveryHost.appendChild(loading);
+      debug({ phase: 'preset-scan-start', searchPath });
+      try {
+        const payload = await post('scan-presets', { searchPath });
+        selectedDiscoveredPreset = null;
+        renderPresetDiscovery(payload);
+        rememberState('preset-scan-complete');
+        const resultCount = Number(payload.resultCount || 0);
+        const details = '扫描 ' + Number(payload.visitedFiles || 0) + ' 个文件，找到 '
+          + resultCount + ' 个预设，耗时 '
+          + Number(payload.durationMs || Math.round(progressNow() - startedAt)) + ' ms';
+        setHint(details + (payload.truncated ? '；结果已达到显示上限' : ''), false);
+        debug({
+          phase: 'preset-scan-complete',
+          resultCount,
+          visitedFiles: Number(payload.visitedFiles || 0),
+          skippedFiles: Number(payload.skippedFiles || 0),
+          truncated: !!payload.truncated,
+          durationMs: Number(payload.durationMs || Math.round(progressNow() - startedAt))
+        });
+      } catch (error) {
+        clearPresetDiscovery();
+        setHint(error.message || String(error), true);
+        status(false, '搜索预设失败：' + (error.message || String(error)));
+        debug({ phase: 'preset-scan-error', message: error.message || String(error) });
+      } finally {
+        setBusy(false, '');
+      }
+    }
+
     async function choosePreset() {
       if (busy || !presetFileInput) return;
       presetFileInput.value = '';
@@ -998,6 +1725,8 @@
           preset
         });
         originalPresetPath = String(payload.presetPath || selected);
+        selectedDiscoveredPreset = null;
+        updateDiscoveredPresetSelection();
         presetPathInput.value = originalPresetPath;
         setPresetEditorValue(JSON.stringify(payload.preset || preset, null, 2));
         parseEditor(false);
@@ -1041,6 +1770,9 @@
       try {
         const payload = await post('search', { rootPath, preset, variables });
         searchResult = payload;
+        if (payload.preset) {
+          adoptGeneratedPreset(payload.preset, 'search-autogen');
+        }
         renderSearchResults(payload);
         const searchDetails = '扫描 ' + Number(payload.visitedFiles || 0)
           + ' 个文件、' + Number(payload.scanCount || 0) + ' 个目录根，耗时 '
@@ -1084,7 +1816,12 @@
     }
 
     async function confirmImport() {
-      if (busy || !(searchResult && searchResult.ready)) return;
+      if (busy || !searchResult) return;
+      const selection = collectionSelectionStatus();
+      if (!selection.valid) {
+        setHint(selection.errors[0] || '请先完成表格列选择', true);
+        return;
+      }
       const preset = parseEditor(true);
       if (!preset) return;
       let variables;
@@ -1162,12 +1899,15 @@
       busy = false;
       parsedPreset = null;
       searchResult = null;
+      clearPresetDiscovery();
       const restored = restoreRememberedState();
       if (!restored) {
         originalPresetPath = '';
         selectedBrowserPresetFile = null;
+        selectedDiscoveredPreset = null;
         variableValues.clear();
         rootPathInput.value = '';
+        presetSearchPathInput.value = DEFAULT_PRESET_SEARCH_PATH;
         presetPathInput.value = '';
         setPresetEditorValue(JSON.stringify(EMPTY_PRESET, null, 2));
       }
@@ -1200,6 +1940,8 @@
     }
 
     pickRootButton.addEventListener('click', () => { void chooseRoot(); });
+    pickPresetRootButton.addEventListener('click', () => { void choosePresetRoot(); });
+    scanPresetsButton.addEventListener('click', () => { void scanPresets(); });
     pickPresetButton.addEventListener('click', () => { void choosePreset(); });
     presetFileInput.addEventListener('change', () => {
       const file = presetFileInput.files && presetFileInput.files[0];
@@ -1215,8 +1957,21 @@
       invalidateSearch('root-path-change');
       scheduleRememberState('root-path-change');
     });
+    presetSearchPathInput.addEventListener('input', () => {
+      selectedDiscoveredPreset = null;
+      clearPresetDiscovery();
+      scheduleRememberState('preset-search-path-change');
+      updateButtons();
+    });
+    presetSearchPathInput.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' || busy) return;
+      event.preventDefault();
+      void scanPresets();
+    });
     presetPathInput.addEventListener('input', () => {
       selectedBrowserPresetFile = null;
+      selectedDiscoveredPreset = null;
+      updateDiscoveredPresetSelection();
       scheduleRememberState('preset-path-change');
       updateButtons();
     });
@@ -1228,8 +1983,16 @@
     modal.addEventListener('click', (event) => {
       if (event.target === modal) close();
     });
+    modal.addEventListener('keydown', (event) => {
+      if (event.target && event.target.closest
+          && event.target.closest('input, textarea, select, [contenteditable="true"]')) {
+        event.stopPropagation();
+      }
+    });
     document.addEventListener('keydown', (event) => {
       if (event.key === 'Escape' && !modal.hidden) {
+        const target = event.target && event.target.closest ? event.target : null;
+        if (target && target.matches('.wave-collection-column-filter') && target.value) return;
         event.preventDefault();
         close();
       }

@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260731-scope-v16';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260802-analog-unknown-v3';
   const DEFAULT_ROW_HEIGHT = 42;
   const MIN_ANALOG_ROW_HEIGHT = 28;
   const MAX_ANALOG_ROW_HEIGHT = 480;
@@ -32,9 +32,20 @@
     { name: '浅灰色', value: '#eef0f2' }
   ];
   const COLORS = COLOR_PRESETS.map((preset) => preset.value);
+  const DISPLAY_MODE_LABELS = {
+    digital: '数字',
+    bus: '总线',
+    analog: '模拟'
+  };
 
   function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
+  }
+
+  function finiteScopeNumber(value) {
+    if (value == null || (typeof value === 'string' && !value.trim())) return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
   }
 
   function initialTargetPointCount(totalColumns) {
@@ -247,6 +258,8 @@
       this.analogFormats = {};
       this.rowStyles = {};
       this.rowHeights = [];
+      this.signalNames = [];
+      this.signalNameEditor = null;
       this.rowOffsets = [0];
       this.windowData = null;
       this.simplified = null;
@@ -285,6 +298,8 @@
       this.presentationDraftDirty = false;
       this.dataDraftDirty = false;
       this.saveInFlight = false;
+      this.displayControlRow = null;
+      this.displayPopoverAnchor = null;
       this.styleControlRow = null;
       this.stylePopoverAnchor = null;
       this.columnBackgroundPopoverAnchor = null;
@@ -311,6 +326,10 @@
         throw new Error('指定的波形图不存在或尚未载入');
       }
       this.meta = await this.worker.call('prepare', { content: this.document.content });
+      this.signalNames = this.meta.rows.map((row) => String(
+        row.sourceName == null ? row.name || '' : row.sourceName
+      ));
+      this.syncSignalNameMetadata();
       this.meta.rows.forEach((row) => {
         this.modes[row.index] = row.mode;
         this.analogFormats[row.index] = normalizeAnalogFormat(
@@ -395,40 +414,15 @@
             <button type="button" class="scope-cursor-choice active" id="scope-cursor-a" aria-pressed="true">A</button>
             <button type="button" class="scope-cursor-choice" id="scope-cursor-b" aria-pressed="false">B</button>
             <span class="scope-cursor-signal" id="scope-cursor-signal"></span>
-            <span class="scope-toolbar-label">边沿</span>
-            <button type="button" class="scope-icon-btn scope-small-icon" id="scope-cursor-prev-edge" title="跳到上一个边沿" aria-label="跳到上一个边沿">◀</button>
-            <button type="button" class="scope-icon-btn scope-small-icon" id="scope-cursor-next-edge" title="跳到下一个边沿" aria-label="跳到下一个边沿">▶</button>
-            <label>值
-              <input type="text" id="scope-cursor-value" aria-label="游标目标值">
+            <label>跳转
+              <input type="text" id="scope-cursor-jump" placeholder="1 或 &gt;=10"
+                  aria-label="游标跳转值或条件"
+                  title="留空跳到任意变化边沿；无比较符时按相等处理；支持 ==、!=、&gt;、&gt;=、&lt;、&lt;=、&amp;&amp;、||">
             </label>
-            <button type="button" class="scope-icon-btn scope-small-icon" id="scope-cursor-prev-value" title="跳到上一个指定值" aria-label="跳到上一个指定值">◀</button>
-            <button type="button" class="scope-icon-btn scope-small-icon" id="scope-cursor-next-value" title="跳到下一个指定值" aria-label="跳到下一个指定值">▶</button>
-            <label>条件
-              <input type="text" id="scope-cursor-condition" placeholder="&gt;=10 &amp;&amp; &lt;20"
-                  aria-label="游标跳转条件" title="支持 ==、!=、&gt;、&gt;=、&lt;、&lt;=、&amp;&amp;、||">
-            </label>
-            <button type="button" class="scope-icon-btn scope-small-icon" id="scope-cursor-prev-condition"
-                title="跳到上一个条件由假变真的边沿" aria-label="上一个条件成立边沿">◀</button>
-            <button type="button" class="scope-icon-btn scope-small-icon" id="scope-cursor-next-condition"
-                title="跳到下一个条件由假变真的边沿" aria-label="下一个条件成立边沿">▶</button>
-          </div>
-          <div class="scope-toolbar-group scope-analog-controls" aria-label="模拟波形数据解释">
-            <span class="scope-toolbar-label">模拟解析</span>
-            <label>类型
-              <select id="scope-analog-type" aria-label="模拟波形数据类型">
-                <option value="unsigned">无符号整数</option>
-                <option value="signed">有符号整数</option>
-                <option value="ufixed">无符号定点</option>
-                <option value="sfixed">有符号定点</option>
-                <option value="float">浮点数</option>
-              </select>
-            </label>
-            <label>位宽
-              <input type="number" id="scope-analog-width" min="1" max="64" step="1" value="32">
-            </label>
-            <label>小数位
-              <input type="number" id="scope-analog-fraction" min="0" max="63" step="1" value="0">
-            </label>
+            <button type="button" class="scope-icon-btn scope-small-icon" id="scope-cursor-prev"
+                title="跳到上一个匹配边沿（键盘左方向键）" aria-label="跳到上一个匹配边沿">◀</button>
+            <button type="button" class="scope-icon-btn scope-small-icon" id="scope-cursor-next"
+                title="跳到下一个匹配边沿（键盘右方向键）" aria-label="跳到下一个匹配边沿">▶</button>
           </div>
           <div class="scope-toolbar-group scope-style-controls" aria-label="波形显示样式">
             <span class="scope-toolbar-label">行样式</span>
@@ -540,6 +534,47 @@
           <span id="scope-status">初始化</span>
           <span id="scope-metrics"></span>
         </footer>
+        <div class="scope-style-popover scope-display-popover" id="scope-display-popover"
+            role="dialog" aria-labelledby="scope-display-popover-title" hidden>
+          <div class="scope-style-popover-header">
+            <strong id="scope-display-popover-title"></strong>
+            <button type="button" class="scope-icon-btn scope-small-icon"
+                id="scope-display-popover-close" title="关闭" aria-label="关闭显示设置">×</button>
+          </div>
+          <div class="scope-display-popover-section">
+            <span class="scope-display-field-label">波形展示</span>
+            <div class="scope-display-mode-options" id="scope-display-mode-options"
+                role="group" aria-label="波形展示类型">
+              <button type="button" data-scope-display-mode="digital">数字</button>
+              <button type="button" data-scope-display-mode="bus">总线</button>
+              <button type="button" data-scope-display-mode="analog">模拟</button>
+            </div>
+          </div>
+          <div class="scope-analog-settings" id="scope-signal-analog-settings">
+            <label>
+              <span>模拟类型</span>
+              <select id="scope-signal-analog-type" aria-label="当前信号的模拟数据类型">
+                <option value="unsigned">无符号整数</option>
+                <option value="signed">有符号整数</option>
+                <option value="ufixed">无符号定点</option>
+                <option value="sfixed">有符号定点</option>
+                <option value="float">浮点数</option>
+              </select>
+            </label>
+            <div class="scope-analog-number-fields">
+              <label>
+                <span>位宽</span>
+                <input type="number" id="scope-signal-analog-width"
+                    min="1" max="64" step="1" value="32">
+              </label>
+              <label>
+                <span>小数位</span>
+                <input type="number" id="scope-signal-analog-fraction"
+                    min="0" max="63" step="1" value="0">
+              </label>
+            </div>
+          </div>
+        </div>
         <div class="scope-style-popover" id="scope-style-popover" role="dialog"
             aria-label="信号颜色设置" hidden>
           <div class="scope-style-popover-header">
@@ -601,17 +636,17 @@
       this.cursorAButton = root.querySelector('#scope-cursor-a');
       this.cursorBButton = root.querySelector('#scope-cursor-b');
       this.cursorSignalEl = root.querySelector('#scope-cursor-signal');
-      this.cursorValueInput = root.querySelector('#scope-cursor-value');
-      this.cursorPrevEdgeButton = root.querySelector('#scope-cursor-prev-edge');
-      this.cursorNextEdgeButton = root.querySelector('#scope-cursor-next-edge');
-      this.cursorPrevValueButton = root.querySelector('#scope-cursor-prev-value');
-      this.cursorNextValueButton = root.querySelector('#scope-cursor-next-value');
-      this.cursorConditionInput = root.querySelector('#scope-cursor-condition');
-      this.cursorPrevConditionButton = root.querySelector('#scope-cursor-prev-condition');
-      this.cursorNextConditionButton = root.querySelector('#scope-cursor-next-condition');
-      this.analogTypeSelect = root.querySelector('#scope-analog-type');
-      this.analogWidthInput = root.querySelector('#scope-analog-width');
-      this.analogFractionInput = root.querySelector('#scope-analog-fraction');
+      this.cursorJumpInput = root.querySelector('#scope-cursor-jump');
+      this.cursorPrevButton = root.querySelector('#scope-cursor-prev');
+      this.cursorNextButton = root.querySelector('#scope-cursor-next');
+      this.displayPopover = root.querySelector('#scope-display-popover');
+      this.displayPopoverTitle = root.querySelector('#scope-display-popover-title');
+      this.displayPopoverCloseButton = root.querySelector('#scope-display-popover-close');
+      this.displayModeOptions = root.querySelector('#scope-display-mode-options');
+      this.signalAnalogSettings = root.querySelector('#scope-signal-analog-settings');
+      this.signalAnalogTypeSelect = root.querySelector('#scope-signal-analog-type');
+      this.signalAnalogWidthInput = root.querySelector('#scope-signal-analog-width');
+      this.signalAnalogFractionInput = root.querySelector('#scope-signal-analog-fraction');
       this.styleSignalEl = root.querySelector('#scope-style-signal');
       this.stylePopover = root.querySelector('#scope-style-popover');
       this.stylePopoverTitle = root.querySelector('#scope-style-popover-title');
@@ -658,37 +693,28 @@
       this.originalDataButton.addEventListener('click', () => this.toggleOriginalData());
       this.cursorAButton.addEventListener('click', () => this.setActiveCursor('A', true));
       this.cursorBButton.addEventListener('click', () => this.setActiveCursor('B', true));
-      this.cursorPrevEdgeButton.addEventListener('click', () => {
-        void this.navigateActiveCursor('edge', -1);
+      this.cursorPrevButton.addEventListener('click', () => {
+        void this.navigateActiveCursor(-1);
       });
-      this.cursorNextEdgeButton.addEventListener('click', () => {
-        void this.navigateActiveCursor('edge', 1);
+      this.cursorNextButton.addEventListener('click', () => {
+        void this.navigateActiveCursor(1);
       });
-      this.cursorPrevValueButton.addEventListener('click', () => {
-        void this.navigateActiveCursor('value', -1);
-      });
-      this.cursorNextValueButton.addEventListener('click', () => {
-        void this.navigateActiveCursor('value', 1);
-      });
-      this.cursorPrevConditionButton.addEventListener('click', () => {
-        void this.navigateActiveCursor('condition', -1);
-      });
-      this.cursorNextConditionButton.addEventListener('click', () => {
-        void this.navigateActiveCursor('condition', 1);
-      });
-      this.cursorValueInput.addEventListener('keydown', (event) => {
+      this.cursorJumpInput.addEventListener('keydown', (event) => {
         if (event.key !== 'Enter') return;
         event.preventDefault();
-        void this.navigateActiveCursor('value', event.shiftKey ? -1 : 1);
+        void this.navigateActiveCursor(event.shiftKey ? -1 : 1);
       });
-      this.cursorConditionInput.addEventListener('keydown', (event) => {
-        if (event.key !== 'Enter') return;
-        event.preventDefault();
-        void this.navigateActiveCursor('condition', event.shiftKey ? -1 : 1);
+      this.displayPopoverCloseButton.addEventListener('click', () => {
+        this.closeDisplayPopover(true);
       });
-      this.analogTypeSelect.addEventListener('change', () => this.applyAnalogFormatControls());
-      this.analogWidthInput.addEventListener('change', () => this.applyAnalogFormatControls());
-      this.analogFractionInput.addEventListener('change', () => this.applyAnalogFormatControls());
+      this.displayModeOptions.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-scope-display-mode]');
+        if (!button || this.displayControlRow == null) return;
+        this.applySignalDisplayMode(this.displayControlRow, button.dataset.scopeDisplayMode);
+      });
+      this.signalAnalogTypeSelect.addEventListener('change', () => this.applySignalAnalogFormat());
+      this.signalAnalogWidthInput.addEventListener('change', () => this.applySignalAnalogFormat());
+      this.signalAnalogFractionInput.addEventListener('change', () => this.applySignalAnalogFormat());
       this.waveColorPresets.addEventListener('click', (event) => {
         const button = event.target.closest('[data-scope-wave-color]');
         if (!button || button.disabled) return;
@@ -741,26 +767,6 @@
       this.undoButton.addEventListener('click', () => this.undo());
       this.redoButton.addEventListener('click', () => this.redo());
 
-      this.signalList.addEventListener('change', (event) => {
-        const select = event.target.closest('[data-scope-mode-row]');
-        if (!select) return;
-        const rowIndex = Number(select.dataset.scopeModeRow);
-        const nextMode = select.value;
-        if (this.modes[rowIndex] === nextMode) return;
-        if (this.simplified) this.pushHistory();
-        const scrollTop = this.plotViewport.scrollTop;
-        this.cursorNavigationSequence += 1;
-        this.modes[rowIndex] = nextMode;
-        this.markDraftDirty('presentation');
-        this.activeCursorRow = rowIndex;
-        this.renderSignalRows();
-        this.plotViewport.scrollTop = scrollTop;
-        this.signalScroll.scrollTop = this.plotViewport.scrollTop;
-        this.updateAnalogControls();
-        this.scheduleWindowRequest();
-        void this.runSimplify(false);
-      });
-
       this.signalList.addEventListener('pointerdown', (event) => {
         const handle = event.target.closest('[data-scope-row-resize]');
         if (!handle) return;
@@ -770,10 +776,24 @@
       this.signalList.addEventListener('pointerup', (event) => this.finishRowResize(event));
       this.signalList.addEventListener('pointercancel', (event) => this.finishRowResize(event));
       this.signalList.addEventListener('click', (event) => {
+        const displayButton = event.target.closest('[data-scope-display-row]');
+        if (displayButton) {
+          event.preventDefault();
+          this.openDisplayPopover(Number(displayButton.dataset.scopeDisplayRow), displayButton);
+          return;
+        }
         const swatch = event.target.closest('[data-scope-swatch-row]');
         if (swatch) {
           event.preventDefault();
           this.openStylePopover(Number(swatch.dataset.scopeSwatchRow), swatch);
+          return;
+        }
+        const nameButton = event.target.closest('[data-scope-name-row]');
+        if (nameButton) {
+          event.preventDefault();
+          const rowIndex = Number(nameButton.dataset.scopeNameRow);
+          this.setActiveCursorRow(rowIndex);
+          this.beginSignalNameEdit(rowIndex, nameButton);
           return;
         }
         if (event.target.closest('select, [data-scope-row-resize]')) return;
@@ -804,12 +824,15 @@
         }
         if (event.key !== 'Enter' && event.key !== ' ') return;
         const row = event.target.closest('[data-scope-signal-row]');
-        if (!row || event.target.closest('select, [data-scope-row-resize], [data-scope-swatch-row]')) return;
+        if (!row || event.target.closest(
+          'input, select, button, [data-scope-row-resize]'
+        )) return;
         event.preventDefault();
         this.setActiveCursorRow(Number(row.dataset.scopeSignalRow));
       });
 
       this.plotViewport.addEventListener('scroll', () => {
+        this.closeDisplayPopover();
         this.closeStylePopover();
         this.closeColumnBackgroundPopover();
         this.signalScroll.scrollTop = this.plotViewport.scrollTop;
@@ -843,6 +866,11 @@
       this.outputTitleInput.addEventListener('input', () => this.scheduleBuild());
 
       global.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape' && this.displayPopover && !this.displayPopover.hidden) {
+          event.preventDefault();
+          this.closeDisplayPopover(true);
+          return;
+        }
         if (event.key === 'Escape'
             && this.columnBackgroundPopover
             && !this.columnBackgroundPopover.hidden) {
@@ -881,7 +909,11 @@
         const target = event.target;
         const editingText = target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName);
         if (editingText) return;
-        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
+        if (!event.ctrlKey && !event.metaKey && !event.altKey
+            && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
+          event.preventDefault();
+          void this.navigateActiveCursor(event.key === 'ArrowLeft' ? -1 : 1);
+        } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
           event.preventDefault();
           if (event.shiftKey) this.redo();
           else this.undo();
@@ -898,6 +930,11 @@
       });
 
       this.root.addEventListener('pointerdown', (event) => {
+        if (this.displayPopover && !this.displayPopover.hidden
+            && !this.displayPopover.contains(event.target)
+            && !event.target.closest('[data-scope-display-row]')) {
+          this.closeDisplayPopover();
+        }
         if (this.stylePopover && !this.stylePopover.hidden
             && !this.stylePopover.contains(event.target)
             && !event.target.closest('[data-scope-swatch-row]')) {
@@ -1009,7 +1046,131 @@
       return low;
     }
 
+    signalDisplayName(rowIndex) {
+      const index = Math.max(0, Math.floor(Number(rowIndex) || 0));
+      const name = this.signalNames[index] == null ? '' : String(this.signalNames[index]);
+      return name || ('signal_' + (index + 1));
+    }
+
+    syncSignalNameMetadata() {
+      if (!this.meta || !Array.isArray(this.meta.rows)) return;
+      this.meta.rows.forEach((row) => {
+        row.name = this.signalDisplayName(row.index);
+      });
+    }
+
+    beginSignalNameEdit(rowIndex, button) {
+      const index = Math.max(0, Math.floor(Number(rowIndex) || 0));
+      if (!this.meta || !this.meta.rows[index] || !button) return;
+      if (this.signalNameEditor) {
+        if (this.signalNameEditor.rowIndex === index) {
+          this.signalNameEditor.input.focus();
+          return;
+        }
+        this.finishSignalNameEdit(true);
+      }
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.className = 'scope-signal-name-input';
+      input.value = this.signalNames[index] || this.signalDisplayName(index);
+      input.maxLength = 256;
+      input.setAttribute('aria-label', '修改信号名');
+      input.title = 'Enter 确认，Esc 取消';
+      button.replaceWith(input);
+      this.signalNameEditor = {
+        rowIndex: index,
+        input,
+        button,
+        initialValue: input.value
+      };
+      input.addEventListener('pointerdown', (event) => event.stopPropagation());
+      input.addEventListener('click', (event) => event.stopPropagation());
+      input.addEventListener('keydown', (event) => {
+        event.stopPropagation();
+        if (event.isComposing || event.keyCode === 229) return;
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          this.finishSignalNameEdit(true);
+        } else if (event.key === 'Escape') {
+          event.preventDefault();
+          this.finishSignalNameEdit(false);
+        }
+      });
+      input.addEventListener('blur', () => {
+        global.setTimeout(() => {
+          if (this.signalNameEditor && this.signalNameEditor.input === input) {
+            this.finishSignalNameEdit(true);
+          }
+        }, 0);
+      });
+      input.focus();
+      input.select();
+      this.log('scope-signal-name', { phase: 'edit-open', rowIndex: index });
+    }
+
+    finishSignalNameEdit(commit) {
+      const editor = this.signalNameEditor;
+      if (!editor) return;
+      this.signalNameEditor = null;
+      const index = editor.rowIndex;
+      const previousName = this.signalNames[index] == null
+        ? ''
+        : String(this.signalNames[index]);
+      const enteredName = editor.input.value.trim();
+      const nextName = commit
+        ? (previousName === '' && enteredName === editor.initialValue ? '' : enteredName)
+        : previousName;
+      editor.button.textContent = nextName || ('signal_' + (index + 1));
+      editor.input.replaceWith(editor.button);
+      if (!commit || nextName === previousName) {
+        this.log('scope-signal-name', {
+          phase: commit ? 'unchanged' : 'edit-cancel',
+          rowIndex: index
+        });
+        return;
+      }
+      if (this.simplified) this.pushHistory();
+      this.signalNames[index] = nextName;
+      this.syncSignalNameMetadata();
+      if (this.simplified && this.simplified.model.rows[index]) {
+        this.simplified.model.rows[index].name = nextName;
+      }
+      const displayName = this.signalDisplayName(index);
+      const rowElement = this.signalList.querySelector(
+        '[data-scope-signal-row="' + index + '"]'
+      );
+      if (rowElement) {
+        rowElement.setAttribute('aria-label', '选择信号 ' + displayName);
+        const swatch = rowElement.querySelector('[data-scope-swatch-row]');
+        if (swatch) {
+          swatch.title = '设置 ' + displayName + ' 的波形和背景颜色';
+          swatch.setAttribute('aria-label', swatch.title);
+        }
+        const displayButton = rowElement.querySelector('[data-scope-display-row]');
+        if (displayButton) displayButton.setAttribute('aria-label', displayName + ' 显示设置');
+        const resizeHandle = rowElement.querySelector('[data-scope-row-resize]');
+        if (resizeHandle) resizeHandle.setAttribute('aria-label', '调整 ' + displayName + ' 行高');
+        const nameContainer = rowElement.querySelector('.scope-signal-name');
+        if (nameContainer) nameContainer.title = displayName;
+      }
+      editor.button.textContent = displayName;
+      editor.button.title = '点击修改信号名：' + displayName;
+      editor.button.setAttribute('aria-label', '修改信号名 ' + displayName);
+      this.updateCursorControls();
+      this.updatePointEditor();
+      this.scheduleBuild();
+      this.markDraftDirty('presentation');
+      this.setStatus('信号名已修改为：' + displayName);
+      this.log('scope-signal-name', {
+        phase: 'changed',
+        rowIndex: index,
+        previousName,
+        nextName
+      });
+    }
+
     renderSignalRows() {
+      this.closeDisplayPopover();
       this.closeStylePopover();
       this.closeColumnBackgroundPopover();
       this.rebuildRowOffsets();
@@ -1030,17 +1191,22 @@
                 aria-haspopup="dialog" aria-expanded="false"></button>
             <span class="scope-signal-name" title="${escapeHtml(row.name)}">
               ${group ? `<small>${escapeHtml(group)}</small>` : ''}
-              <strong>${escapeHtml(row.name)}</strong>
+              <button type="button" class="scope-signal-name-button"
+                  data-scope-name-row="${row.index}"
+                  title="点击修改信号名：${escapeHtml(row.name)}"
+                  aria-label="修改信号名 ${escapeHtml(row.name)}">${escapeHtml(row.name)}</button>
               <em>
                 <span>${escapeHtml(String(row.sampleCount || 0))} 点${row.unit ? ` · ${escapeHtml(row.unit)}` : ''}</span>
                 <b data-scope-cursor-value-row="${row.index}">${escapeHtml(this.activeCursor)}：--</b>
               </em>
             </span>
-            <select data-scope-mode-row="${row.index}" aria-label="${escapeHtml(row.name)} 显示模式">
-              <option value="digital"${this.modes[row.index] === 'digital' ? ' selected' : ''}>数字</option>
-              <option value="bus"${this.modes[row.index] === 'bus' ? ' selected' : ''}>总线</option>
-              <option value="analog"${this.modes[row.index] === 'analog' ? ' selected' : ''}>模拟</option>
-            </select>
+            <button type="button" class="scope-display-mode-button"
+                data-scope-display-row="${row.index}"
+                aria-label="${escapeHtml(row.name)} 显示设置"
+                aria-haspopup="dialog" aria-expanded="false"
+                aria-controls="scope-display-popover">
+              <span>${DISPLAY_MODE_LABELS[this.modes[row.index]] || DISPLAY_MODE_LABELS.digital}</span>
+            </button>
             ${analogMode ? `
               <span class="scope-row-resize-handle" data-scope-row-resize="${row.index}"
                   role="separator" aria-orientation="horizontal"
@@ -1055,6 +1221,162 @@
         this.updateCursorControls();
         void this.updateCursorReadout();
       }
+    }
+
+    openDisplayPopover(rowIndex, anchor) {
+      const index = clamp(
+        Math.floor(Number(rowIndex) || 0),
+        0,
+        Math.max(0, this.meta.rows.length - 1)
+      );
+      if (!anchor || !this.meta.rows[index]) return;
+      if (!this.displayPopover.hidden
+          && this.displayControlRow === index
+          && this.displayPopoverAnchor === anchor) {
+        this.closeDisplayPopover(true);
+        return;
+      }
+      this.closeDisplayPopover();
+      this.closeStylePopover();
+      this.closeColumnBackgroundPopover();
+      this.setActiveCursorRow(index);
+      this.displayControlRow = index;
+      this.displayPopoverAnchor = anchor;
+      anchor.classList.add('active');
+      anchor.setAttribute('aria-expanded', 'true');
+      this.displayPopover.hidden = false;
+      this.displayPopover.style.visibility = 'hidden';
+      this.updateDisplayPopover();
+      this.positionDisplayPopover();
+      this.setStatus('正在设置 ' + this.meta.rows[index].name + ' 的显示方式');
+    }
+
+    positionDisplayPopover() {
+      const anchor = this.displayPopoverAnchor;
+      if (!anchor || !this.displayPopover || this.displayPopover.hidden) return;
+      const anchorRect = anchor.getBoundingClientRect();
+      const popoverRect = this.displayPopover.getBoundingClientRect();
+      const margin = 8;
+      const viewportWidth = Math.max(1, document.documentElement.clientWidth);
+      const viewportHeight = Math.max(1, document.documentElement.clientHeight);
+      let left = anchorRect.right + 8;
+      if (left + popoverRect.width > viewportWidth - margin) {
+        left = anchorRect.left - popoverRect.width - 8;
+      }
+      const top = clamp(
+        anchorRect.top,
+        margin,
+        Math.max(margin, viewportHeight - popoverRect.height - margin)
+      );
+      this.displayPopover.style.left = clamp(
+        left,
+        margin,
+        Math.max(margin, viewportWidth - popoverRect.width - margin)
+      ) + 'px';
+      this.displayPopover.style.top = top + 'px';
+      this.displayPopover.style.visibility = '';
+    }
+
+    updateDisplayPopover() {
+      if (!this.displayPopover || this.displayPopover.hidden || this.displayControlRow == null) return;
+      const row = this.meta && this.meta.rows[this.displayControlRow];
+      if (!row) {
+        this.closeDisplayPopover();
+        return;
+      }
+      const mode = this.modes[row.index] || 'digital';
+      this.displayPopoverTitle.textContent = row.name;
+      this.displayModeOptions.querySelectorAll('[data-scope-display-mode]').forEach((button) => {
+        const active = button.dataset.scopeDisplayMode === mode;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-pressed', String(active));
+      });
+      const analogMode = mode === 'analog';
+      this.signalAnalogSettings.hidden = !analogMode;
+      const format = normalizeAnalogFormat(
+        this.analogFormats[row.index],
+        row.detectedMode === 'analog' ? 'float' : 'unsigned'
+      );
+      this.analogFormats[row.index] = format;
+      this.signalAnalogTypeSelect.value = format.type;
+      this.signalAnalogWidthInput.value = String(format.bitWidth);
+      this.signalAnalogFractionInput.value = String(format.fractionalBits);
+      const fixedPoint = format.type === 'ufixed' || format.type === 'sfixed';
+      this.signalAnalogFractionInput.disabled = !fixedPoint;
+      this.signalAnalogFractionInput.max = String(Math.max(0, format.bitWidth - 1));
+    }
+
+    closeDisplayPopover(restoreFocus) {
+      if (!this.displayPopover || this.displayPopover.hidden) return;
+      const anchor = this.displayPopoverAnchor;
+      if (anchor) {
+        anchor.classList.remove('active');
+        anchor.setAttribute('aria-expanded', 'false');
+      }
+      this.displayControlRow = null;
+      this.displayPopoverAnchor = null;
+      this.displayPopover.hidden = true;
+      this.displayPopover.style.visibility = '';
+      if (restoreFocus && anchor && anchor.isConnected) anchor.focus({ preventScroll: true });
+    }
+
+    applySignalDisplayMode(rowIndex, requestedMode) {
+      const index = Math.max(0, Math.floor(Number(rowIndex) || 0));
+      const row = this.meta && this.meta.rows[index];
+      const nextMode = String(requestedMode || '');
+      if (!row || !Object.prototype.hasOwnProperty.call(DISPLAY_MODE_LABELS, nextMode)) return;
+      if (this.modes[index] === nextMode) {
+        this.updateDisplayPopover();
+        return;
+      }
+      if (this.simplified) this.pushHistory();
+      const scrollTop = this.plotViewport.scrollTop;
+      this.cursorNavigationSequence += 1;
+      this.modes[index] = nextMode;
+      this.activeCursorRow = index;
+      this.markDraftDirty('presentation');
+      this.renderSignalRows();
+      this.plotViewport.scrollTop = scrollTop;
+      this.signalScroll.scrollTop = scrollTop;
+      this.scheduleWindowRequest();
+      void this.runSimplify(false);
+      const nextAnchor = this.signalList.querySelector(
+        '[data-scope-display-row="' + index + '"]'
+      );
+      if (nextAnchor) this.openDisplayPopover(index, nextAnchor);
+      this.setStatus(row.name + ' 已切换为' + DISPLAY_MODE_LABELS[nextMode] + '显示');
+    }
+
+    applySignalAnalogFormat() {
+      if (!this.meta || this.displayControlRow == null) return;
+      const row = this.meta.rows[this.displayControlRow];
+      if (!row || this.modes[row.index] !== 'analog') return;
+      const previous = normalizeAnalogFormat(
+        this.analogFormats[row.index],
+        row.detectedMode === 'analog' ? 'float' : 'unsigned'
+      );
+      const next = normalizeAnalogFormat({
+        type: this.signalAnalogTypeSelect.value,
+        bitWidth: this.signalAnalogWidthInput.value,
+        fractionalBits: this.signalAnalogFractionInput.value
+      }, previous.type);
+      const changed = previous.type !== next.type
+        || previous.bitWidth !== next.bitWidth
+        || previous.fractionalBits !== next.fractionalBits;
+      if (changed && this.simplified) this.pushHistory();
+      this.analogFormats[row.index] = next;
+      this.updateDisplayPopover();
+      this.positionDisplayPopover();
+      if (!changed) return;
+      this.markDraftDirty('presentation');
+      this.cursorNavigationSequence += 1;
+      this.scheduleWindowRequest();
+      void this.updateCursorReadout();
+      void this.runSimplify(false);
+      const typeLabel = this.signalAnalogTypeSelect.options[
+        this.signalAnalogTypeSelect.selectedIndex
+      ].text;
+      this.setStatus(row.name + ' 已按' + typeLabel + '解析');
     }
 
     rowStyle(rowIndex) {
@@ -1171,6 +1493,7 @@
         Math.max(0, this.meta.rows.length - 1)
       );
       if (!anchor || !this.meta.rows[index]) return;
+      this.closeDisplayPopover();
       this.closeStylePopover();
       this.closeColumnBackgroundPopover();
       this.setActiveCursorRow(index);
@@ -1218,6 +1541,7 @@
         this.styleColumnsInput.focus();
         return;
       }
+      this.closeDisplayPopover();
       this.closeStylePopover();
       this.closeColumnBackgroundPopover();
       this.columnBackgroundPopoverAnchor = anchor;
@@ -1853,15 +2177,24 @@
       } else {
         context.beginPath();
         let started = false;
+        let previousY = null;
         data.items.forEach((item) => {
           const x = this.xForColumn(item[0], width);
-          const y = yFor(item[1]);
+          const value = finiteScopeNumber(item[1]);
+          if (value == null) {
+            if (started && previousY != null) context.lineTo(x, previousY);
+            started = false;
+            previousY = null;
+            return;
+          }
+          const y = yFor(value);
           if (!started) {
             context.moveTo(x, y);
             started = true;
           } else {
             context.lineTo(x, y);
           }
+          previousY = y;
         });
         context.stroke();
       }
@@ -1872,6 +2205,17 @@
       context.lineTo(width, (yTop + yBottom) / 2);
       context.stroke();
       context.setLineDash([]);
+      (data.unknowns || []).forEach((range) => {
+        this.drawUnknownDigitalSegment(
+          context,
+          this.xForColumn(range[0], width),
+          this.xForColumn(range[1], width),
+          yTop,
+          yBottom,
+          1,
+          true
+        );
+      });
     }
 
     drawSimplifiedRow(context, rowIndex, yTop, yBottom, width, color) {
@@ -1889,12 +2233,15 @@
         let min = Number.POSITIVE_INFINITY;
         let max = Number.NEGATIVE_INFINITY;
         row.values.forEach((value) => {
-          const number = Number(value);
-          if (!Number.isFinite(number)) return;
+          const number = finiteScopeNumber(value);
+          if (number == null) return;
           min = Math.min(min, number);
           max = Math.max(max, number);
         });
-        if (!Number.isFinite(min) || !Number.isFinite(max)) return;
+        if (!Number.isFinite(min) || !Number.isFinite(max)) {
+          min = -1;
+          max = 1;
+        }
         if (Math.abs(max - min) < 1e-12) {
           min -= 1;
           max += 1;
@@ -1902,14 +2249,34 @@
         context.strokeStyle = color;
         context.lineWidth = 1.7;
         context.beginPath();
+        let started = false;
+        let previousY = null;
         visible.forEach((pointIndex, index) => {
           const x = this.xForColumn(columns[pointIndex], width);
-          const value = Number(row.values[pointIndex]);
+          const nextPoint = visible[index + 1];
+          const x2 = nextPoint == null ? width : this.xForColumn(columns[nextPoint], width);
+          const value = finiteScopeNumber(row.values[pointIndex]);
+          if (value == null) {
+            if (started && previousY != null) {
+              context.lineTo(x, previousY);
+              context.stroke();
+            }
+            this.drawUnknownDigitalSegment(context, x, x2, yTop, yBottom, 1, true);
+            context.beginPath();
+            started = false;
+            previousY = null;
+            return;
+          }
           const y = yBottom - 4 - (value - min) / (max - min) * (yBottom - yTop - 8);
-          if (!index) context.moveTo(x, y);
-          else context.lineTo(x, y);
+          if (!started) {
+            context.moveTo(x, y);
+            started = true;
+          } else {
+            context.lineTo(x, y);
+          }
+          previousY = y;
         });
-        context.stroke();
+        if (started) context.stroke();
       } else if (row.mode === 'bus') {
         const busSegments = [];
         columns.forEach((column, pointIndex) => {
@@ -2427,18 +2794,45 @@
             context.setLineDash([]);
             previousY = y;
           });
-        } else {
+        } else if (row.mode === 'analog') {
           context.beginPath();
+          let started = false;
+          let previousY = null;
           row.values.forEach((value, pointIndex) => {
             const column = this.simplified.model.columns[pointIndex];
-            const x = column / Math.max(1, this.meta.totalColumns - 1) * width;
-            let y = (yTop + yBottom) / 2;
-            if (row.mode === 'analog') {
-              const number = Number(value);
-              y = Number.isFinite(number)
-                ? yBottom - clamp((number + 1) / 2, 0, 1) * (yBottom - yTop)
-                : y;
+            const nextColumn = pointIndex + 1 < this.simplified.model.columns.length
+              ? this.simplified.model.columns[pointIndex + 1]
+              : this.meta.totalColumns;
+            const x1 = column / Math.max(1, this.meta.totalColumns) * width;
+            const x2 = nextColumn / Math.max(1, this.meta.totalColumns) * width;
+            const number = finiteScopeNumber(value);
+            if (number == null) {
+              if (started && previousY != null) {
+                context.lineTo(x1, previousY);
+                context.stroke();
+              }
+              this.drawUnknownDigitalSegment(context, x1, x2, yTop, yBottom, 1, true);
+              context.beginPath();
+              started = false;
+              previousY = null;
+              return;
             }
+            const y = yBottom - clamp((number + 1) / 2, 0, 1) * (yBottom - yTop);
+            if (!started) {
+              context.moveTo(x1, y);
+              started = true;
+            } else {
+              context.lineTo(x1, y);
+            }
+            previousY = y;
+          });
+          if (started) context.stroke();
+        } else {
+          context.beginPath();
+          row.values.forEach((_value, pointIndex) => {
+            const column = this.simplified.model.columns[pointIndex];
+            const x = column / Math.max(1, this.meta.totalColumns - 1) * width;
+            const y = (yTop + yBottom) / 2;
             if (!pointIndex) context.moveTo(x, y);
             else context.lineTo(x, y);
           });
@@ -3050,67 +3444,11 @@
       const row = this.meta && this.meta.rows[this.activeCursorRow];
       this.cursorSignalEl.textContent = row ? row.name : '';
       this.cursorSignalEl.title = row ? row.name : '';
-      this.updateAnalogControls();
       this.updateStyleControls();
     }
 
-    updateAnalogControls() {
-      if (!this.analogTypeSelect || !this.meta) return;
-      const row = this.meta.rows[this.activeCursorRow];
-      const enabled = !!row && this.modes[row.index] === 'analog';
-      const format = normalizeAnalogFormat(
-        row && this.analogFormats[row.index],
-        row && row.detectedMode === 'analog' ? 'float' : 'unsigned'
-      );
-      if (row) this.analogFormats[row.index] = format;
-      this.analogTypeSelect.value = format.type;
-      this.analogWidthInput.value = String(format.bitWidth);
-      this.analogFractionInput.value = String(format.fractionalBits);
-      this.analogTypeSelect.disabled = !enabled;
-      this.analogWidthInput.disabled = !enabled;
-      const fixedPoint = format.type === 'ufixed' || format.type === 'sfixed';
-      this.analogFractionInput.disabled = !enabled || !fixedPoint;
-      this.analogFractionInput.max = String(Math.max(0, format.bitWidth - 1));
-    }
-
-    applyAnalogFormatControls() {
-      if (!this.meta) return;
-      const row = this.meta.rows[this.activeCursorRow];
-      if (!row || this.modes[row.index] !== 'analog') {
-        this.updateAnalogControls();
-        return;
-      }
-      const previous = normalizeAnalogFormat(
-        this.analogFormats[row.index],
-        row.detectedMode === 'analog' ? 'float' : 'unsigned'
-      );
-      const next = normalizeAnalogFormat({
-        type: this.analogTypeSelect.value,
-        bitWidth: this.analogWidthInput.value,
-        fractionalBits: this.analogFractionInput.value
-      }, previous.type);
-      const changed = previous.type !== next.type
-        || previous.bitWidth !== next.bitWidth
-        || previous.fractionalBits !== next.fractionalBits;
-      if (!changed) {
-        this.analogFormats[row.index] = next;
-        this.updateAnalogControls();
-        return;
-      }
-      if (this.simplified) this.pushHistory();
-      this.analogFormats[row.index] = next;
-      this.markDraftDirty('presentation');
-      this.updateAnalogControls();
-      this.cursorNavigationSequence += 1;
-      this.scheduleWindowRequest();
-      void this.updateCursorReadout();
-      void this.runSimplify(false);
-      this.setStatus('已按 ' + this.analogTypeSelect.options[this.analogTypeSelect.selectedIndex].text
-        + ' 解析 ' + row.name);
-    }
-
     formatCursorValue(value) {
-      if (value == null || value === '') return '--';
+      if (value == null || value === '') return 'x';
       if (typeof value === 'number') {
         return String(Math.round(value * 1000000) / 1000000);
       }
@@ -3192,30 +3530,12 @@
       this.centerViewOnColumn(column);
     }
 
-    async navigateActiveCursor(kind, direction) {
+    async navigateActiveCursor(direction) {
       if (!this.meta.rows.length) return;
       const row = this.meta.rows[this.activeCursorRow];
       const mode = this.modes[this.activeCursorRow] || row.mode;
-      const value = this.cursorValueInput.value.trim();
-      const condition = this.cursorConditionInput.value.trim();
-      if (kind === 'value' && !value) {
-        this.setStatus('请先输入要跳转的值', true);
-        this.cursorValueInput.focus();
-        return;
-      }
-      if (kind === 'value' && mode === 'analog' && !Number.isFinite(Number(value))) {
-        this.setStatus('模拟信号的目标值必须是数字', true);
-        return;
-      }
-      if (kind === 'value' && mode === 'digital' && !/^[01xzhHlL]$/.test(value)) {
-        this.setStatus('数字信号的目标值支持 0、1、x、z、h、l', true);
-        return;
-      }
-      if (kind === 'condition' && !condition) {
-        this.setStatus('请先输入游标跳转条件', true);
-        this.cursorConditionInput.focus();
-        return;
-      }
+      const expression = this.cursorJumpInput.value.trim();
+      const kind = expression ? 'condition' : 'edge';
       const sequence = ++this.cursorNavigationSequence;
       try {
         const result = await this.worker.call('navigate', {
@@ -3223,8 +3543,7 @@
           column: this.activeCursorColumn(),
           direction,
           kind,
-          value,
-          condition,
+          condition: expression,
           mode,
           analogFormat: this.analogFormats[this.activeCursorRow]
         });
@@ -3233,7 +3552,7 @@
           this.setStatus(
             (direction < 0 ? '前方' : '后方')
             + '没有匹配的'
-            + (kind === 'edge' ? '边沿' : (kind === 'condition' ? '条件成立边沿' : '值')),
+            + (kind === 'edge' ? '变化边沿' : '条件成立边沿'),
             true
           );
           return;
@@ -3244,9 +3563,20 @@
         this.setStatus(
           this.activeCursor + ' 已跳到 ' + row.name + ' 的'
           + (kind === 'edge'
-            ? '边沿'
-            : (kind === 'condition' ? ('条件成立边沿 ' + condition) : ('值 ' + value)))
+            ? '变化边沿'
+            : (/^(?:value\s*)?(?:==|!=|>=|<=|>|<|=)/i.test(expression)
+              ? ('条件成立边沿 ' + expression)
+              : ('值等于 ' + expression + ' 的边沿')))
         );
+        this.log('scope-cursor', {
+          phase: 'navigate',
+          cursor: this.activeCursor,
+          rowIndex: this.activeCursorRow,
+          direction: direction < 0 ? -1 : 1,
+          kind,
+          expression,
+          column: result.column
+        });
       } catch (error) {
         if (sequence !== this.cursorNavigationSequence) return;
         this.setStatus('游标跳转失败：' + (error.message || String(error)), true);
@@ -3310,6 +3640,7 @@
         analogFormats: this.analogFormats,
         rowStyles: this.rowStyles,
         rowHeights: this.rowHeights,
+        signalNames: this.signalNames.slice(),
         lockedColumns: Array.from(this.lockedColumns),
         outputTitle: this.outputTitleInput.value.trim() || (this.meta.title + ' - 展示实例'),
         sourceWaveId: this.document.name,
@@ -3403,7 +3734,10 @@
       }
       const row = this.simplified.model.rows[selected.rowIndex];
       const column = this.simplified.model.columns[selected.pointIndex];
-      this.pointPositionEl.textContent = row.name + ' · 第 ' + (selected.pointIndex + 1)
+      const displayName = this.meta && this.meta.rows[selected.rowIndex]
+        ? this.meta.rows[selected.rowIndex].name
+        : row.name;
+      this.pointPositionEl.textContent = displayName + ' · 第 ' + (selected.pointIndex + 1)
         + ' 点 · 来源列 ' + (Math.round(column * 1000) / 1000 + 1);
       const clockSymbol = row.mode === 'digital'
         && row.symbols
@@ -3430,6 +3764,7 @@
         analogFormats: clone(this.analogFormats),
         rowStyles: clone(this.rowStyles),
         rowHeights: this.rowHeights.slice(),
+        signalNames: this.signalNames.slice(),
         lockedColumns: Array.from(this.lockedColumns),
         selectedPoint: this.selectedPoint ? Object.assign({}, this.selectedPoint) : null,
         connections: clone(this.connections),
@@ -3451,6 +3786,15 @@
       this.rowHeights = Array.isArray(snapshot.rowHeights)
         ? snapshot.rowHeights.slice()
         : this.rowHeights;
+      this.signalNames = Array.isArray(snapshot.signalNames)
+        ? snapshot.signalNames.map((name) => String(name == null ? '' : name))
+        : this.signalNames;
+      this.syncSignalNameMetadata();
+      if (this.simplified && this.simplified.model && Array.isArray(this.simplified.model.rows)) {
+        this.simplified.model.rows.forEach((row, index) => {
+          row.name = this.signalNames[index] == null ? row.name : this.signalNames[index];
+        });
+      }
       this.lockedColumns = new Set(snapshot.lockedColumns || []);
       this.selectedPoint = snapshot.selectedPoint ? Object.assign({}, snapshot.selectedPoint) : null;
       this.connections = clone(snapshot.connections || []);
@@ -3686,6 +4030,10 @@
     async reloadSavedDocument(saved) {
       this.document = saved;
       this.meta = await this.worker.call('prepare', { content: saved.content });
+      this.signalNames = this.meta.rows.map((row) => String(
+        row.sourceName == null ? row.name || '' : row.sourceName
+      ));
+      this.syncSignalNameMetadata();
       this.modes = {};
       this.analogFormats = {};
       this.rowStyles = {};

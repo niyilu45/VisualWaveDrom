@@ -2,4 +2,5 @@ temp/
 node_modules/
 __pycache__/
 *.pyc
+bin/*.exe~
 Wave/.visualwavedrom-state.json

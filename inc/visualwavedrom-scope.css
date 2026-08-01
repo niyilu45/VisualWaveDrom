@@ -68,27 +68,8 @@ body.scope-wave-view > #vim-help-modal {
 }
 
 .scope-cursor-controls {
-  flex: 1 1 500px;
+  flex: 1 1 390px;
   flex-wrap: wrap;
-}
-
-.scope-analog-controls {
-  flex: 0 1 auto;
-  flex-wrap: wrap;
-}
-
-.scope-analog-controls #scope-analog-type {
-  width: 112px;
-}
-
-.scope-analog-controls input[type="number"] {
-  width: 58px;
-}
-
-.scope-analog-controls :disabled {
-  color: #8b9098;
-  background: #eef0f2;
-  cursor: not-allowed;
 }
 
 .scope-style-controls {
@@ -206,12 +187,8 @@ body.scope-wave-view > #vim-help-modal {
   white-space: nowrap;
 }
 
-.scope-cursor-controls #scope-cursor-value {
-  width: 74px;
-}
-
-.scope-cursor-controls #scope-cursor-condition {
-  width: 118px;
+.scope-cursor-controls #scope-cursor-jump {
+  width: 150px;
 }
 
 .scope-small-icon {
@@ -477,7 +454,7 @@ body.scope-row-resizing * {
 }
 
 .scope-signal-name small,
-.scope-signal-name strong,
+.scope-signal-name-button,
 .scope-signal-name em {
   overflow: hidden;
   line-height: 1;
@@ -491,9 +468,42 @@ body.scope-row-resizing * {
   font-style: normal;
 }
 
-.scope-signal-name strong {
+.scope-signal-name-button {
+  width: 100%;
+  min-width: 0;
+  padding: 2px;
+  border: 0;
+  border-radius: 2px;
+  color: inherit;
+  background: transparent;
+  font-family: inherit;
   font-size: 12px;
   font-weight: 600;
+  text-align: left;
+  cursor: text;
+}
+
+.scope-signal-name-button:hover {
+  background: #e6eff9;
+}
+
+.scope-signal-name-button:focus-visible {
+  outline: 2px solid #2f73bf;
+  outline-offset: 0;
+}
+
+.scope-signal-name-input {
+  width: 100%;
+  min-width: 0;
+  height: 24px;
+  box-sizing: border-box;
+  padding: 2px 5px;
+  border: 1px solid #2f73bf;
+  border-radius: 3px;
+  color: #20252b;
+  background: #ffffff;
+  font: 600 12px/1.2 Arial, "Microsoft YaHei", sans-serif;
+  outline: 2px solid rgba(47, 115, 191, 0.18);
 }
 
 .scope-signal-name em {
@@ -512,13 +522,41 @@ body.scope-row-resizing * {
   font-weight: 700;
 }
 
-.scope-signal-row select {
+.scope-display-mode-button {
   width: 68px;
   height: 28px;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  padding: 0 7px;
   border: 1px solid #b9bec5;
   border-radius: 4px;
+  color: #30353b;
   background: #ffffff;
-  font-size: 11px;
+  font: 11px "Segoe UI", "Microsoft YaHei", sans-serif;
+  cursor: pointer;
+}
+
+.scope-display-mode-button::after {
+  width: 0;
+  height: 0;
+  border-top: 4px solid #687078;
+  border-right: 3px solid transparent;
+  border-left: 3px solid transparent;
+  content: "";
+}
+
+.scope-display-mode-button:hover,
+.scope-display-mode-button.active {
+  border-color: #3978c5;
+  background: #f2f7fc;
+}
+
+.scope-display-mode-button:focus-visible {
+  outline: 2px solid #2f73bf;
+  outline-offset: 1px;
 }
 
 .scope-overview-label {
@@ -700,6 +738,111 @@ body.scope-row-resizing * {
 
 .scope-style-popover[hidden] {
   display: none;
+}
+
+.scope-display-popover {
+  width: min(304px, calc(100vw - 16px));
+}
+
+.scope-display-popover-section {
+  display: grid;
+  gap: 6px;
+  padding-top: 9px;
+}
+
+.scope-display-field-label,
+.scope-analog-settings label > span {
+  color: #555b63;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.scope-display-mode-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.scope-display-mode-options button {
+  height: 30px;
+  border: 1px solid #b9bec5;
+  border-radius: 4px;
+  color: #30353b;
+  background: #ffffff;
+  font: 12px "Segoe UI", "Microsoft YaHei", sans-serif;
+  cursor: pointer;
+}
+
+.scope-display-mode-options button:hover {
+  border-color: #3978c5;
+  background: #f2f7fc;
+}
+
+.scope-display-mode-options button.active {
+  border-color: #2669b5;
+  color: #ffffff;
+  background: #2f73bf;
+}
+
+.scope-display-mode-options button:focus-visible {
+  outline: 2px solid rgba(47, 115, 191, 0.35);
+  outline-offset: 1px;
+}
+
+.scope-analog-settings {
+  display: grid;
+  gap: 8px;
+  margin-top: 9px;
+  padding-top: 9px;
+  border-top: 1px solid #dfe2e6;
+}
+
+.scope-analog-settings[hidden] {
+  display: none;
+}
+
+.scope-analog-settings label {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.scope-analog-settings select,
+.scope-analog-settings input {
+  width: 100%;
+  height: 30px;
+  box-sizing: border-box;
+  border: 1px solid #b9bec5;
+  border-radius: 4px;
+  color: #30353b;
+  background: #ffffff;
+  font: 12px "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+
+.scope-analog-settings select {
+  padding: 0 6px;
+}
+
+.scope-analog-settings input {
+  padding: 0 7px;
+}
+
+.scope-analog-settings input:disabled {
+  color: #8b9098;
+  background: #eef0f2;
+  cursor: not-allowed;
+}
+
+.scope-analog-settings select:focus,
+.scope-analog-settings input:focus {
+  border-color: #2f73bf;
+  outline: 2px solid rgba(47, 115, 191, 0.18);
+}
+
+.scope-analog-number-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
 }
 
 .scope-style-popover-header {

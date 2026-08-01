@@ -1930,10 +1930,70 @@
     }
 
     .row-import-section-title,
-    .row-import-signal-field > span {
+    .row-import-signal-field > span,
+    .row-import-header-field > span:first-child,
+    .row-import-mode-field legend {
       color: var(--text);
       font-size: 0.78rem;
       font-weight: 600;
+    }
+
+    .row-import-mode-field {
+      display: grid;
+      gap: 6px;
+      min-width: 0;
+      margin: 0;
+      padding: 0;
+      border: 0;
+    }
+
+    .row-import-mode-options {
+      display: inline-grid;
+      grid-template-columns: repeat(2, minmax(92px, 1fr));
+      width: fit-content;
+      padding: 2px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--surface-2);
+    }
+
+    .row-import-mode-options label {
+      position: relative;
+      cursor: pointer;
+    }
+
+    .row-import-mode-options input {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .row-import-mode-options span {
+      display: block;
+      padding: 6px 12px;
+      border-radius: 4px;
+      color: var(--text-muted);
+      font-size: 0.76rem;
+      font-weight: 600;
+      text-align: center;
+    }
+
+    .row-import-mode-options input:checked + span {
+      background: var(--surface);
+      color: var(--accent);
+      box-shadow: 0 1px 3px rgba(15, 23, 42, 0.12);
+    }
+
+    .row-import-mode-options input:focus-visible + span {
+      outline: 2px solid var(--focus-ring);
+      outline-offset: 1px;
+    }
+
+    .row-import-mode-options input:disabled + span {
+      opacity: 0.55;
+      cursor: wait;
     }
 
     .row-import-sample {
@@ -1965,6 +2025,39 @@
       grid-template-columns: minmax(110px, auto) minmax(180px, 1fr);
       align-items: center;
       gap: 10px;
+    }
+
+    .row-import-header-field {
+      display: grid;
+      grid-template-columns: minmax(110px, auto) minmax(180px, 1fr);
+      align-items: center;
+      gap: 10px;
+    }
+
+    .row-import-header-field[hidden],
+    .row-import-signal-field[hidden],
+    .row-import-index-field[hidden],
+    .row-import-section[hidden],
+    .row-import-dialog .nav-move-options[hidden] {
+      display: none;
+    }
+
+    .row-import-header-controls {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .row-import-header-controls .modal-input {
+      width: 96px;
+      flex: none;
+    }
+
+    .row-import-header-controls small {
+      color: var(--text-muted);
+      font-size: 0.72rem;
+      line-height: 1.4;
     }
 
     .row-import-index-field {
@@ -2070,6 +2163,16 @@
         grid-template-columns: 1fr;
         gap: 6px;
       }
+
+      .row-import-header-field {
+        grid-template-columns: 1fr;
+        gap: 6px;
+      }
+
+      .row-import-header-controls {
+        align-items: flex-start;
+        flex-direction: column;
+      }
     }
 
     .wave-collection-import-dialog {
@@ -2102,13 +2205,80 @@
       gap: 8px;
     }
 
-    .wave-collection-preset-controls {
+    .wave-collection-preset-controls,
+    .wave-collection-preset-search-controls {
       grid-template-columns: minmax(0, 1fr) auto auto;
     }
 
     .wave-collection-path-controls .modal-input {
       min-width: 0;
       font-family: Consolas, "Courier New", monospace;
+    }
+
+    .wave-collection-preset-discovery {
+      flex: 0 0 auto;
+      max-height: 156px;
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      background: var(--surface);
+    }
+
+    .wave-collection-preset-discovery[hidden] {
+      display: none;
+    }
+
+    .wave-collection-preset-option {
+      width: 100%;
+      min-height: 38px;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 10px;
+      padding: 7px 10px;
+      border: 0;
+      border-bottom: 1px solid var(--border);
+      color: var(--text);
+      background: transparent;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .wave-collection-preset-option:last-child {
+      border-bottom: 0;
+    }
+
+    .wave-collection-preset-option:hover,
+    .wave-collection-preset-option.is-selected {
+      background: var(--accent-soft);
+    }
+
+    .wave-collection-preset-option:focus-visible {
+      position: relative;
+      z-index: 1;
+      outline: 2px solid var(--accent);
+      outline-offset: -2px;
+    }
+
+    .wave-collection-preset-option code {
+      min-width: 0;
+      overflow: hidden;
+      color: inherit;
+      font: 0.74rem/1.4 Consolas, "Courier New", monospace;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .wave-collection-preset-option small {
+      color: var(--text-muted);
+      font-size: 0.68rem;
+      white-space: nowrap;
+    }
+
+    .wave-collection-preset-discovery-empty {
+      padding: 10px;
+      color: var(--text-muted);
+      font-size: 0.74rem;
     }
 
     .wave-collection-section {
@@ -2313,7 +2483,7 @@
 
     .wave-collection-results {
       min-height: 74px;
-      max-height: 260px;
+      max-height: 430px;
       overflow: auto;
       border: 1px solid var(--border);
       border-radius: 5px;
@@ -2357,6 +2527,170 @@
       white-space: nowrap;
     }
 
+    .wave-collection-table-config {
+      grid-column: 1 / -1;
+      display: grid;
+      gap: 8px;
+      padding-top: 8px;
+      border-top: 1px solid var(--border);
+    }
+
+    .wave-collection-table-header,
+    .wave-collection-column-tools {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .wave-collection-table-header label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--text-muted);
+      font-size: 0.72rem;
+    }
+
+    .wave-collection-header-row {
+      width: 72px;
+      min-width: 72px;
+    }
+
+    .wave-collection-table-meta {
+      min-width: 0;
+      margin-right: auto;
+      color: var(--text-muted);
+      font-size: 0.72rem;
+      overflow-wrap: anywhere;
+    }
+
+    .wave-collection-table-preview {
+      min-width: 0;
+      display: grid;
+      gap: 5px;
+    }
+
+    .wave-collection-preview-heading {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 10px;
+      color: var(--text-muted);
+      font-size: 0.7rem;
+    }
+
+    .wave-collection-preview-heading strong {
+      color: var(--text);
+      font-size: 0.72rem;
+      font-weight: 600;
+    }
+
+    .wave-collection-preview-viewport {
+      max-height: 190px;
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: var(--surface-deep, var(--surface));
+    }
+
+    .wave-collection-preview-viewport table {
+      width: 100%;
+      min-width: max-content;
+      border-collapse: collapse;
+      color: var(--text);
+      font: 0.7rem/1.4 Consolas, "Courier New", monospace;
+    }
+
+    .wave-collection-preview-viewport th,
+    .wave-collection-preview-viewport td {
+      min-width: 96px;
+      max-width: 240px;
+      padding: 5px 8px;
+      border-right: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      overflow: hidden;
+      text-align: left;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .wave-collection-preview-viewport th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      color: var(--text);
+      background: var(--surface-raised, var(--surface));
+      font-weight: 600;
+    }
+
+    .wave-collection-preview-viewport th:last-child,
+    .wave-collection-preview-viewport td:last-child {
+      border-right: 0;
+    }
+
+    .wave-collection-preview-viewport tbody tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .wave-collection-column-filter {
+      min-width: 150px;
+      max-width: 280px;
+      margin-right: auto;
+    }
+
+    .wave-collection-columns {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 5px 10px;
+      max-height: 240px;
+      overflow: auto;
+      padding: 1px 3px 1px 0;
+    }
+
+    .wave-collection-column {
+      display: grid;
+      grid-template-columns: 18px minmax(96px, 0.7fr) minmax(140px, 1fr) minmax(180px, 1.15fr);
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .wave-collection-column[hidden] {
+      display: none;
+    }
+
+    .wave-collection-column-filter-empty {
+      padding: 12px 8px;
+      color: var(--text-muted);
+      font-size: 0.72rem;
+      text-align: center;
+    }
+
+    .wave-collection-column-filter-empty[hidden] {
+      display: none;
+    }
+
+    .wave-collection-column code {
+      min-width: 0;
+      color: var(--text-muted);
+      font: 0.7rem/1.35 Consolas, "Courier New", monospace;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .wave-collection-column-name,
+    .wave-collection-column-condition {
+      min-width: 0;
+      height: 28px;
+      padding: 4px 7px;
+      font-size: 0.72rem;
+    }
+
+    .wave-collection-column-condition[aria-invalid="true"] {
+      border-color: var(--error);
+      color: var(--error);
+    }
+
     .wave-collection-result.is-ready .wave-collection-result-state {
       border-color: var(--success);
       color: var(--success);
@@ -2377,11 +2711,13 @@
     }
 
     @media (max-width: 720px) {
-      .wave-collection-preset-controls {
+      .wave-collection-preset-controls,
+      .wave-collection-preset-search-controls {
         grid-template-columns: 1fr 1fr;
       }
 
-      .wave-collection-preset-controls .modal-input {
+      .wave-collection-preset-controls .modal-input,
+      .wave-collection-preset-search-controls .modal-input {
         grid-column: 1 / -1;
       }
 
@@ -2396,6 +2732,33 @@
       .wave-collection-result-path {
         grid-column: 1 / -1;
         grid-row: 2;
+      }
+
+      .wave-collection-table-config {
+        grid-column: 1 / -1;
+      }
+
+      .wave-collection-columns {
+        grid-template-columns: 1fr;
+      }
+
+      .wave-collection-column-tools {
+        flex-wrap: wrap;
+      }
+
+      .wave-collection-column-filter {
+        flex-basis: 100%;
+        max-width: none;
+      }
+
+      .wave-collection-column {
+        grid-template-columns: 18px minmax(0, 1fr);
+      }
+
+      .wave-collection-column code,
+      .wave-collection-column-name,
+      .wave-collection-column-condition {
+        grid-column: 2;
       }
     }
 

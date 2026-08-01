@@ -7,6 +7,7 @@ const MIN_ANALOG_ROW_HEIGHT = 28;
 const MAX_ANALOG_ROW_HEIGHT = 480;
 
 function finiteNumber(value) {
+  if (value == null || (typeof value === 'string' && !value.trim())) return null;
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
 }
@@ -462,16 +463,19 @@ function buildAnalogLevels(samples) {
   if (!samples || !samples.length) return levels;
   let mins = new Float64Array(samples.length);
   let maxs = new Float64Array(samples.length);
+  let unknowns = new Uint8Array(samples.length);
   for (let index = 0; index < samples.length; index += 1) {
     mins[index] = samples[index];
     maxs[index] = samples[index];
+    unknowns[index] = Number.isFinite(samples[index]) ? 0 : 1;
   }
-  levels.push({ size: 1, mins, maxs });
+  levels.push({ size: 1, mins, maxs, unknowns });
   let size = 1;
   while (mins.length > 1024) {
     const length = Math.ceil(mins.length / 2);
     const nextMins = new Float64Array(length);
     const nextMaxs = new Float64Array(length);
+    const nextUnknowns = new Uint8Array(length);
     for (let index = 0; index < length; index += 1) {
       const left = index * 2;
       const right = left + 1;
@@ -483,11 +487,14 @@ function buildAnalogLevels(samples) {
         : (Number.isNaN(bMin) ? aMin : Math.min(aMin, bMin));
       nextMaxs[index] = Number.isNaN(aMax) ? bMax
         : (Number.isNaN(bMax) ? aMax : Math.max(aMax, bMax));
+      nextUnknowns[index] = unknowns[left]
+        || (right < unknowns.length ? unknowns[right] : 0);
     }
     size *= 2;
-    levels.push({ size, mins: nextMins, maxs: nextMaxs });
+    levels.push({ size, mins: nextMins, maxs: nextMaxs, unknowns: nextUnknowns });
     mins = nextMins;
     maxs = nextMaxs;
+    unknowns = nextUnknowns;
   }
   return levels;
 }
@@ -537,6 +544,7 @@ function createSession(content) {
       source: row.source,
       path: row.path,
       groups: row.groups,
+      sourceName: row.name,
       name: row.name || ('signal_' + (rowIndex + 1)),
       mode,
       detectedMode,
@@ -695,6 +703,22 @@ function sampleIndexForColumn(row, column, totalColumns) {
   );
 }
 
+function appendAnalogUnknownRange(ranges, start, end) {
+  if (!(end > start)) return;
+  const previous = ranges[ranges.length - 1];
+  if (previous && start <= previous[1] + 1e-7) {
+    previous[1] = Math.max(previous[1], end);
+    return;
+  }
+  ranges.push([start, end]);
+}
+
+function analogSampleBoundary(sampleIndex, sampleCount, totalColumns) {
+  if (sampleIndex <= 0 || sampleCount <= 0) return 0;
+  if (sampleIndex >= sampleCount) return totalColumns;
+  return sampleIndex * totalColumns / sampleCount;
+}
+
 function analogWindow(row, start, end, width, totalColumns) {
   const startIndex = sampleIndexForColumn(row, start, totalColumns);
   const endIndex = Math.max(
@@ -704,15 +728,24 @@ function analogWindow(row, start, end, width, totalColumns) {
   const sampleSpan = Math.max(1, endIndex - startIndex);
   if (sampleSpan <= Math.max(64, width * 2)) {
     const points = [];
+    const unknowns = [];
     for (let index = startIndex; index < endIndex && index < row.samples.length; index += 1) {
       const value = row.samples[index];
-      if (!Number.isFinite(value)) continue;
       const column = row.samples.length <= 1
         ? 0
         : index * (totalColumns - 1) / (row.samples.length - 1);
-      points.push([column, value]);
+      if (!Number.isFinite(value)) {
+        points.push([column, null]);
+        appendAnalogUnknownRange(
+          unknowns,
+          analogSampleBoundary(index, row.samples.length, totalColumns),
+          analogSampleBoundary(index + 1, row.samples.length, totalColumns)
+        );
+      } else {
+        points.push([column, value]);
+      }
     }
-    return { kind: 'points', items: points, range: row.range };
+    return { kind: 'points', items: points, unknowns, range: row.range };
   }
 
   const samplesPerPixel = sampleSpan / Math.max(1, width);
@@ -724,17 +757,29 @@ function analogWindow(row, start, end, width, totalColumns) {
   const firstBucket = Math.floor(startIndex / level.size);
   const lastBucket = Math.min(level.mins.length, Math.ceil(endIndex / level.size));
   const items = [];
+  const unknowns = [];
   for (let index = firstBucket; index < lastBucket; index += 1) {
     const min = level.mins[index];
     const max = level.maxs[index];
-    if (!Number.isFinite(min) && !Number.isFinite(max)) continue;
     const sampleIndex = index * level.size;
+    if (level.unknowns && level.unknowns[index]) {
+      appendAnalogUnknownRange(
+        unknowns,
+        analogSampleBoundary(sampleIndex, row.samples.length, totalColumns),
+        analogSampleBoundary(
+          Math.min(row.samples.length, sampleIndex + level.size),
+          row.samples.length,
+          totalColumns
+        )
+      );
+    }
+    if (!Number.isFinite(min) && !Number.isFinite(max)) continue;
     const column = row.samples.length <= 1
       ? 0
       : sampleIndex * (totalColumns - 1) / (row.samples.length - 1);
     items.push([column, min, max]);
   }
-  return { kind: 'envelope', items, range: row.range };
+  return { kind: 'envelope', items, unknowns, range: row.range };
 }
 
 function createWindow(payload) {
@@ -1288,6 +1333,51 @@ function signalAtPath(source, path) {
   return cursor;
 }
 
+function requestedSignalName(payload, row) {
+  const names = payload && Array.isArray(payload.signalNames) ? payload.signalNames : null;
+  if (names && Object.prototype.hasOwnProperty.call(names, row.index)) {
+    return String(names[row.index] == null ? '' : names[row.index]);
+  }
+  return String(row.sourceName == null ? '' : row.sourceName);
+}
+
+function applySignalNames(source, payload) {
+  const names = activeSession.rows.map((row) => requestedSignalName(payload, row));
+  const signalConfigs = source.scope
+    && typeof source.scope === 'object'
+    && source.scope.signals
+    && typeof source.scope.signals === 'object'
+    && !Array.isArray(source.scope.signals)
+    ? source.scope.signals
+    : null;
+  const originalSignalConfigs = signalConfigs ? Object.assign({}, signalConfigs) : null;
+  activeSession.rows.forEach((row) => {
+    const nextName = names[row.index];
+    const previousName = String(row.sourceName == null ? '' : row.sourceName);
+    if (signalConfigs && previousName && previousName !== nextName
+        && Object.prototype.hasOwnProperty.call(originalSignalConfigs, previousName)) {
+      const nextKey = nextName || String(row.index);
+      const nextNameUseCount = nextName
+        ? names.reduce((count, name) => count + (name === nextName ? 1 : 0), 0)
+        : 1;
+      if (nextNameUseCount === 1 || !Object.prototype.hasOwnProperty.call(signalConfigs, nextKey)) {
+        signalConfigs[nextKey] = originalSignalConfigs[previousName];
+      }
+    }
+    const target = signalAtPath(source, row.path);
+    if (!target || typeof target !== 'object') return;
+    if (nextName) target.name = nextName;
+    else delete target.name;
+  });
+  if (signalConfigs) {
+    activeSession.rows.forEach((row) => {
+      const previousName = String(row.sourceName == null ? '' : row.sourceName);
+      if (previousName && !names.includes(previousName)) delete signalConfigs[previousName];
+    });
+  }
+  return names;
+}
+
 function buildWaveFromValues(mode, values, labels, symbols, gaps) {
   if (!values.length) return { wave: '' };
   if (mode === 'analog') {
@@ -1430,6 +1520,7 @@ function applyRowDisplayConfig(target, row, rowIndex, payload) {
 function buildStyledSource(payload) {
   if (!activeSession) throw new Error('Scope session has not been prepared');
   const source = cloneJson(activeSession.source);
+  applySignalNames(source, payload);
   const rowStyles = payload.rowStyles || {};
   activeSession.rows.forEach((row) => {
     const target = signalAtPath(source, row.path);
@@ -1441,6 +1532,7 @@ function buildStyledSource(payload) {
 
 function buildSimplifiedContent(model, options) {
   const source = cloneJson(activeSession.source);
+  applySignalNames(source, options);
   removeConnectionMetadata(source);
   const outputTitle = String(options.outputTitle || model.title || (activeSession.title + ' - display'));
   source.title = outputTitle;
@@ -1595,7 +1687,7 @@ function createSimplifiedModel(payload) {
     ));
     return {
       index: row.index,
-      name: row.name,
+      name: requestedSignalName(payload, row),
       mode,
       values,
       analogFormat,
@@ -1652,6 +1744,7 @@ function prepareResponse() {
     rows: activeSession.rows.map((row) => ({
       index: row.index,
       name: row.name,
+      sourceName: row.sourceName,
       groups: row.groups,
       mode: row.mode,
       detectedMode: row.detectedMode,

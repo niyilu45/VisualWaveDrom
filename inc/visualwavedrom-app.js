@@ -1077,8 +1077,14 @@ ${lines.join('\n')}`;
     const rowImportLoadPathBtn = document.getElementById('row-import-load-path');
     const rowImportSample = document.getElementById('row-import-sample');
     const rowImportAnalysisText = document.getElementById('row-import-analysis');
+    const rowImportModeInputs = Array.from(document.querySelectorAll('input[name="row-import-mode"]'));
+    const rowImportSignalField = document.getElementById('row-import-signal-field');
     const rowImportSignalName = document.getElementById('row-import-signal-name');
+    const rowImportIndexField = document.getElementById('row-import-index-field');
     const rowImportHasIndex = document.getElementById('row-import-has-index');
+    const rowImportHeaderField = document.getElementById('row-import-header-field');
+    const rowImportHeaderRow = document.getElementById('row-import-header-row');
+    const rowImportSchemeSection = document.getElementById('row-import-scheme-section');
     const rowImportPreviewShell = document.getElementById('row-import-preview-shell');
     const rowImportPreviewSummary = document.getElementById('row-import-preview-summary');
     const rowImportPreview = document.getElementById('row-import-preview');
@@ -14015,6 +14021,25 @@ ${lines.join('\n')}`;
       rowImportSchemeHint.classList.toggle('is-info', !!message && !isError);
     }
 
+    function currentRowImportMode() {
+      const selected = rowImportModeInputs.find((input) => input.checked);
+      return selected && selected.value === 'table' ? 'table' : 'single';
+    }
+
+    function currentRowImportHeaderRow() {
+      const value = Number(rowImportHeaderRow && rowImportHeaderRow.value);
+      return Number.isInteger(value) && value >= 1 && value <= 1000000 ? value : 0;
+    }
+
+    function updateRowImportModeVisibility() {
+      const tableMode = currentRowImportMode() === 'table';
+      if (rowImportSignalField) rowImportSignalField.hidden = tableMode;
+      if (rowImportIndexField) rowImportIndexField.hidden = tableMode;
+      if (rowImportHeaderField) rowImportHeaderField.hidden = !tableMode;
+      if (rowImportSchemeSection) rowImportSchemeSection.hidden = tableMode;
+      if (rowImportSchemeOptions) rowImportSchemeOptions.hidden = tableMode;
+    }
+
     function closeRowImportSchemeModal() {
       if (rowImportSchemeBusy) return;
       if (rowImportSchemeModal) rowImportSchemeModal.hidden = true;
@@ -14027,6 +14052,8 @@ ${lines.join('\n')}`;
       if (rowImportFileInput) rowImportFileInput.value = '';
       if (rowImportPathInput) rowImportPathInput.value = '';
       if (rowImportHasIndex) rowImportHasIndex.checked = false;
+      rowImportModeInputs.forEach((input) => { input.checked = input.value === 'single'; });
+      if (rowImportHeaderRow) rowImportHeaderRow.value = '1';
       if (rowImportFileName) rowImportFileName.textContent = '尚未选择文件';
       if (rowImportFileMeta) rowImportFileMeta.textContent = '';
       if (rowImportSample) rowImportSample.textContent = '';
@@ -14034,6 +14061,7 @@ ${lines.join('\n')}`;
       if (rowImportSchemeOptions) rowImportSchemeOptions.innerHTML = '';
       if (rowImportPreview) rowImportPreview.innerHTML = '';
       if (rowImportPreviewShell) rowImportPreviewShell.hidden = true;
+      updateRowImportModeVisibility();
       setRowImportSchemeHint('', false);
     }
 
@@ -14299,17 +14327,25 @@ ${lines.join('\n')}`;
     }
 
     function updateRowImportActionState() {
+      updateRowImportModeVisibility();
+      const tableMode = currentRowImportMode() === 'table';
       const signalName = String(rowImportSignalName && rowImportSignalName.value || '').trim();
+      const headerRow = currentRowImportHeaderRow();
+      const pythonAvailable = !!(rowImportAnalysis && rowImportAnalysis.python
+        && rowImportAnalysis.python.available);
       const canPreview = !!rowImportSelectedFile
-        && !!selectedRowImportScheme()
-        && rowImportSelectedMappingIndex >= 0
-        && !!signalName
+        && pythonAvailable
+        && (tableMode
+          ? headerRow > 0
+          : (!!selectedRowImportScheme()
+            && rowImportSelectedMappingIndex >= 0
+            && !!signalName))
         && !rowImportSchemeBusy;
       if (rowImportPreviewBtn) rowImportPreviewBtn.disabled = !canPreview;
       if (rowImportConfirmBtn) {
         rowImportConfirmBtn.disabled = rowImportSchemeBusy
           || !rowImportPreviewPayload
-          || !signalName;
+          || (!tableMode && !signalName);
       }
       if (rowImportChangeFileBtn) rowImportChangeFileBtn.disabled = rowImportSchemeBusy;
       if (rowImportPathInput) rowImportPathInput.disabled = rowImportSchemeBusy;
@@ -14319,6 +14355,8 @@ ${lines.join('\n')}`;
       }
       if (rowImportSignalName) rowImportSignalName.disabled = rowImportSchemeBusy;
       if (rowImportHasIndex) rowImportHasIndex.disabled = rowImportSchemeBusy;
+      if (rowImportHeaderRow) rowImportHeaderRow.disabled = rowImportSchemeBusy;
+      rowImportModeInputs.forEach((input) => { input.disabled = rowImportSchemeBusy; });
       if (rowImportSchemeOptions) {
         rowImportSchemeOptions.querySelectorAll('button').forEach((button) => {
           button.disabled = rowImportSchemeBusy
@@ -14454,7 +14492,9 @@ ${lines.join('\n')}`;
         throw new Error('预览结果没有有效波形');
       }
       const previewColumnLimit = 200;
-      const previewSignals = updates.map((update) => {
+      const previewSignalLimit = 64;
+      const visibleUpdates = updates.slice(0, previewSignalLimit);
+      const previewSignals = visibleUpdates.map((update) => {
         const previewWave = update.wave.slice(0, previewColumnLimit);
         const dataSymbolCount = Array.from(previewWave)
           .filter((symbol) => '=23456789'.includes(symbol)).length;
@@ -14485,33 +14525,51 @@ ${lines.join('\n')}`;
         const truncated = longestWave > previewColumnLimit
           ? '；效果图显示前 ' + previewColumnLimit + ' 列'
           : '';
-        const complexMessage = payload.complexDetected
-          ? '检测到复数，已拆分为 '
-            + updates.map((update) => String(update.signal || '')).join('、') + '；'
+        const hiddenSignals = updates.length > previewSignalLimit
+          ? '；效果图显示前 ' + previewSignalLimit + ' 个信号'
           : '';
-        rowImportPreviewSummary.textContent = complexMessage + longestWave + ' 列，'
-          + Number(updates[0].pointCount || 0) + ' 个数据点' + truncated;
+        const complexUpdates = updates
+          .filter((update) => update && update.complexDetected)
+          .map((update) => String(update.signal || ''));
+        const complexMessage = complexUpdates.length
+          ? '检测到复数，已拆分为 '
+            + complexUpdates.join('、') + '；'
+          : '';
+        const modeMessage = payload.importMode === 'table'
+          ? updates.length + ' 个信号，'
+          : '';
+        rowImportPreviewSummary.textContent = complexMessage + modeMessage + longestWave + ' 列，'
+          + Number(payload.pointCount || updates[0].pointCount || 0) + ' 个数据点'
+          + truncated + hiddenSignals;
       }
     }
 
     async function requestRowImportPreview() {
       if (rowImportSchemeBusy || !rowImportSelectedFile) return;
+      const importMode = currentRowImportMode();
+      const tableMode = importMode === 'table';
+      const headerRow = currentRowImportHeaderRow();
       const scheme = selectedRowImportScheme();
       const signalName = String(rowImportSignalName && rowImportSignalName.value || '').trim();
-      if (!scheme || rowImportSelectedMappingIndex < 0) {
+      if (!tableMode && (!scheme || rowImportSelectedMappingIndex < 0)) {
         setRowImportSchemeHint('请选择文件处理预设', true);
         return;
       }
-      if (!signalName) {
+      if (!tableMode && !signalName) {
         setRowImportSchemeHint('请输入导入后的信号名', true);
         if (rowImportSignalName) rowImportSignalName.focus();
+        return;
+      }
+      if (tableMode && !headerRow) {
+        setRowImportSchemeHint('标题栏行号必须是 1 到 1000000 之间的整数', true);
+        if (rowImportHeaderRow) rowImportHeaderRow.focus();
         return;
       }
       rowImportSchemeBusy = true;
       invalidateRowImportPreview('preview-start');
       updateRowImportActionState();
       setRowImportSchemeHint('正在解析文件并生成效果图…', false);
-      const hasIndex = !!(rowImportHasIndex && rowImportHasIndex.checked);
+      const hasIndex = !tableMode && !!(rowImportHasIndex && rowImportHasIndex.checked);
       const file = rowImportSelectedFile;
       const sourcePath = String(file && file.sourcePath || '');
       const sourceDocumentName = editingWaveDocumentName;
@@ -14522,7 +14580,9 @@ ${lines.join('\n')}`;
         fileSize: file.size,
         sourceKind: sourcePath ? 'path' : 'upload',
         sourcePath,
-        schemeId: scheme.id,
+        importMode,
+        headerRow: tableMode ? headerRow : null,
+        schemeId: scheme ? scheme.id : '',
         mappingIndex: rowImportSelectedMappingIndex,
         signalName,
         hasIndex
@@ -14535,7 +14595,9 @@ ${lines.join('\n')}`;
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               sourcePath,
-              schemeId: scheme.id,
+              importMode,
+              headerRow,
+              schemeId: scheme ? scheme.id : '',
               mappingIndex: rowImportSelectedMappingIndex,
               signalName,
               hasIndex
@@ -14543,7 +14605,9 @@ ${lines.join('\n')}`;
           });
         } else {
           const query = new URLSearchParams({
-            schemeId: scheme.id,
+            importMode,
+            headerRow: String(headerRow || 1),
+            schemeId: scheme ? scheme.id : '',
             mappingIndex: String(rowImportSelectedMappingIndex),
             signalName,
             fileName: file.name,
@@ -14578,6 +14642,8 @@ ${lines.join('\n')}`;
             : 0,
           updateCount: payload.updates ? payload.updates.length : 0,
           complexDetected: !!payload.complexDetected,
+          importMode,
+          headerRow: tableMode ? headerRow : null,
           hasIndex
         });
       } catch (error) {
@@ -14594,14 +14660,24 @@ ${lines.join('\n')}`;
 
     async function confirmRowImportPreview() {
       if (rowImportSchemeBusy || !rowImportPreviewPayload) return;
+      const importMode = currentRowImportMode();
+      const tableMode = importMode === 'table';
+      const headerRow = currentRowImportHeaderRow();
       const signalName = String(rowImportSignalName && rowImportSignalName.value || '').trim();
       const update = rowImportPreviewPayload.updates && rowImportPreviewPayload.updates[0];
       const previewSignalName = String(
         rowImportPreviewPayload.baseSignalName || (update && update.signal) || ''
       );
-      if (!update || signalName !== previewSignalName) {
+      const previewMatches = tableMode
+        ? rowImportPreviewPayload.importMode === 'table'
+          && Number(rowImportPreviewPayload.headerRow) === headerRow
+        : signalName === previewSignalName;
+      if (!update || !previewMatches) {
         invalidateRowImportPreview('signal-name-mismatch');
-        setRowImportSchemeHint('信号名已变化，请重新生成效果图', true);
+        setRowImportSchemeHint(
+          tableMode ? '标题栏行号已变化，请重新生成效果图' : '信号名已变化，请重新生成效果图',
+          true
+        );
         updateRowImportActionState();
         return;
       }
@@ -14609,7 +14685,12 @@ ${lines.join('\n')}`;
       if (rowImportConfirmBtn) rowImportConfirmBtn.textContent = '正在保存…';
       setRowImportSchemeHint('正在导入并保存波形数据…', false);
       updateRowImportActionState();
-      vwdDebugLog('row-import', { phase: 'confirm-start', signalName });
+      vwdDebugLog('row-import', {
+        phase: 'confirm-start',
+        importMode,
+        signalName: tableMode ? '' : signalName,
+        headerRow: tableMode ? headerRow : null
+      });
       try {
         const result = applyImportedWaveRows(rowImportPreviewPayload, { createMissing: true });
         await persistImportedWaveRows(result);
@@ -14626,7 +14707,9 @@ ${lines.join('\n')}`;
         );
         vwdDebugLog('row-import', {
           phase: 'confirm-complete',
-          signalName,
+          importMode,
+          signalName: tableMode ? '' : signalName,
+          headerRow: tableMode ? headerRow : null,
           changed: result.changed,
           createdCount: result.createdCount,
           extendedColumns: result.extendedColumns
@@ -14657,6 +14740,7 @@ ${lines.join('\n')}`;
 
     function applyRowImportAnalysisPayload(payload) {
       rowImportAnalysis = payload;
+      const tableMode = currentRowImportMode() === 'table';
       if (rowImportAnalysisText) {
         const recommendation = payload.recommended
           ? '；推荐预设：' + payload.recommended.schemeName
@@ -14665,11 +14749,23 @@ ${lines.join('\n')}`;
           ? payload.analysis.reason
           : '未能自动判断处理函数') + recommendation;
       }
-      renderRowImportSchemeCatalog(payload);
+      if (tableMode) {
+        rowImportSchemeCatalog = Array.isArray(payload && payload.schemes)
+          ? payload.schemes
+          : [];
+        if (rowImportSchemeOptions) rowImportSchemeOptions.innerHTML = '';
+      } else {
+        renderRowImportSchemeCatalog(payload);
+      }
       if (!(payload.python && payload.python.available)) {
         setRowImportSchemeHint(
           (payload.python && payload.python.error) || '未找到 Python 3.6 或更高版本',
           true
+        );
+      } else if (tableMode) {
+        setRowImportSchemeHint(
+          '第 ' + currentRowImportHeaderRow() + ' 行将作为标题栏；生成效果图后再确认导入',
+          false
         );
       } else if (Array.isArray(payload.invalid) && payload.invalid.length) {
         setRowImportSchemeHint(
@@ -14679,6 +14775,7 @@ ${lines.join('\n')}`;
       } else {
         setRowImportSchemeHint('已自动选择推荐预设；填写信号名后生成效果图', false);
       }
+      updateRowImportActionState();
     }
 
     async function handleRowImportPathSelected(rawPath, selectionOptions) {
@@ -14693,7 +14790,10 @@ ${lines.join('\n')}`;
       const preservedSignalName = preserveSignalName
         ? String(rowImportSignalName && rowImportSignalName.value || '')
         : '';
-      const hasIndex = !!(rowImportHasIndex && rowImportHasIndex.checked);
+      const importMode = currentRowImportMode();
+      const headerRow = currentRowImportHeaderRow() || 1;
+      const hasIndex = importMode !== 'table'
+        && !!(rowImportHasIndex && rowImportHasIndex.checked);
       const pendingSource = {
         name: requestedPath.split(/[\\/]/).pop() || 'signal',
         size: 0,
@@ -14727,13 +14827,15 @@ ${lines.join('\n')}`;
       vwdDebugLog('row-import', {
         phase: 'path-selected',
         requestedPath,
+        importMode,
+        headerRow: importMode === 'table' ? headerRow : null,
         hasIndex
       });
       try {
         const response = await fetch('/api/import-wave-analyze', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sourcePath: requestedPath, hasIndex })
+          body: JSON.stringify({ sourcePath: requestedPath, hasIndex, importMode, headerRow })
         });
         let payload = null;
         try { payload = await response.json(); } catch (_error) { /* handled below */ }
@@ -14776,6 +14878,8 @@ ${lines.join('\n')}`;
           schemeCount: rowImportSchemeCatalog.length,
           invalid: payload.invalid || [],
           python: payload.python || null,
+          importMode,
+          headerRow: importMode === 'table' ? headerRow : null,
           hasIndex
         });
       } catch (error) {
@@ -14817,7 +14921,10 @@ ${lines.join('\n')}`;
       const preservedSignalName = preserveSignalName
         ? String(rowImportSignalName && rowImportSignalName.value || '')
         : '';
-      const hasIndex = !!(rowImportHasIndex && rowImportHasIndex.checked);
+      const importMode = currentRowImportMode();
+      const headerRow = currentRowImportHeaderRow() || 1;
+      const hasIndex = importMode !== 'table'
+        && !!(rowImportHasIndex && rowImportHasIndex.checked);
       rowImportSelectedFile = file;
       rowImportAnalysis = null;
       rowImportSchemeCatalog = [];
@@ -14850,6 +14957,8 @@ ${lines.join('\n')}`;
         fileName: file.name,
         fileSize: file.size,
         fileType: file.type || '',
+        importMode,
+        headerRow: importMode === 'table' ? headerRow : null,
         hasIndex
       });
       try {
@@ -14860,7 +14969,13 @@ ${lines.join('\n')}`;
         const response = await fetch('/api/import-wave-analyze', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ fileName: file.name, sampleLines, hasIndex })
+          body: JSON.stringify({
+            fileName: file.name,
+            sampleLines,
+            hasIndex,
+            importMode,
+            headerRow
+          })
         });
         let payload = null;
         try { payload = await response.json(); } catch (_error) { /* handled below */ }
@@ -14875,6 +14990,8 @@ ${lines.join('\n')}`;
           schemeCount: rowImportSchemeCatalog.length,
           invalid: payload.invalid || [],
           python: payload.python || null,
+          importMode,
+          headerRow: importMode === 'table' ? headerRow : null,
           hasIndex
         });
       } catch (error) {
@@ -18786,6 +18903,7 @@ ${lines.join('\n')}`;
 
     document.addEventListener('keydown', (e) => {
       if (e.target && e.target.closest && e.target.closest('.vwd-big-wave-jump')) return;
+      if (e.target && e.target.closest && e.target.closest('#wave-collection-import-modal')) return;
       if (vimController && vimController.handleKeydown(e)) return;
       if (handleUndoRedoShortcut(e)) return;
       if (handleWaveClipboardShortcut(e)) return;
@@ -19138,6 +19256,8 @@ ${lines.join('\n')}`;
           : null,
         selectedSchemeId: rowImportSelectedSchemeId,
         selectedMappingIndex: rowImportSelectedMappingIndex,
+        importMode: currentRowImportMode(),
+        headerRow: currentRowImportHeaderRow(),
         signalName: String(rowImportSignalName && rowImportSignalName.value || ''),
         previewReady: !!rowImportPreviewPayload,
         schemes: rowImportSchemeCatalog.slice()
@@ -19305,6 +19425,47 @@ ${lines.join('\n')}`;
         rowImportFileInput.value = '';
         rowImportFileInput.click();
         vwdDebugLog('row-import', { phase: 'file-picker-reopen' });
+      });
+    }
+    rowImportModeInputs.forEach((input) => {
+      input.addEventListener('change', () => {
+        if (!input.checked || rowImportSchemeBusy) return;
+        invalidateRowImportPreview('import-mode-change');
+        updateRowImportModeVisibility();
+        const file = rowImportSelectedFile;
+        vwdDebugLog('row-import', {
+          phase: 'import-mode-change',
+          importMode: currentRowImportMode(),
+          hasFile: !!file
+        });
+        if (!file) {
+          setRowImportSchemeHint('', false);
+          updateRowImportActionState();
+          return;
+        }
+        setRowImportSchemeHint('正在按新的导入形式重新分析文件…', false);
+        if (file.sourcePath) {
+          void handleRowImportPathSelected(file.sourcePath, { preserveSignalName: true });
+        } else {
+          void handleRowImportFileSelected(file, { preserveSignalName: true });
+        }
+      });
+    });
+    if (rowImportHeaderRow) {
+      rowImportHeaderRow.addEventListener('input', () => {
+        invalidateRowImportPreview('header-row-change');
+        const headerRow = currentRowImportHeaderRow();
+        setRowImportSchemeHint(
+          headerRow
+            ? '第 ' + headerRow + ' 行将作为标题栏'
+            : '标题栏行号必须是 1 到 1000000 之间的整数',
+          !headerRow
+        );
+        updateRowImportActionState();
+        vwdDebugLog('row-import', {
+          phase: 'header-row-change',
+          headerRow: headerRow || null
+        });
       });
     }
     if (rowImportHasIndex) {
