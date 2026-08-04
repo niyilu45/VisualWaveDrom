@@ -512,6 +512,90 @@ func TestCollectionSearchSignatureIgnoresAutoGenEdits(t *testing.T) {
 	}
 }
 
+func TestCollectionSearchSignatureIgnoresHasSeqParsingEdit(t *testing.T) {
+	withoutSequence := false
+	withSequence := true
+	preset := collectionPreset{
+		Vars: []string{},
+		Paths: []collectionPresetPath{effectiveCollectionPresetPath(
+			collectionRuleConfig{
+				Folder: ".", GrepKeys: `^signal\.txt$`, Name: "signal",
+				ImportMode: "single", HasSeq: &withoutSequence,
+			},
+			collectionRuleConfig{},
+		)},
+	}
+	before := collectionSearchSignature("root", preset, map[string]string{})
+	rule := preset.Paths[0]
+	rule.UsrGen.HasSeq = &withSequence
+	rule.AutoGen.HasSeq = &withSequence
+	preset.Paths[0] = effectiveCollectionPresetPath(rule.UsrGen, rule.AutoGen)
+	after := collectionSearchSignature("root", preset, map[string]string{})
+	if before != after {
+		t.Fatal("hasSeq parsing edit invalidated unchanged file matches")
+	}
+}
+
+func TestCollectionSingleFilePreviewSurvivesHasSeqToggle(t *testing.T) {
+	root := t.TempDir()
+	sourcePath := filepath.Join(root, "signal.txt")
+	content := "seq value\n0 10\n2 20\n"
+	if err := os.WriteFile(sourcePath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	preset, err := normalizeCollectionPreset(map[string]any{
+		"vars": []any{},
+		"paths": []any{map[string]any{
+			"usrGen": map[string]any{
+				"folder": ".", "grepKeys": `^signal\.txt$`, "name": "signal",
+				"importMode": "single", "hasSeq": false,
+			},
+			"autoGen": map[string]any{},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := searchCollectionFiles(
+		root, root, preset, map[string]string{}, runTestCollectionRegexSearch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance := &service{
+		config:                 config{rootDir: root},
+		collectionSearchCache:  make(map[string]collectionSearchCacheEntry),
+		collectionPreviewCache: make(map[string]collectionSinglePreviewIndex),
+	}
+	result = instance.rememberCollectionSearch(result)
+
+	toggled := result.Preset
+	toggled.Paths = append([]collectionPresetPath{}, result.Preset.Paths...)
+	rule := toggled.Paths[0]
+	withSequence := true
+	rule.UsrGen.HasSeq = &withSequence
+	rule.AutoGen.HasSeq = &withSequence
+	toggled.Paths[0] = effectiveCollectionPresetPath(rule.UsrGen, rule.AutoGen)
+
+	preview, err := instance.previewCollectionSingleFile(
+		root, toggled, map[string]string{}, result.SearchToken, 0, 1, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines, ok := preview["lines"].([]collectionSinglePreviewLine)
+	if !ok || len(lines) != 3 || lines[0].Text != "seq value" ||
+		lines[1].Text != "0 10" || lines[2].Text != "2 20" {
+		t.Fatalf("hasSeq toggle changed the raw file preview: %#v", preview["lines"])
+	}
+	_, prepared, err := prepareCollectionEntry(
+		toggled.Paths[0], result.Entries[0].Matches[0], 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !prepared.HasSeq || prepared.Parser != "parse_index_data" {
+		t.Fatalf("hasSeq parser was not refreshed: %#v", prepared)
+	}
+}
+
 func TestCollectionSingleColumnAutoGenCanBeSearchedAgain(t *testing.T) {
 	root := t.TempDir()
 	sourcePath := filepath.Join(root, "SeqConvOutC.txt")

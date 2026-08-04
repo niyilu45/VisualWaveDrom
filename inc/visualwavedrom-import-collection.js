@@ -1081,15 +1081,24 @@
       return normalized;
     }
 
+    function singleEntryParser(hasSeq, delimiter) {
+      if (!hasSeq) return 'parse_single_column';
+      const normalized = String(delimiter || '').trim().toLowerCase();
+      if (normalized === 'comma' || normalized === 'csv') return 'parse_csv_index_data';
+      if (normalized === 'tab' || normalized === 'tsv') return 'parse_tsv_index_data';
+      return 'parse_index_data';
+    }
+
     function syncEntryAutoGen(entry, reason) {
       if (!parsedPreset || !entry || !parsedPreset.paths[entry.index]) return;
       const path = parsedPreset.paths[entry.index];
+      const importMode = entry.importMode || 'single';
       const autoGen = Object.assign({}, path.autoGen || {}, {
-        importMode: entry.importMode || 'single',
+        importMode,
         delimiter: entry.delimiter || 'auto',
-        parser: entry.parser || (entry.importMode === 'table'
+        parser: importMode === 'table'
           ? 'parse_table_data'
-          : 'parse_single_column'),
+          : singleEntryParser(!!entry.hasSeq, entry.delimiter),
         schemaHash: entry.schemaHash || ''
       });
       if (entry.importMode === 'table') {
@@ -1112,6 +1121,7 @@
         delete autoGen.hasSeq;
       } else {
         autoGen.hasSeq = !!entry.hasSeq;
+        entry.parser = autoGen.parser;
         if (path.usrGen && Object.prototype.hasOwnProperty.call(path.usrGen, 'hasSeq')) {
           path.usrGen.hasSeq = !!entry.hasSeq;
         }
@@ -1451,8 +1461,15 @@
             entry.hasSeq = sequenceCheckbox.checked;
             syncEntryAutoGen(entry, 'single-has-seq-change');
             setHint(entry.hasSeq
-              ? '已按文件第一列作为序号导入'
-              : '已改为自动从 0 编号', false);
+              ? '文件原文保持不变；导入时第一列作为序号'
+              : '文件原文保持不变；导入时从 0 自动编号', false);
+            debug({
+              phase: 'single-has-seq-change',
+              entryIndex: entry.index,
+              hasSeq: entry.hasSeq,
+              parser: entry.parser,
+              previewLineCount: previewState ? previewState.lines.length : 0
+            });
             renderSearchResults(payload);
           });
           sequenceLabel.appendChild(sequenceCheckbox);
@@ -2065,7 +2082,7 @@
         if (file.size > 2 * 1024 * 1024) {
           throw new Error('预设 JSON 文件不能超过 2 MB');
         }
-        const text = String(await file.text()).replace(/^\uFEFF/, '');
+        const text = String(await readBrowserPresetText(file)).replace(/^\uFEFF/, '');
         const preset = validatePresetShape(JSON.parse(text));
         selectedBrowserPresetFile = file;
         selectedDiscoveredPreset = null;
@@ -2099,6 +2116,18 @@
       } finally {
         setBusy(false, '');
       }
+    }
+
+    function readBrowserPresetText(file) {
+      if (file && typeof file.text === 'function') return file.text();
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.addEventListener('load', () => resolve(String(reader.result || '')), { once: true });
+        reader.addEventListener('error', () => {
+          reject(reader.error || new Error('无法读取选择的预设文件'));
+        }, { once: true });
+        reader.readAsText(file, 'UTF-8');
+      });
     }
 
     async function chooseRoot() {
@@ -2198,9 +2227,59 @@
 
     async function choosePreset() {
       if (busy || !presetFileInput) return;
-      presetFileInput.value = '';
-      debug({ phase: 'preset-browser-picker-open' });
-      presetFileInput.click();
+      const serverMode = typeof settings.isServerMode === 'function'
+        && !!settings.isServerMode();
+      if (!serverMode) {
+        presetFileInput.value = '';
+        debug({ phase: 'preset-browser-picker-open', serverMode: false });
+        if (typeof presetFileInput.showPicker === 'function') presetFileInput.showPicker();
+        else presetFileInput.click();
+        return;
+      }
+
+      let selectedPath = '';
+      let focusManualPath = false;
+      setBusy(true, 'pick');
+      debug({ phase: 'preset-native-picker-open', serverMode: true });
+      try {
+        const initialPath = originalPresetPath || String(presetPathInput.value || '').trim();
+        const result = await pickPath('preset', initialPath);
+        if (result.manual) {
+          manualSavePathMode = false;
+          if (result.path) presetPathInput.value = result.path;
+          setHint(result.message || '请直接输入预设 JSON 路径，再点击“读取预设”', false);
+          status(true, '请在页面中输入预设 JSON 路径');
+          focusManualPath = true;
+          debug({
+            phase: 'preset-native-picker-manual-path',
+            path: presetPathInput.value,
+            detail: result.detail
+          });
+        } else if (!result.cancelled && result.path) {
+          selectedPath = result.path;
+          selectedBrowserPresetFile = null;
+          selectedDiscoveredPreset = null;
+          manualSavePathMode = false;
+          presetPathInput.value = selectedPath;
+          updateDiscoveredPresetSelection();
+          rememberState('preset-native-selected');
+          debug({ phase: 'preset-native-picker-selected', path: selectedPath });
+        } else {
+          debug({ phase: 'preset-native-picker-cancelled' });
+        }
+      } catch (error) {
+        setHint((error.message || String(error)) + '；也可以直接粘贴预设路径', true);
+        status(false, '选择预设失败：' + (error.message || String(error)));
+        debug({ phase: 'preset-native-picker-error', message: error.message || String(error) });
+      } finally {
+        setBusy(false, '');
+        refreshEditorsAfterPathPicker('preset-open-picker');
+      }
+      if (focusManualPath) {
+        focusAndSelectPath(presetPathInput);
+        return;
+      }
+      if (selectedPath) await loadPreset(selectedPath);
     }
 
     async function savePreset() {
@@ -2478,7 +2557,15 @@
     pickPresetButton.addEventListener('click', () => { void choosePreset(); });
     presetFileInput.addEventListener('change', () => {
       const file = presetFileInput.files && presetFileInput.files[0];
-      if (file) void loadBrowserPreset(file);
+      debug({
+        phase: 'preset-browser-picker-change',
+        hasFile: !!file,
+        name: file ? file.name : ''
+      });
+      if (!file) return;
+      presetPathInput.value = file.name;
+      rememberState('preset-browser-selected');
+      void loadBrowserPreset(file);
     });
     loadPresetButton.addEventListener('click', () => { void loadPreset(presetPathInput.value); });
     savePresetButton.addEventListener('click', () => { void savePreset(); });

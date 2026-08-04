@@ -1928,9 +1928,15 @@ func prepareCollectionEntry(
 				"select at least one waveform signal column besides the index column")
 		}
 	} else {
-		analysis := analyzeImportSample(match.FileName, lines)
+		hasSeqConfigured := rule.UsrGen.HasSeq != nil || rule.AutoGen.HasSeq != nil
+		var analysis map[string]any
+		if hasSeqConfigured {
+			analysis = analyzeImportSample(match.FileName, lines, rule.HasSeq)
+		} else {
+			analysis = analyzeImportSample(match.FileName, lines)
+		}
 		hasSeq := boolValue(analysis["hasIndex"], rule.HasSeq)
-		if rule.UsrGen.HasSeq != nil || rule.AutoGen.HasSeq != nil {
+		if hasSeqConfigured {
 			hasSeq = rule.HasSeq
 		}
 		autoGen := rule.AutoGen
@@ -2128,17 +2134,24 @@ func collectionSearchSignature(
 	preset collectionPreset,
 	variables map[string]string,
 ) string {
-	usrGen := make([]collectionRuleConfig, len(preset.Paths))
+	type searchRule struct {
+		Folder   string `json:"folder"`
+		GrepKeys string `json:"grepKeys"`
+		Name     string `json:"name"`
+	}
+	rules := make([]searchRule, len(preset.Paths))
 	for index, rule := range preset.Paths {
-		usrGen[index] = rule.UsrGen
+		rules[index] = searchRule{
+			Folder: rule.Folder, GrepKeys: rule.GrepKeys, Name: rule.Name,
+		}
 	}
 	payload := struct {
-		RootPath  string                 `json:"rootPath"`
-		Vars      []string               `json:"vars"`
-		UsrGen    []collectionRuleConfig `json:"usrGen"`
-		Variables map[string]string      `json:"variables"`
+		RootPath  string            `json:"rootPath"`
+		Vars      []string          `json:"vars"`
+		Rules     []searchRule      `json:"rules"`
+		Variables map[string]string `json:"variables"`
 	}{
-		RootPath: rootPath, Vars: preset.Vars, UsrGen: usrGen, Variables: variables,
+		RootPath: rootPath, Vars: preset.Vars, Rules: rules, Variables: variables,
 	}
 	data, _ := json.Marshal(payload)
 	sum := sha256.Sum256(data)
