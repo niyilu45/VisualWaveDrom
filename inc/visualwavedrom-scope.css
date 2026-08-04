@@ -578,6 +578,14 @@ body.scope-row-resizing * {
   gap: 6px;
 }
 
+.scope-overview-label-footer {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
 .scope-overview-label strong {
   flex: 0 0 auto;
   font-size: 12px;
@@ -751,7 +759,8 @@ body.scope-row-resizing * {
 }
 
 .scope-display-field-label,
-.scope-analog-settings label > span {
+.scope-analog-settings label > span,
+.scope-bus-signed-field > span {
   color: #555b63;
   font-size: 11px;
   font-weight: 600;
@@ -761,6 +770,16 @@ body.scope-row-resizing * {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 5px;
+}
+
+.scope-bus-signed-field {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.scope-bus-signed-options {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .scope-display-mode-options button {

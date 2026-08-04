@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"crypto/sha256"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -46,6 +47,8 @@ const (
 	collectionSingleIndexStride  = 256
 	collectionSingleIndexLimit   = 32
 	collectionSingleIndexTTL     = 10 * time.Minute
+	collectionImportProgressTTL  = 10 * time.Minute
+	collectionImportProgressMax  = 32
 )
 
 var collectionVariableNamePattern = regexp.MustCompile(`^[\p{L}_][\p{L}\p{N}_.-]*$`)
@@ -56,6 +59,7 @@ var collectionTemplateVariablePattern = regexp.MustCompile(
 var collectionUnresolvedVariablePattern = regexp.MustCompile(
 	`\$\{[\p{L}_][\p{L}\p{N}_.-]*\}|\{\{[\p{L}_][\p{L}\p{N}_.-]*\}\}|\{[\p{L}_][\p{L}\p{N}_.-]*\}`,
 )
+var collectionImportProgressTokenPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
 
 type collectionPresetPath struct {
 	UsrGen  collectionRuleConfig `json:"usrGen"`
@@ -105,6 +109,15 @@ type collectionPresetFile struct {
 	InnerType string                 `json:"InnerType"`
 	Vars      []string               `json:"vars"`
 	Paths     []collectionPresetPath `json:"paths"`
+}
+
+type collectionPresetDocument struct {
+	Text        string
+	Preset      collectionPreset
+	Valid       bool
+	PresetError string
+	ErrorLine   int
+	ErrorColumn int
 }
 
 type collectionPresetDiscoveryEntry struct {
@@ -229,6 +242,21 @@ type collectionImportEntryResult struct {
 	updates []map[string]any
 	file    map[string]any
 	err     error
+}
+
+type collectionImportProgress struct {
+	ProgressToken   string `json:"progressToken"`
+	Phase           string `json:"phase"`
+	TotalFiles      int    `json:"totalFiles"`
+	CompletedFiles  int    `json:"completedFiles"`
+	SuccessfulFiles int    `json:"successfulFiles"`
+	FailedFiles     int    `json:"failedFiles"`
+	SignalCount     int    `json:"signalCount"`
+	Done            bool   `json:"done"`
+	Error           string `json:"error,omitempty"`
+	DurationMS      int64  `json:"durationMs"`
+	startedAt       time.Time
+	updatedAt       time.Time
 }
 
 func anyList(value any) ([]any, bool) {
@@ -901,31 +929,76 @@ func resolveCollectionPresetFile(rawPath, baseDir string) (string, error) {
 	return resolved, nil
 }
 
-func loadCollectionPreset(rawPath, baseDir string) (collectionPreset, string, error) {
+func collectionJSONErrorLocation(data []byte, err error) (int, int) {
+	var syntaxError *json.SyntaxError
+	if !errors.As(err, &syntaxError) {
+		return 0, 0
+	}
+	offset := int(syntaxError.Offset) - 1
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > len(data) {
+		offset = len(data)
+	}
+	line, column := 1, 1
+	for index := 0; index < offset; index++ {
+		if data[index] == '\n' {
+			line, column = line+1, 1
+		} else {
+			column++
+		}
+	}
+	return line, column
+}
+
+func loadCollectionPresetDocument(
+	rawPath string,
+	baseDir string,
+) (collectionPresetDocument, string, error) {
 	presetPath, err := resolveCollectionPresetFile(rawPath, baseDir)
 	if err != nil {
-		return collectionPreset{}, "", err
+		return collectionPresetDocument{}, "", err
 	}
 	info, err := os.Stat(presetPath)
 	if err != nil {
-		return collectionPreset{}, "", err
+		return collectionPresetDocument{}, "", err
 	}
 	if info.Size() > collectionPresetMaxBytes {
-		return collectionPreset{}, "", errors.New("preset JSON cannot exceed 1 MB")
+		return collectionPresetDocument{}, "", errors.New("preset JSON cannot exceed 1 MB")
 	}
 	data, err := os.ReadFile(presetPath)
 	if err != nil {
-		return collectionPreset{}, "", err
+		return collectionPresetDocument{}, "", err
 	}
+	text := strings.TrimPrefix(string(data), "\uFEFF")
+	document := collectionPresetDocument{Text: text}
+	jsonData := []byte(text)
 	var raw map[string]any
-	if err = json.Unmarshal(data, &raw); err != nil {
-		return collectionPreset{}, "", fmt.Errorf("preset JSON is invalid: %w", err)
+	if err = json.Unmarshal(jsonData, &raw); err != nil {
+		document.PresetError = fmt.Sprintf("preset JSON is invalid: %v", err)
+		document.ErrorLine, document.ErrorColumn = collectionJSONErrorLocation(jsonData, err)
+		return document, presetPath, nil
 	}
 	preset, err := normalizeCollectionPreset(raw)
 	if err != nil {
+		document.PresetError = err.Error()
+		return document, presetPath, nil
+	}
+	document.Preset = preset
+	document.Valid = true
+	return document, presetPath, nil
+}
+
+func loadCollectionPreset(rawPath, baseDir string) (collectionPreset, string, error) {
+	document, presetPath, err := loadCollectionPresetDocument(rawPath, baseDir)
+	if err != nil {
 		return collectionPreset{}, "", err
 	}
-	return preset, presetPath, nil
+	if !document.Valid {
+		return collectionPreset{}, "", errors.New(document.PresetError)
+	}
+	return document.Preset, presetPath, nil
 }
 
 func saveCollectionPreset(
@@ -1057,6 +1130,23 @@ func resolveDiscoveredCollectionPreset(
 	rawRelativePath string,
 	baseDir string,
 ) (string, string, error) {
+	presetPath, normalizedRelative, err := resolveDiscoveredCollectionPresetFile(
+		rawRootPath, rawRelativePath, baseDir)
+	if err != nil {
+		return "", "", err
+	}
+	innerType, err := readCollectionPresetInnerType(presetPath)
+	if err != nil || innerType != collectionPresetInnerType {
+		return "", "", errors.New("selected file is not a batch waveform import preset")
+	}
+	return presetPath, normalizedRelative, nil
+}
+
+func resolveDiscoveredCollectionPresetFile(
+	rawRootPath string,
+	rawRelativePath string,
+	baseDir string,
+) (string, string, error) {
 	rootPath, err := resolveCollectionRoot(rawRootPath, baseDir)
 	if err != nil {
 		return "", "", err
@@ -1074,16 +1164,29 @@ func resolveDiscoveredCollectionPreset(
 	if err != nil {
 		return "", "", err
 	}
-	innerType, err := readCollectionPresetInnerType(presetPath)
-	if err != nil || innerType != collectionPresetInnerType {
-		return "", "", errors.New("selected file is not a batch waveform import preset")
-	}
 	normalizedRelative, err := filepath.Rel(rootPath, presetPath)
 	if err != nil || normalizedRelative == ".." ||
 		strings.HasPrefix(normalizedRelative, ".."+string(os.PathSeparator)) {
 		return "", "", errors.New("preset path is outside the search folder")
 	}
 	return presetPath, filepath.ToSlash(normalizedRelative), nil
+}
+
+func loadDiscoveredCollectionPresetDocument(
+	rawRootPath string,
+	rawRelativePath string,
+	baseDir string,
+) (collectionPresetDocument, string, string, error) {
+	presetPath, relativePath, err := resolveDiscoveredCollectionPresetFile(
+		rawRootPath, rawRelativePath, baseDir)
+	if err != nil {
+		return collectionPresetDocument{}, "", "", err
+	}
+	document, resolvedPath, err := loadCollectionPresetDocument(presetPath, baseDir)
+	if err != nil {
+		return collectionPresetDocument{}, "", "", err
+	}
+	return document, resolvedPath, relativePath, nil
 }
 
 func loadDiscoveredCollectionPreset(
@@ -1439,6 +1542,73 @@ func readCollectionSinglePreviewRange(
 		currentLine++
 	}
 	return lines, nil
+}
+
+func collectionSinglePreviewDelimiter(delimiter, line, fileName string) string {
+	delimiter = strings.ToLower(strings.TrimSpace(delimiter))
+	switch delimiter {
+	case "csv":
+		return "comma"
+	case "tsv":
+		return "tab"
+	case "space":
+		return "whitespace"
+	case "", "auto", "unknown":
+		return collectionDelimiterForLine(line, fileName)
+	default:
+		return delimiter
+	}
+}
+
+func joinCollectionSinglePreviewColumns(columns []string, delimiter string) string {
+	switch delimiter {
+	case "comma":
+		var output strings.Builder
+		writer := csv.NewWriter(&output)
+		if err := writer.Write(columns); err != nil {
+			return strings.Join(columns, ",")
+		}
+		writer.Flush()
+		if writer.Error() != nil {
+			return strings.Join(columns, ",")
+		}
+		return strings.TrimSuffix(strings.TrimSuffix(output.String(), "\n"), "\r")
+	case "tab":
+		return strings.Join(columns, "\t")
+	case "whitespace":
+		return strings.Join(columns, " ")
+	default:
+		if utf8.RuneCountInString(delimiter) == 1 {
+			return strings.Join(columns, delimiter)
+		}
+		return strings.Join(columns, " ")
+	}
+}
+
+func collectionSinglePreviewWithoutSequenceColumn(
+	lines []collectionSinglePreviewLine,
+	delimiter string,
+	fileName string,
+) []collectionSinglePreviewLine {
+	result := make([]collectionSinglePreviewLine, len(lines))
+	copy(result, lines)
+	for index := range result {
+		trimmed := strings.TrimSpace(result[index].Text)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") ||
+			strings.HasPrefix(trimmed, "//") {
+			continue
+		}
+		effectiveDelimiter := collectionSinglePreviewDelimiter(
+			delimiter, result[index].Text, fileName)
+		columns := collectionSplitColumns(result[index].Text, effectiveDelimiter)
+		if len(columns) <= 1 {
+			result[index].Text = ""
+			continue
+		}
+		result[index].Text = joinCollectionSinglePreviewColumns(
+			columns[1:], effectiveDelimiter)
+	}
+	return result
 }
 
 func collectionDelimiterForLine(line, fileName string) string {
@@ -2353,11 +2523,157 @@ func (s *service) parseCollectionEntry(
 	}
 }
 
+func normalizeCollectionImportProgressToken(raw string) (string, error) {
+	token := strings.TrimSpace(raw)
+	if token == "" {
+		return "", nil
+	}
+	if !collectionImportProgressTokenPattern.MatchString(token) {
+		return "", errors.New("collection import progress token is invalid")
+	}
+	return token, nil
+}
+
+func (s *service) pruneCollectionImportProgressLocked(now time.Time) {
+	for token, progress := range s.collectionImportJobs {
+		if now.Sub(progress.updatedAt) > collectionImportProgressTTL {
+			delete(s.collectionImportJobs, token)
+		}
+	}
+	for len(s.collectionImportJobs) >= collectionImportProgressMax {
+		oldestToken := ""
+		var oldestAt time.Time
+		for token, progress := range s.collectionImportJobs {
+			if oldestToken == "" || progress.updatedAt.Before(oldestAt) {
+				oldestToken = token
+				oldestAt = progress.updatedAt
+			}
+		}
+		if oldestToken == "" {
+			break
+		}
+		delete(s.collectionImportJobs, oldestToken)
+	}
+}
+
+func (s *service) beginCollectionImportProgress(rawToken string) (string, error) {
+	token, err := normalizeCollectionImportProgressToken(rawToken)
+	if err != nil || token == "" {
+		return token, err
+	}
+	now := time.Now()
+	s.collectionImportMu.Lock()
+	defer s.collectionImportMu.Unlock()
+	if s.collectionImportJobs == nil {
+		s.collectionImportJobs = make(map[string]collectionImportProgress)
+	}
+	s.pruneCollectionImportProgressLocked(now)
+	s.collectionImportJobs[token] = collectionImportProgress{
+		ProgressToken: token,
+		Phase:         "preparing",
+		startedAt:     now,
+		updatedAt:     now,
+	}
+	return token, nil
+}
+
+func (s *service) setCollectionImportProgressTotal(token string, total int) {
+	if token == "" {
+		return
+	}
+	s.collectionImportMu.Lock()
+	defer s.collectionImportMu.Unlock()
+	progress, found := s.collectionImportJobs[token]
+	if !found {
+		return
+	}
+	progress.TotalFiles = total
+	progress.Phase = "parsing"
+	progress.updatedAt = time.Now()
+	s.collectionImportJobs[token] = progress
+}
+
+func (s *service) recordCollectionImportProgress(
+	token string,
+	result collectionImportEntryResult,
+) {
+	if token == "" {
+		return
+	}
+	s.collectionImportMu.Lock()
+	defer s.collectionImportMu.Unlock()
+	progress, found := s.collectionImportJobs[token]
+	if !found {
+		return
+	}
+	progress.CompletedFiles++
+	if result.err != nil {
+		progress.FailedFiles++
+	} else {
+		progress.SuccessfulFiles++
+		progress.SignalCount += len(result.updates)
+	}
+	progress.updatedAt = time.Now()
+	s.collectionImportJobs[token] = progress
+}
+
+func (s *service) finishCollectionImportProgress(token string, importErr error) {
+	if token == "" {
+		return
+	}
+	now := time.Now()
+	s.collectionImportMu.Lock()
+	defer s.collectionImportMu.Unlock()
+	progress, found := s.collectionImportJobs[token]
+	if !found {
+		return
+	}
+	progress.Done = true
+	progress.Phase = "complete"
+	if importErr != nil {
+		progress.Phase = "error"
+		progress.Error = importErr.Error()
+	}
+	progress.DurationMS = now.Sub(progress.startedAt).Milliseconds()
+	progress.updatedAt = now
+	s.collectionImportJobs[token] = progress
+}
+
+func (s *service) collectionImportProgressSnapshot(
+	rawToken string,
+) (collectionImportProgress, error) {
+	token, err := normalizeCollectionImportProgressToken(rawToken)
+	if err != nil {
+		return collectionImportProgress{}, err
+	}
+	if token == "" {
+		return collectionImportProgress{}, errors.New("collection import progress token is required")
+	}
+	now := time.Now()
+	s.collectionImportMu.Lock()
+	defer s.collectionImportMu.Unlock()
+	if s.collectionImportJobs == nil {
+		return collectionImportProgress{}, errors.New("collection import progress was not found")
+	}
+	progress, found := s.collectionImportJobs[token]
+	if !found || now.Sub(progress.updatedAt) > collectionImportProgressTTL {
+		if found {
+			delete(s.collectionImportJobs, token)
+		}
+		return collectionImportProgress{}, errors.New("collection import progress was not found")
+	}
+	if !progress.Done {
+		progress.DurationMS = now.Sub(progress.startedAt).Milliseconds()
+	}
+	return progress, nil
+}
+
 func (s *service) importCollectionFiles(
 	rawRootPath string,
 	preset collectionPreset,
 	variables map[string]string,
 	searchToken string,
+	progressToken string,
 ) (map[string]any, error) {
 	startedAt := time.Now()
 	search, err := s.cachedCollectionSearch(
@@ -2374,6 +2690,7 @@ func (s *service) importCollectionFiles(
 	if len(importEntries) == 0 {
 		return nil, errors.New("search did not find any files to import")
 	}
+	s.setCollectionImportProgressTotal(progressToken, len(importEntries))
 	catalog := s.imports.listSchemes()
 	if len(catalog.Schemes) == 0 {
 		return nil, errors.New("import/Scheme does not contain a usable parser preset")
@@ -2402,14 +2719,17 @@ func (s *service) importCollectionFiles(
 			defer workers.Done()
 			for index := range jobs {
 				entry := importEntries[index]
+				var result collectionImportEntryResult
 				if entry.Index < 0 || entry.Index >= len(preset.Paths) {
-					entryResults[index] = collectionImportEntryResult{
+					result = collectionImportEntryResult{
 						err: errors.New("collection rule index is invalid"),
 					}
-					continue
+				} else {
+					result = s.parseCollectionEntry(
+						catalog, search, entry, preset.Paths[entry.Index])
 				}
-				entryResults[index] = s.parseCollectionEntry(
-					catalog, search, entry, preset.Paths[entry.Index])
+				entryResults[index] = result
+				s.recordCollectionImportProgress(progressToken, result)
 			}
 		}()
 	}
@@ -2574,13 +2894,23 @@ func (s *service) previewCollectionSingleFile(
 	if err != nil {
 		return nil, fmt.Errorf("读取文件预览失败：%w", err)
 	}
+	sequenceColumnHidden := preset.Paths[ruleIndex].HasSeq
+	if sequenceColumnHidden {
+		delimiter := preset.Paths[ruleIndex].Delimiter
+		if strings.TrimSpace(delimiter) == "" {
+			delimiter = selected.Delimiter
+		}
+		lines = collectionSinglePreviewWithoutSequenceColumn(
+			lines, delimiter, match.FileName)
+	}
 	return map[string]any{
 		"ok": true, "index": ruleIndex,
 		"path": match.Path, "relativePath": match.RelativePath,
 		"totalLines": indexed.totalLines, "startLine": startLine,
 		"lineCount": lineCount, "displayedCount": len(lines),
-		"hasMore": startLine+len(lines)-1 < indexed.totalLines,
-		"lines":   lines,
+		"hasMore":              startLine+len(lines)-1 < indexed.totalLines,
+		"sequenceColumnHidden": sequenceColumnHidden,
+		"lines":                lines,
 	}, nil
 }
 
@@ -2626,15 +2956,24 @@ func (s *service) handleImportCollection(writer http.ResponseWriter, request *ht
 			"ok": true, "path": selected, "cancelled": cancelled,
 		})
 	case "load":
-		preset, presetPath, err := loadCollectionPreset(
+		document, presetPath, err := loadCollectionPresetDocument(
 			stringValue(payload["presetPath"]), s.config.rootDir)
 		if err != nil {
 			sendJSON(writer, 400, map[string]any{"error": err.Error()})
 			return
 		}
-		sendJSON(writer, 200, map[string]any{
-			"ok": true, "presetPath": presetPath, "preset": preset,
-		})
+		response := map[string]any{
+			"ok": true, "presetPath": presetPath,
+			"presetText": document.Text, "presetValid": document.Valid,
+		}
+		if document.Valid {
+			response["preset"] = document.Preset
+		} else {
+			response["presetError"] = document.PresetError
+			response["errorLine"] = document.ErrorLine
+			response["errorColumn"] = document.ErrorColumn
+		}
+		sendJSON(writer, 200, response)
 	case "scan-presets":
 		result, err := discoverCollectionPresets(
 			stringValue(payload["searchPath"]), s.config.rootDir)
@@ -2644,7 +2983,7 @@ func (s *service) handleImportCollection(writer http.ResponseWriter, request *ht
 		}
 		sendJSON(writer, 200, result)
 	case "load-discovered":
-		preset, presetPath, relativePath, err := loadDiscoveredCollectionPreset(
+		document, presetPath, relativePath, err := loadDiscoveredCollectionPresetDocument(
 			stringValue(payload["searchPath"]),
 			stringValue(payload["relativePath"]),
 			s.config.rootDir,
@@ -2653,10 +2992,19 @@ func (s *service) handleImportCollection(writer http.ResponseWriter, request *ht
 			sendJSON(writer, 400, map[string]any{"error": err.Error()})
 			return
 		}
-		sendJSON(writer, 200, map[string]any{
+		response := map[string]any{
 			"ok": true, "presetPath": presetPath,
-			"relativePath": relativePath, "preset": preset,
-		})
+			"relativePath": relativePath, "presetText": document.Text,
+			"presetValid": document.Valid,
+		}
+		if document.Valid {
+			response["preset"] = document.Preset
+		} else {
+			response["presetError"] = document.PresetError
+			response["errorLine"] = document.ErrorLine
+			response["errorColumn"] = document.ErrorColumn
+		}
+		sendJSON(writer, 200, response)
 	case "save":
 		preset, err := normalizeCollectionPreset(payload["preset"])
 		if err != nil {
@@ -2672,6 +3020,14 @@ func (s *service) handleImportCollection(writer http.ResponseWriter, request *ht
 		sendJSON(writer, 200, map[string]any{
 			"ok": true, "presetPath": presetPath, "preset": preset,
 		})
+	case "import-progress":
+		progress, err := s.collectionImportProgressSnapshot(
+			stringValue(payload["progressToken"]))
+		if err != nil {
+			sendJSON(writer, 404, map[string]any{"error": err.Error()})
+			return
+		}
+		sendJSON(writer, 200, map[string]any{"ok": true, "progress": progress})
 	case "search", "preview", "single-preview", "import":
 		preset, err := normalizeCollectionPreset(payload["preset"])
 		if err != nil {
@@ -2732,15 +3088,28 @@ func (s *service) handleImportCollection(writer http.ResponseWriter, request *ht
 			sendJSON(writer, 200, result)
 			return
 		}
+		progressToken, progressErr := s.beginCollectionImportProgress(
+			stringValue(payload["progressToken"]))
+		if progressErr != nil {
+			sendJSON(writer, 400, map[string]any{"error": progressErr.Error()})
+			return
+		}
 		result, importErr := s.importCollectionFiles(
 			stringValue(payload["rootPath"]),
 			preset,
 			variables,
 			stringValue(payload["searchToken"]),
+			progressToken,
 		)
+		s.finishCollectionImportProgress(progressToken, importErr)
 		if importErr != nil {
 			sendJSON(writer, 400, map[string]any{"error": importErr.Error()})
 			return
+		}
+		if progressToken != "" {
+			if progress, snapshotErr := s.collectionImportProgressSnapshot(progressToken); snapshotErr == nil {
+				result["progress"] = progress
+			}
 		}
 		result["ok"] = true
 		sendJSON(writer, 200, result)

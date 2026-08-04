@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260802-analog-unknown-v3';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260804-bus-format-v2';
   const DEFAULT_ROW_HEIGHT = 42;
   const MIN_ANALOG_ROW_HEIGHT = 28;
   const MAX_ANALOG_ROW_HEIGHT = 480;
@@ -36,6 +36,12 @@
     digital: '数字',
     bus: '总线',
     analog: '模拟'
+  };
+  const BUS_RADIX_LABELS = {
+    2: '二进制',
+    8: '八进制',
+    10: '十进制',
+    16: '十六进制'
   };
 
   function clamp(value, min, max) {
@@ -101,6 +107,74 @@
     return { type, bitWidth, fractionalBits };
   }
 
+  function normalizeBusFormat(candidate) {
+    const source = candidate && typeof candidate === 'object' ? candidate : {};
+    const requestedRadix = Number(
+      source.busRadix == null ? source.radix : source.busRadix
+    );
+    const radix = [2, 8, 10, 16].indexOf(requestedRadix) >= 0 ? requestedRadix : 10;
+    const widthValue = source.busBitWidth == null ? source.bitWidth : source.busBitWidth;
+    const bitWidth = clamp(Math.floor(Number(widthValue) || 32), 1, 64);
+    const signedValue = source.busSigned == null ? source.signed : source.busSigned;
+    const signedText = String(signedValue == null ? '' : signedValue).toLowerCase();
+    const signed = signedValue === true || signedText === 'true' || signedText === 'signed';
+    return { radix, bitWidth, signed };
+  }
+
+  function parseBusInteger(value) {
+    let token = String(value == null ? '' : value).trim().replace(/_/g, '');
+    if (!token || /^(x|z)$/i.test(token)) return null;
+    let negative = false;
+    if (token[0] === '+' || token[0] === '-') {
+      negative = token[0] === '-';
+      token = token.slice(1);
+    }
+    if (!/^(?:0[xX][0-9a-fA-F]+|0[bB][01]+|0[oO][0-7]+|\d+)$/.test(token)) {
+      return null;
+    }
+    try {
+      const parsed = BigInt(token);
+      return negative ? -parsed : parsed;
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  function formatBusValue(value, candidate) {
+    const text = String(value == null ? '' : value).trim();
+    if (!text || /^(x|z)$/i.test(text)) return text.toLowerCase();
+    const integer = parseBusInteger(text);
+    if (integer == null) return text;
+    const format = normalizeBusFormat(candidate);
+    const interpreted = format.signed
+      ? BigInt.asIntN(format.bitWidth, integer)
+      : BigInt.asUintN(format.bitWidth, integer);
+    const negative = interpreted < 0n;
+    const magnitude = negative ? -interpreted : interpreted;
+    let digits = magnitude.toString(format.radix);
+    if (format.radix === 16) digits = digits.toUpperCase();
+    if (!negative && format.radix !== 10) {
+      const groupSize = format.radix === 2 ? 1 : (format.radix === 8 ? 3 : 4);
+      digits = digits.padStart(Math.ceil(format.bitWidth / groupSize), '0');
+    }
+    const prefix = format.radix === 2
+      ? '0b'
+      : (format.radix === 8 ? '0o' : (format.radix === 16 ? '0x' : ''));
+    return (negative ? '-' : '') + prefix + digits;
+  }
+
+  function compactBusLabel(value, pixelWidth) {
+    const text = String(value == null ? '' : value);
+    const maxCharacters = Math.max(5, Math.floor((Number(pixelWidth) - 10) / 6.2));
+    if (text.length <= maxCharacters) return text;
+    const prefixMatch = text.match(/^-?0[bBoOxX]/);
+    if (prefixMatch && maxCharacters >= prefixMatch[0].length + 2) {
+      const tailLength = maxCharacters - prefixMatch[0].length - 1;
+      return prefixMatch[0] + '…' + text.slice(-tailLength);
+    }
+    return text.slice(0, Math.max(1, maxCharacters - 1)) + '…';
+  }
+
   function normalizeScopeColor(value) {
     const color = String(value == null ? '' : value).trim().toLowerCase();
     if (/^#[0-9a-f]{6}$/.test(color)) return color;
@@ -150,6 +224,35 @@
         color: normalizeScopeColor(range.color)
       })).filter((range) => range.color && range.end > range.start)
     };
+  }
+
+  function simplifiedBusSegments(row, columns, rangeEnd, busFormat) {
+    const segments = [];
+    columns.forEach((column, pointIndex) => {
+      const rawValue = row.values[pointIndex];
+      const unknown = rawValue == null || rawValue === '';
+      const value = unknown
+        ? ''
+        : formatBusValue(
+          row.labels && row.labels[pointIndex] != null
+            ? row.labels[pointIndex]
+            : rawValue,
+          busFormat
+        );
+      const end = pointIndex + 1 < columns.length
+        ? columns[pointIndex + 1]
+        : rangeEnd;
+      const previous = segments[segments.length - 1];
+      if (previous
+          && previous.unknown === unknown
+          && (unknown || previous.value === value)
+          && Math.abs(previous.end - column) < 1e-7) {
+        previous.end = end;
+      } else {
+        segments.push({ start: column, end, value, unknown });
+      }
+    });
+    return segments;
   }
 
   function parseColumnSelection(value, totalColumns) {
@@ -255,6 +358,7 @@
       this.document = null;
       this.meta = null;
       this.modes = {};
+      this.busFormats = {};
       this.analogFormats = {};
       this.rowStyles = {};
       this.rowHeights = [];
@@ -332,6 +436,7 @@
       this.syncSignalNameMetadata();
       this.meta.rows.forEach((row) => {
         this.modes[row.index] = row.mode;
+        this.busFormats[row.index] = normalizeBusFormat(row.busFormat);
         this.analogFormats[row.index] = normalizeAnalogFormat(
           row.analogFormat,
           row.detectedMode === 'analog' ? 'float' : 'unsigned'
@@ -495,7 +600,11 @@
                       id="scope-fit">适应窗口</button>
                 </div>
               </div>
-              <span>拖动定位</span>
+              <div class="scope-overview-label-footer">
+                <span>拖动定位</span>
+                <button type="button" class="scope-command-btn scope-overview-fit-btn"
+                    id="scope-fit-cursors" title="显示 A、B 游标之间的区域">适应游标</button>
+              </div>
             </div>
           </aside>
           <section class="scope-plot-column">
@@ -527,7 +636,9 @@
           <div class="scope-measurements" id="scope-measurements">
             <span>A：未设置</span>
             <span>B：未设置</span>
-            <strong>Δt：--</strong>
+            <strong>B-A：--</strong>
+            <span>Cur-A：--</span>
+            <span>Cur-B：--</span>
           </div>
         </section>
         <footer class="scope-statusbar">
@@ -548,6 +659,33 @@
               <button type="button" data-scope-display-mode="digital">数字</button>
               <button type="button" data-scope-display-mode="bus">总线</button>
               <button type="button" data-scope-display-mode="analog">模拟</button>
+            </div>
+          </div>
+          <div class="scope-analog-settings scope-bus-settings" id="scope-signal-bus-settings"
+              hidden>
+            <label>
+              <span>显示进制</span>
+              <select id="scope-signal-bus-radix" aria-label="当前总线的显示进制">
+                <option value="2">二进制（BIN）</option>
+                <option value="8">八进制（OCT）</option>
+                <option value="10">十进制（DEC）</option>
+                <option value="16">十六进制（HEX）</option>
+              </select>
+            </label>
+            <div class="scope-analog-number-fields">
+              <label>
+                <span>位宽</span>
+                <input type="number" id="scope-signal-bus-width"
+                    min="1" max="64" step="1" value="32">
+              </label>
+              <div class="scope-bus-signed-field">
+                <span>数值类型</span>
+                <div class="scope-display-mode-options scope-bus-signed-options"
+                    id="scope-signal-bus-signed" role="group" aria-label="总线有无符号">
+                  <button type="button" data-scope-bus-signed="false">无符号</button>
+                  <button type="button" data-scope-bus-signed="true">有符号</button>
+                </div>
+              </div>
             </div>
           </div>
           <div class="scope-analog-settings" id="scope-signal-analog-settings">
@@ -643,6 +781,10 @@
       this.displayPopoverTitle = root.querySelector('#scope-display-popover-title');
       this.displayPopoverCloseButton = root.querySelector('#scope-display-popover-close');
       this.displayModeOptions = root.querySelector('#scope-display-mode-options');
+      this.signalBusSettings = root.querySelector('#scope-signal-bus-settings');
+      this.signalBusRadixSelect = root.querySelector('#scope-signal-bus-radix');
+      this.signalBusWidthInput = root.querySelector('#scope-signal-bus-width');
+      this.signalBusSignedOptions = root.querySelector('#scope-signal-bus-signed');
       this.signalAnalogSettings = root.querySelector('#scope-signal-analog-settings');
       this.signalAnalogTypeSelect = root.querySelector('#scope-signal-analog-type');
       this.signalAnalogWidthInput = root.querySelector('#scope-signal-analog-width');
@@ -689,6 +831,9 @@
       this.root.querySelector('#scope-zoom-in').addEventListener('click', () => this.zoom(0.5));
       this.root.querySelector('#scope-zoom-out').addEventListener('click', () => this.zoom(2));
       this.root.querySelector('#scope-fit').addEventListener('click', () => this.fit());
+      this.root.querySelector('#scope-fit-cursors').addEventListener('click', () => {
+        this.fitToCursors();
+      });
       this.connectionButton.addEventListener('click', () => this.toggleConnectionMode());
       this.originalDataButton.addEventListener('click', () => this.toggleOriginalData());
       this.cursorAButton.addEventListener('click', () => this.setActiveCursor('A', true));
@@ -711,6 +856,13 @@
         const button = event.target.closest('[data-scope-display-mode]');
         if (!button || this.displayControlRow == null) return;
         this.applySignalDisplayMode(this.displayControlRow, button.dataset.scopeDisplayMode);
+      });
+      this.signalBusRadixSelect.addEventListener('change', () => this.applySignalBusFormat());
+      this.signalBusWidthInput.addEventListener('change', () => this.applySignalBusFormat());
+      this.signalBusSignedOptions.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-scope-bus-signed]');
+        if (!button) return;
+        this.applySignalBusFormat(button.dataset.scopeBusSigned === 'true');
       });
       this.signalAnalogTypeSelect.addEventListener('change', () => this.applySignalAnalogFormat());
       this.signalAnalogWidthInput.addEventListener('change', () => this.applySignalAnalogFormat());
@@ -1291,6 +1443,17 @@
         button.classList.toggle('active', active);
         button.setAttribute('aria-pressed', String(active));
       });
+      const busMode = mode === 'bus';
+      this.signalBusSettings.hidden = !busMode;
+      const busFormat = normalizeBusFormat(this.busFormats[row.index]);
+      this.busFormats[row.index] = busFormat;
+      this.signalBusRadixSelect.value = String(busFormat.radix);
+      this.signalBusWidthInput.value = String(busFormat.bitWidth);
+      this.signalBusSignedOptions.querySelectorAll('[data-scope-bus-signed]').forEach((button) => {
+        const active = (button.dataset.scopeBusSigned === 'true') === busFormat.signed;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-pressed', String(active));
+      });
       const analogMode = mode === 'analog';
       this.signalAnalogSettings.hidden = !analogMode;
       const format = normalizeAnalogFormat(
@@ -1345,6 +1508,36 @@
       );
       if (nextAnchor) this.openDisplayPopover(index, nextAnchor);
       this.setStatus(row.name + ' 已切换为' + DISPLAY_MODE_LABELS[nextMode] + '显示');
+    }
+
+    applySignalBusFormat(requestedSigned) {
+      if (!this.meta || this.displayControlRow == null) return;
+      const row = this.meta.rows[this.displayControlRow];
+      if (!row || this.modes[row.index] !== 'bus') return;
+      const previous = normalizeBusFormat(this.busFormats[row.index]);
+      const next = normalizeBusFormat({
+        radix: this.signalBusRadixSelect.value,
+        bitWidth: this.signalBusWidthInput.value,
+        signed: typeof requestedSigned === 'boolean' ? requestedSigned : previous.signed
+      });
+      const changed = previous.radix !== next.radix
+        || previous.bitWidth !== next.bitWidth
+        || previous.signed !== next.signed;
+      if (changed && this.simplified) this.pushHistory();
+      this.busFormats[row.index] = next;
+      this.updateDisplayPopover();
+      this.positionDisplayPopover();
+      if (!changed) return;
+      this.markDraftDirty('presentation');
+      this.cursorNavigationSequence += 1;
+      this.scheduleWindowRequest();
+      this.scheduleBuild();
+      void this.updateCursorReadout();
+      this.draw();
+      this.setStatus(
+        row.name + ' 已设为' + (next.signed ? '有符号' : '无符号')
+        + BUS_RADIX_LABELS[next.radix] + '，位宽 ' + next.bitWidth
+      );
     }
 
     applySignalAnalogFormat() {
@@ -1839,6 +2032,7 @@
           rowStart: visible.start,
           rowEnd: visible.end,
           modes: this.modes,
+          busFormats: this.busFormats,
           analogFormats: this.analogFormats
         });
         if (sequence !== this.windowRequestSequence) return;
@@ -2064,12 +2258,13 @@
             context.fillRect(x1, yTop + 3, Math.max(1, x2 - x1), yBottom - yTop - 6);
             context.strokeStyle = color;
             context.strokeRect(x1, yTop + 3, Math.max(1, x2 - x1), yBottom - yTop - 6);
-          } else {
+          }
+          if (bucket.unknown) {
+            this.drawUnknownDigitalSegment(context, x1, x2, yTop, yBottom, 1, true);
+          }
+          if (!bucket.bus) {
             const highY = yTop + 5;
             const lowY = yBottom - 5;
-            if (bucket.unknown) {
-              this.drawUnknownDigitalSegment(context, x1, x2, yTop, yBottom, 1, true);
-            }
             context.strokeStyle = color;
             context.beginPath();
             if (bucket.high) {
@@ -2096,6 +2291,21 @@
       data.items.forEach((segment) => {
         const x1 = this.xForColumn(segment.start, width);
         const x2 = this.xForColumn(segment.end, width);
+        const state = String(
+          segment.state == null || segment.state === '' ? 'x' : segment.state
+        ).toLowerCase();
+        if (mode === 'bus' && segment.kind !== 'bus' && state === 'x') {
+          previousY = this.drawUnknownDigitalSegment(
+            context,
+            x1,
+            x2,
+            yTop,
+            yBottom,
+            1.5,
+            false
+          );
+          return;
+        }
         if (segment.kind === 'bus' || mode === 'bus') {
           const top = yTop + 5;
           const bottom = yBottom - 5;
@@ -2117,14 +2327,15 @@
             context.textAlign = 'center';
             context.textBaseline = 'middle';
             const label = String(segment.value == null ? '' : segment.value);
-            context.fillText(label.length > 18 ? label.slice(0, 17) + '…' : label, (x1 + x2) / 2, (top + bottom) / 2);
+            context.fillText(
+              compactBusLabel(label, x2 - x1),
+              (x1 + x2) / 2,
+              (top + bottom) / 2
+            );
           }
           previousY = null;
           return;
         }
-        const state = String(
-          segment.state == null || segment.state === '' ? 'x' : segment.state
-        ).toLowerCase();
         if (state === 'x') {
           previousY = this.drawUnknownDigitalSegment(
             context,
@@ -2278,27 +2489,28 @@
         });
         if (started) context.stroke();
       } else if (row.mode === 'bus') {
-        const busSegments = [];
-        columns.forEach((column, pointIndex) => {
-          const value = String(
-            row.labels && row.labels[pointIndex] != null
-              ? row.labels[pointIndex]
-              : (row.values[pointIndex] == null ? '' : row.values[pointIndex])
-          );
-          const end = pointIndex + 1 < columns.length
-            ? columns[pointIndex + 1]
-            : this.simplified.model.rangeEnd;
-          const previous = busSegments[busSegments.length - 1];
-          if (previous && previous.value === value && Math.abs(previous.end - column) < 1e-7) {
-            previous.end = end;
-          } else {
-            busSegments.push({ start: column, end, value });
-          }
-        });
+        const busSegments = simplifiedBusSegments(
+          row,
+          columns,
+          this.simplified.model.rangeEnd,
+          this.busFormats[rowIndex]
+        );
         busSegments.forEach((segment) => {
           if (segment.end <= this.viewStart || segment.start >= this.viewEnd) return;
           const x1 = this.xForColumn(Math.max(segment.start, this.viewStart), width);
           const x2 = this.xForColumn(Math.min(segment.end, this.viewEnd), width);
+          if (segment.unknown) {
+            this.drawUnknownDigitalSegment(
+              context,
+              x1,
+              x2,
+              yTop,
+              yBottom,
+              1.5,
+              false
+            );
+            return;
+          }
           context.fillStyle = 'rgba(0, 151, 167, 0.1)';
           context.fillRect(x1, yTop + 5, Math.max(1, x2 - x1), yBottom - yTop - 10);
           context.strokeStyle = color;
@@ -2309,7 +2521,7 @@
             context.textAlign = 'center';
             context.textBaseline = 'middle';
             context.fillText(
-              segment.value.length > 18 ? segment.value.slice(0, 17) + '…' : segment.value,
+              compactBusLabel(segment.value, x2 - x1),
               (x1 + x2) / 2,
               (yTop + yBottom) / 2
             );
@@ -2447,6 +2659,66 @@
         context.textBaseline = 'middle';
         context.fillText(cursor.name, labelX, labelHeight / 2);
       });
+    }
+
+    drawOverviewCursors(context, width, height) {
+      if (!this.meta || !this.meta.totalColumns) return;
+      const cursors = [
+        { name: 'A', column: this.cursorA, color: '#1f68d5', labelTop: 2 },
+        { name: 'B', column: this.cursorB, color: '#d93025', labelTop: height - 18 }
+      ].sort((left, right) => {
+        if (left.name === this.activeCursor) return 1;
+        if (right.name === this.activeCursor) return -1;
+        return 0;
+      });
+      context.save();
+      cursors.forEach((cursor) => {
+        if (cursor.column == null) return;
+        const x = clamp(
+          cursor.column / Math.max(1, this.meta.totalColumns) * width,
+          0,
+          width
+        );
+        const active = cursor.name === this.activeCursor;
+        context.strokeStyle = 'rgba(255, 255, 255, 0.92)';
+        context.lineWidth = active ? 4.5 : 3.5;
+        context.beginPath();
+        context.moveTo(x, 0);
+        context.lineTo(x, height);
+        context.stroke();
+        context.strokeStyle = cursor.color;
+        context.lineWidth = active ? 2.5 : 1.5;
+        context.beginPath();
+        context.moveTo(x, 0);
+        context.lineTo(x, height);
+        context.stroke();
+
+        const labelWidth = active ? 20 : 18;
+        const labelHeight = 16;
+        const labelLeft = clamp(x - labelWidth / 2, 1, Math.max(1, width - labelWidth - 1));
+        context.fillStyle = cursor.color;
+        context.fillRect(labelLeft, cursor.labelTop, labelWidth, labelHeight);
+        if (active) {
+          context.strokeStyle = '#ffffff';
+          context.lineWidth = 1.5;
+          context.strokeRect(
+            labelLeft + 0.75,
+            cursor.labelTop + 0.75,
+            labelWidth - 1.5,
+            labelHeight - 1.5
+          );
+        }
+        context.fillStyle = '#ffffff';
+        context.font = 'bold 10px "Segoe UI", sans-serif';
+        context.textAlign = 'center';
+        context.textBaseline = 'middle';
+        context.fillText(
+          cursor.name,
+          labelLeft + labelWidth / 2,
+          cursor.labelTop + labelHeight / 2
+        );
+      });
+      context.restore();
     }
 
     connectionPoint(column, rowIndex) {
@@ -2828,15 +3100,31 @@
           });
           if (started) context.stroke();
         } else {
-          context.beginPath();
-          row.values.forEach((_value, pointIndex) => {
-            const column = this.simplified.model.columns[pointIndex];
-            const x = column / Math.max(1, this.meta.totalColumns - 1) * width;
-            const y = (yTop + yBottom) / 2;
-            if (!pointIndex) context.moveTo(x, y);
-            else context.lineTo(x, y);
+          simplifiedBusSegments(
+            row,
+            this.simplified.model.columns,
+            this.simplified.model.rangeEnd,
+            this.busFormats[rowIndex]
+          ).forEach((segment) => {
+            const x1 = segment.start / Math.max(1, this.meta.totalColumns) * width;
+            const x2 = segment.end / Math.max(1, this.meta.totalColumns) * width;
+            if (segment.unknown) {
+              this.drawUnknownDigitalSegment(
+                context,
+                x1,
+                x2,
+                yTop,
+                yBottom,
+                1,
+                true
+              );
+              return;
+            }
+            context.fillStyle = 'rgba(0, 151, 167, 0.12)';
+            context.fillRect(x1, yTop, Math.max(1, x2 - x1), Math.max(1, yBottom - yTop));
+            context.strokeStyle = color;
+            context.strokeRect(x1, yTop, Math.max(1, x2 - x1), Math.max(1, yBottom - yTop));
           });
-          context.stroke();
         }
       });
       const x1 = this.viewStart / this.meta.totalColumns * width;
@@ -2846,6 +3134,7 @@
       context.strokeStyle = '#1f68d5';
       context.lineWidth = 1.5;
       context.strokeRect(x1 + 0.5, 0.5, Math.max(1, x2 - x1 - 1), height - 1);
+      this.drawOverviewCursors(context, width, height);
     }
 
     fit() {
@@ -2853,6 +3142,32 @@
       this.viewEnd = this.meta.totalColumns;
       this.scheduleWindowRequest();
       this.draw();
+    }
+
+    fitToCursors() {
+      if (!this.meta || this.cursorA == null || this.cursorB == null) {
+        this.setStatus('请先设置 A、B 两个游标', true);
+        return;
+      }
+      const total = Math.max(1, this.meta.totalColumns);
+      const left = clamp(Math.min(this.cursorA, this.cursorB), 0, total);
+      const right = clamp(Math.max(this.cursorA, this.cursorB), 0, total);
+      const minimumSpan = Math.min(1, total);
+      let start = left;
+      let end = right;
+      if (end - start < minimumSpan) {
+        const center = (left + right) / 2;
+        start = clamp(center - minimumSpan / 2, 0, Math.max(0, total - minimumSpan));
+        end = start + minimumSpan;
+      }
+      this.viewStart = start;
+      this.viewEnd = end;
+      this.scheduleWindowRequest();
+      this.draw();
+      this.setStatus(
+        '已适应游标区域：A ' + this.formatTime(this.cursorA)
+        + '，B ' + this.formatTime(this.cursorB)
+      );
     }
 
     zoom(factor, anchorColumn) {
@@ -2937,6 +3252,7 @@
       }
       this.closeColumnBackgroundPopover();
       this.updateColumnBackgroundAvailability();
+      this.updateMeasurements();
     }
 
     onPlotPointerDown(event) {
@@ -2992,6 +3308,7 @@
         this.columnSelection = null;
         this.selectedPoint = null;
         this.updatePointEditor();
+        this.updateMeasurements();
         this.draw();
         this.setStatus('已选择连接线：' + hitConnection.label + '，按 Del 删除');
         this.log('scope-connection', {
@@ -3240,6 +3557,7 @@
         this.selectedPoint = null;
         this.selectedConnectionId = '';
         this.updatePointEditor();
+        this.updateMeasurements();
       } else {
         this.connectionDraftStart = null;
         this.connectionHover = null;
@@ -3485,6 +3803,7 @@
         const result = await this.worker.call('inspect', {
           column,
           modes: this.modes,
+          busFormats: this.busFormats,
           analogFormats: this.analogFormats
         });
         if (sequence !== this.cursorInspectSequence) return;
@@ -3589,20 +3908,45 @@
       }
     }
 
+    currentMeasurementColumn() {
+      if (this.columnSelection && Number.isFinite(Number(this.columnSelection.start))) {
+        return Number(this.columnSelection.start);
+      }
+      if (this.selectedPoint && this.simplified && this.simplified.model) {
+        const pointIndex = this.selectedPoint.pointIndex;
+        const column = this.simplified.model.columns[pointIndex];
+        return Number.isFinite(Number(column)) ? Number(column) : null;
+      }
+      return null;
+    }
+
+    formatSignedMeasurement(columnDifference) {
+      const value = Number(columnDifference) * this.meta.samplePeriod;
+      if (!Number.isFinite(value)) return '--';
+      const rounded = Math.round(value * 1000000) / 1000000;
+      const normalized = Object.is(rounded, -0) ? 0 : rounded;
+      return (normalized > 0 ? '+' : '') + normalized + ' ' + this.meta.timeUnit;
+    }
+
     updateMeasurements() {
       const aText = this.cursorA == null ? 'A：未设置' : 'A：' + this.formatTime(this.cursorA);
       const bText = this.cursorB == null ? 'B：未设置' : 'B：' + this.formatTime(this.cursorB);
-      let deltaText = 'Δt：--';
-      let frequencyText = '';
-      if (this.cursorA != null && this.cursorB != null) {
-        const delta = Math.abs(this.cursorB - this.cursorA) * this.meta.samplePeriod;
-        deltaText = 'Δt：' + (Math.round(delta * 1000000) / 1000000) + ' ' + this.meta.timeUnit;
-        if (delta > 0) frequencyText = ' · 1/Δt：' + (Math.round(1000000 / delta) / 1000000);
-      }
+      const currentColumn = this.currentMeasurementColumn();
+      const bMinusA = this.cursorA == null || this.cursorB == null
+        ? '--'
+        : this.formatSignedMeasurement(this.cursorB - this.cursorA);
+      const currentMinusA = currentColumn == null || this.cursorA == null
+        ? '--'
+        : this.formatSignedMeasurement(currentColumn - this.cursorA);
+      const currentMinusB = currentColumn == null || this.cursorB == null
+        ? '--'
+        : this.formatSignedMeasurement(currentColumn - this.cursorB);
       this.measurementsEl.innerHTML = `
         <span class="${this.activeCursor === 'A' ? 'active' : ''}">${escapeHtml(aText)}</span>
         <span class="${this.activeCursor === 'B' ? 'active' : ''}">${escapeHtml(bText)}</span>
-        <strong>${escapeHtml(deltaText + frequencyText)}</strong>
+        <strong>${escapeHtml('B-A：' + bMinusA)}</strong>
+        <span>${escapeHtml('Cur-A：' + currentMinusA)}</span>
+        <span>${escapeHtml('Cur-B：' + currentMinusB)}</span>
       `;
     }
 
@@ -3637,6 +3981,7 @@
         rangeEnd: end,
         method: this.methodSelect.value,
         modes: this.modes,
+        busFormats: this.busFormats,
         analogFormats: this.analogFormats,
         rowStyles: this.rowStyles,
         rowHeights: this.rowHeights,
@@ -3712,6 +4057,7 @@
       }
       this.selectedPoint = { rowIndex, pointIndex };
       this.updatePointEditor();
+      this.updateMeasurements();
       this.draw();
     }
 
@@ -3761,6 +4107,7 @@
         simplified: clone(this.simplified),
         outputContent: this.outputContent,
         modes: Object.assign({}, this.modes),
+        busFormats: clone(this.busFormats),
         analogFormats: clone(this.analogFormats),
         rowStyles: clone(this.rowStyles),
         rowHeights: this.rowHeights.slice(),
@@ -3781,6 +4128,7 @@
       this.simplified = clone(snapshot.simplified);
       this.outputContent = snapshot.outputContent;
       this.modes = Object.assign({}, snapshot.modes || this.modes);
+      this.busFormats = clone(snapshot.busFormats || this.busFormats);
       this.analogFormats = clone(snapshot.analogFormats || this.analogFormats);
       this.rowStyles = clone(snapshot.rowStyles || this.rowStyles);
       this.rowHeights = Array.isArray(snapshot.rowHeights)
@@ -4020,6 +4368,7 @@
       if (this.dataDraftDirty) return this.ensureOutputBuilt();
       const result = await this.worker.call('style-source', {
         modes: Object.assign({}, this.modes),
+        busFormats: clone(this.busFormats),
         analogFormats: clone(this.analogFormats),
         rowStyles: clone(this.rowStyles),
         rowHeights: this.rowHeights.slice()
@@ -4035,10 +4384,12 @@
       ));
       this.syncSignalNameMetadata();
       this.modes = {};
+      this.busFormats = {};
       this.analogFormats = {};
       this.rowStyles = {};
       this.meta.rows.forEach((row) => {
         this.modes[row.index] = row.mode;
+        this.busFormats[row.index] = normalizeBusFormat(row.busFormat);
         this.analogFormats[row.index] = normalizeAnalogFormat(
           row.analogFormat,
           row.detectedMode === 'analog' ? 'float' : 'unsigned'

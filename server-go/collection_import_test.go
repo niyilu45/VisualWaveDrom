@@ -536,7 +536,7 @@ func TestCollectionSearchSignatureIgnoresHasSeqParsingEdit(t *testing.T) {
 	}
 }
 
-func TestCollectionSingleFilePreviewSurvivesHasSeqToggle(t *testing.T) {
+func TestCollectionSingleFilePreviewTracksHasSeqToggle(t *testing.T) {
 	root := t.TempDir()
 	sourcePath := filepath.Join(root, "signal.txt")
 	content := "seq value\n0 10\n2 20\n"
@@ -582,9 +582,25 @@ func TestCollectionSingleFilePreviewSurvivesHasSeqToggle(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines, ok := preview["lines"].([]collectionSinglePreviewLine)
-	if !ok || len(lines) != 3 || lines[0].Text != "seq value" ||
-		lines[1].Text != "0 10" || lines[2].Text != "2 20" {
-		t.Fatalf("hasSeq toggle changed the raw file preview: %#v", preview["lines"])
+	if !ok || len(lines) != 3 || lines[0].Text != "value" ||
+		lines[1].Text != "10" || lines[2].Text != "20" {
+		t.Fatalf("hasSeq preview did not hide the sequence column: %#v", preview["lines"])
+	}
+	if hidden, _ := preview["sequenceColumnHidden"].(bool); !hidden {
+		t.Fatalf("hasSeq preview was not marked as sequence-column hidden: %#v", preview)
+	}
+	rawPreview, err := instance.previewCollectionSingleFile(
+		root, result.Preset, map[string]string{}, result.SearchToken, 0, 1, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawLines, ok := rawPreview["lines"].([]collectionSinglePreviewLine)
+	if !ok || len(rawLines) != 3 || rawLines[0].Text != "seq value" ||
+		rawLines[1].Text != "0 10" || rawLines[2].Text != "2 20" {
+		t.Fatalf("automatic-index preview did not keep the full file: %#v", rawPreview["lines"])
+	}
+	if hidden, _ := rawPreview["sequenceColumnHidden"].(bool); hidden {
+		t.Fatalf("automatic-index preview unexpectedly hid the first column: %#v", rawPreview)
 	}
 	_, prepared, err := prepareCollectionEntry(
 		toggled.Paths[0], result.Entries[0].Matches[0], 0)
@@ -593,6 +609,20 @@ func TestCollectionSingleFilePreviewSurvivesHasSeqToggle(t *testing.T) {
 	}
 	if !prepared.HasSeq || prepared.Parser != "parse_index_data" {
 		t.Fatalf("hasSeq parser was not refreshed: %#v", prepared)
+	}
+}
+
+func TestCollectionSingleFilePreviewHidesQuotedCSVSequenceColumn(t *testing.T) {
+	lines := []collectionSinglePreviewLine{
+		{Number: 1, Text: `0,"value,with,commas",tail`},
+		{Number: 2, Text: "# preview comment"},
+	}
+	result := collectionSinglePreviewWithoutSequenceColumn(lines, "comma", "signal.csv")
+	if result[0].Text != `"value,with,commas",tail` {
+		t.Fatalf("quoted CSV preview was corrupted: %q", result[0].Text)
+	}
+	if result[1].Text != lines[1].Text {
+		t.Fatalf("preview comments should remain unchanged: %q", result[1].Text)
 	}
 }
 
@@ -965,6 +995,32 @@ func TestCollectionPresetSaveAndLoad(t *testing.T) {
 	}
 }
 
+func TestCollectionPresetDocumentLoadsInvalidJSON(t *testing.T) {
+	root := t.TempDir()
+	presetText := "{\n  \"vars\": [],\n  \"paths\": [}\n"
+	presetPath := filepath.Join(root, "invalid.json")
+	if err := os.WriteFile(presetPath, []byte(presetText), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	document, loadedPath, err := loadCollectionPresetDocument(presetPath, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if document.Valid || document.Text != presetText || document.PresetError == "" {
+		t.Fatalf("invalid preset was not returned as editable text: %#v", document)
+	}
+	if document.ErrorLine != 3 || document.ErrorColumn < 1 {
+		t.Fatalf("unexpected JSON error location: line %d column %d", document.ErrorLine, document.ErrorColumn)
+	}
+	if !samePath(loadedPath, presetPath) {
+		t.Fatalf("unexpected loaded path: %q", loadedPath)
+	}
+	if _, _, err = loadCollectionPreset(presetPath, root); err == nil {
+		t.Fatal("strict preset loading should still reject invalid JSON")
+	}
+}
+
 func TestCollectionSearchScansSharedFolderOnce(t *testing.T) {
 	root := t.TempDir()
 	for name, content := range map[string]string{
@@ -1199,5 +1255,53 @@ func TestCollectionSingleFilePreviewReturnsTotalAndRequestedLines(t *testing.T) 
 		root, result.Preset, map[string]string{}, result.SearchToken, 0, 7, 1,
 	); err == nil || !strings.Contains(err.Error(), "不能超过文件总行数") {
 		t.Fatalf("out-of-range preview returned an unclear error: %v", err)
+	}
+}
+
+func TestCollectionImportProgressTracksCompletedFiles(t *testing.T) {
+	instance := &service{
+		collectionImportJobs: make(map[string]collectionImportProgress),
+	}
+	token, err := instance.beginCollectionImportProgress("import-test-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance.setCollectionImportProgressTotal(token, 3)
+	instance.recordCollectionImportProgress(token, collectionImportEntryResult{
+		updates: []map[string]any{{"signal": "I"}, {"signal": "Q"}},
+	})
+	instance.recordCollectionImportProgress(token, collectionImportEntryResult{
+		err: fmt.Errorf("parse failed"),
+	})
+
+	progress, err := instance.collectionImportProgressSnapshot(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if progress.Phase != "parsing" || progress.TotalFiles != 3 ||
+		progress.CompletedFiles != 2 || progress.SuccessfulFiles != 1 ||
+		progress.FailedFiles != 1 || progress.SignalCount != 2 || progress.Done {
+		t.Fatalf("unexpected in-flight import progress: %#v", progress)
+	}
+
+	instance.finishCollectionImportProgress(token, nil)
+	progress, err = instance.collectionImportProgressSnapshot(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !progress.Done || progress.Phase != "complete" || progress.Error != "" {
+		t.Fatalf("unexpected completed import progress: %#v", progress)
+	}
+}
+
+func TestCollectionImportProgressRejectsInvalidToken(t *testing.T) {
+	instance := &service{
+		collectionImportJobs: make(map[string]collectionImportProgress),
+	}
+	if _, err := instance.beginCollectionImportProgress("invalid token"); err == nil {
+		t.Fatal("invalid progress token was accepted")
+	}
+	if _, err := instance.collectionImportProgressSnapshot(""); err == nil {
+		t.Fatal("empty progress token returned a snapshot")
 	}
 }

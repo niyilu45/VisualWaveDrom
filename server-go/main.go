@@ -28,7 +28,7 @@ import (
 const (
 	appID                      = "VisualWaveDrom"
 	protocolScheme             = "visualwavedrom"
-	serviceAPIVersion          = 15
+	serviceAPIVersion          = 18
 	defaultPort                = 4173
 	maxWaveLibraryRequestBytes = 256 * 1024 * 1024
 	importMaxUploadBytes       = 128 * 1024 * 1024
@@ -141,6 +141,8 @@ type service struct {
 	collectionSearchCache  map[string]collectionSearchCacheEntry
 	collectionPreviewMu    sync.Mutex
 	collectionPreviewCache map[string]collectionSinglePreviewIndex
+	collectionImportMu     sync.Mutex
+	collectionImportJobs   map[string]collectionImportProgress
 }
 
 type clientLease struct {
@@ -255,6 +257,7 @@ func newService(configuration config) (*service, error) {
 		clients:                make(map[string]clientLease),
 		collectionSearchCache:  make(map[string]collectionSearchCacheEntry),
 		collectionPreviewCache: make(map[string]collectionSinglePreviewIndex),
+		collectionImportJobs:   make(map[string]collectionImportProgress),
 	}
 	if err = instance.ensureWaveDirectory(); err != nil {
 		return nil, err

@@ -124,6 +124,10 @@
     let progressTimer = 0;
     let progressStartedAt = 0;
     let progressMessage = '';
+    let importProgressState = null;
+    let importProgressPollTimer = 0;
+    let importProgressPollStopped = true;
+    let importProgressPollErrorLogged = false;
     let presetCodeEditor = null;
     let presetResizeObserver = null;
     let syncingPresetCodeEditor = false;
@@ -160,13 +164,105 @@
         : Date.now();
     }
 
+    function createImportProgressToken() {
+      if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+        return 'import-' + window.crypto.randomUUID();
+      }
+      return 'import-' + Date.now().toString(36) + '-'
+        + Math.random().toString(36).slice(2, 12);
+    }
+
+    function applyImportProgress(progress) {
+      if (!progress || typeof progress !== 'object') return;
+      importProgressState = Object.assign({}, importProgressState || {}, {
+        phase: String(progress.phase || 'parsing'),
+        totalFiles: Math.max(0, Number(progress.totalFiles || 0)),
+        completedFiles: Math.max(0, Number(progress.completedFiles || 0)),
+        successfulFiles: Math.max(0, Number(progress.successfulFiles || 0)),
+        failedFiles: Math.max(0, Number(progress.failedFiles || 0)),
+        signalCount: Math.max(0, Number(progress.signalCount || 0)),
+        done: !!progress.done
+      });
+      renderProgress();
+    }
+
+    function renderImportProgress(seconds) {
+      const state = importProgressState || {};
+      const total = Math.max(0, Number(state.totalFiles || 0));
+      const completed = Math.min(total || Number.MAX_SAFE_INTEGER,
+        Math.max(0, Number(state.completedFiles || 0)));
+      let message = total > 0
+        ? ('导入进度：已完成 ' + completed + '/' + total + ' 个文件')
+        : '导入进度：正在准备待导入文件';
+      message += '，已解析 ' + Math.max(0, Number(state.signalCount || 0)) + ' 个信号';
+      if (Number(state.failedFiles || 0) > 0) {
+        message += '，失败 ' + Number(state.failedFiles) + ' 个文件';
+      }
+      if (state.phase === 'applying') message += '，正在写入当前波形图';
+      message += '，已等待 ' + seconds + ' 秒';
+      setHint(message, false);
+      if (busy && total > 0) {
+        confirmButton.textContent = '导入中 ' + completed + '/' + total;
+      }
+    }
+
     function renderProgress() {
       if (!progressStartedAt || !progressMessage) return;
       const seconds = Math.max(0, Math.floor((progressNow() - progressStartedAt) / 1000));
+      if (importProgressState) {
+        renderImportProgress(seconds);
+        return;
+      }
       setHint(progressMessage + (seconds ? '（已等待 ' + seconds + ' 秒，程序仍在处理）' : ''), false);
     }
 
+    function stopImportProgressPolling() {
+      importProgressPollStopped = true;
+      window.clearTimeout(importProgressPollTimer);
+      importProgressPollTimer = 0;
+    }
+
+    function startImportProgressPolling(progressToken, totalFiles) {
+      stopImportProgressPolling();
+      importProgressPollStopped = false;
+      importProgressPollErrorLogged = false;
+      importProgressState = {
+        phase: 'preparing',
+        totalFiles: Math.max(0, Number(totalFiles || 0)),
+        completedFiles: 0,
+        successfulFiles: 0,
+        failedFiles: 0,
+        signalCount: 0,
+        done: false
+      };
+      renderProgress();
+
+      const poll = async () => {
+        if (importProgressPollStopped) return;
+        try {
+          const payload = await post('import-progress', { progressToken });
+          importProgressPollErrorLogged = false;
+          applyImportProgress(payload.progress);
+          if (payload.progress && payload.progress.done) return;
+        } catch (error) {
+          if (!importProgressPollErrorLogged) {
+            importProgressPollErrorLogged = true;
+            debug({
+              phase: 'import-progress-unavailable',
+              message: error.message || String(error)
+            });
+          }
+        }
+        if (!importProgressPollStopped) {
+          importProgressPollTimer = window.setTimeout(poll, 400);
+        }
+      };
+      importProgressPollTimer = window.setTimeout(poll, 120);
+    }
+
     function startProgress(message) {
+      stopImportProgressPolling();
+      importProgressState = null;
       clearInterval(progressTimer);
       progressStartedAt = progressNow();
       progressMessage = message;
@@ -180,10 +276,12 @@
     }
 
     function stopProgress() {
+      stopImportProgressPolling();
       clearInterval(progressTimer);
       progressTimer = 0;
       progressStartedAt = 0;
       progressMessage = '';
+      importProgressState = null;
     }
 
     function getPresetEditorValue() {
@@ -1297,6 +1395,7 @@
           totalLines: null,
           lines: [],
           relativePath: '',
+          sequenceColumnHidden: false,
           error: ''
         });
       }
@@ -1340,10 +1439,12 @@
         previewState.totalLines = Math.max(0, Number(payload.totalLines || 0));
         previewState.relativePath = String(payload.relativePath || '');
         previewState.lines = Array.isArray(payload.lines) ? payload.lines : [];
+        previewState.sequenceColumnHidden = !!payload.sequenceColumnHidden;
         setHint(
           '已显示第 ' + previewState.startLine + ' 行起的 '
             + previewState.lines.length + ' 行；文件共 '
-            + formatPreviewLineCount(previewState.totalLines) + ' 行',
+            + formatPreviewLineCount(previewState.totalLines) + ' 行；'
+            + (previewState.sequenceColumnHidden ? '序号列已隐藏' : '显示完整内容'),
           false
         );
         debug({
@@ -1351,7 +1452,8 @@
           startLine: previewState.startLine,
           lineCount: previewState.lineCount,
           totalLines: previewState.totalLines,
-          displayedCount: previewState.lines.length
+          displayedCount: previewState.lines.length,
+          sequenceColumnHidden: previewState.sequenceColumnHidden
         });
       } catch (error) {
         previewState.error = error.message || String(error);
@@ -1460,17 +1562,28 @@
           sequenceCheckbox.addEventListener('change', () => {
             entry.hasSeq = sequenceCheckbox.checked;
             syncEntryAutoGen(entry, 'single-has-seq-change');
+            if (previewState) {
+              previewState.loaded = false;
+              previewState.error = '';
+              previewState.lines = [];
+              previewState.sequenceColumnHidden = entry.hasSeq;
+            }
             setHint(entry.hasSeq
-              ? '文件原文保持不变；导入时第一列作为序号'
-              : '文件原文保持不变；导入时从 0 自动编号', false);
+              ? '预览已隐藏第一列；导入时第一列作为序号'
+              : '预览显示完整文件；导入时从 0 自动编号', false);
             debug({
               phase: 'single-has-seq-change',
               entryIndex: entry.index,
               hasSeq: entry.hasSeq,
               parser: entry.parser,
-              previewLineCount: previewState ? previewState.lines.length : 0
+              previewLineCount: previewState ? previewState.lines.length : 0,
+              previewRefresh: !!(previewState && previewState.expanded)
             });
             renderSearchResults(payload);
+            if (previewState && previewState.expanded && !previewState.loading) {
+              void loadSingleFilePreview(
+                entry.index, previewState.startLine, previewState.lineCount);
+            }
           });
           sequenceLabel.appendChild(sequenceCheckbox);
           sequenceLabel.appendChild(sequenceText);
@@ -1483,7 +1596,9 @@
             const heading = document.createElement('div');
             heading.className = 'wave-collection-preview-heading';
             const title = document.createElement('strong');
-            title.textContent = '文件内容';
+            title.textContent = entry.hasSeq
+              ? '数据内容（序号列已隐藏）'
+              : '文件完整内容';
             const meta = document.createElement('span');
             if (previewState.totalLines === null) {
               meta.textContent = previewState.loading ? '正在统计总行数…' : '尚未读取';
@@ -1999,16 +2114,23 @@
         originalPresetPath = String(payload.presetPath || path);
         manualSavePathMode = false;
         presetPathInput.value = originalPresetPath;
-        setPresetEditorValue(JSON.stringify(payload.preset || EMPTY_PRESET, null, 2));
+        const presetText = typeof payload.presetText === 'string'
+          ? payload.presetText.replace(/^\uFEFF/, '')
+          : JSON.stringify(payload.preset || EMPTY_PRESET, null, 2);
+        setPresetEditorValue(presetText);
         variableValues.clear();
         parsedPreset = null;
-        parseEditor(true);
+        const loadedPreset = parseEditor(true);
         invalidateSearch('preset-loaded');
         rememberState('preset-loaded');
-        setHint('预设已读取；变量从 grepKeys 自动识别，留空按 0 匹配', false);
+        if (loadedPreset) {
+          setHint('预设已读取；变量从 grepKeys 自动识别，留空按 0 匹配', false);
+        }
         debug({
           phase: 'preset-load-complete',
           path: originalPresetPath,
+          valid: !!loadedPreset,
+          errorLine: Number(payload.errorLine || 0),
           variableCount: parsedPreset ? parsedPreset.vars.length : 0,
           pathCount: parsedPreset ? parsedPreset.paths.length : 0,
           durationMs: Math.round(progressNow() - startedAt)
@@ -2040,17 +2162,24 @@
         originalPresetPath = String(payload.presetPath || '');
         manualSavePathMode = false;
         presetPathInput.value = selectedDiscoveredPreset.relativePath;
-        setPresetEditorValue(JSON.stringify(payload.preset || EMPTY_PRESET, null, 2));
+        const presetText = typeof payload.presetText === 'string'
+          ? payload.presetText.replace(/^\uFEFF/, '')
+          : JSON.stringify(payload.preset || EMPTY_PRESET, null, 2);
+        setPresetEditorValue(presetText);
         variableValues.clear();
         parsedPreset = null;
-        parseEditor(true);
+        const loadedPreset = parseEditor(true);
         invalidateSearch('preset-discovered-loaded');
         updateDiscoveredPresetSelection();
         rememberState('preset-discovered-loaded');
-        setHint('已读取预设：' + selectedDiscoveredPreset.relativePath, false);
+        if (loadedPreset) {
+          setHint('已读取预设：' + selectedDiscoveredPreset.relativePath, false);
+        }
         debug({
           phase: 'preset-discovered-load-complete',
           relativePath: selectedDiscoveredPreset.relativePath,
+          valid: !!loadedPreset,
+          errorLine: Number(payload.errorLine || 0),
           variableCount: parsedPreset ? parsedPreset.vars.length : 0,
           pathCount: parsedPreset ? parsedPreset.paths.length : 0,
           durationMs: Math.round(progressNow() - startedAt)
@@ -2083,25 +2212,25 @@
           throw new Error('预设 JSON 文件不能超过 2 MB');
         }
         const text = String(await readBrowserPresetText(file)).replace(/^\uFEFF/, '');
-        const preset = validatePresetShape(JSON.parse(text));
         selectedBrowserPresetFile = file;
         selectedDiscoveredPreset = null;
         updateDiscoveredPresetSelection();
         originalPresetPath = '';
         manualSavePathMode = false;
         presetPathInput.value = file.name;
-        setPresetEditorValue(JSON.stringify(preset, null, 2));
+        setPresetEditorValue(text);
         variableValues.clear();
         parsedPreset = null;
-        parseEditor(true);
+        const loadedPreset = parseEditor(true);
         invalidateSearch('preset-browser-loaded');
         rememberState('preset-browser-loaded');
-        setHint('已读取预设文件：' + file.name, false);
+        if (loadedPreset) setHint('已读取预设文件：' + file.name, false);
         debug({
           phase: 'preset-browser-load-complete',
           name: file.name,
-          variableCount: preset.vars.length,
-          pathCount: preset.paths.length,
+          valid: !!loadedPreset,
+          variableCount: loadedPreset ? loadedPreset.vars.length : 0,
+          pathCount: loadedPreset ? loadedPreset.paths.length : 0,
           durationMs: Math.round(progressNow() - startedAt)
         });
       } catch (error) {
@@ -2443,7 +2572,9 @@
         : '';
       setBusy(true, 'import');
       const fileCount = Number(searchResult.resultCount || 0);
+      const progressToken = createImportProgressToken();
       startProgress('正在核对并解析 ' + fileCount + ' 个文件…');
+      startImportProgressPolling(progressToken, fileCount);
       const startedAt = progressStartedAt;
       debug({
         phase: 'import-start',
@@ -2457,8 +2588,11 @@
           rootPath,
           preset,
           variables,
-          searchToken: searchResult.searchToken || ''
+          searchToken: searchResult.searchToken || '',
+          progressToken
         });
+        stopImportProgressPolling();
+        applyImportProgress(payload.progress);
         if (typeof settings.getContextToken === 'function'
             && settings.getContextToken() !== contextToken) {
           throw new Error('解析期间波形图或波形库已切换，请重新搜索');
@@ -2466,18 +2600,26 @@
         if (typeof settings.applyImport !== 'function') {
           throw new Error('批量导入处理函数未初始化');
         }
+        if (importProgressState) importProgressState.phase = 'applying';
         updateProgress('文件解析完成，正在写入当前波形图…');
         const result = await settings.applyImport(payload);
+        const completedFiles = payload.progress
+          ? Number(payload.progress.successfulFiles || payload.progress.completedFiles || 0)
+          : (Array.isArray(payload.files) ? payload.files.length : fileCount);
+        const elapsedSeconds = Math.max(0,
+          (progressNow() - startedAt) / 1000).toFixed(1);
         setHint('', false);
         status(
           true,
           (result.changed ? '已批量导入 ' : '批量导入内容未变化：')
-            + result.count + ' 个信号行'
+            + completedFiles + ' 个文件，' + result.count + ' 个信号行'
             + (result.createdCount ? '，新增 ' + result.createdCount + ' 行' : '')
+            + '，耗时 ' + elapsedSeconds + ' 秒'
         );
         debug({
           phase: 'import-complete',
           changed: result.changed,
+          completedFiles,
           updateCount: result.count,
           createdCount: result.createdCount,
           workerCount: payload.workerCount,

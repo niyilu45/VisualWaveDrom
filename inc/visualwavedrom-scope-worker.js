@@ -94,6 +94,20 @@ function normalizeAnalogFormat(candidate, fallbackType) {
   return { type, bitWidth, fractionalBits };
 }
 
+function normalizeBusFormat(candidate) {
+  const source = candidate && typeof candidate === 'object' ? candidate : {};
+  const requestedRadix = finiteNumber(
+    source.busRadix == null ? source.radix : source.busRadix
+  );
+  const radix = [2, 8, 10, 16].indexOf(requestedRadix) >= 0 ? requestedRadix : 10;
+  const widthValue = source.busBitWidth == null ? source.bitWidth : source.busBitWidth;
+  const bitWidth = clamp(Math.floor(finiteNumber(widthValue) || 32), 1, 64);
+  const signedValue = source.busSigned == null ? source.signed : source.busSigned;
+  const signedText = String(signedValue == null ? '' : signedValue).toLowerCase();
+  const signed = signedValue === true || signedText === 'true' || signedText === 'signed';
+  return { radix, bitWidth, signed };
+}
+
 function normalizeScopeColor(value) {
   const color = String(value == null ? '' : value).trim().toLowerCase();
   if (/^#[0-9a-f]{6}$/.test(color)) return color;
@@ -169,16 +183,51 @@ function getAnalogFormat(source, row, rowIndex, hasSamples) {
   return normalizeAnalogFormat(localScope || globalScope, hasSamples ? 'float' : 'unsigned');
 }
 
+function getBusFormat(source, row, rowIndex) {
+  const signal = row.source || {};
+  const localScope = signal.scope && typeof signal.scope === 'object' ? signal.scope : null;
+  const globalScope = getScopeSignalConfig(source, row, rowIndex);
+  return normalizeBusFormat(localScope || globalScope);
+}
+
 function parseIntegerToken(value) {
   let token = String(value == null ? '' : value).trim().replace(/_/g, '');
   if (!token || /^(x|z)$/i.test(token)) return null;
-  if (token[0] === '+') token = token.slice(1);
-  if (!/^-?(?:0[xX][0-9a-fA-F]+|0[bB][01]+|0[oO][0-7]+|\d+)$/.test(token)) return null;
+  let negative = false;
+  if (token[0] === '+' || token[0] === '-') {
+    negative = token[0] === '-';
+    token = token.slice(1);
+  }
+  if (!/^(?:0[xX][0-9a-fA-F]+|0[bB][01]+|0[oO][0-7]+|\d+)$/.test(token)) return null;
   try {
-    return BigInt(token);
+    const parsed = BigInt(token);
+    return negative ? -parsed : parsed;
   } catch (_error) {
     return null;
   }
+}
+
+function formatBusValue(value, candidate) {
+  const text = String(value == null ? '' : value).trim();
+  if (!text || /^(x|z)$/i.test(text)) return text.toLowerCase();
+  const integer = parseIntegerToken(text);
+  if (integer == null) return text;
+  const format = normalizeBusFormat(candidate);
+  const interpreted = format.signed
+    ? BigInt.asIntN(format.bitWidth, integer)
+    : BigInt.asUintN(format.bitWidth, integer);
+  const negative = interpreted < 0n;
+  const magnitude = negative ? -interpreted : interpreted;
+  let digits = magnitude.toString(format.radix);
+  if (format.radix === 16) digits = digits.toUpperCase();
+  if (!negative && format.radix !== 10) {
+    const groupSize = format.radix === 2 ? 1 : (format.radix === 8 ? 3 : 4);
+    digits = digits.padStart(Math.ceil(format.bitWidth / groupSize), '0');
+  }
+  const prefix = format.radix === 2
+    ? '0b'
+    : (format.radix === 8 ? '0o' : (format.radix === 16 ? '0x' : ''));
+  return (negative ? '-' : '') + prefix + digits;
 }
 
 function floatFromBits(rawValue, bitWidth) {
@@ -557,6 +606,7 @@ function createSession(content) {
       samples: analogSamples,
       analogLevels: analogSamples ? buildAnalogLevels(analogSamples) : [],
       range: analogSamples ? analogRange(analogSamples) : null,
+      busFormat: getBusFormat(source, row, rowIndex),
       analogFormat: getAnalogFormat(source, row, rowIndex, !!analogSamples),
       analogCache: new Map(),
       rowHeight: normalizeRowHeight(localScope && localScope.rowHeight),
@@ -628,18 +678,65 @@ function pointEventsInWindow(events, start, end, width) {
   return result;
 }
 
-function rowSegmentsInWindow(row, start, end, width) {
+function displaySegmentForMode(row, segment, column, mode, totalColumns, busFormat) {
+  if (mode === 'bus') {
+    let rawValue;
+    if (row.samples && row.samples.length) {
+      const sampleIndex = sampleIndexForColumn(row, column, totalColumns);
+      const sample = row.samples[sampleIndex];
+      if (!Number.isFinite(sample)) {
+        return { kind: 'digital', state: 'x', value: 'x' };
+      }
+      rawValue = segment.kind === 'bus'
+        ? String(segment.value == null ? '' : segment.value)
+        : String(sample);
+    } else if (segment.kind === 'bus') {
+      rawValue = String(segment.value == null ? '' : segment.value);
+    } else {
+      const state = normalizedDigitalState(segment.state, 'x');
+      if (state === 'x') return { kind: 'digital', state: 'x', value: 'x' };
+      rawValue = state;
+    }
+    return {
+      kind: 'bus',
+      state: 'bus',
+      value: formatBusValue(rawValue, busFormat)
+    };
+  }
+  if (!row.samples || !row.samples.length || mode === 'analog') return segment;
+  const sampleIndex = sampleIndexForColumn(row, column, totalColumns);
+  const sample = row.samples[sampleIndex];
+  if (mode === 'digital') {
+    const state = Number.isFinite(sample) && (sample === 0 || sample === 1)
+      ? String(sample)
+      : 'x';
+    return { kind: 'digital', state, value: state };
+  }
+  return segment;
+}
+
+function rowSegmentsInWindow(row, start, end, width, mode, totalColumns, busFormat) {
   const first = findFirstSegment(row.segments, start);
   const selected = [];
   for (let index = first; index < row.segments.length; index += 1) {
     const segment = row.segments[index];
     if (segment.start >= end) break;
-    selected.push({
-      start: Math.max(start, segment.start),
-      end: Math.min(end, segment.end),
-      kind: segment.kind,
-      state: segment.state,
-      value: segment.value
+    const visibleStart = Math.max(start, segment.start);
+    const visibleEnd = Math.min(end, segment.end);
+    const display = displaySegmentForMode(
+      row,
+      segment,
+      visibleStart + 1e-7,
+      mode,
+      totalColumns,
+      busFormat
+    );
+    pushSegment(selected, {
+      start: visibleStart,
+      end: visibleEnd,
+      kind: display.kind,
+      state: display.state,
+      value: display.value
     });
   }
   const decorations = {
@@ -807,7 +904,15 @@ function createWindow(payload) {
       : row;
     const data = mode === 'analog' && analogRow.samples
       ? analogWindow(analogRow, start, end, width, total)
-      : rowSegmentsInWindow(row, start, end, width);
+      : rowSegmentsInWindow(
+        row,
+        start,
+        end,
+        width,
+        mode,
+        total,
+        payload.busFormats && payload.busFormats[index] || row.busFormat
+      );
     rows.push({ index, mode, data });
   }
   return { start, end, width, rowStart, rowEnd, rows };
@@ -1028,8 +1133,28 @@ function stateAtColumn(row, column, mode, analogFormat) {
     return Number.isFinite(value) ? value : null;
   }
   const segment = segmentAt(row, column + 1e-7);
-  if (!segment) return mode === 'bus' ? '' : 'x';
-  if (mode === 'bus') return String(segment.value == null ? '' : segment.value);
+  if (row.samples && row.samples.length) {
+    const sample = row.samples[sampleIndexForColumn(row, column, activeSession.totalColumns)];
+    if (mode === 'digital') {
+      return Number.isFinite(sample) && (sample === 0 || sample === 1)
+        ? String(sample)
+        : 'x';
+    }
+    if (mode === 'bus') {
+      if (!Number.isFinite(sample)) return null;
+      return segment && segment.kind === 'bus'
+        ? String(segment.value == null ? '' : segment.value)
+        : String(sample);
+    }
+  }
+  if (!segment) return mode === 'bus' ? null : 'x';
+  if (mode === 'bus') {
+    return segment.kind === 'bus'
+      ? String(segment.value == null ? '' : segment.value)
+      : (normalizedDigitalState(segment.state, 'x') === 'x'
+          ? null
+          : normalizedDigitalState(segment.state, 'x'));
+  }
   return normalizedDigitalState(segment.state, 'x');
 }
 
@@ -1041,15 +1166,19 @@ function inspectCursor(payload) {
     Math.max(0, activeSession.totalColumns - 1e-7)
   );
   const modes = payload.modes || {};
+  const busFormats = payload.busFormats || {};
   const analogFormats = payload.analogFormats || {};
   return {
     column,
     rows: activeSession.rows.map((row) => {
       const mode = modes[row.index] || row.mode;
+      const value = stateAtColumn(row, column, mode, analogFormats[row.index]);
       return {
         index: row.index,
         mode,
-        value: stateAtColumn(row, column, mode, analogFormats[row.index]),
+        value: mode === 'bus'
+          ? formatBusValue(value, busFormats[row.index] || row.busFormat)
+          : value,
         symbol: mode === 'digital' ? clockSymbolAt(row, column) : ''
       };
     })
@@ -1401,17 +1530,22 @@ function buildWaveFromValues(mode, values, labels, symbols, gaps) {
     let wave = '';
     let previous = null;
     values.forEach((rawValue, index) => {
-      const value = labels && labels[index] != null ? String(labels[index]) : String(rawValue == null ? '' : rawValue);
-      if (value === previous) {
+      const unknown = rawValue == null || rawValue === '';
+      const value = unknown
+        ? ''
+        : (labels && labels[index] != null
+            ? String(labels[index])
+            : String(rawValue));
+      const stateKey = unknown ? 'unknown' : ('value:' + value);
+      if (stateKey === previous) {
         wave += '.';
-      } else if (!value) {
+      } else if (unknown) {
         wave += 'x';
-        previous = value;
       } else {
         wave += '=';
         data.push(value);
-        previous = value;
       }
+      previous = stateKey;
     });
     return { wave, data };
   }
@@ -1496,6 +1630,14 @@ function applyRowDisplayConfig(target, row, rowIndex, payload) {
     scope.mode = mode;
   } else {
     delete scope.mode;
+  }
+  if (mode === 'bus') {
+    const format = normalizeBusFormat(
+      source.busFormats && source.busFormats[rowIndex] || row.busFormat
+    );
+    scope.busRadix = format.radix;
+    scope.busBitWidth = format.bitWidth;
+    scope.busSigned = format.signed;
   }
   if (mode === 'analog') {
     const format = normalizeAnalogFormat(
@@ -1594,6 +1736,11 @@ function buildSimplifiedContent(model, options) {
     rangeEnd: model.rangeEnd,
     columnMap: model.columns.slice(),
     displayModes: model.rows.map((row) => row.mode),
+    busFormats: model.rows.map((row, index) => (
+      row.mode === 'bus'
+        ? normalizeBusFormat(options.busFormats && options.busFormats[index])
+        : null
+    )),
     analogFormats: model.rows.map((row) => (
       row.mode === 'analog' ? normalizeAnalogFormat(row.analogFormat) : null
     ))
@@ -1750,6 +1897,7 @@ function prepareResponse() {
       detectedMode: row.detectedMode,
       unit: row.unit,
       range: row.range,
+      busFormat: row.busFormat,
       analogFormat: row.analogFormat,
       rowHeight: row.rowHeight,
       style: normalizeRowStyle(row.source.scope, activeSession.totalColumns),
