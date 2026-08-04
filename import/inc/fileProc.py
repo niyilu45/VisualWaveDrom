@@ -375,6 +375,13 @@ def parse_table_data(file_path, options=None):
             raise FileProcError("header signal name is duplicated: %s" % header)
         seen_headers.add(header)
 
+    index_column = str(opts.get("indexColumn") or "").strip()
+    index_column_index = None
+    if index_column:
+        if index_column not in seen_headers:
+            raise FileProcError("selected table index column is missing: %s" % index_column)
+        index_column_index = headers.index(index_column)
+
     raw_column_rules = opts.get("columns")
     selected_columns = []
     filter_columns = []
@@ -382,6 +389,7 @@ def parse_table_data(file_path, options=None):
         selected_columns = [
             {"source": header, "name": header, "index": index}
             for index, header in enumerate(headers)
+            if header != index_column
         ]
     else:
         if not isinstance(raw_column_rules, list):
@@ -408,6 +416,8 @@ def parse_table_data(file_path, options=None):
                     "condition": condition,
                     "compiled": _compile_filter_condition(condition, source)
                 })
+            if source == index_column:
+                continue
             if not bool(raw_rule.get("enabled", True)):
                 continue
             name = str(raw_rule.get("name") or source).strip()
@@ -421,8 +431,10 @@ def parse_table_data(file_path, options=None):
                 "name": name,
                 "index": header_indexes[source]
             })
-        if not selected_columns:
-            raise FileProcError("select at least one table column")
+    if not selected_columns:
+        raise FileProcError(
+            "select at least one waveform signal column besides the index column"
+        )
 
     prefixes = opts.get("commentPrefixes", ["#", "//"])
     if not isinstance(prefixes, list):
@@ -438,6 +450,7 @@ def parse_table_data(file_path, options=None):
     data_row_index = 0
     source_data_row_count = 0
     filtered_out_row_count = 0
+    previous_explicit_index = -1
     for line_number, raw_line in enumerate(lines[header_row:], header_row + 1):
         stripped = raw_line.strip()
         if not stripped or any(stripped.startswith(prefix) for prefix in prefixes):
@@ -453,6 +466,17 @@ def parse_table_data(file_path, options=None):
             )
         columns.extend([""] * (len(headers) - len(columns)))
         source_data_row_count += 1
+        explicit_index = None
+        if index_column_index is not None:
+            explicit_index = _parse_index(columns[index_column_index], line_number)
+            if explicit_index >= max_columns:
+                raise FileProcError("line %d sequence number exceeds maxColumns" % line_number)
+            if explicit_index <= previous_explicit_index:
+                raise FileProcError(
+                    "line %d sequence number must be greater than %d"
+                    % (line_number, previous_explicit_index)
+                )
+            previous_explicit_index = explicit_index
         for selected_index, selected in enumerate(selected_columns):
             if signal_value_modes[selected_index] != "auto":
                 continue
@@ -465,10 +489,11 @@ def parse_table_data(file_path, options=None):
             continue
         if data_row_index >= max_columns:
             raise FileProcError("filtered table exceeds maxColumns")
+        point_index = explicit_index if explicit_index is not None else data_row_index
         for selected_index, selected in enumerate(selected_columns):
             value = columns[selected["index"]]
             signal_points[selected_index].append({
-                "index": data_row_index,
+                "index": point_index,
                 "value": value,
                 "lineNumber": line_number
             })
@@ -478,28 +503,31 @@ def parse_table_data(file_path, options=None):
         if filter_columns and source_data_row_count:
             raise FileProcError("table contains no data rows matching the column filters")
         raise FileProcError("table contains no data rows after header row %d" % header_row)
+    signals = []
+    for index, selected in enumerate(selected_columns):
+        signal = {
+            "name": selected["name"],
+            "sourceName": selected["source"],
+            "points": signal_points[index],
+            "explicitIndex": index_column_index is not None,
+            "sourceRowCount": data_row_index,
+            "fillGap": ".",
+            "valueMode": signal_value_modes[index]
+        }
+        if index_column_index is None:
+            signal["targetLength"] = source_data_row_count
+            signal["fillTrailing"] = "x" if filter_columns else "."
+        signals.append(signal)
     return {
         "tableDetected": True,
         "headerRow": header_row,
         "delimiter": delimiter,
+        "indexColumn": index_column,
         "sourceHeaders": headers,
         "sourceRowCount": data_row_index,
         "unfilteredRowCount": source_data_row_count,
         "filteredOutRowCount": filtered_out_row_count,
-        "signals": [
-            {
-                "name": selected["name"],
-                "sourceName": selected["source"],
-                "points": signal_points[index],
-                "explicitIndex": False,
-                "sourceRowCount": data_row_index,
-                "targetLength": source_data_row_count,
-                "fillGap": ".",
-                "fillTrailing": "x" if filter_columns else ".",
-                "valueMode": signal_value_modes[index]
-            }
-            for index, selected in enumerate(selected_columns)
-        ]
+        "signals": signals
     }
 
 

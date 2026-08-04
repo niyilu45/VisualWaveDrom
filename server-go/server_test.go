@@ -228,6 +228,81 @@ func TestTableImportOnlyParsesEnabledColumnsAndAppliesNames(t *testing.T) {
 	}
 }
 
+func TestTableImportUsesSelectedIndexColumn(t *testing.T) {
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := newImportManager(filepath.Dir(workingDirectory))
+	if python := manager.pythonRuntime(); !python.Available {
+		t.Skip("Python runtime is not available")
+	}
+	sourcePath := filepath.Join(t.TempDir(), "indexed-signals.csv")
+	data := "Sample,SigA,Flag\n2,10,1\n4,20,0\n"
+	if err = os.WriteFile(sourcePath, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := manager.runTableLocalFileWithOptions(sourcePath, tableImportOptions{
+		HeaderRow:   1,
+		IndexColumn: "Sample",
+		Delimiter:   "comma",
+		Columns: []collectionColumnConfig{
+			{Source: "Sample", Enabled: true, Name: "Sample"},
+			{Source: "SigA", Enabled: true, Name: "SigA"},
+			{Source: "Flag", Enabled: true, Name: "Flag"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if actual := stringValue(result["indexColumn"]); actual != "Sample" {
+		t.Fatalf("index column = %q, expected Sample", actual)
+	}
+	updates, ok := result["updates"].([]map[string]any)
+	if !ok || len(updates) != 2 {
+		t.Fatalf("index column should not produce a signal: %#v", result["updates"])
+	}
+	if stringValue(updates[0]["signal"]) != "SigA" ||
+		stringValue(updates[1]["signal"]) != "Flag" {
+		t.Fatalf("unexpected indexed signal names: %#v", updates)
+	}
+	if wave := stringValue(updates[0]["wave"]); wave != "x.=.=" {
+		t.Fatalf("indexed SigA wave = %q, expected %q", wave, "x.=.=")
+	}
+	if wave := stringValue(updates[1]["wave"]); wave != "x.1.0" {
+		t.Fatalf("indexed Flag wave = %q, expected %q", wave, "x.1.0")
+	}
+	samples, ok := updates[0]["samples"].([]any)
+	if !ok || len(samples) != 5 || samples[0] != nil || samples[1] != nil ||
+		intValue(samples[2], 0) != 10 || intValue(samples[3], 0) != 10 ||
+		intValue(samples[4], 0) != 20 {
+		t.Fatalf("indexed samples = %#v, expected [nil nil 10 10 20]", updates[0]["samples"])
+	}
+}
+
+func TestTableImportRejectsInvalidSelectedIndexColumnValue(t *testing.T) {
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := newImportManager(filepath.Dir(workingDirectory))
+	if python := manager.pythonRuntime(); !python.Available {
+		t.Skip("Python runtime is not available")
+	}
+	sourcePath := filepath.Join(t.TempDir(), "invalid-index.csv")
+	if err = os.WriteFile(sourcePath, []byte("Sample,SigA\n0.5,10\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = manager.runTableLocalFileWithOptions(sourcePath, tableImportOptions{
+		HeaderRow:   1,
+		IndexColumn: "Sample",
+		Delimiter:   "comma",
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid sequence number") {
+		t.Fatalf("invalid selected index value returned an unclear error: %v", err)
+	}
+}
+
 func TestTableImportFiltersRowsUsingDisabledControlColumn(t *testing.T) {
 	workingDirectory, err := os.Getwd()
 	if err != nil {

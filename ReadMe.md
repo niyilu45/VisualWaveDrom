@@ -298,7 +298,8 @@ Linux 可直接粘贴 `/home/user/data.csv`、`~/data.csv` 或 `file:///home/use
 3. 点击 **搜索**。程序把变量代入每条 `paths` 规则，只搜索
    `数据文件夹/usrGen.folder` 当前层的文件，不进入其子目录。
 4. 程序读取文件开头的少量内容，自动判断单信号或带标题表格。表格会自动识别标题行；
-   预览中可以修正标题行、筛选列、全选/全不选、修改导入后的信号名，并为每列设置数据过滤条件。
+   预览中可以修正标题行、选择一个信号列作为序号列（也可以不选）、筛选列、全选/全不选、
+   修改导入后的信号名，并为每列设置数据过滤条件。
 5. 未匹配到文件的规则会被跳过；只要至少一条规则找到文件，且生成的信号名不重复，
    **确定导入** 就会可用。
 6. 可以直接修改窗口中的预设 JSON。点击 **保存预设** 时，`usrGen` 与当前确认后的
@@ -349,7 +350,11 @@ Linux 可直接粘贴 `/home/user/data.csv`、`~/data.csv` 或 `file:///home/use
   第一个文件。
 - `usrGen.name`：单信号文件导入后的信号名，也可以使用变量；省略时采用文件名。
 - `autoGen`：程序根据文件检测结果和预览选择生成的配置。单信号会记录解析方式及是否含序号；
-  表格会记录 `headerRow`、`delimiter`、`schemaHash` 和列规则。
+  表格会记录 `headerRow`、`indexColumn`、`delimiter`、`schemaHash` 和列规则。
+- `autoGen.indexColumn`：可选的表格序号列。选择后，该列只用于放置数据，不会生成同名波形；
+  内容必须是严格递增的非负整数。首个序号之前补 `x`，两个离散序号之间延续前一个值。
+  不选择序号列时不保存此字段，筛选后的数据按保留顺序从 0 重新编号。表格结构变化并导致
+  原序号列消失时，程序会自动清除旧的生成配置并恢复自动编号。
 - `autoGen.columns`：每列以 `source`、`enabled`、`name` 和可选的 `filter` 保存。再次载入预设时会参考这些设置；
   表格结构局部变化后，程序按 `source` 增量合并，保留仍存在列的勾选和改名，删除消失列，
   并为新增列建立默认规则。不会整块重写既有选择。
@@ -363,9 +368,11 @@ Linux 可直接粘贴 `/home/user/data.csv`、`~/data.csv` 或 `file:///home/use
 "autoGen": {
   "importMode": "table",
   "headerRow": 2,
+  "indexColumn": "Sample",
   "delimiter": "comma",
   "parser": "parse_table_data",
   "columns": [
+    { "source": "Sample", "enabled": false, "name": "Sample" },
     { "source": "rx_I", "enabled": true, "name": "feedback_I" },
     { "source": "rx_Q", "enabled": true, "name": "feedback_Q" },
     { "source": "CurSt", "enabled": false, "name": "CurSt", "filter": ">=1&&<=2" },

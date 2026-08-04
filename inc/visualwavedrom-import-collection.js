@@ -828,7 +828,7 @@
         throw validationError(fieldPath + ' 必须是字典', fieldPath);
       }
       const config = {};
-      ['folder', 'grepKeys', 'name', 'importMode', 'delimiter', 'parser', 'schemaHash']
+      ['folder', 'grepKeys', 'name', 'importMode', 'indexColumn', 'delimiter', 'parser', 'schemaHash']
         .forEach((key) => {
           if (value[key] === undefined) return;
           if (typeof value[key] !== 'string') {
@@ -980,6 +980,11 @@
       });
       if (entry.importMode === 'table') {
         autoGen.headerRow = Math.max(1, Number(entry.headerRow || 1));
+        if (String(entry.indexColumn || '').trim()) {
+          autoGen.indexColumn = String(entry.indexColumn).trim();
+        } else {
+          delete autoGen.indexColumn;
+        }
         autoGen.columns = (entry.columns || []).map((column) => {
           const normalized = {
             source: String(column.source || ''),
@@ -994,6 +999,7 @@
       } else {
         autoGen.hasSeq = !!entry.hasSeq;
         delete autoGen.headerRow;
+        delete autoGen.indexColumn;
         delete autoGen.columns;
       }
       Object.keys(autoGen).forEach((key) => {
@@ -1002,7 +1008,8 @@
       path.autoGen = autoGen;
       entry.outputNames = entry.importMode === 'table'
         ? (entry.columns || [])
-          .filter((column) => column.enabled !== false)
+          .filter((column) => column.enabled !== false
+            && String(column.source || '') !== String(entry.indexColumn || ''))
           .map((column) => String(column.name || column.source || '').trim())
           .filter(Boolean)
         : [String(entry.name || '').trim()].filter(Boolean);
@@ -1041,7 +1048,8 @@
         });
         const names = entry.importMode === 'table'
           ? (entry.columns || [])
-            .filter((column) => column.enabled !== false)
+            .filter((column) => column.enabled !== false
+              && String(column.source || '') !== String(entry.indexColumn || ''))
             .map((column) => String(column.name || column.source || '').trim())
           : [String(entry.name || '').trim()];
         if (!names.length || names.some((name) => !name)) {
@@ -1100,8 +1108,8 @@
       searchButton.disabled = busy || !canSearch;
       const selection = collectionSelectionStatus();
       confirmButton.disabled = busy || !selection.valid;
-      resultsHost.querySelectorAll('input, button').forEach((control) => {
-        control.disabled = busy;
+      resultsHost.querySelectorAll('input, button, select').forEach((control) => {
+        control.disabled = busy || control.dataset.permanentDisabled === 'true';
       });
       presetDiscoveryHost.querySelectorAll('button').forEach((control) => {
         control.disabled = busy;
@@ -1133,10 +1141,13 @@
         const name = document.createElement('div');
         name.className = 'wave-collection-result-name';
         if (entry.importMode === 'table') {
+          const importableColumns = (entry.columns || [])
+            .filter((column) => String(column.source || '') !== String(entry.indexColumn || ''));
           const enabledCount = (entry.columns || [])
-            .filter((column) => column.enabled !== false).length;
+            .filter((column) => column.enabled !== false
+              && String(column.source || '') !== String(entry.indexColumn || '')).length;
           name.textContent = String(entry.name || '表格文件') + '（表格，已选 '
-            + enabledCount + '/' + (entry.columns || []).length + ' 列）';
+            + enabledCount + '/' + importableColumns.length + ' 列）';
         } else {
           name.textContent = String(entry.name || '未命名信号')
             + (entry.hasSeq ? '（含序号）' : '（自动编号）');
@@ -1216,6 +1227,32 @@
           });
           headerLabel.appendChild(headerInput);
           headerControls.appendChild(headerLabel);
+          const indexLabel = document.createElement('label');
+          indexLabel.textContent = '序号列';
+          const indexSelect = document.createElement('select');
+          indexSelect.className = 'modal-input wave-collection-index-column';
+          indexSelect.setAttribute('aria-label', '选择 CSV 序号列');
+          const noIndexOption = document.createElement('option');
+          noIndexOption.value = '';
+          noIndexOption.textContent = '不使用（筛选后从 0 编号）';
+          indexSelect.appendChild(noIndexOption);
+          (entry.columns || []).forEach((column) => {
+            const option = document.createElement('option');
+            option.value = String(column.source || '');
+            option.textContent = String(column.source || '');
+            indexSelect.appendChild(option);
+          });
+          indexSelect.value = String(entry.indexColumn || '');
+          indexSelect.addEventListener('change', () => {
+            entry.indexColumn = indexSelect.value;
+            syncEntryAutoGen(entry, 'index-column-change');
+            setHint(entry.indexColumn
+              ? ('已将 ' + entry.indexColumn + ' 设为序号列；该列不作为波形信号导入')
+              : '未使用序号列；筛选后的数据将从 0 开始重新编号', false);
+            renderSearchResults(payload);
+          });
+          indexLabel.appendChild(indexSelect);
+          headerControls.appendChild(indexLabel);
           const delimiter = document.createElement('span');
           delimiter.className = 'wave-collection-table-meta';
           delimiter.textContent = '分隔方式：' + String(entry.delimiter || '自动');
@@ -1251,6 +1288,10 @@
               const cell = document.createElement('th');
               cell.scope = 'col';
               cell.textContent = String(column || '');
+              if (String(column || '') === String(entry.indexColumn || '')) {
+                cell.classList.add('is-index-column');
+                cell.title = '序号列，不作为波形信号导入';
+              }
               headerRow.appendChild(cell);
             });
             tableHead.appendChild(headerRow);
@@ -1294,22 +1335,34 @@
           const columnsHost = document.createElement('div');
           columnsHost.className = 'wave-collection-columns';
           (entry.columns || []).forEach((column) => {
+            const isIndexColumn = String(column.source || '') === String(entry.indexColumn || '');
             const columnRow = document.createElement('label');
             columnRow.className = 'wave-collection-column';
+            columnRow.classList.toggle('is-index-column', isIndexColumn);
             columnRow.dataset.searchText = (String(column.source || '') + ' '
               + String(column.name || '')).toLowerCase();
             const checkbox = document.createElement('input');
             checkbox.type = 'checkbox';
-            checkbox.checked = column.enabled !== false;
+            checkbox.checked = !isIndexColumn && column.enabled !== false;
             checkbox.setAttribute('aria-label', '导入列 ' + String(column.source || ''));
+            if (isIndexColumn) {
+              checkbox.disabled = true;
+              checkbox.dataset.permanentDisabled = 'true';
+              checkbox.title = '序号列只用于定位，不作为波形信号导入';
+            }
             const source = document.createElement('code');
-            source.textContent = String(column.source || '');
+            source.textContent = String(column.source || '') + (isIndexColumn ? '（序号列）' : '');
             const rename = document.createElement('input');
             rename.type = 'text';
             rename.className = 'modal-input wave-collection-column-name';
             rename.value = String(column.name || column.source || '');
             rename.placeholder = '导入后的信号名';
             rename.setAttribute('aria-label', String(column.source || '') + ' 导入后的信号名');
+            if (isIndexColumn) {
+              rename.disabled = true;
+              rename.dataset.permanentDisabled = 'true';
+              rename.title = '序号列不生成波形信号';
+            }
             const condition = document.createElement('input');
             condition.type = 'text';
             condition.className = 'modal-input wave-collection-column-condition';
@@ -1404,11 +1457,16 @@
           const setVisibleSelection = (enabled) => {
             visibleColumns().forEach((columnRow) => {
               const checkbox = columnRow.querySelector('input[type="checkbox"]');
-              if (checkbox) checkbox.checked = enabled;
+              if (checkbox && checkbox.dataset.permanentDisabled !== 'true') {
+                checkbox.checked = enabled;
+              }
             });
             (entry.columns || []).forEach((column, index) => {
               const columnRow = columnsHost.children[index];
-              if (columnRow && !columnRow.hidden) column.enabled = enabled;
+              if (columnRow && !columnRow.hidden
+                  && String(column.source || '') !== String(entry.indexColumn || '')) {
+                column.enabled = enabled;
+              }
             });
             syncEntryAutoGen(entry, enabled ? 'columns-select-all' : 'columns-select-none');
             renderSearchResults(payload);

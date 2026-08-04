@@ -1192,9 +1192,10 @@ func (m *importManager) runSourceFile(
 }
 
 type tableImportOptions struct {
-	HeaderRow int
-	Delimiter string
-	Columns   []collectionColumnConfig
+	HeaderRow   int
+	IndexColumn string
+	Delimiter   string
+	Columns     []collectionColumnConfig
 }
 
 func (m *importManager) runTableSourceFileWithOptions(
@@ -1233,6 +1234,9 @@ func (m *importManager) runTableSourceFileWithOptions(
 			"maxColumns": importMaxWaveColumns,
 		},
 	}
+	if strings.TrimSpace(tableOptions.IndexColumn) != "" {
+		mapping.Options["indexColumn"] = strings.TrimSpace(tableOptions.IndexColumn)
+	}
 	if strings.TrimSpace(tableOptions.Delimiter) != "" {
 		mapping.Options["delimiter"] = tableOptions.Delimiter
 	}
@@ -1253,6 +1257,7 @@ func (m *importManager) runTableSourceFileWithOptions(
 	return map[string]any{
 		"importMode":          "table",
 		"headerRow":           tableOptions.HeaderRow,
+		"indexColumn":         strings.TrimSpace(tableOptions.IndexColumn),
 		"delimiter":           tableOptions.Delimiter,
 		"parser":              mapping.Parser,
 		"pythonVersion":       python.Version,

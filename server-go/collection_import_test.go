@@ -339,6 +339,71 @@ func TestCollectionTableDetectionIncrementallyMergesColumns(t *testing.T) {
 	}
 }
 
+func TestCollectionTableIndexColumnPersistsAndClearsWhenMissing(t *testing.T) {
+	root := t.TempDir()
+	sourcePath := filepath.Join(root, "capture.csv")
+	if err := os.WriteFile(
+		sourcePath,
+		[]byte("Sample,SigA\n2,10\n4,20\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	preset, err := normalizeCollectionPreset(map[string]any{
+		"paths": []any{map[string]any{
+			"usrGen": map[string]any{
+				"folder": ".", "grepKeys": `^capture\.csv$`,
+			},
+			"autoGen": map[string]any{
+				"importMode": "table", "headerRow": 1, "delimiter": "comma",
+				"indexColumn": "Sample",
+				"columns": []any{
+					map[string]any{"source": "Sample", "enabled": true, "name": "Sample"},
+					map[string]any{"source": "SigA", "enabled": true, "name": "SigA"},
+				},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := searchCollectionFiles(
+		root, root, preset, map[string]string{}, runTestCollectionRegexSearch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := result.Entries[0]
+	if !result.Ready || entry.IndexColumn != "Sample" ||
+		len(entry.OutputNames) != 1 || entry.OutputNames[0] != "SigA" ||
+		result.Preset.Paths[0].AutoGen.IndexColumn != "Sample" {
+		t.Fatalf("selected index column was not preserved: %#v %#v", entry, result.Preset.Paths[0])
+	}
+	savedPath, err := saveCollectionPreset("indexed.json", root, result.Preset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved, _, err := loadCollectionPreset(savedPath, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Paths[0].AutoGen.IndexColumn != "Sample" {
+		t.Fatalf("saved index column = %q, expected Sample", saved.Paths[0].AutoGen.IndexColumn)
+	}
+
+	if err = os.WriteFile(sourcePath, []byte("Tick,SigA\n0,30\n1,40\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err = searchCollectionFiles(
+		root, root, result.Preset, map[string]string{}, runTestCollectionRegexSearch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Entries[0].IndexColumn != "" ||
+		result.Preset.Paths[0].AutoGen.IndexColumn != "" {
+		t.Fatalf("missing generated index column was not cleared: %#v", result.Preset.Paths[0])
+	}
+}
+
 func TestCollectionTablePreviewAppliesColumnFilters(t *testing.T) {
 	lines := []string{
 		"CurSt,Value",

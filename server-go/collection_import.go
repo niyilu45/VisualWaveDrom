@@ -55,16 +55,17 @@ type collectionPresetPath struct {
 	AutoGen collectionRuleConfig `json:"autoGen"`
 
 	// Effective values keep the search/import code and legacy tests simple.
-	Folder     string                   `json:"-"`
-	GrepKeys   string                   `json:"-"`
-	HasSeq     bool                     `json:"-"`
-	Name       string                   `json:"-"`
-	ImportMode string                   `json:"-"`
-	HeaderRow  int                      `json:"-"`
-	Delimiter  string                   `json:"-"`
-	Parser     string                   `json:"-"`
-	Columns    []collectionColumnConfig `json:"-"`
-	SchemaHash string                   `json:"-"`
+	Folder      string                   `json:"-"`
+	GrepKeys    string                   `json:"-"`
+	HasSeq      bool                     `json:"-"`
+	Name        string                   `json:"-"`
+	ImportMode  string                   `json:"-"`
+	HeaderRow   int                      `json:"-"`
+	IndexColumn string                   `json:"-"`
+	Delimiter   string                   `json:"-"`
+	Parser      string                   `json:"-"`
+	Columns     []collectionColumnConfig `json:"-"`
+	SchemaHash  string                   `json:"-"`
 }
 
 type collectionColumnConfig struct {
@@ -75,16 +76,17 @@ type collectionColumnConfig struct {
 }
 
 type collectionRuleConfig struct {
-	Folder     string                   `json:"folder,omitempty"`
-	GrepKeys   string                   `json:"grepKeys,omitempty"`
-	Name       string                   `json:"name,omitempty"`
-	ImportMode string                   `json:"importMode,omitempty"`
-	HeaderRow  int                      `json:"headerRow,omitempty"`
-	Delimiter  string                   `json:"delimiter,omitempty"`
-	HasSeq     *bool                    `json:"hasSeq,omitempty"`
-	Parser     string                   `json:"parser,omitempty"`
-	Columns    []collectionColumnConfig `json:"columns,omitempty"`
-	SchemaHash string                   `json:"schemaHash,omitempty"`
+	Folder      string                   `json:"folder,omitempty"`
+	GrepKeys    string                   `json:"grepKeys,omitempty"`
+	Name        string                   `json:"name,omitempty"`
+	ImportMode  string                   `json:"importMode,omitempty"`
+	HeaderRow   int                      `json:"headerRow,omitempty"`
+	IndexColumn string                   `json:"indexColumn,omitempty"`
+	Delimiter   string                   `json:"delimiter,omitempty"`
+	HasSeq      *bool                    `json:"hasSeq,omitempty"`
+	Parser      string                   `json:"parser,omitempty"`
+	Columns     []collectionColumnConfig `json:"columns,omitempty"`
+	SchemaHash  string                   `json:"schemaHash,omitempty"`
 }
 
 type collectionPreset struct {
@@ -132,6 +134,7 @@ type collectionSearchEntry struct {
 	Name             string                   `json:"name"`
 	ImportMode       string                   `json:"importMode"`
 	HeaderRow        int                      `json:"headerRow,omitempty"`
+	IndexColumn      string                   `json:"indexColumn,omitempty"`
 	Delimiter        string                   `json:"delimiter,omitempty"`
 	Parser           string                   `json:"parser,omitempty"`
 	Columns          []collectionColumnConfig `json:"columns,omitempty"`
@@ -384,6 +387,12 @@ func normalizeCollectionRuleConfig(
 	if config.HeaderRow, err = collectionOptionalInt(raw, "headerRow", fieldPath); err != nil {
 		return config, err
 	}
+	if config.IndexColumn, err = collectionOptionalString(raw, "indexColumn", fieldPath); err != nil {
+		return config, err
+	}
+	if utf8.RuneCountInString(config.IndexColumn) > 256 {
+		return config, fmt.Errorf("%s.indexColumn cannot exceed 256 characters", fieldPath)
+	}
 	if config.Delimiter, err = collectionOptionalString(raw, "delimiter", fieldPath); err != nil {
 		return config, err
 	}
@@ -452,6 +461,10 @@ func effectiveCollectionPresetPath(
 	effective.HeaderRow = usrGen.HeaderRow
 	if effective.HeaderRow == 0 {
 		effective.HeaderRow = autoGen.HeaderRow
+	}
+	effective.IndexColumn = usrGen.IndexColumn
+	if effective.IndexColumn == "" {
+		effective.IndexColumn = autoGen.IndexColumn
 	}
 	effective.Delimiter = usrGen.Delimiter
 	if effective.Delimiter == "" {
@@ -1614,7 +1627,8 @@ func prepareCollectionEntry(
 	prepared := rule
 	entry := collectionSearchEntry{
 		Index: -1, Name: rule.Name, HasSeq: rule.HasSeq,
-		Columns: []collectionColumnConfig{}, OutputNames: []string{},
+		IndexColumn: rule.IndexColumn,
+		Columns:     []collectionColumnConfig{}, OutputNames: []string{},
 	}
 	preferredRow := rule.HeaderRow
 	if forcedHeaderRow > 0 {
@@ -1637,12 +1651,30 @@ func prepareCollectionEntry(
 			return rule, entry, errors.New("无法识别表格标题行，请修改标题行")
 		}
 		columns := mergeCollectionColumns(header.Headers, rule.Columns)
+		indexColumn := strings.TrimSpace(rule.IndexColumn)
+		if indexColumn != "" {
+			found := false
+			for _, headerName := range header.Headers {
+				if headerName == indexColumn {
+					found = true
+					break
+				}
+			}
+			if !found {
+				if strings.TrimSpace(rule.UsrGen.IndexColumn) != "" {
+					return rule, entry, fmt.Errorf(
+						"selected table index column is missing: %s", indexColumn)
+				}
+				indexColumn = ""
+			}
+		}
 		autoGen := rule.AutoGen
 		autoGen.ImportMode = "table"
 		autoGen.HeaderRow = header.HeaderRow
 		autoGen.Delimiter = header.Delimiter
 		autoGen.Parser = "parse_table_data"
 		autoGen.Columns = columns
+		autoGen.IndexColumn = indexColumn
 		autoGen.SchemaHash = collectionSchemaHash("table", header.Delimiter, header.Headers)
 		autoGen.HasSeq = nil
 		prepared = effectiveCollectionPresetPath(rule.UsrGen, autoGen)
@@ -1652,6 +1684,7 @@ func prepareCollectionEntry(
 		}
 		entry.ImportMode = "table"
 		entry.HeaderRow = header.HeaderRow
+		entry.IndexColumn = indexColumn
 		entry.Delimiter = header.Delimiter
 		entry.Parser = autoGen.Parser
 		entry.Columns = columns
@@ -1665,9 +1698,13 @@ func prepareCollectionEntry(
 		entry.PreviewRows = previewRows
 		entry.PreviewTruncated = previewTruncated
 		for _, column := range columns {
-			if column.Enabled {
+			if column.Enabled && column.Source != indexColumn {
 				entry.OutputNames = append(entry.OutputNames, column.Name)
 			}
+		}
+		if len(entry.OutputNames) == 0 {
+			return rule, entry, errors.New(
+				"select at least one waveform signal column besides the index column")
 		}
 	} else {
 		analysis := analyzeImportSample(match.FileName, lines)
@@ -1678,6 +1715,7 @@ func prepareCollectionEntry(
 		autoGen := rule.AutoGen
 		autoGen.ImportMode = "single"
 		autoGen.HeaderRow = 0
+		autoGen.IndexColumn = ""
 		autoGen.Delimiter = stringValue(analysis["delimiter"])
 		autoGen.Parser = stringValue(analysis["recommendedParser"])
 		autoGen.Columns = nil
@@ -1813,6 +1851,7 @@ func searchCollectionFiles(
 			entry.Message = prepareErr.Error()
 			entry.ImportMode = runtimeRule.ImportMode
 			entry.HeaderRow = runtimeRule.HeaderRow
+			entry.IndexColumn = runtimeRule.IndexColumn
 			entry.Delimiter = runtimeRule.Delimiter
 			entry.Parser = runtimeRule.Parser
 			entry.Columns = runtimeRule.Columns
@@ -1826,6 +1865,7 @@ func searchCollectionFiles(
 		entry.HasSeq = preparedEntry.HasSeq
 		entry.ImportMode = preparedEntry.ImportMode
 		entry.HeaderRow = preparedEntry.HeaderRow
+		entry.IndexColumn = preparedEntry.IndexColumn
 		entry.Delimiter = preparedEntry.Delimiter
 		entry.Parser = preparedEntry.Parser
 		entry.Columns = preparedEntry.Columns
@@ -2023,15 +2063,17 @@ func (s *service) parseCollectionEntry(
 		result, err = s.imports.runTableLocalFileWithOptions(
 			sourcePath,
 			tableImportOptions{
-				HeaderRow: preparedRule.HeaderRow,
-				Delimiter: preparedRule.Delimiter,
-				Columns:   preparedRule.Columns,
+				HeaderRow:   preparedRule.HeaderRow,
+				IndexColumn: preparedRule.IndexColumn,
+				Delimiter:   preparedRule.Delimiter,
+				Columns:     preparedRule.Columns,
 			},
 		)
 		parser = "parse_table_data"
 		analysis = map[string]any{
 			"importMode": "table", "headerRow": preparedRule.HeaderRow,
-			"delimiter": preparedRule.Delimiter,
+			"indexColumn": preparedRule.IndexColumn,
+			"delimiter":   preparedRule.Delimiter,
 		}
 	} else {
 		lines, readErr := readImportSampleLines(sourcePath)
@@ -2223,6 +2265,7 @@ func (s *service) previewCollectionEntry(
 	entry.HasSeq = preparedEntry.HasSeq
 	entry.ImportMode = preparedEntry.ImportMode
 	entry.HeaderRow = preparedEntry.HeaderRow
+	entry.IndexColumn = preparedEntry.IndexColumn
 	entry.Delimiter = preparedEntry.Delimiter
 	entry.Parser = preparedEntry.Parser
 	entry.Columns = preparedEntry.Columns
