@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260804-bus-format-v2';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260804-window-coverage-v4';
   const DEFAULT_ROW_HEIGHT = 42;
   const MIN_ANALOG_ROW_HEIGHT = 28;
   const MAX_ANALOG_ROW_HEIGHT = 480;
@@ -2434,11 +2434,22 @@
       const row = this.simplified.model.rows[rowIndex];
       const columns = this.simplified.model.columns;
       if (!columns.length) return;
-      const visible = [];
-      for (let index = 0; index < columns.length; index += 1) {
-        if (columns[index] < this.viewStart || columns[index] > this.viewEnd) continue;
-        visible.push(index);
+      let low = 0;
+      let high = columns.length;
+      while (low < high) {
+        const middle = (low + high) >> 1;
+        if (columns[middle] < this.viewStart) low = middle + 1;
+        else high = middle;
       }
+      const firstInside = low;
+      const firstPoint = Math.max(0, firstInside - 1);
+      let afterWindow = firstInside;
+      while (afterWindow < columns.length && columns[afterWindow] <= this.viewEnd) {
+        afterWindow += 1;
+      }
+      const lastPoint = Math.min(columns.length - 1, afterWindow);
+      const visible = [];
+      for (let index = firstPoint; index <= lastPoint; index += 1) visible.push(index);
       if (!visible.length) return;
       if (row.mode === 'analog') {
         let min = Number.POSITIVE_INFINITY;

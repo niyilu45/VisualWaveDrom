@@ -682,14 +682,12 @@ function displaySegmentForMode(row, segment, column, mode, totalColumns, busForm
   if (mode === 'bus') {
     let rawValue;
     if (row.samples && row.samples.length) {
-      const sampleIndex = sampleIndexForColumn(row, column, totalColumns);
-      const sample = row.samples[sampleIndex];
+      const sampleIndex = discreteSampleIndexForColumn(row, column);
+      const sample = sampleIndex >= 0 ? row.samples[sampleIndex] : Number.NaN;
       if (!Number.isFinite(sample)) {
         return { kind: 'digital', state: 'x', value: 'x' };
       }
-      rawValue = segment.kind === 'bus'
-        ? String(segment.value == null ? '' : segment.value)
-        : String(sample);
+      rawValue = String(sample);
     } else if (segment.kind === 'bus') {
       rawValue = String(segment.value == null ? '' : segment.value);
     } else {
@@ -704,8 +702,8 @@ function displaySegmentForMode(row, segment, column, mode, totalColumns, busForm
     };
   }
   if (!row.samples || !row.samples.length || mode === 'analog') return segment;
-  const sampleIndex = sampleIndexForColumn(row, column, totalColumns);
-  const sample = row.samples[sampleIndex];
+  const sampleIndex = discreteSampleIndexForColumn(row, column);
+  const sample = sampleIndex >= 0 ? row.samples[sampleIndex] : Number.NaN;
   if (mode === 'digital') {
     const state = Number.isFinite(sample) && (sample === 0 || sample === 1)
       ? String(sample)
@@ -715,22 +713,29 @@ function displaySegmentForMode(row, segment, column, mode, totalColumns, busForm
   return segment;
 }
 
-function rowSegmentsInWindow(row, start, end, width, mode, totalColumns, busFormat) {
-  const first = findFirstSegment(row.segments, start);
+function sampledSegmentsInWindow(row, start, end, mode, busFormat) {
   const selected = [];
-  for (let index = first; index < row.segments.length; index += 1) {
-    const segment = row.segments[index];
-    if (segment.start >= end) break;
-    const visibleStart = Math.max(start, segment.start);
-    const visibleEnd = Math.min(end, segment.end);
-    const display = displaySegmentForMode(
-      row,
-      segment,
-      visibleStart + 1e-7,
-      mode,
-      totalColumns,
-      busFormat
-    );
+  const sampleCount = row.samples ? row.samples.length : 0;
+  const firstIndex = Math.max(0, Math.floor(start));
+  const lastIndex = Math.min(sampleCount, Math.ceil(end));
+  for (let index = firstIndex; index < lastIndex; index += 1) {
+    const visibleStart = Math.max(start, index);
+    const visibleEnd = Math.min(end, index + 1);
+    if (!(visibleEnd > visibleStart)) continue;
+    const sample = row.samples[index];
+    let display;
+    if (!Number.isFinite(sample)) {
+      display = { kind: 'digital', state: 'x', value: 'x' };
+    } else if (mode === 'bus') {
+      display = {
+        kind: 'bus',
+        state: 'bus',
+        value: formatBusValue(String(sample), busFormat)
+      };
+    } else {
+      const state = sample === 0 || sample === 1 ? String(sample) : 'x';
+      display = { kind: 'digital', state, value: state };
+    }
     pushSegment(selected, {
       start: visibleStart,
       end: visibleEnd,
@@ -739,10 +744,132 @@ function rowSegmentsInWindow(row, start, end, width, mode, totalColumns, busForm
       value: display.value
     });
   }
+  if (end > sampleCount) {
+    pushSegment(selected, {
+      start: Math.max(start, sampleCount),
+      end,
+      kind: 'digital',
+      state: 'x',
+      value: 'x'
+    });
+  }
+  return selected;
+}
+
+function sampledBucketsInWindow(row, start, end, width, mode, busFormat) {
+  const bucketCount = Math.max(1, Math.floor(width));
+  const span = end - start;
+  const sampleCount = row.samples ? row.samples.length : 0;
+  const buckets = [];
+  for (let pixel = 0; pixel < bucketCount; pixel += 1) {
+    const bucketStart = start + span * pixel / bucketCount;
+    const bucketEnd = start + span * (pixel + 1) / bucketCount;
+    const firstIndex = Math.max(0, Math.floor(bucketStart));
+    const lastIndex = Math.max(firstIndex + 1, Math.ceil(bucketEnd));
+    const availableCount = Math.max(1, lastIndex - firstIndex);
+    const probeCount = Math.min(8, availableCount);
+    let high = false;
+    let low = false;
+    let unknown = false;
+    let bus = false;
+    let value = '';
+    let changes = 0;
+    let previousKey = '';
+    for (let probe = 0; probe < probeCount; probe += 1) {
+      const sampleIndex = probeCount <= 1
+        ? firstIndex
+        : firstIndex + Math.floor(probe * (availableCount - 1) / (probeCount - 1));
+      const sample = sampleIndex < sampleCount ? row.samples[sampleIndex] : Number.NaN;
+      let key;
+      if (!Number.isFinite(sample)) {
+        unknown = true;
+        key = 'x';
+      } else if (mode === 'bus') {
+        bus = true;
+        const formatted = formatBusValue(String(sample), busFormat);
+        if (!value) value = formatted;
+        else if (value !== formatted) value = '*';
+        key = 'bus:' + formatted;
+      } else if (sample === 1) {
+        high = true;
+        key = '1';
+      } else if (sample === 0) {
+        low = true;
+        key = '0';
+      } else {
+        unknown = true;
+        key = 'x';
+      }
+      if (previousKey && previousKey !== key) changes += 1;
+      previousKey = key;
+    }
+    buckets.push({
+      start: bucketStart,
+      end: bucketEnd,
+      high,
+      low,
+      unknown,
+      bus,
+      value,
+      changes
+    });
+  }
+  return buckets;
+}
+
+function rowSegmentsInWindow(row, start, end, width, mode, totalColumns, busFormat) {
   const decorations = {
     clockEdges: pointEventsInWindow(row.clockEdges, start, end, width),
     gaps: pointEventsInWindow(row.gaps, start, end, width)
   };
+  let selected;
+  if (row.samples && row.samples.length && mode !== 'analog') {
+    const visibleSampleCount = Math.max(
+      0,
+      Math.min(row.samples.length, Math.ceil(end)) - Math.max(0, Math.floor(start))
+    );
+    if (visibleSampleCount > Math.max(64, width * 4)) {
+      return Object.assign({
+        kind: 'buckets',
+        items: sampledBucketsInWindow(row, start, end, width, mode, busFormat)
+      }, decorations);
+    }
+    selected = sampledSegmentsInWindow(row, start, end, mode, busFormat);
+  } else {
+    selected = [];
+    const first = findFirstSegment(row.segments, start);
+    for (let index = first; index < row.segments.length; index += 1) {
+      const segment = row.segments[index];
+      if (segment.start >= end) break;
+      const visibleStart = Math.max(start, segment.start);
+      const visibleEnd = Math.min(end, segment.end);
+      const display = displaySegmentForMode(
+        row,
+        segment,
+        visibleStart + 1e-7,
+        mode,
+        totalColumns,
+        busFormat
+      );
+      pushSegment(selected, {
+        start: visibleStart,
+        end: visibleEnd,
+        kind: display.kind,
+        state: display.state,
+        value: display.value
+      });
+    }
+    const coveredEnd = selected.length ? selected[selected.length - 1].end : start;
+    if (coveredEnd < end) {
+      pushSegment(selected, {
+        start: coveredEnd,
+        end,
+        kind: 'digital',
+        state: 'x',
+        value: 'x'
+      });
+    }
+  }
   if (selected.length <= Math.max(64, width * 4)) {
     return Object.assign({ kind: 'segments', items: selected }, decorations);
   }
@@ -800,6 +927,12 @@ function sampleIndexForColumn(row, column, totalColumns) {
   );
 }
 
+function discreteSampleIndexForColumn(row, column) {
+  if (!row.samples || !row.samples.length) return -1;
+  const index = Math.floor(Math.max(0, Number(column) || 0));
+  return index < row.samples.length ? index : -1;
+}
+
 function appendAnalogUnknownRange(ranges, start, end) {
   if (!(end > start)) return;
   const previous = ranges[ranges.length - 1];
@@ -817,10 +950,15 @@ function analogSampleBoundary(sampleIndex, sampleCount, totalColumns) {
 }
 
 function analogWindow(row, start, end, width, totalColumns) {
-  const startIndex = sampleIndexForColumn(row, start, totalColumns);
-  const endIndex = Math.max(
+  const sampleCount = row.samples ? row.samples.length : 0;
+  const scale = sampleCount <= 1 || totalColumns <= 1
+    ? 0
+    : (sampleCount - 1) / (totalColumns - 1);
+  const startIndex = clamp(Math.floor(start * scale), 0, Math.max(0, sampleCount - 1));
+  const endIndex = clamp(
+    Math.max(startIndex + 1, Math.ceil(end * scale) + 1),
     startIndex + 1,
-    sampleIndexForColumn(row, end, totalColumns) + 1
+    sampleCount
   );
   const sampleSpan = Math.max(1, endIndex - startIndex);
   if (sampleSpan <= Math.max(64, width * 2)) {
@@ -1134,7 +1272,8 @@ function stateAtColumn(row, column, mode, analogFormat) {
   }
   const segment = segmentAt(row, column + 1e-7);
   if (row.samples && row.samples.length) {
-    const sample = row.samples[sampleIndexForColumn(row, column, activeSession.totalColumns)];
+    const sampleIndex = discreteSampleIndexForColumn(row, column);
+    const sample = sampleIndex >= 0 ? row.samples[sampleIndex] : Number.NaN;
     if (mode === 'digital') {
       return Number.isFinite(sample) && (sample === 0 || sample === 1)
         ? String(sample)
@@ -1142,9 +1281,7 @@ function stateAtColumn(row, column, mode, analogFormat) {
     }
     if (mode === 'bus') {
       if (!Number.isFinite(sample)) return null;
-      return segment && segment.kind === 'bus'
-        ? String(segment.value == null ? '' : segment.value)
-        : String(sample);
+      return String(sample);
     }
   }
   if (!segment) return mode === 'bus' ? null : 'x';
