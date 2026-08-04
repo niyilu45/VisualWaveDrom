@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -76,25 +77,36 @@ func pickLocalPathNative(kind, initialPath string) (string, bool, error) {
 		return "", false, fmt.Errorf("unsupported path picker kind %q", kind)
 	}
 	if os.Getenv("DISPLAY") == "" && os.Getenv("WAYLAND_DISPLAY") == "" {
-		return "", false, errors.New(
+		return "", false, nativePathPickerUnavailable(
 			"no graphical desktop was detected; paste the local path into the input instead",
 		)
 	}
 	executable, args, available := graphicalPickerCommand(kind, initialPath)
 	if !available {
-		return "", false, errors.New(
+		return "", false, nativePathPickerUnavailable(
 			"no supported file picker was found; install zenity, yad, or kdialog, or paste the path",
 		)
 	}
 	command := exec.Command(executable, args...)
-	output, err := command.CombinedOutput()
-	selected := strings.TrimSpace(string(output))
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	err := command.Run()
+	selected := strings.TrimSpace(strings.TrimPrefix(stdout.String(), "\ufeff"))
+	detail := strings.TrimSpace(stderr.String())
 	if err != nil {
+		if nativePathPickerSessionFailure(detail) {
+			return "", false, nativePathPickerUnavailable(detail)
+		}
 		var exitError *exec.ExitError
-		if errors.As(err, &exitError) && (exitError.ExitCode() == 1 || selected == "") {
+		if errors.As(err, &exitError) && exitError.ExitCode() == 1 && selected == "" {
 			return "", true, nil
 		}
-		return "", false, fmt.Errorf("path picker failed: %s", selected)
+		if detail == "" {
+			detail = err.Error()
+		}
+		return "", false, fmt.Errorf("path picker failed: %s", detail)
 	}
 	return selected, selected == "", nil
 }

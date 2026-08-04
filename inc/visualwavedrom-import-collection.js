@@ -105,6 +105,7 @@
     const presetFileInput = document.getElementById('wave-collection-preset-file');
     const presetEditor = document.getElementById('wave-collection-preset-editor');
     const presetEditorShell = presetEditor.closest('.wave-collection-preset-editor-shell');
+    const presetNavigation = document.getElementById('wave-collection-preset-nav');
     const presetState = document.getElementById('wave-collection-preset-state');
     const variablesHost = document.getElementById('wave-collection-vars');
     const resultsHost = document.getElementById('wave-collection-results');
@@ -130,7 +131,13 @@
     let selectedDiscoveredPreset = null;
     let discoveredPresets = [];
     let rememberStateTimer = 0;
+    let manualSavePathMode = false;
+    let activePresetNavigationIndex = -1;
+    let presetNavigationRanges = [];
+    let presetNavigationHighlightLine = null;
+    let presetNavigationHighlightTimer = 0;
     const variableValues = new Map();
+    const singlePreviewStates = new Map();
 
     function debug(payload) {
       if (typeof settings.debugLog === 'function') {
@@ -279,6 +286,108 @@
         return [];
       }
       return [];
+    }
+
+    function setActivePresetNavigation(index) {
+      activePresetNavigationIndex = Number.isInteger(index) ? index : -1;
+      if (!presetNavigation) return;
+      presetNavigation.querySelectorAll('.wave-collection-preset-nav-item').forEach((button) => {
+        const active = Number(button.dataset.pathIndex) === activePresetNavigationIndex;
+        button.classList.toggle('is-active', active);
+        if (active) button.setAttribute('aria-current', 'true');
+        else button.removeAttribute('aria-current');
+      });
+    }
+
+    function clearPresetNavigationHighlight() {
+      window.clearTimeout(presetNavigationHighlightTimer);
+      presetNavigationHighlightTimer = 0;
+      if (presetCodeEditor && presetNavigationHighlightLine !== null) {
+        presetCodeEditor.removeLineClass(
+          presetNavigationHighlightLine, 'background', 'wave-collection-nav-target-line');
+      }
+      presetNavigationHighlightLine = null;
+    }
+
+    function jumpToPresetPath(index) {
+      const range = presetNavigationRanges[index];
+      if (!range) {
+        setHint('当前 JSON 中没有找到该规则位置', true);
+        return;
+      }
+      clearPresetNavigationHighlight();
+      setActivePresetNavigation(index);
+      if (presetCodeEditor) {
+        const position = presetCodeEditor.posFromIndex(range.start);
+        presetCodeEditor.operation(() => {
+          presetCodeEditor.setCursor(position);
+          presetCodeEditor.scrollIntoView({ from: position, to: position }, 48);
+          presetNavigationHighlightLine = presetCodeEditor.addLineClass(
+            position.line, 'background', 'wave-collection-nav-target-line');
+        });
+        presetCodeEditor.focus();
+        presetNavigationHighlightTimer = window.setTimeout(
+          clearPresetNavigationHighlight, 1100);
+      } else {
+        presetEditor.focus();
+        presetEditor.setSelectionRange(range.start, range.start);
+        const lineHeight = Number.parseFloat(
+          window.getComputedStyle(presetEditor).lineHeight) || 18;
+        presetEditor.scrollTop = Math.max(0, (range.line - 3) * lineHeight);
+      }
+      debug({ phase: 'preset-navigation-jump', index, line: range.line });
+    }
+
+    function renderPresetNavigation(preset, text) {
+      if (!presetNavigation) return;
+      const paths = preset && Array.isArray(preset.paths) ? preset.paths : [];
+      presetNavigationRanges = preset ? findPresetPathObjectRanges(String(text || '')) : [];
+      presetNavigation.innerHTML = '';
+      if (!paths.length) {
+        const empty = document.createElement('div');
+        empty.className = 'wave-collection-preset-nav-empty';
+        empty.textContent = preset ? '没有 paths 规则' : 'JSON 有误，导航已暂停';
+        presetNavigation.appendChild(empty);
+        activePresetNavigationIndex = -1;
+        return;
+      }
+      const fragment = document.createDocumentFragment();
+      paths.forEach((entry, index) => {
+        const name = String(entry && entry.usrGen && entry.usrGen.name || '').trim();
+        const label = name || ('规则 ' + (index + 1));
+        const range = presetNavigationRanges[index];
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'wave-collection-preset-nav-item';
+        button.dataset.pathIndex = String(index);
+        button.setAttribute('aria-label', (index + 1) + '. ' + label);
+        button.title = label + ' · paths[' + index + ']'
+          + (range ? (' · 第 ' + range.line + ' 行') : '');
+        const number = document.createElement('span');
+        number.className = 'wave-collection-preset-nav-index';
+        number.textContent = String(index + 1);
+        const textLabel = document.createElement('span');
+        textLabel.className = 'wave-collection-preset-nav-label';
+        textLabel.textContent = label;
+        button.appendChild(number);
+        button.appendChild(textLabel);
+        button.addEventListener('click', () => jumpToPresetPath(index));
+        fragment.appendChild(button);
+      });
+      presetNavigation.appendChild(fragment);
+      if (activePresetNavigationIndex >= paths.length) activePresetNavigationIndex = -1;
+      setActivePresetNavigation(activePresetNavigationIndex);
+    }
+
+    function syncPresetNavigationFromCursor() {
+      if (!presetCodeEditor || !presetNavigationRanges.length) return;
+      const cursorIndex = presetCodeEditor.indexFromPos(presetCodeEditor.getCursor());
+      const pathIndex = presetNavigationRanges.findIndex((range) => (
+        cursorIndex >= range.start && cursorIndex <= range.end
+      ));
+      if (pathIndex !== activePresetNavigationIndex) {
+        setActivePresetNavigation(pathIndex);
+      }
     }
 
     function findPresetPathObjectLines(text) {
@@ -609,6 +718,7 @@
         clearJsonErrorMarker();
         scheduleEditorParse();
       });
+      presetCodeEditor.on('cursorActivity', syncPresetNavigationFromCursor);
       presetCodeEditor.on('keydown', (editor, event) => {
         if (!event || event.altKey || !(event.ctrlKey || event.metaKey)) return;
         const key = String(event.key || '').toLowerCase();
@@ -733,6 +843,7 @@
         debug({ phase: 'search-invalidated', reason: reason || 'changed' });
       }
       searchResult = null;
+      singlePreviewStates.clear();
       clearSearchMarkers();
       setEmptyResults('预设、目录或变量已变化，请重新搜索');
       updateButtons();
@@ -933,12 +1044,14 @@
         if (previousVariables !== nextVariables || !variablesHost.childElementCount) {
           renderVariables(nextPreset.vars);
         }
+        renderPresetNavigation(nextPreset, editorText);
         clearJsonErrorMarker();
         setHint('', false);
         updateButtons();
         return nextPreset;
       } catch (error) {
         parsedPreset = null;
+        renderPresetNavigation(null, editorText);
         presetState.textContent = '预设 JSON 有错误';
         const location = renderJsonErrorMarker(error, editorText);
         if (showError) {
@@ -961,6 +1074,7 @@
         + normalized.paths.length + ' 条搜索规则；autoGen 已更新';
       if (searchResult) searchResult.preset = normalized;
       renderVariables(normalized.vars);
+      renderPresetNavigation(normalized, getPresetEditorValue());
       renderSearchMarkers(searchResult);
       scheduleRememberState(reason || 'autogen-updated');
       updateButtons();
@@ -998,6 +1112,9 @@
         delete autoGen.hasSeq;
       } else {
         autoGen.hasSeq = !!entry.hasSeq;
+        if (path.usrGen && Object.prototype.hasOwnProperty.call(path.usrGen, 'hasSeq')) {
+          path.usrGen.hasSeq = !!entry.hasSeq;
+        }
         delete autoGen.headerRow;
         delete autoGen.indexColumn;
         delete autoGen.columns;
@@ -1020,6 +1137,7 @@
         entry.message = '';
       }
       setPresetEditorValue(JSON.stringify(parsedPreset, null, 2), { keepHistory: true });
+      renderPresetNavigation(parsedPreset, getPresetEditorValue());
       if (searchResult) searchResult.preset = parsedPreset;
       renderSearchMarkers(searchResult);
       scheduleRememberState(reason || 'autogen-edited');
@@ -1090,6 +1208,7 @@
       rootPathInput.disabled = busy;
       presetSearchPathInput.disabled = busy;
       presetPathInput.disabled = busy;
+      presetPathInput.classList.toggle('is-save-target', manualSavePathMode);
       presetEditor.disabled = busy;
       if (presetCodeEditor) {
         presetCodeEditor.setOption('readOnly', busy ? 'nocursor' : false);
@@ -1124,8 +1243,118 @@
         ? '正在搜索…'
         : '搜索预设';
       confirmButton.textContent = nextBusy && action === 'import' ? '正在导入…' : '确定导入';
-      savePresetButton.textContent = nextBusy && action === 'save' ? '正在保存…' : '保存预设';
+      savePresetButton.textContent = nextBusy && action === 'save'
+        ? '正在保存…'
+        : (manualSavePathMode ? '保存到此路径' : '保存预设');
       updateButtons();
+    }
+
+    function refreshEditorsAfterPathPicker(reason) {
+      const refresh = () => {
+        if (presetCodeEditor) {
+          presetCodeEditor.setOption('readOnly', busy ? 'nocursor' : false);
+          presetCodeEditor.getWrapperElement().setAttribute('aria-disabled', String(busy));
+          presetCodeEditor.refresh();
+        }
+        if (typeof settings.refreshEditors === 'function') {
+          settings.refreshEditors(reason || 'path-picker');
+        }
+        debug({ phase: 'editors-refreshed', reason: reason || 'path-picker', busy });
+      };
+      if (typeof window.requestAnimationFrame === 'function') {
+        window.requestAnimationFrame(() => window.requestAnimationFrame(refresh));
+      } else {
+        window.setTimeout(refresh, 0);
+      }
+    }
+
+    function focusAndSelectPath(input) {
+      window.requestAnimationFrame(() => {
+        if (!input || input.disabled || modal.hidden) return;
+        input.focus();
+        input.select();
+      });
+    }
+
+    function singlePreviewState(entryIndex) {
+      if (!singlePreviewStates.has(entryIndex)) {
+        singlePreviewStates.set(entryIndex, {
+          expanded: false,
+          loaded: false,
+          loading: false,
+          startLine: 1,
+          lineCount: 5,
+          totalLines: null,
+          lines: [],
+          relativePath: '',
+          error: ''
+        });
+      }
+      return singlePreviewStates.get(entryIndex);
+    }
+
+    function formatPreviewLineCount(value) {
+      const count = Math.max(0, Number(value || 0));
+      try {
+        return new Intl.NumberFormat('zh-CN').format(count);
+      } catch (error) {
+        return String(count);
+      }
+    }
+
+    async function loadSingleFilePreview(entryIndex, startLine, lineCount) {
+      if (busy || !searchResult || !parsedPreset) return;
+      const previewState = singlePreviewState(entryIndex);
+      previewState.loading = true;
+      previewState.error = '';
+      setBusy(true, 'single-preview');
+      renderSearchResults(searchResult);
+      startProgress(previewState.loaded
+        ? '正在读取指定范围…'
+        : '正在统计文件总行数并读取预览…');
+      debug({ phase: 'single-preview-start', entryIndex, startLine, lineCount });
+      try {
+        const variables = collectVariableValues().values;
+        const payload = await post('single-preview', {
+          rootPath: String(rootPathInput.value || '').trim(),
+          preset: parsedPreset,
+          variables,
+          searchToken: searchResult.searchToken || '',
+          index: entryIndex,
+          startLine,
+          lineCount
+        });
+        previewState.loaded = true;
+        previewState.startLine = Math.max(1, Number(payload.startLine || startLine));
+        previewState.lineCount = Math.max(1, Number(payload.lineCount || lineCount));
+        previewState.totalLines = Math.max(0, Number(payload.totalLines || 0));
+        previewState.relativePath = String(payload.relativePath || '');
+        previewState.lines = Array.isArray(payload.lines) ? payload.lines : [];
+        setHint(
+          '已显示第 ' + previewState.startLine + ' 行起的 '
+            + previewState.lines.length + ' 行；文件共 '
+            + formatPreviewLineCount(previewState.totalLines) + ' 行',
+          false
+        );
+        debug({
+          phase: 'single-preview-complete', entryIndex,
+          startLine: previewState.startLine,
+          lineCount: previewState.lineCount,
+          totalLines: previewState.totalLines,
+          displayedCount: previewState.lines.length
+        });
+      } catch (error) {
+        previewState.error = error.message || String(error);
+        setHint(previewState.error, true);
+        debug({
+          phase: 'single-preview-error', entryIndex,
+          startLine, lineCount, message: previewState.error
+        });
+      } finally {
+        previewState.loading = false;
+        setBusy(false, '');
+        renderSearchResults(searchResult);
+      }
     }
 
     function renderSearchResults(payload) {
@@ -1177,9 +1406,184 @@
         else if (entry.status === 'config-error') state.textContent = '配置错误';
         else if (entry.status === 'folder-missing') state.textContent = '目录不存在，跳过';
         else state.textContent = '未匹配，跳过';
+        const actions = document.createElement('div');
+        actions.className = 'wave-collection-result-actions';
+        actions.appendChild(state);
+        let previewState = null;
+        if (entry.importMode === 'single' && matches.length) {
+          previewState = singlePreviewState(entry.index);
+          const togglePreview = document.createElement('button');
+          togglePreview.type = 'button';
+          togglePreview.className = 'modal-btn wave-collection-preview-toggle';
+          togglePreview.textContent = previewState.expanded ? '收起' : '展开';
+          togglePreview.setAttribute('aria-expanded', String(previewState.expanded));
+          togglePreview.setAttribute(
+            'aria-label',
+            (previewState.expanded ? '收起文件预览：' : '展开文件预览：')
+              + String(matches[0].relativePath || matches[0].fileName || entry.name || '')
+          );
+          togglePreview.addEventListener('click', () => {
+            previewState.expanded = !previewState.expanded;
+            renderSearchResults(payload);
+            if (previewState.expanded && !previewState.loaded && !previewState.loading) {
+              void loadSingleFilePreview(
+                entry.index, previewState.startLine, previewState.lineCount);
+            }
+          });
+          actions.appendChild(togglePreview);
+        }
         row.appendChild(name);
         row.appendChild(path);
-        row.appendChild(state);
+        row.appendChild(actions);
+        if (entry.importMode === 'single' && matches.length) {
+          const config = document.createElement('div');
+          config.className = 'wave-collection-single-config';
+          const sequenceLabel = document.createElement('label');
+          sequenceLabel.className = 'wave-collection-sequence-option';
+          const sequenceCheckbox = document.createElement('input');
+          sequenceCheckbox.type = 'checkbox';
+          sequenceCheckbox.checked = !!entry.hasSeq;
+          sequenceCheckbox.setAttribute(
+            'aria-label', String(entry.name || '单波形文件') + ' 第一列为序号');
+          const sequenceText = document.createElement('span');
+          sequenceText.textContent = '第一列为序号';
+          sequenceCheckbox.addEventListener('change', () => {
+            entry.hasSeq = sequenceCheckbox.checked;
+            syncEntryAutoGen(entry, 'single-has-seq-change');
+            setHint(entry.hasSeq
+              ? '已按文件第一列作为序号导入'
+              : '已改为自动从 0 编号', false);
+            renderSearchResults(payload);
+          });
+          sequenceLabel.appendChild(sequenceCheckbox);
+          sequenceLabel.appendChild(sequenceText);
+          config.appendChild(sequenceLabel);
+
+          if (previewState && previewState.expanded) {
+            const preview = document.createElement('section');
+            preview.className = 'wave-collection-single-preview';
+            preview.setAttribute('aria-label', '单波形文件内容预览');
+            const heading = document.createElement('div');
+            heading.className = 'wave-collection-preview-heading';
+            const title = document.createElement('strong');
+            title.textContent = '文件内容';
+            const meta = document.createElement('span');
+            if (previewState.totalLines === null) {
+              meta.textContent = previewState.loading ? '正在统计总行数…' : '尚未读取';
+            } else {
+              const selectedPath = previewState.relativePath
+                || String(matches[0].relativePath || matches[0].fileName || '');
+              meta.textContent = (selectedPath ? (selectedPath + ' · ') : '')
+                + '共 ' + formatPreviewLineCount(previewState.totalLines) + ' 行';
+              meta.title = String(matches[0].path || selectedPath);
+            }
+            heading.appendChild(title);
+            heading.appendChild(meta);
+            preview.appendChild(heading);
+
+            const controls = document.createElement('div');
+            controls.className = 'wave-collection-single-preview-controls';
+            const startLabel = document.createElement('label');
+            startLabel.textContent = '起始行';
+            const startInput = document.createElement('input');
+            startInput.type = 'number';
+            startInput.className = 'modal-input';
+            startInput.min = '1';
+            startInput.step = '1';
+            startInput.value = String(previewState.startLine);
+            if (previewState.totalLines > 0) {
+              startInput.max = String(previewState.totalLines);
+            }
+            startInput.setAttribute('aria-label', '文件预览起始行');
+            startLabel.appendChild(startInput);
+            const countLabel = document.createElement('label');
+            countLabel.textContent = '显示行数';
+            const countInput = document.createElement('input');
+            countInput.type = 'number';
+            countInput.className = 'modal-input';
+            countInput.min = '1';
+            countInput.max = '200';
+            countInput.step = '1';
+            countInput.value = String(previewState.lineCount);
+            countInput.setAttribute('aria-label', '文件预览显示行数');
+            countLabel.appendChild(countInput);
+            const applyRange = document.createElement('button');
+            applyRange.type = 'button';
+            applyRange.className = 'modal-btn';
+            applyRange.textContent = '应用';
+            const apply = () => {
+              const startLine = Number(startInput.value);
+              const lineCount = Number(countInput.value);
+              if (!Number.isInteger(startLine) || startLine < 1) {
+                setHint('预览起始行必须是大于或等于 1 的整数', true);
+                startInput.focus();
+                return;
+              }
+              if (!Number.isInteger(lineCount) || lineCount < 1 || lineCount > 200) {
+                setHint('预览显示行数必须介于 1 和 200 之间', true);
+                countInput.focus();
+                return;
+              }
+              if (previewState.totalLines > 0 && startLine > previewState.totalLines) {
+                setHint('预览起始行不能超过文件总行数 ' + previewState.totalLines, true);
+                startInput.focus();
+                return;
+              }
+              previewState.startLine = startLine;
+              previewState.lineCount = lineCount;
+              void loadSingleFilePreview(entry.index, startLine, lineCount);
+            };
+            applyRange.addEventListener('click', apply);
+            [startInput, countInput].forEach((input) => {
+              input.addEventListener('keydown', (event) => {
+                event.stopPropagation();
+                if (event.key !== 'Enter') return;
+                event.preventDefault();
+                apply();
+              });
+            });
+            controls.appendChild(startLabel);
+            controls.appendChild(countLabel);
+            controls.appendChild(applyRange);
+            preview.appendChild(controls);
+
+            const viewport = document.createElement('div');
+            viewport.className = 'wave-collection-single-preview-viewport';
+            viewport.setAttribute('aria-live', 'polite');
+            if (previewState.loading) {
+              const loading = document.createElement('div');
+              loading.className = 'wave-collection-single-preview-empty';
+              loading.textContent = '正在读取文件内容…';
+              viewport.appendChild(loading);
+            } else if (previewState.error) {
+              const error = document.createElement('div');
+              error.className = 'wave-collection-single-preview-empty is-error';
+              error.textContent = previewState.error;
+              viewport.appendChild(error);
+            } else if (previewState.lines.length) {
+              previewState.lines.forEach((line) => {
+                const lineRow = document.createElement('div');
+                lineRow.className = 'wave-collection-single-preview-line';
+                const lineNumber = document.createElement('span');
+                lineNumber.textContent = String(line.number || '');
+                const lineText = document.createElement('code');
+                lineText.textContent = String(line.text == null ? '' : line.text);
+                if (line.truncated) lineText.title = '该行内容过长，预览已截断';
+                lineRow.appendChild(lineNumber);
+                lineRow.appendChild(lineText);
+                viewport.appendChild(lineRow);
+              });
+            } else {
+              const empty = document.createElement('div');
+              empty.className = 'wave-collection-single-preview-empty';
+              empty.textContent = previewState.totalLines === 0 ? '文件为空' : '所选范围没有内容';
+              viewport.appendChild(empty);
+            }
+            preview.appendChild(viewport);
+            config.appendChild(preview);
+          }
+          row.appendChild(config);
+        }
         if (entry.importMode === 'table' && matches.length) {
           const config = document.createElement('div');
           config.className = 'wave-collection-table-config';
@@ -1532,8 +1936,21 @@
         kind,
         initialPath: String(initialPath || '')
       });
-      if (result.cancelled) return '';
-      return String(result.path || '');
+      const normalized = {
+        path: String(result.path || ''),
+        cancelled: !!result.cancelled,
+        manual: !!result.manual,
+        message: String(result.message || ''),
+        detail: String(result.detail || '')
+      };
+      debug({
+        phase: 'path-picker-result', kind,
+        cancelled: normalized.cancelled,
+        manual: normalized.manual,
+        hasPath: !!normalized.path,
+        detail: normalized.detail
+      });
+      return normalized;
     }
 
     async function loadPreset(pathValue) {
@@ -1563,6 +1980,7 @@
         selectedDiscoveredPreset = null;
         updateDiscoveredPresetSelection();
         originalPresetPath = String(payload.presetPath || path);
+        manualSavePathMode = false;
         presetPathInput.value = originalPresetPath;
         setPresetEditorValue(JSON.stringify(payload.preset || EMPTY_PRESET, null, 2));
         variableValues.clear();
@@ -1603,6 +2021,7 @@
           relativePath: String(payload.relativePath || relativePath)
         };
         originalPresetPath = String(payload.presetPath || '');
+        manualSavePathMode = false;
         presetPathInput.value = selectedDiscoveredPreset.relativePath;
         setPresetEditorValue(JSON.stringify(payload.preset || EMPTY_PRESET, null, 2));
         variableValues.clear();
@@ -1652,6 +2071,7 @@
         selectedDiscoveredPreset = null;
         updateDiscoveredPresetSelection();
         originalPresetPath = '';
+        manualSavePathMode = false;
         presetPathInput.value = file.name;
         setPresetEditorValue(JSON.stringify(preset, null, 2));
         variableValues.clear();
@@ -1683,11 +2103,17 @@
 
     async function chooseRoot() {
       if (busy) return;
+      let focusManualPath = false;
       setBusy(true, 'pick');
       try {
-        const selected = await pickPath('folder', rootPathInput.value);
-        if (selected) {
-          rootPathInput.value = selected;
+        const result = await pickPath('folder', rootPathInput.value);
+        if (result.manual) {
+          if (result.path) rootPathInput.value = result.path;
+          setHint(result.message || '请直接输入数据文件夹路径', false);
+          status(true, '请在页面中输入数据文件夹路径');
+          focusManualPath = true;
+        } else if (!result.cancelled && result.path) {
+          rootPathInput.value = result.path;
           invalidateSearch('root-selected');
           rememberState('root-selected');
         }
@@ -1695,16 +2121,24 @@
         setHint((error.message || String(error)) + '；也可以直接粘贴文件夹路径', true);
       } finally {
         setBusy(false, '');
+        refreshEditorsAfterPathPicker('data-folder-picker');
+        if (focusManualPath) focusAndSelectPath(rootPathInput);
       }
     }
 
     async function choosePresetRoot() {
       if (busy) return;
+      let focusManualPath = false;
       setBusy(true, 'pick');
       try {
-        const selected = await pickPath('folder', presetSearchPathInput.value);
-        if (selected) {
-          presetSearchPathInput.value = selected;
+        const result = await pickPath('folder', presetSearchPathInput.value);
+        if (result.manual) {
+          if (result.path) presetSearchPathInput.value = result.path;
+          setHint(result.message || '请直接输入预设搜索目录', false);
+          status(true, '请在页面中输入预设搜索目录');
+          focusManualPath = true;
+        } else if (!result.cancelled && result.path) {
+          presetSearchPathInput.value = result.path;
           selectedDiscoveredPreset = null;
           clearPresetDiscovery();
           rememberState('preset-search-root-selected');
@@ -1713,6 +2147,8 @@
         setHint((error.message || String(error)) + '；也可以直接粘贴搜索目录', true);
       } finally {
         setBusy(false, '');
+        refreshEditorsAfterPathPicker('preset-folder-picker');
+        if (focusManualPath) focusAndSelectPath(presetSearchPathInput);
       }
     }
 
@@ -1770,19 +2206,49 @@
     async function savePreset() {
       const preset = parseEditor(true);
       if (!preset || busy) return;
+      let focusManualPath = false;
       setBusy(true, 'save');
-      startProgress('请选择预设保存路径…');
+      startProgress(manualSavePathMode ? '正在保存预设…' : '请选择预设保存路径…');
       const startedAt = progressStartedAt;
       try {
-        const initialPath = originalPresetPath
-          || (selectedBrowserPresetFile ? '' : presetPathInput.value);
-        const selected = await pickPath('save-preset', initialPath);
-        if (!selected) return;
+        let selected = String(presetPathInput.value || '').trim();
+        if (!manualSavePathMode) {
+          const initialPath = originalPresetPath
+            || (selectedBrowserPresetFile ? '' : selected);
+          const result = await pickPath('save-preset', initialPath);
+          if (result.manual) {
+            manualSavePathMode = true;
+            presetPathInput.value = result.path || initialPath
+              || 'import/SchemeCollection/preset.json';
+            setHint(
+              result.message
+                || '请修改上方的预设 JSON 路径，然后点击“保存到此路径”',
+              false
+            );
+            status(true, '请在页面中输入预设保存路径');
+            debug({
+              phase: 'preset-save-manual-path',
+              hasSuggestedPath: !!presetPathInput.value,
+              detail: result.detail
+            });
+            focusManualPath = true;
+            return;
+          }
+          if (result.cancelled || !result.path) return;
+          selected = result.path;
+        }
+        if (!selected) {
+          setHint('请输入预设保存路径', true);
+          focusManualPath = true;
+          return;
+        }
         const payload = await post('save', {
           presetPath: selected,
           preset
         });
         originalPresetPath = String(payload.presetPath || selected);
+        manualSavePathMode = false;
+        selectedBrowserPresetFile = null;
         selectedDiscoveredPreset = null;
         updateDiscoveredPresetSelection();
         presetPathInput.value = originalPresetPath;
@@ -1802,6 +2268,8 @@
         debug({ phase: 'preset-save-error', message: error.message || String(error) });
       } finally {
         setBusy(false, '');
+        refreshEditorsAfterPathPicker('preset-save-picker');
+        if (focusManualPath) focusAndSelectPath(presetPathInput);
       }
     }
 
@@ -1820,6 +2288,7 @@
         setHint('请选择数据文件夹', true);
         return;
       }
+      singlePreviewStates.clear();
       setBusy(true, 'search');
       startProgress('正在建立文件索引并匹配规则…');
       const startedAt = progressStartedAt;
@@ -1955,8 +2424,13 @@
         return;
       }
       busy = false;
+      manualSavePathMode = false;
+      activePresetNavigationIndex = -1;
+      presetNavigationRanges = [];
+      clearPresetNavigationHighlight();
       parsedPreset = null;
       searchResult = null;
+      singlePreviewStates.clear();
       clearPresetDiscovery();
       const restored = restoreRememberedState();
       if (!restored) {
@@ -1993,6 +2467,7 @@
       modal.hidden = true;
       clearTimeout(editorParseTimer);
       editorParseTimer = 0;
+      clearPresetNavigationHighlight();
       stopProgress();
       debug({ phase: 'modal-close' });
     }
@@ -2055,6 +2530,9 @@
         close();
       }
     }, true);
+    window.addEventListener('focus', () => {
+      if (!modal.hidden) refreshEditorsAfterPathPicker('window-focus');
+    });
 
     return { open, close };
   }

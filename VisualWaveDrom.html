@@ -7,7 +7,7 @@
   <script src="inc/skins/default.js?v=20260712"></script>
   <script src="inc/wavedrom.min.js?v=20260712"></script>
   <link rel="stylesheet" href="inc/codemirror.css?v=5.65.21">
-  <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260802-table-index-column-v1">
+  <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260804-preset-nav-picker-v2">
   <link rel="stylesheet" href="inc/visualwavedrom-scope.css?v=20260801-signal-display-card-v1">
 </head>
 <body>
@@ -707,9 +707,13 @@
             <strong>预设内容</strong>
             <span id="wave-collection-preset-state">尚未读取预设</span>
           </div>
-          <div class="wave-collection-preset-editor-shell">
-            <textarea class="wave-collection-preset-editor" id="wave-collection-preset-editor"
-              spellcheck="false" aria-label="预设 JSON 内容"></textarea>
+          <div class="wave-collection-preset-workspace">
+            <nav class="wave-collection-preset-nav" id="wave-collection-preset-nav"
+              aria-label="预设规则导航"></nav>
+            <div class="wave-collection-preset-editor-shell">
+              <textarea class="wave-collection-preset-editor" id="wave-collection-preset-editor"
+                spellcheck="false" aria-label="预设 JSON 内容"></textarea>
+            </div>
           </div>
         </section>
         <section class="wave-collection-section">
@@ -767,7 +771,7 @@
     <script src="inc/visualwavedrom-json-bigdata.js?v=20260731-bigdata-fix-v1"></script>
     <script src="inc/visualwavedrom-scope-worker.js?v=20260802-analog-unknown-v3"></script>
     <script src="inc/visualwavedrom-scope.js?v=20260802-analog-unknown-v3"></script>
-    <script src="inc/visualwavedrom-import-collection.js?v=20260802-table-index-column-v1"></script>
-    <script src="inc/visualwavedrom-app.js?v=20260802-table-filter-v1"></script>
+    <script src="inc/visualwavedrom-import-collection.js?v=20260804-preset-nav-picker-v2"></script>
+    <script src="inc/visualwavedrom-app.js?v=20260804-preset-nav-picker-v2"></script>
 </body>
 </html>

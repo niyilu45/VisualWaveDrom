@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"math"
 	"net/http"
@@ -39,6 +40,12 @@ const (
 	collectionPreviewColumnLimit = 32
 	collectionPreviewCellLimit   = 120
 	collectionMaxFilterLength    = 512
+	collectionSinglePreviewLines = 5
+	collectionSinglePreviewMax   = 200
+	collectionSinglePreviewRunes = 2000
+	collectionSingleIndexStride  = 256
+	collectionSingleIndexLimit   = 32
+	collectionSingleIndexTTL     = 10 * time.Minute
 )
 
 var collectionVariableNamePattern = regexp.MustCompile(`^[\p{L}_][\p{L}\p{N}_.-]*$`)
@@ -201,6 +208,21 @@ type collectionSearchCacheEntry struct {
 	createdAt time.Time
 	signature string
 	result    collectionSearchResult
+}
+
+type collectionSinglePreviewIndex struct {
+	createdAt   time.Time
+	sourcePath  string
+	size        int64
+	modifiedAt  string
+	totalLines  int
+	checkpoints []int64
+}
+
+type collectionSinglePreviewLine struct {
+	Number    int    `json:"number"`
+	Text      string `json:"text"`
+	Truncated bool   `json:"truncated,omitempty"`
 }
 
 type collectionImportEntryResult struct {
@@ -1216,6 +1238,205 @@ func readCollectionPreviewLines(sourcePath string) ([]string, error) {
 	}
 	if err = scanner.Err(); err != nil {
 		return nil, err
+	}
+	return lines, nil
+}
+
+func collectionSinglePreviewCacheKey(match collectionFileMatch) string {
+	return canonicalExistingPath(match.Path) + "\x00" +
+		strconv.FormatInt(match.Size, 10) + "\x00" + match.ModifiedAt
+}
+
+func buildCollectionSinglePreviewIndex(
+	match collectionFileMatch,
+) (collectionSinglePreviewIndex, error) {
+	sourcePath := canonicalExistingPath(match.Path)
+	file, err := os.Open(sourcePath)
+	if err != nil {
+		return collectionSinglePreviewIndex{}, err
+	}
+	defer file.Close()
+
+	buffer := make([]byte, 64*1024)
+	checkpoints := []int64{0}
+	totalLines := 0
+	offset := int64(0)
+	hasBytes := false
+	lastByte := byte(0)
+	for {
+		count, readErr := file.Read(buffer)
+		if count > 0 {
+			hasBytes = true
+			lastByte = buffer[count-1]
+			for index, value := range buffer[:count] {
+				if value != '\n' {
+					continue
+				}
+				totalLines++
+				if totalLines%collectionSingleIndexStride == 0 {
+					checkpoints = append(checkpoints, offset+int64(index)+1)
+				}
+			}
+			offset += int64(count)
+		}
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if readErr != nil {
+			return collectionSinglePreviewIndex{}, readErr
+		}
+	}
+	if hasBytes && lastByte != '\n' {
+		totalLines++
+	}
+	return collectionSinglePreviewIndex{
+		createdAt: time.Now(), sourcePath: sourcePath,
+		size: match.Size, modifiedAt: match.ModifiedAt,
+		totalLines: totalLines, checkpoints: checkpoints,
+	}, nil
+}
+
+func (s *service) collectionSinglePreviewIndex(
+	match collectionFileMatch,
+) (collectionSinglePreviewIndex, error) {
+	key := collectionSinglePreviewCacheKey(match)
+	now := time.Now()
+	s.collectionPreviewMu.Lock()
+	if cached, found := s.collectionPreviewCache[key]; found &&
+		now.Sub(cached.createdAt) <= collectionSingleIndexTTL {
+		s.collectionPreviewMu.Unlock()
+		return cached, nil
+	}
+	s.collectionPreviewMu.Unlock()
+
+	indexed, err := buildCollectionSinglePreviewIndex(match)
+	if err != nil {
+		return collectionSinglePreviewIndex{}, err
+	}
+	s.collectionPreviewMu.Lock()
+	defer s.collectionPreviewMu.Unlock()
+	if s.collectionPreviewCache == nil {
+		s.collectionPreviewCache = make(map[string]collectionSinglePreviewIndex)
+	}
+	for cacheKey, cached := range s.collectionPreviewCache {
+		if now.Sub(cached.createdAt) > collectionSingleIndexTTL {
+			delete(s.collectionPreviewCache, cacheKey)
+		}
+	}
+	for len(s.collectionPreviewCache) >= collectionSingleIndexLimit {
+		oldestKey := ""
+		var oldestTime time.Time
+		for cacheKey, cached := range s.collectionPreviewCache {
+			if oldestKey == "" || cached.createdAt.Before(oldestTime) {
+				oldestKey = cacheKey
+				oldestTime = cached.createdAt
+			}
+		}
+		if oldestKey == "" {
+			break
+		}
+		delete(s.collectionPreviewCache, oldestKey)
+	}
+	s.collectionPreviewCache[key] = indexed
+	return indexed, nil
+}
+
+func readCollectionSinglePreviewLine(
+	reader *bufio.Reader,
+) (string, bool, bool, error) {
+	const captureByteLimit = 16 * 1024
+	data := make([]byte, 0, 512)
+	found := false
+	truncated := false
+	for {
+		fragment, err := reader.ReadSlice('\n')
+		if len(fragment) > 0 {
+			found = true
+			remaining := captureByteLimit - len(data)
+			if remaining > 0 {
+				copyCount := len(fragment)
+				if copyCount > remaining {
+					copyCount = remaining
+				}
+				data = append(data, fragment[:copyCount]...)
+			}
+			if len(fragment) > remaining {
+				truncated = true
+			}
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		if errors.Is(err, io.EOF) {
+			if !found {
+				return "", false, false, nil
+			}
+			break
+		}
+		if err != nil {
+			return "", false, false, err
+		}
+		break
+	}
+	text := strings.TrimSuffix(string(data), "\n")
+	text = strings.TrimSuffix(text, "\r")
+	text = strings.ToValidUTF8(text, "\uFFFD")
+	runes := []rune(text)
+	if len(runes) > collectionSinglePreviewRunes {
+		text = string(runes[:collectionSinglePreviewRunes])
+		truncated = true
+	}
+	if truncated {
+		text += "..."
+	}
+	return text, true, truncated, nil
+}
+
+func readCollectionSinglePreviewRange(
+	indexed collectionSinglePreviewIndex,
+	startLine int,
+	lineCount int,
+) ([]collectionSinglePreviewLine, error) {
+	if indexed.totalLines == 0 {
+		return []collectionSinglePreviewLine{}, nil
+	}
+	checkpoint := (startLine - 1) / collectionSingleIndexStride
+	if checkpoint < 0 || checkpoint >= len(indexed.checkpoints) {
+		return nil, errors.New("单文件预览起始行超出范围")
+	}
+	file, err := os.Open(indexed.sourcePath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	if _, err = file.Seek(indexed.checkpoints[checkpoint], io.SeekStart); err != nil {
+		return nil, err
+	}
+	reader := bufio.NewReaderSize(file, 64*1024)
+	currentLine := checkpoint*collectionSingleIndexStride + 1
+	for currentLine < startLine {
+		_, found, _, readErr := readCollectionSinglePreviewLine(reader)
+		if readErr != nil {
+			return nil, readErr
+		}
+		if !found {
+			return nil, errors.New("单文件预览起始行超出范围")
+		}
+		currentLine++
+	}
+	lines := make([]collectionSinglePreviewLine, 0, lineCount)
+	for len(lines) < lineCount && currentLine <= indexed.totalLines {
+		text, found, truncated, readErr := readCollectionSinglePreviewLine(reader)
+		if readErr != nil {
+			return nil, readErr
+		}
+		if !found {
+			break
+		}
+		lines = append(lines, collectionSinglePreviewLine{
+			Number: currentLine, Text: text, Truncated: truncated,
+		})
+		currentLine++
 	}
 	return lines, nil
 }
@@ -2286,6 +2507,70 @@ func (s *service) previewCollectionEntry(
 	}, nil
 }
 
+func (s *service) previewCollectionSingleFile(
+	rawRootPath string,
+	preset collectionPreset,
+	variables map[string]string,
+	searchToken string,
+	ruleIndex int,
+	startLine int,
+	lineCount int,
+) (map[string]any, error) {
+	if ruleIndex < 0 || ruleIndex >= len(preset.Paths) {
+		return nil, errors.New("单文件预览规则序号无效")
+	}
+	if startLine == 0 {
+		startLine = 1
+	}
+	if lineCount == 0 {
+		lineCount = collectionSinglePreviewLines
+	}
+	if startLine < 1 {
+		return nil, errors.New("起始行必须是大于或等于 1 的整数")
+	}
+	if lineCount < 1 || lineCount > collectionSinglePreviewMax {
+		return nil, fmt.Errorf("显示行数必须介于 1 和 %d 之间", collectionSinglePreviewMax)
+	}
+	search, err := s.cachedCollectionSearch(
+		searchToken, rawRootPath, preset, variables, false)
+	if err != nil {
+		return nil, err
+	}
+	var selected *collectionSearchEntry
+	for index := range search.Entries {
+		if search.Entries[index].Index == ruleIndex && len(search.Entries[index].Matches) > 0 {
+			selected = &search.Entries[index]
+			break
+		}
+	}
+	if selected == nil {
+		return nil, errors.New("该规则没有可预览的匹配文件")
+	}
+	if selected.ImportMode != "single" {
+		return nil, errors.New("只有单波形文件支持文本范围预览")
+	}
+	match := selected.Matches[0]
+	indexed, err := s.collectionSinglePreviewIndex(match)
+	if err != nil {
+		return nil, fmt.Errorf("读取文件行索引失败：%w", err)
+	}
+	if indexed.totalLines > 0 && startLine > indexed.totalLines {
+		return nil, fmt.Errorf("起始行不能超过文件总行数 %d", indexed.totalLines)
+	}
+	lines, err := readCollectionSinglePreviewRange(indexed, startLine, lineCount)
+	if err != nil {
+		return nil, fmt.Errorf("读取文件预览失败：%w", err)
+	}
+	return map[string]any{
+		"ok": true, "index": ruleIndex,
+		"path": match.Path, "relativePath": match.RelativePath,
+		"totalLines": indexed.totalLines, "startLine": startLine,
+		"lineCount": lineCount, "displayedCount": len(lines),
+		"hasMore": startLine+len(lines)-1 < indexed.totalLines,
+		"lines":   lines,
+	}, nil
+}
+
 func (s *service) handleImportCollection(writer http.ResponseWriter, request *http.Request) {
 	payload := make(map[string]any)
 	if err := decodeJSONBody(writer, request, 2*1024*1024, &payload); err != nil {
@@ -2310,6 +2595,17 @@ func (s *service) handleImportCollection(writer http.ResponseWriter, request *ht
 		}
 		selected, cancelled, err := pickLocalPathNative(kind, initialPath)
 		if err != nil {
+			if errors.Is(err, errNativePathPickerUnavailable) {
+				message := "当前 Linux 桌面无法打开原生文件窗口，请直接在页面中输入本地路径"
+				if kind == "save-preset" {
+					message = "当前 Linux 桌面无法打开保存窗口，请修改页面中的预设路径后再次保存"
+				}
+				sendJSON(writer, 200, map[string]any{
+					"ok": true, "manual": true, "path": initialPath,
+					"cancelled": false, "message": message, "detail": err.Error(),
+				})
+				return
+			}
 			sendJSON(writer, 400, map[string]any{"error": err.Error()})
 			return
 		}
@@ -2363,7 +2659,7 @@ func (s *service) handleImportCollection(writer http.ResponseWriter, request *ht
 		sendJSON(writer, 200, map[string]any{
 			"ok": true, "presetPath": presetPath, "preset": preset,
 		})
-	case "search", "preview", "import":
+	case "search", "preview", "single-preview", "import":
 		preset, err := normalizeCollectionPreset(payload["preset"])
 		if err != nil {
 			sendJSON(writer, 400, map[string]any{"error": err.Error()})
@@ -2398,6 +2694,23 @@ func (s *service) handleImportCollection(writer http.ResponseWriter, request *ht
 				stringValue(payload["searchToken"]),
 				intValue(payload["index"], -1),
 				intValue(payload["headerRow"], 0),
+			)
+			if previewErr != nil {
+				sendJSON(writer, 400, map[string]any{"error": previewErr.Error()})
+				return
+			}
+			sendJSON(writer, 200, result)
+			return
+		}
+		if action == "single-preview" {
+			result, previewErr := s.previewCollectionSingleFile(
+				stringValue(payload["rootPath"]),
+				preset,
+				variables,
+				stringValue(payload["searchToken"]),
+				intValue(payload["index"], -1),
+				intValue(payload["startLine"], 1),
+				intValue(payload["lineCount"], collectionSinglePreviewLines),
 			)
 			if previewErr != nil {
 				sendJSON(writer, 400, map[string]any{"error": previewErr.Error()})

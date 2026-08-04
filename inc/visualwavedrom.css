@@ -2215,6 +2215,11 @@
       font-family: Consolas, "Courier New", monospace;
     }
 
+    .wave-collection-path-controls .modal-input.is-save-target {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 20%, transparent);
+    }
+
     .wave-collection-preset-discovery {
       flex: 0 0 auto;
       max-height: 156px;
@@ -2300,7 +2305,9 @@
       overflow-wrap: anywhere;
     }
 
-    .wave-collection-preset-editor-shell {
+    .wave-collection-preset-workspace {
+      display: grid;
+      grid-template-columns: minmax(132px, 176px) minmax(0, 1fr);
       width: 100%;
       height: 190px;
       min-height: 190px;
@@ -2312,9 +2319,80 @@
       background: #121820;
     }
 
-    .wave-collection-preset-editor-shell:focus-within {
+    .wave-collection-preset-workspace:focus-within {
       border-color: var(--accent);
       box-shadow: 0 0 0 2px var(--focus-ring);
+    }
+
+    .wave-collection-preset-nav {
+      min-width: 0;
+      overflow: auto;
+      border-right: 1px solid #2b3540;
+      background: #0e141a;
+      scrollbar-width: thin;
+    }
+
+    .wave-collection-preset-nav-empty {
+      padding: 11px 9px;
+      color: #758596;
+      font-size: 0.7rem;
+      line-height: 1.45;
+    }
+
+    .wave-collection-preset-nav-item {
+      display: grid;
+      grid-template-columns: 24px minmax(0, 1fr);
+      align-items: center;
+      column-gap: 6px;
+      width: 100%;
+      min-height: 32px;
+      padding: 4px 8px 4px 5px;
+      border: 0;
+      border-bottom: 1px solid #202a34;
+      border-radius: 0;
+      background: transparent;
+      color: #b7c3cf;
+      font: inherit;
+      font-size: 0.72rem;
+      line-height: 1.35;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .wave-collection-preset-nav-item:hover {
+      background: #19232d;
+      color: #e5edf5;
+    }
+
+    .wave-collection-preset-nav-item.is-active {
+      background: #20354a;
+      color: #f2f7fb;
+    }
+
+    .wave-collection-preset-nav-item:focus-visible {
+      position: relative;
+      z-index: 1;
+      outline: 2px solid var(--accent);
+      outline-offset: -2px;
+    }
+
+    .wave-collection-preset-nav-index {
+      color: #758596;
+      font: 0.66rem/1 Consolas, "Courier New", monospace;
+      text-align: right;
+    }
+
+    .wave-collection-preset-nav-label {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .wave-collection-preset-editor-shell {
+      min-width: 0;
+      min-height: 0;
+      overflow: hidden;
     }
 
     .wave-collection-preset-editor {
@@ -2462,6 +2540,10 @@
       color: #ff9b9b !important;
     }
 
+    .wave-collection-preset-editor-shell .wave-collection-nav-target-line {
+      background: rgba(63, 124, 178, 0.22);
+    }
+
     .wave-collection-vars {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2525,6 +2607,125 @@
       color: var(--text-muted);
       font-size: 0.68rem;
       white-space: nowrap;
+    }
+
+    .wave-collection-result-actions {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .wave-collection-preview-toggle {
+      min-width: 54px;
+      min-height: 28px;
+      padding: 4px 9px;
+      white-space: nowrap;
+    }
+
+    .wave-collection-single-config {
+      grid-column: 1 / -1;
+      display: grid;
+      gap: 8px;
+      min-width: 0;
+      padding-top: 4px;
+    }
+
+    .wave-collection-sequence-option {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      width: fit-content;
+      color: var(--text);
+      font-size: 0.74rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .wave-collection-sequence-option input {
+      margin: 0;
+    }
+
+    .wave-collection-single-preview {
+      display: grid;
+      gap: 7px;
+      min-width: 0;
+    }
+
+    .wave-collection-single-preview-controls {
+      display: flex;
+      align-items: flex-end;
+      flex-wrap: wrap;
+      gap: 7px;
+    }
+
+    .wave-collection-single-preview-controls label {
+      display: grid;
+      gap: 3px;
+      color: var(--text-muted);
+      font-size: 0.68rem;
+    }
+
+    .wave-collection-single-preview-controls input {
+      width: 92px;
+      height: 30px;
+      padding: 4px 7px;
+      font-size: 0.72rem;
+    }
+
+    .wave-collection-single-preview-controls .modal-btn {
+      min-height: 30px;
+    }
+
+    .wave-collection-single-preview-viewport {
+      max-height: 220px;
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: var(--surface-deep, var(--surface));
+      color: var(--text);
+      font: 0.7rem/1.5 Consolas, "Courier New", monospace;
+    }
+
+    .wave-collection-single-preview-line {
+      display: grid;
+      grid-template-columns: minmax(42px, auto) minmax(max-content, 1fr);
+      min-width: max-content;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .wave-collection-single-preview-line:last-child {
+      border-bottom: 0;
+    }
+
+    .wave-collection-single-preview-line > span {
+      position: sticky;
+      left: 0;
+      z-index: 1;
+      min-width: 42px;
+      padding: 4px 7px;
+      border-right: 1px solid var(--border);
+      background: var(--surface-raised, var(--surface));
+      color: var(--text-muted);
+      text-align: right;
+      user-select: none;
+    }
+
+    .wave-collection-single-preview-line > code {
+      padding: 4px 8px;
+      color: inherit;
+      white-space: pre;
+    }
+
+    .wave-collection-single-preview-empty {
+      padding: 12px;
+      color: var(--text-muted);
+      text-align: center;
+    }
+
+    .wave-collection-single-preview-empty.is-error {
+      color: var(--error);
     }
 
     .wave-collection-table-config {
@@ -2739,6 +2940,10 @@
     }
 
     @media (max-width: 720px) {
+      .wave-collection-preset-workspace {
+        grid-template-columns: 116px minmax(0, 1fr);
+      }
+
       .wave-collection-preset-controls,
       .wave-collection-preset-search-controls {
         grid-template-columns: 1fr 1fr;

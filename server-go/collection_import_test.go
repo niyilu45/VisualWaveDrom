@@ -1033,3 +1033,87 @@ func TestCollectionSearchCacheValidatesMatchedFile(t *testing.T) {
 		t.Fatal("changed matched file reused a stale search result")
 	}
 }
+
+func TestCollectionSingleFilePreviewUsesSparseLineIndex(t *testing.T) {
+	root := t.TempDir()
+	sourcePath := filepath.Join(root, "signal.txt")
+	var content strings.Builder
+	for line := 1; line <= 600; line++ {
+		fmt.Fprintf(&content, "line-%03d\n", line)
+	}
+	if err := os.WriteFile(sourcePath, []byte(content.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexed, err := buildCollectionSinglePreviewIndex(collectionFileMatch{
+		Path: sourcePath, RelativePath: "signal.txt", FileName: "signal.txt",
+		Size: info.Size(), ModifiedAt: info.ModTime().UTC().Format(timeFormatRFC3339Nano),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if indexed.totalLines != 600 || len(indexed.checkpoints) < 3 {
+		t.Fatalf("unexpected sparse index: lines=%d checkpoints=%#v",
+			indexed.totalLines, indexed.checkpoints)
+	}
+	lines, err := readCollectionSinglePreviewRange(indexed, 514, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lines) != 5 || lines[0].Number != 514 || lines[0].Text != "line-514" ||
+		lines[4].Number != 518 || lines[4].Text != "line-518" {
+		t.Fatalf("unexpected sparse preview range: %#v", lines)
+	}
+}
+
+func TestCollectionSingleFilePreviewReturnsTotalAndRequestedLines(t *testing.T) {
+	root := t.TempDir()
+	sourcePath := filepath.Join(root, "signal.txt")
+	if err := os.WriteFile(sourcePath, []byte("zero\none\ntwo\nthree\nfour\nsix"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	preset, err := normalizeCollectionPreset(collectionPresetValue(
+		[]any{},
+		map[string]any{
+			"folder": ".", "grepKeys": `^signal\.txt$`,
+			"hasSeq": false, "name": "signal",
+		},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := searchCollectionFiles(
+		root, root, preset, map[string]string{}, runTestCollectionRegexSearch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance := &service{
+		config:                 config{rootDir: root},
+		collectionSearchCache:  make(map[string]collectionSearchCacheEntry),
+		collectionPreviewCache: make(map[string]collectionSinglePreviewIndex),
+	}
+	result = instance.rememberCollectionSearch(result)
+	preview, err := instance.previewCollectionSingleFile(
+		root, result.Preset, map[string]string{}, result.SearchToken, 0, 2, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if intValue(preview["totalLines"], 0) != 6 ||
+		intValue(preview["displayedCount"], 0) != 3 ||
+		!boolValue(preview["hasMore"], false) {
+		t.Fatalf("unexpected single preview metadata: %#v", preview)
+	}
+	lines, ok := preview["lines"].([]collectionSinglePreviewLine)
+	if !ok || len(lines) != 3 || lines[0].Number != 2 || lines[0].Text != "one" ||
+		lines[2].Number != 4 || lines[2].Text != "three" {
+		t.Fatalf("unexpected single preview lines: %#v", preview["lines"])
+	}
+	if _, err = instance.previewCollectionSingleFile(
+		root, result.Preset, map[string]string{}, result.SearchToken, 0, 7, 1,
+	); err == nil || !strings.Contains(err.Error(), "不能超过文件总行数") {
+		t.Fatalf("out-of-range preview returned an unclear error: %v", err)
+	}
+}

@@ -19135,6 +19135,9 @@ ${lines.join('\n')}`;
         getContextToken: () => currentWaveLibraryId + '\u0000' + editingWaveDocumentName,
         setStatus,
         debugLog: vwdDebugLog,
+        refreshEditors: () => {
+          if (codeMirrorEditor) codeMirrorEditor.refresh();
+        },
         applyImport: async (payload) => {
           const result = applyImportedWaveRows(payload, { createMissing: true });
           await persistImportedWaveRows(result);

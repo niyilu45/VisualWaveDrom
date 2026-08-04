@@ -28,7 +28,7 @@ import (
 const (
 	appID                      = "VisualWaveDrom"
 	protocolScheme             = "visualwavedrom"
-	serviceAPIVersion          = 12
+	serviceAPIVersion          = 14
 	defaultPort                = 4173
 	maxWaveLibraryRequestBytes = 256 * 1024 * 1024
 	importMaxUploadBytes       = 128 * 1024 * 1024
@@ -127,18 +127,20 @@ type libraryListItem struct {
 }
 
 type service struct {
-	config                config
-	store                 *sqliteStore
-	imports               *importManager
-	sqliteVersion         string
-	activeScheme          string
-	httpServer            *http.Server
-	clientMu              sync.Mutex
-	clients               map[string]clientLease
-	shutdownTimer         *time.Timer
-	stateMu               sync.Mutex
-	collectionSearchMu    sync.Mutex
-	collectionSearchCache map[string]collectionSearchCacheEntry
+	config                 config
+	store                  *sqliteStore
+	imports                *importManager
+	sqliteVersion          string
+	activeScheme           string
+	httpServer             *http.Server
+	clientMu               sync.Mutex
+	clients                map[string]clientLease
+	shutdownTimer          *time.Timer
+	stateMu                sync.Mutex
+	collectionSearchMu     sync.Mutex
+	collectionSearchCache  map[string]collectionSearchCacheEntry
+	collectionPreviewMu    sync.Mutex
+	collectionPreviewCache map[string]collectionSinglePreviewIndex
 }
 
 type clientLease struct {
@@ -250,8 +252,9 @@ func newService(configuration config) (*service, error) {
 	instance := &service{
 		config: configuration, store: store, imports: newImportManager(configuration.rootDir),
 		sqliteVersion: sqliteVersion, activeScheme: protocolScheme,
-		clients:               make(map[string]clientLease),
-		collectionSearchCache: make(map[string]collectionSearchCacheEntry),
+		clients:                make(map[string]clientLease),
+		collectionSearchCache:  make(map[string]collectionSearchCacheEntry),
+		collectionPreviewCache: make(map[string]collectionSinglePreviewIndex),
 	}
 	if err = instance.ensureWaveDirectory(); err != nil {
 		return nil, err
