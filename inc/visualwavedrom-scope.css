@@ -896,29 +896,12 @@ body.scope-row-resizing * {
   font-weight: 600;
 }
 
-.scope-column-background-popover {
-  width: min(248px, calc(100vw - 16px));
-}
-
 .scope-column-background-summary {
-  margin: 8px 0 0;
+  margin: 6px 36px 0 76px;
   color: #555b63;
   font-size: 11px;
   line-height: 1.45;
   overflow-wrap: anywhere;
-}
-
-.scope-column-background-palette {
-  display: grid;
-  grid-template-columns: repeat(4, 30px);
-  gap: 8px;
-  padding-top: 9px;
-}
-
-.scope-column-background-palette .scope-color-preset {
-  width: 30px;
-  height: 30px;
-  flex-basis: 30px;
 }
 
 .scope-statusbar {

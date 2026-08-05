@@ -1176,6 +1176,42 @@ function lttbIndexes(samples, threshold) {
   return sampled;
 }
 
+function evenlyReducedColumns(columns, target) {
+  if (columns.length <= target) return columns.slice();
+  if (target <= 1) return columns.length ? [columns[0]] : [];
+  const selected = [];
+  for (let index = 0; index < target; index += 1) {
+    selected.push(columns[Math.round(index * (columns.length - 1) / (target - 1))]);
+  }
+  return Array.from(new Set(selected));
+}
+
+function distributedCandidateColumns(entries, target, rangeStart, rangeEnd) {
+  if (target <= 0 || !entries.length) return [];
+  const span = Math.max(1, rangeEnd - rangeStart);
+  const buckets = new Array(target);
+  entries.forEach((entry) => {
+    const column = entry[0];
+    const score = entry[1];
+    const bucketIndex = clamp(
+      Math.floor((column - rangeStart) * target / span),
+      0,
+      target - 1
+    );
+    const center = rangeStart + (bucketIndex + 0.5) * span / target;
+    const distance = Math.abs(column - center);
+    const previous = buckets[bucketIndex];
+    if (!previous
+        || score > previous.score
+        || (score === previous.score && distance < previous.distance)
+        || (score === previous.score && distance === previous.distance
+          && column < previous.column)) {
+      buckets[bucketIndex] = { column, score, distance };
+    }
+  });
+  return buckets.filter(Boolean).map((entry) => entry.column);
+}
+
 function chooseColumns(
   targetPoints,
   lockedColumns,
@@ -1229,10 +1265,25 @@ function chooseColumns(
       });
     }
     if (includeAnalog && analogRow.samples) {
+      const sampleScale = analogRow.samples.length <= 1 || total <= 1
+        ? 0
+        : (analogRow.samples.length - 1) / (total - 1);
+      const sampleStart = clamp(
+        Math.floor(rangeStart * sampleScale),
+        0,
+        Math.max(0, analogRow.samples.length - 1)
+      );
+      const sampleEnd = clamp(
+        Math.max(sampleStart + 1, Math.ceil((rangeEnd - 1) * sampleScale) + 1),
+        sampleStart + 1,
+        analogRow.samples.length
+      );
+      const rangeSamples = analogRow.samples.subarray(sampleStart, sampleEnd);
       lttbIndexes(
-        analogRow.samples,
-        Math.min(analogRow.samples.length, rowBudget)
-      ).forEach((sampleIndex) => {
+        rangeSamples,
+        Math.min(rangeSamples.length, rowBudget)
+      ).forEach((rangeSampleIndex) => {
+        const sampleIndex = sampleStart + rangeSampleIndex;
         const column = analogRow.samples.length <= 1
           ? 0
           : sampleIndex * (total - 1) / (analogRow.samples.length - 1);
@@ -1241,23 +1292,58 @@ function chooseColumns(
     }
   });
 
-  const uniformCount = Math.max(2, Math.floor(target * 0.45));
+  const uniformCount = Math.max(2, target);
   for (let index = 0; index < uniformCount; index += 1) {
     add(rangeStart + index * (rangeLength - 1) / Math.max(1, uniformCount - 1), 300);
   }
 
-  let selected = Array.from(scores.entries())
-    .sort((left, right) => right[1] - left[1] || left[0] - right[0])
-    .slice(0, target)
+  const entries = Array.from(scores.entries()).sort((left, right) => left[0] - right[0]);
+  const mandatoryColumns = entries
+    .filter((entry) => entry[1] >= 10000)
     .map((entry) => entry[0]);
+  let selected = evenlyReducedColumns(mandatoryColumns, target);
   const selectedSet = new Set(selected);
-  for (let index = 0; selected.length < target && index < target * 4; index += 1) {
+
+  let remaining = target - selected.length;
+  const priorityEntries = entries.filter((entry) => (
+    entry[1] >= 700 && entry[1] < 10000 && !selectedSet.has(entry[0])
+  ));
+  if (priorityEntries.length <= Math.floor(remaining * 0.5)) {
+    priorityEntries.forEach((entry) => {
+      if (selected.length >= target || selectedSet.has(entry[0])) return;
+      selectedSet.add(entry[0]);
+      selected.push(entry[0]);
+    });
+  }
+
+  remaining = target - selected.length;
+  if (remaining > 0) {
+    const candidates = entries.filter((entry) => !selectedSet.has(entry[0]));
+    distributedCandidateColumns(candidates, remaining, rangeStart, rangeEnd)
+      .forEach((column) => {
+        if (selected.length >= target || selectedSet.has(column)) return;
+        selectedSet.add(column);
+        selected.push(column);
+      });
+  }
+
+  for (let index = 0; selected.length < target && index < target * 8; index += 1) {
     const column = Math.round(
-      rangeStart + index * (rangeLength - 1) / Math.max(1, target * 4 - 1)
+      rangeStart + index * (rangeLength - 1) / Math.max(1, target * 8 - 1)
     );
     if (selectedSet.has(column)) continue;
     selectedSet.add(column);
     selected.push(column);
+  }
+  if (selected.length < target) {
+    entries
+      .slice()
+      .sort((left, right) => right[1] - left[1] || left[0] - right[0])
+      .forEach((entry) => {
+        if (selected.length >= target || selectedSet.has(entry[0])) return;
+        selectedSet.add(entry[0]);
+        selected.push(entry[0]);
+      });
   }
   selected = Array.from(new Set(selected)).sort((left, right) => left - right);
   return selected.slice(0, target);

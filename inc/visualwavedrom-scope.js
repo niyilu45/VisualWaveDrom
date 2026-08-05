@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260804-window-coverage-v4';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260805-distributed-sampling-v1';
   const DEFAULT_ROW_HEIGHT = 42;
   const MIN_ANALOG_ROW_HEIGHT = 28;
   const MAX_ANALOG_ROW_HEIGHT = 480;
@@ -372,7 +372,7 @@
       this.viewEnd = 1;
       this.cursorA = null;
       this.cursorB = null;
-      this.activeCursor = 'A';
+      this.activeCursor = '';
       this.activeCursorRow = 0;
       this.connectionMode = false;
       this.connectionDraftStart = null;
@@ -406,7 +406,6 @@
       this.displayPopoverAnchor = null;
       this.styleControlRow = null;
       this.stylePopoverAnchor = null;
-      this.columnBackgroundPopoverAnchor = null;
       this.columnBackgroundColor = BACKGROUND_COLOR_PRESETS[0].value;
       this.rowStart = 0;
       this.rowEnd = 0;
@@ -500,7 +499,7 @@
       const columnBackgroundPresetButtons = buildPresetButtons(
         BACKGROUND_COLOR_PRESETS,
         'data-scope-column-background',
-        '指定列背景'
+        '选区背景'
       );
       root.innerHTML = `
         <header class="scope-toolbar">
@@ -516,18 +515,18 @@
           </div>
           <div class="scope-toolbar-group scope-cursor-controls" aria-label="游标工具">
             <span class="scope-toolbar-label">游标</span>
-            <button type="button" class="scope-cursor-choice active" id="scope-cursor-a" aria-pressed="true">A</button>
+            <button type="button" class="scope-cursor-choice" id="scope-cursor-a" aria-pressed="false">A</button>
             <button type="button" class="scope-cursor-choice" id="scope-cursor-b" aria-pressed="false">B</button>
             <span class="scope-cursor-signal" id="scope-cursor-signal"></span>
             <label>跳转
               <input type="text" id="scope-cursor-jump" placeholder="1 或 &gt;=10"
                   aria-label="游标跳转值或条件"
-                  title="留空跳到任意变化边沿；无比较符时按相等处理；支持 ==、!=、&gt;、&gt;=、&lt;、&lt;=、&amp;&amp;、||">
+                  title="留空跳到任意变化边沿；无比较符时按相等处理；支持 ==、!=、&gt;、&gt;=、&lt;、&lt;=、&amp;&amp;、||" disabled>
             </label>
             <button type="button" class="scope-icon-btn scope-small-icon" id="scope-cursor-prev"
-                title="跳到上一个匹配边沿（键盘左方向键）" aria-label="跳到上一个匹配边沿">◀</button>
+                title="跳到上一个匹配边沿（键盘左方向键）" aria-label="跳到上一个匹配边沿" disabled>◀</button>
             <button type="button" class="scope-icon-btn scope-small-icon" id="scope-cursor-next"
-                title="跳到下一个匹配边沿（键盘右方向键）" aria-label="跳到下一个匹配边沿">▶</button>
+                title="跳到下一个匹配边沿（键盘右方向键）" aria-label="跳到下一个匹配边沿" disabled>▶</button>
           </div>
           <div class="scope-toolbar-group scope-style-controls" aria-label="波形显示样式">
             <span class="scope-toolbar-label">行样式</span>
@@ -538,11 +537,6 @@
             </label>
             <button type="button" class="scope-command-btn" id="scope-style-use-cursors"
                 title="使用 A、B 游标之间的列">使用 A-B</button>
-            <button type="button" class="scope-command-btn" id="scope-column-background-apply"
-                aria-haspopup="dialog" aria-expanded="false"
-                aria-controls="scope-column-background-popover"
-                title="选择预设颜色并应用到当前选区">列背景</button>
-            <button type="button" class="scope-command-btn" id="scope-column-background-clear">清除列背景</button>
           </div>
           <div class="scope-toolbar-group scope-simplify-controls">
             <label>方法
@@ -735,21 +729,17 @@
             <button type="button" class="scope-icon-btn scope-small-icon" id="scope-row-background-clear"
               title="清除整行背景色" aria-label="清除整行背景色">×</button>
           </div>
-        </div>
-        <div class="scope-style-popover scope-column-background-popover"
-            id="scope-column-background-popover" role="dialog"
-            aria-labelledby="scope-column-background-popover-title" hidden>
-          <div class="scope-style-popover-header">
-            <strong id="scope-column-background-popover-title">选区背景</strong>
+          <div class="scope-style-popover-row">
+            <span>选区背景</span>
+            <div class="scope-color-presets scope-background-presets"
+                id="scope-column-background-presets"
+                role="group" aria-label="选区背景预设颜色">${columnBackgroundPresetButtons}</div>
             <button type="button" class="scope-icon-btn scope-small-icon"
-                id="scope-column-background-popover-close"
-                title="关闭" aria-label="关闭列背景颜色选择">×</button>
+                id="scope-column-background-clear"
+                title="清除选区背景色" aria-label="清除选区背景色">×</button>
           </div>
           <p class="scope-column-background-summary"
               id="scope-column-background-summary"></p>
-          <div class="scope-color-presets scope-background-presets scope-column-background-palette"
-              id="scope-column-background-presets"
-              role="group" aria-label="选区背景预设颜色">${columnBackgroundPresetButtons}</div>
         </div>
       `;
       document.body.appendChild(root);
@@ -800,16 +790,8 @@
       this.styleColumnsInput = root.querySelector('#scope-style-columns');
       this.styleUseCursorsButton = root.querySelector('#scope-style-use-cursors');
       this.columnBackgroundPresets = root.querySelector('#scope-column-background-presets');
-      this.columnBackgroundApplyButton = root.querySelector('#scope-column-background-apply');
       this.columnBackgroundClearButton = root.querySelector('#scope-column-background-clear');
-      this.columnBackgroundPopover = root.querySelector('#scope-column-background-popover');
-      this.columnBackgroundPopoverTitle = root.querySelector(
-        '#scope-column-background-popover-title'
-      );
       this.columnBackgroundSummary = root.querySelector('#scope-column-background-summary');
-      this.columnBackgroundPopoverCloseButton = root.querySelector(
-        '#scope-column-background-popover-close'
-      );
       this.statusEl = root.querySelector('#scope-status');
       this.metricsEl = root.querySelector('#scope-metrics');
       this.measurementsEl = root.querySelector('#scope-measurements');
@@ -836,8 +818,8 @@
       });
       this.connectionButton.addEventListener('click', () => this.toggleConnectionMode());
       this.originalDataButton.addEventListener('click', () => this.toggleOriginalData());
-      this.cursorAButton.addEventListener('click', () => this.setActiveCursor('A', true));
-      this.cursorBButton.addEventListener('click', () => this.setActiveCursor('B', true));
+      this.cursorAButton.addEventListener('click', () => this.toggleActiveCursor('A'));
+      this.cursorBButton.addEventListener('click', () => this.toggleActiveCursor('B'));
       this.cursorPrevButton.addEventListener('click', () => {
         void this.navigateActiveCursor(-1);
       });
@@ -886,26 +868,26 @@
         this.columnBackgroundColor = button.dataset.scopeColumnBackground;
         this.updateStyleControls();
         this.applyColumnBackground(false);
-        this.closeColumnBackgroundPopover(true);
-      });
-      this.columnBackgroundPopoverCloseButton.addEventListener('click', () => {
-        this.closeColumnBackgroundPopover(true);
       });
       this.styleUseCursorsButton.addEventListener('click', () => this.useCursorColumnSelection());
-      this.columnBackgroundApplyButton.addEventListener('click', () => {
-        this.openColumnBackgroundPopover(this.columnBackgroundApplyButton);
-      });
       this.columnBackgroundClearButton.addEventListener('click', () => {
         this.applyColumnBackground(true);
       });
       this.styleColumnsInput.addEventListener('input', () => {
-        this.closeColumnBackgroundPopover();
         this.updateColumnBackgroundAvailability();
       });
       this.styleColumnsInput.addEventListener('keydown', (event) => {
         if (event.key !== 'Enter') return;
         event.preventDefault();
-        this.openColumnBackgroundPopover(this.columnBackgroundApplyButton);
+        const row = this.meta && this.meta.rows[this.activeCursorRow];
+        const anchor = row && this.signalList.querySelector(
+          '[data-scope-swatch-row="' + row.index + '"]'
+        );
+        if (anchor && this.updateColumnBackgroundAvailability()) {
+          this.openStylePopover(row.index, anchor);
+        } else {
+          this.setStatus('请先在波形区域选择需要设置背景的列', true);
+        }
       });
       this.root.querySelector('#scope-use-view').addEventListener('click', () => this.useCurrentViewRange());
       this.root.querySelector('#scope-simplify').addEventListener('click', () => this.runSimplify(true));
@@ -986,7 +968,6 @@
       this.plotViewport.addEventListener('scroll', () => {
         this.closeDisplayPopover();
         this.closeStylePopover();
-        this.closeColumnBackgroundPopover();
         this.signalScroll.scrollTop = this.plotViewport.scrollTop;
         this.positionPlotCanvas();
         this.scheduleWindowRequest();
@@ -1021,13 +1002,6 @@
         if (event.key === 'Escape' && this.displayPopover && !this.displayPopover.hidden) {
           event.preventDefault();
           this.closeDisplayPopover(true);
-          return;
-        }
-        if (event.key === 'Escape'
-            && this.columnBackgroundPopover
-            && !this.columnBackgroundPopover.hidden) {
-          event.preventDefault();
-          this.closeColumnBackgroundPopover(true);
           return;
         }
         if (event.key === 'Escape' && this.stylePopover && !this.stylePopover.hidden) {
@@ -1091,11 +1065,6 @@
             && !this.stylePopover.contains(event.target)
             && !event.target.closest('[data-scope-swatch-row]')) {
           this.closeStylePopover();
-        }
-        if (this.columnBackgroundPopover && !this.columnBackgroundPopover.hidden
-            && !this.columnBackgroundPopover.contains(event.target)
-            && !event.target.closest('#scope-column-background-apply')) {
-          this.closeColumnBackgroundPopover();
         }
       });
 
@@ -1324,7 +1293,6 @@
     renderSignalRows() {
       this.closeDisplayPopover();
       this.closeStylePopover();
-      this.closeColumnBackgroundPopover();
       this.rebuildRowOffsets();
       this.signalList.innerHTML = this.meta.rows.map((row) => {
         const group = row.groups && row.groups.length ? row.groups.join(' / ') : '';
@@ -1349,7 +1317,7 @@
                   aria-label="修改信号名 ${escapeHtml(row.name)}">${escapeHtml(row.name)}</button>
               <em>
                 <span>${escapeHtml(String(row.sampleCount || 0))} 点${row.unit ? ` · ${escapeHtml(row.unit)}` : ''}</span>
-                <b data-scope-cursor-value-row="${row.index}">${escapeHtml(this.activeCursor)}：--</b>
+                <b data-scope-cursor-value-row="${row.index}">${escapeHtml(this.activeCursor || '游标')}：--</b>
               </em>
             </span>
             <button type="button" class="scope-display-mode-button"
@@ -1390,7 +1358,6 @@
       }
       this.closeDisplayPopover();
       this.closeStylePopover();
-      this.closeColumnBackgroundPopover();
       this.setActiveCursorRow(index);
       this.displayControlRow = index;
       this.displayPopoverAnchor = anchor;
@@ -1602,7 +1569,6 @@
         this.rowBackgroundClearButton,
         this.styleColumnsInput,
         this.styleUseCursorsButton,
-        this.columnBackgroundApplyButton,
         this.columnBackgroundClearButton
       ];
       controls.forEach((control) => { control.disabled = !row; });
@@ -1652,30 +1618,23 @@
     }
 
     updateColumnBackgroundAvailability() {
-      if (!this.columnBackgroundApplyButton) return false;
+      if (!this.columnBackgroundPresets) return false;
       const row = this.meta && this.meta.rows[this.activeCursorRow];
       const columnText = this.styleColumnsInput
         ? String(this.styleColumnsInput.value || '').trim()
         : '';
       const available = !!row && !!columnText;
-      this.columnBackgroundApplyButton.disabled = !available;
       this.columnBackgroundClearButton.disabled = !available;
       Array.from(
         this.columnBackgroundPresets.querySelectorAll('[data-scope-column-background]')
       ).forEach((button) => {
         button.disabled = !available;
       });
-      if (this.columnBackgroundPopoverTitle) {
-        this.columnBackgroundPopoverTitle.textContent = row
-          ? '选区背景 · ' + row.name
-          : '选区背景';
-      }
       if (this.columnBackgroundSummary) {
         this.columnBackgroundSummary.textContent = available
           ? row.name + '：第 ' + columnText + ' 列'
           : '请先在波形区域选择需要设置背景的列';
       }
-      if (!available) this.closeColumnBackgroundPopover();
       return available;
     }
 
@@ -1688,7 +1647,6 @@
       if (!anchor || !this.meta.rows[index]) return;
       this.closeDisplayPopover();
       this.closeStylePopover();
-      this.closeColumnBackgroundPopover();
       this.setActiveCursorRow(index);
       this.stylePopoverAnchor = anchor;
       anchor.classList.add('active');
@@ -1718,78 +1676,6 @@
       this.stylePopover.style.top = top + 'px';
       this.stylePopover.style.visibility = '';
       this.setStatus('正在设置 ' + this.meta.rows[index].name + ' 的波形和背景颜色');
-    }
-
-    openColumnBackgroundPopover(anchor) {
-      const row = this.meta && this.meta.rows[this.activeCursorRow];
-      if (!anchor || !row || !this.updateColumnBackgroundAvailability()) {
-        this.setStatus('请先在波形区域选择需要设置背景的列', true);
-        return;
-      }
-      let selection;
-      try {
-        selection = parseColumnSelection(this.styleColumnsInput.value, this.meta.totalColumns);
-      } catch (error) {
-        this.setStatus(error.message || String(error), true);
-        this.styleColumnsInput.focus();
-        return;
-      }
-      this.closeDisplayPopover();
-      this.closeStylePopover();
-      this.closeColumnBackgroundPopover();
-      this.columnBackgroundPopoverAnchor = anchor;
-      anchor.classList.add('active');
-      anchor.setAttribute('aria-expanded', 'true');
-      this.columnBackgroundSummary.textContent = row.name + '：第 ' + selection.map((range) => {
-        const first = range.start + 1;
-        const last = range.end;
-        return first === last ? String(first) : first + '-' + last;
-      }).join('、') + ' 列';
-      this.columnBackgroundPopover.hidden = false;
-      this.columnBackgroundPopover.style.visibility = 'hidden';
-      const anchorRect = anchor.getBoundingClientRect();
-      const popoverRect = this.columnBackgroundPopover.getBoundingClientRect();
-      const margin = 8;
-      const viewportWidth = Math.max(1, document.documentElement.clientWidth);
-      const viewportHeight = Math.max(1, document.documentElement.clientHeight);
-      let left = anchorRect.left;
-      let top = anchorRect.bottom + 6;
-      if (top + popoverRect.height > viewportHeight - margin) {
-        top = anchorRect.top - popoverRect.height - 6;
-      }
-      this.columnBackgroundPopover.style.left = clamp(
-        left,
-        margin,
-        Math.max(margin, viewportWidth - popoverRect.width - margin)
-      ) + 'px';
-      this.columnBackgroundPopover.style.top = clamp(
-        top,
-        margin,
-        Math.max(margin, viewportHeight - popoverRect.height - margin)
-      ) + 'px';
-      this.columnBackgroundPopover.style.visibility = '';
-      const activeButton = this.columnBackgroundPresets.querySelector(
-        '[data-scope-column-background].active'
-      );
-      const firstButton = this.columnBackgroundPresets.querySelector(
-        '[data-scope-column-background]'
-      );
-      const focusTarget = activeButton || firstButton;
-      if (focusTarget) focusTarget.focus({ preventScroll: true });
-      this.setStatus('请选择 ' + row.name + ' 选中区域的背景颜色');
-    }
-
-    closeColumnBackgroundPopover(restoreFocus) {
-      if (!this.columnBackgroundPopover || this.columnBackgroundPopover.hidden) return;
-      const anchor = this.columnBackgroundPopoverAnchor;
-      if (anchor) {
-        anchor.classList.remove('active');
-        anchor.setAttribute('aria-expanded', 'false');
-      }
-      this.columnBackgroundPopoverAnchor = null;
-      this.columnBackgroundPopover.hidden = true;
-      this.columnBackgroundPopover.style.visibility = '';
-      if (restoreFocus && anchor) anchor.focus({ preventScroll: true });
     }
 
     closeStylePopover() {
@@ -3189,16 +3075,13 @@
       const cursorAnchor = activeCursorColumn == null ? NaN : Number(activeCursorColumn);
       const explicitAnchor = anchorColumn == null ? NaN : Number(anchorColumn);
       const viewCenter = (this.viewStart + this.viewEnd) / 2;
-      const anchor = Number.isFinite(explicitAnchor)
-        ? explicitAnchor
-        : (Number.isFinite(cursorAnchor)
-            && cursorAnchor >= this.viewStart
-            && cursorAnchor <= this.viewEnd
-          ? cursorAnchor
-          : viewCenter);
-      const ratio = span > 0
-        ? clamp((anchor - this.viewStart) / span, 0, 1)
-        : 0.5;
+      const cursorSelected = Boolean(this.activeCursor) && Number.isFinite(cursorAnchor);
+      const anchor = cursorSelected
+        ? cursorAnchor
+        : (Number.isFinite(explicitAnchor) ? explicitAnchor : viewCenter);
+      const ratio = cursorSelected
+        ? 0.5
+        : (span > 0 ? clamp((anchor - this.viewStart) / span, 0, 1) : 0.5);
       let start = anchor - nextSpan * ratio;
       start = clamp(start, 0, Math.max(0, this.meta.totalColumns - nextSpan));
       this.viewStart = start;
@@ -3261,7 +3144,6 @@
         const last = end;
         this.styleColumnsInput.value = first === last ? String(first) : first + '-' + last;
       }
-      this.closeColumnBackgroundPopover();
       this.updateColumnBackgroundAvailability();
       this.updateMeasurements();
     }
@@ -3327,6 +3209,18 @@
           id: hitConnection.id,
           label: hitConnection.label
         });
+        return;
+      }
+      if (this.activeCursor) {
+        if (this.selectedConnectionId) this.selectedConnectionId = '';
+        this.columnSelection = null;
+        this.selectedPoint = null;
+        this.updatePointEditor();
+        this.updateMeasurements();
+        this.setActiveCursorRow(rowIndex);
+        this.setActiveCursorPosition(Math.round(column * 2) / 2, true);
+        void this.snapActiveCursorPosition(column, rowIndex);
+        this.setStatus(this.activeCursor + ' 游标正在移动到点击位置');
         return;
       }
       if (this.selectedConnectionId) this.selectedConnectionId = '';
@@ -3662,7 +3556,9 @@
     }
 
     activeCursorColumn() {
-      return this.activeCursor === 'B' ? this.cursorB : this.cursorA;
+      if (this.activeCursor === 'A') return this.cursorA;
+      if (this.activeCursor === 'B') return this.cursorB;
+      return null;
     }
 
     cursorAtX(x, width) {
@@ -3681,24 +3577,34 @@
       return candidates[0].name;
     }
 
+    toggleActiveCursor(name) {
+      const requested = name === 'B' ? 'B' : 'A';
+      this.setActiveCursor(this.activeCursor === requested ? '' : requested, true);
+    }
+
     setActiveCursor(name, centerView) {
-      const next = name === 'B' ? 'B' : 'A';
+      const next = name === 'A' || name === 'B' ? name : '';
       this.cursorNavigationSequence += 1;
       this.activeCursor = next;
       this.updateCursorControls();
       this.updateMeasurements();
       void this.updateCursorReadout();
-      const column = next === 'B' ? this.cursorB : this.cursorA;
-      if (centerView) {
+      const column = next === 'A' ? this.cursorA : (next === 'B' ? this.cursorB : null);
+      if (next && centerView) {
         this.centerViewOnColumn(column);
       }
       this.draw();
+      if (!next) {
+        this.setStatus('已取消游标选择；可继续选择波形数据');
+        return;
+      }
       this.setStatus(centerView && column != null
         ? '当前工作游标：' + next + '，视图已定位到 ' + this.formatTime(column)
         : '当前工作游标：' + next);
     }
 
     setActiveCursorPosition(column, realtimeReadout) {
+      if (!this.activeCursor) return;
       this.cursorNavigationSequence += 1;
       const value = clamp(
         Number(column) || 0,
@@ -3714,7 +3620,7 @@
     }
 
     async snapActiveCursorPosition(column, rowIndex) {
-      if (!this.meta.rows.length) return;
+      if (!this.activeCursor || !this.meta.rows.length) return;
       const index = clamp(
         Math.floor(Number(rowIndex) || 0),
         0,
@@ -3766,10 +3672,15 @@
     updateCursorControls() {
       if (!this.cursorAButton || !this.cursorBButton) return;
       const activeA = this.activeCursor === 'A';
+      const activeB = this.activeCursor === 'B';
       this.cursorAButton.classList.toggle('active', activeA);
-      this.cursorBButton.classList.toggle('active', !activeA);
+      this.cursorBButton.classList.toggle('active', activeB);
       this.cursorAButton.setAttribute('aria-pressed', String(activeA));
-      this.cursorBButton.setAttribute('aria-pressed', String(!activeA));
+      this.cursorBButton.setAttribute('aria-pressed', String(activeB));
+      const hasActiveCursor = activeA || activeB;
+      this.cursorPrevButton.disabled = !hasActiveCursor;
+      this.cursorNextButton.disabled = !hasActiveCursor;
+      this.cursorJumpInput.disabled = !hasActiveCursor;
       const row = this.meta && this.meta.rows[this.activeCursorRow];
       this.cursorSignalEl.textContent = row ? row.name : '';
       this.cursorSignalEl.title = row ? row.name : '';
@@ -3807,9 +3718,15 @@
 
     async updateCursorReadout() {
       if (!this.meta || !this.signalList) return;
-      const column = this.activeCursorColumn();
-      if (column == null) return;
       const sequence = ++this.cursorInspectSequence;
+      const column = this.activeCursorColumn();
+      if (column == null) {
+        this.signalList.querySelectorAll('[data-scope-cursor-value-row]').forEach((target) => {
+          target.textContent = '游标：--';
+          target.title = '请先选择 A 或 B 游标';
+        });
+        return;
+      }
       try {
         const result = await this.worker.call('inspect', {
           column,
@@ -3862,6 +3779,10 @@
 
     async navigateActiveCursor(direction) {
       if (!this.meta.rows.length) return;
+      if (!this.activeCursor) {
+        this.setStatus('请先选择 A 或 B 游标', true);
+        return;
+      }
       const row = this.meta.rows[this.activeCursorRow];
       const mode = this.modes[this.activeCursorRow] || row.mode;
       const expression = this.cursorJumpInput.value.trim();
