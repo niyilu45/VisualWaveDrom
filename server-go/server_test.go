@@ -148,6 +148,104 @@ func TestComplexSampleWithIndexUsesIndexedParser(t *testing.T) {
 	}
 }
 
+func TestPresetValueTableAddsLabelsWithoutChangingSamples(t *testing.T) {
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := newImportManager(filepath.Dir(workingDirectory))
+	python := manager.pythonRuntime()
+	if !python.Available {
+		t.Skip("Python runtime is not available")
+	}
+	sourcePath := filepath.Join(t.TempDir(), "state.txt")
+	if err = os.WriteFile(sourcePath, []byte("0\n1\n1\n0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := manager.runParser(importMapping{
+		Parser:      "parse_single_column",
+		SourcePath:  sourcePath,
+		DisplayPath: "state.txt",
+		Options: map[string]any{
+			"hasIndex": false,
+			"tbl":      map[string]string{"1": "abc"},
+		},
+	}, python)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wave := stringValue(result["wave"]); wave != "0=.0" {
+		t.Fatalf("mapped wave = %q, expected %q", wave, "0=.0")
+	}
+	labels, ok := result["data"].([]string)
+	if !ok || len(labels) != 1 || labels[0] != "1:abc" {
+		t.Fatalf("mapped labels = %#v, expected [1:abc]", result["data"])
+	}
+	samples, ok := result["samples"].([]any)
+	if !ok || len(samples) != 4 || intValue(samples[0], -1) != 0 ||
+		intValue(samples[1], -1) != 1 || intValue(samples[2], -1) != 1 ||
+		intValue(samples[3], -1) != 0 {
+		t.Fatalf("mapped samples changed: %#v", result["samples"])
+	}
+
+	unmatched, err := manager.runParser(importMapping{
+		Parser:      "parse_single_column",
+		SourcePath:  sourcePath,
+		DisplayPath: "state.txt",
+		Options: map[string]any{
+			"hasIndex": false,
+			"tbl":      map[string]string{"2": "unused"},
+		},
+	}, python)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wave := stringValue(unmatched["wave"]); wave != "01.0" {
+		t.Fatalf("unmatched value table changed the wave: %q", wave)
+	}
+	if labels, ok = unmatched["data"].([]string); !ok || len(labels) != 0 {
+		t.Fatalf("unmatched value table added labels: %#v", unmatched["data"])
+	}
+}
+
+func TestTableImportPassesPresetValueTable(t *testing.T) {
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := newImportManager(filepath.Dir(workingDirectory))
+	if python := manager.pythonRuntime(); !python.Available {
+		t.Skip("Python runtime is not available")
+	}
+	sourcePath := filepath.Join(t.TempDir(), "states.csv")
+	if err = os.WriteFile(sourcePath, []byte("State\n0\n1\n1\n0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := manager.runTableLocalFileWithOptions(sourcePath, tableImportOptions{
+		HeaderRow: 1,
+		Delimiter: "comma",
+		Tbl:       map[string]string{"1": "active"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updates, ok := result["updates"].([]map[string]any)
+	if !ok || len(updates) != 1 {
+		t.Fatalf("unexpected table updates: %#v", result["updates"])
+	}
+	labels, ok := updates[0]["data"].([]string)
+	if !ok || len(labels) != 3 || labels[0] != "0" ||
+		labels[1] != "1:active" || labels[2] != "0" {
+		t.Fatalf("table labels = %#v, expected [0 1:active 0]", updates[0]["data"])
+	}
+	samples, ok := updates[0]["samples"].([]any)
+	if !ok || len(samples) != 4 || intValue(samples[0], -1) != 0 ||
+		intValue(samples[1], -1) != 1 || intValue(samples[2], -1) != 1 ||
+		intValue(samples[3], -1) != 0 {
+		t.Fatalf("table samples changed: %#v", updates[0]["samples"])
+	}
+}
+
 func TestTableImportUsesSelectedHeaderAndSplitsComplexSignals(t *testing.T) {
 	workingDirectory, err := os.Getwd()
 	if err != nil {

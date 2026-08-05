@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"math"
 	"net/http"
 	"net/url"
@@ -77,6 +78,7 @@ type collectionPresetPath struct {
 	Parser      string                   `json:"-"`
 	Columns     []collectionColumnConfig `json:"-"`
 	SchemaHash  string                   `json:"-"`
+	Tbl         map[string]string        `json:"-"`
 }
 
 type collectionColumnConfig struct {
@@ -98,6 +100,7 @@ type collectionRuleConfig struct {
 	Parser      string                   `json:"parser,omitempty"`
 	Columns     []collectionColumnConfig `json:"columns,omitempty"`
 	SchemaHash  string                   `json:"schemaHash,omitempty"`
+	Tbl         map[string]string        `json:"tbl,omitempty"`
 }
 
 type collectionPreset struct {
@@ -477,6 +480,20 @@ func normalizeCollectionRuleConfig(
 		}
 		config.HasSeq = &hasSeq
 	}
+	if rawTable, supplied := raw["tbl"]; supplied {
+		table, ok := rawTable.(map[string]any)
+		if !ok {
+			return config, fmt.Errorf("%s.tbl must be an object", fieldPath)
+		}
+		config.Tbl = make(map[string]string, len(table))
+		for rawValue, rawKeyword := range table {
+			keyword, keywordOK := rawKeyword.(string)
+			if !keywordOK {
+				return config, fmt.Errorf("%s.tbl[%q] must be a string", fieldPath, rawValue)
+			}
+			config.Tbl[rawValue] = keyword
+		}
+	}
 	config.Columns, err = normalizeCollectionColumns(raw["columns"], raw["renames"], fieldPath)
 	if err != nil {
 		return config, err
@@ -537,6 +554,11 @@ func effectiveCollectionPresetPath(
 		effective.Columns = append([]collectionColumnConfig{}, usrGen.Columns...)
 	} else {
 		effective.Columns = append([]collectionColumnConfig{}, autoGen.Columns...)
+	}
+	if len(usrGen.Tbl) > 0 {
+		effective.Tbl = maps.Clone(usrGen.Tbl)
+	} else if len(autoGen.Tbl) > 0 {
+		effective.Tbl = maps.Clone(autoGen.Tbl)
 	}
 	return effective
 }
@@ -667,9 +689,14 @@ func normalizeCollectionPreset(value any) (collectionPreset, error) {
 					return collectionPreset{}, fmt.Errorf("paths[%d].autoGen must be an object", index)
 				}
 			}
+			if value, supplied := entry["tbl"]; supplied {
+				if _, nested := usrRaw["tbl"]; !nested {
+					usrRaw["tbl"] = value
+				}
+			}
 		} else {
 			// Legacy presets are migrated without changing their single-signal behavior.
-			for _, key := range []string{"folder", "grepKeys", "name"} {
+			for _, key := range []string{"folder", "grepKeys", "name", "tbl"} {
 				if value, supplied := entry[key]; supplied {
 					usrRaw[key] = value
 				}
@@ -2471,6 +2498,7 @@ func (s *service) parseCollectionEntry(
 				IndexColumn: preparedRule.IndexColumn,
 				Delimiter:   preparedRule.Delimiter,
 				Columns:     preparedRule.Columns,
+				Tbl:         preparedRule.Tbl,
 			},
 		)
 		parser = "parse_table_data"
@@ -2492,12 +2520,13 @@ func (s *service) parseCollectionEntry(
 			}
 		}
 		parser = recommended["parser"]
-		result, err = s.imports.runLocalFile(
+		result, err = s.imports.runLocalFileWithOptions(
 			stringValue(recommended["schemeId"]),
 			intValue(recommended["mappingIndex"], -1),
 			preparedEntry.Name,
 			sourcePath,
 			preparedRule.HasSeq,
+			map[string]any{"tbl": preparedRule.Tbl},
 		)
 	}
 	if err != nil {

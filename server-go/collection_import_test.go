@@ -77,6 +77,58 @@ func collectionPresetValue(
 	}
 }
 
+func TestCollectionPresetNormalizesValueTable(t *testing.T) {
+	preset, err := normalizeCollectionPreset(map[string]any{
+		"paths": []any{map[string]any{
+			"usrGen": map[string]any{
+				"folder": ".", "grepKeys": `^state\.txt$`, "name": "state",
+				"tbl": map[string]any{"0": "idle", "1": "active"},
+			},
+			"autoGen": map[string]any{},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preset.Paths[0].Tbl["1"] != "active" ||
+		preset.Paths[0].UsrGen.Tbl["0"] != "idle" {
+		t.Fatalf("value table was not preserved: %#v", preset.Paths[0])
+	}
+	alias, err := normalizeCollectionPreset(map[string]any{
+		"paths": []any{map[string]any{
+			"usrGen":  map[string]any{"folder": ".", "grepKeys": `^alias\.txt$`},
+			"autoGen": map[string]any{},
+			"tbl":     map[string]any{"1": "alias"},
+		}},
+	})
+	if err != nil || alias.Paths[0].UsrGen.Tbl["1"] != "alias" {
+		t.Fatalf("path-level value table alias was not migrated: %#v (%v)", alias, err)
+	}
+
+	legacy, err := normalizeCollectionPreset(collectionPresetValue(
+		[]any{},
+		map[string]any{
+			"folder": ".", "grepKeys": `^legacy\.txt$`, "name": "legacy",
+			"tbl": map[string]any{"2": "ready"},
+		},
+	))
+	if err != nil || legacy.Paths[0].UsrGen.Tbl["2"] != "ready" {
+		t.Fatalf("legacy value table was not migrated: %#v (%v)", legacy, err)
+	}
+
+	_, err = normalizeCollectionPreset(map[string]any{
+		"paths": []any{map[string]any{
+			"usrGen": map[string]any{
+				"folder": ".", "grepKeys": `^invalid\.txt$`,
+				"tbl": map[string]any{"1": float64(1)},
+			},
+		}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "tbl") {
+		t.Fatalf("non-string table value returned an unclear error: %v", err)
+	}
+}
+
 func TestCollectionSearchSubstitutesVariables(t *testing.T) {
 	root := t.TempDir()
 	capture := filepath.Join(root, "capture")

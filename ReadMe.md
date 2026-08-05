@@ -320,7 +320,11 @@ Linux 可直接粘贴 `/home/user/data.csv`、`~/data.csv` 或 `file:///home/use
       "usrGen": {
         "folder": "Data",
         "grepKeys": "^{channel}-{case}\\.txt$",
-        "name": "{channel}_{case}_txt"
+        "name": "{channel}_{case}_txt",
+        "tbl": {
+          "0": "idle",
+          "1": "active"
+        }
       },
       "autoGen": {}
     },
@@ -355,6 +359,9 @@ Linux 可直接粘贴 `/home/user/data.csv`、`~/data.csv` 或 `file:///home/use
   `!` 表示匹配到多个文件。多匹配不会阻止导入，程序按相对路径排序并默认使用
   第一个文件。
 - `usrGen.name`：单信号文件导入后的信号名，也可以使用变量；省略时采用文件名。
+- `usrGen.tbl`：可选的值名称映射字典。键是文件中的原始值，值是需要附加显示的名称；
+  例如 `"1": "active"` 会在波形上显示 `1:active`。未配置 `tbl` 或原值不在字典中时，
+  保持原显示不变。映射只影响 WaveDrom 标签，不改变示波器使用的原始样本值。
 - `autoGen`：程序根据文件检测结果和预览选择生成的配置。单信号会记录解析方式及是否含序号；
   表格会记录 `headerRow`、`indexColumn`、`delimiter`、`schemaHash` 和列规则。
 - `autoGen.indexColumn`：可选的表格序号列。选择后，该列只用于放置数据，不会生成同名波形；

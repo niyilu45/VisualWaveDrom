@@ -1126,6 +1126,7 @@ func (m *importManager) runSourceFile(
 	sourcePath string,
 	displayName string,
 	hasIndex bool,
+	optionOverrides map[string]any,
 ) (map[string]any, error) {
 	python := m.pythonRuntime()
 	if !python.Available {
@@ -1164,6 +1165,9 @@ func (m *importManager) runSourceFile(
 	source := scheme.Mappings[mappingIndex]
 	options := cloneJSONValue(source.Options, map[string]any{}).(map[string]any)
 	options["hasIndex"] = hasIndex
+	for key, value := range optionOverrides {
+		options[key] = value
+	}
 	headerLikely, _ := analysis["headerLikely"].(bool)
 	if _, supplied := options["skipRows"]; headerLikely && !supplied {
 		options["skipRows"] = 1
@@ -1196,6 +1200,7 @@ type tableImportOptions struct {
 	IndexColumn string
 	Delimiter   string
 	Columns     []collectionColumnConfig
+	Tbl         map[string]string
 }
 
 func (m *importManager) runTableSourceFileWithOptions(
@@ -1242,6 +1247,9 @@ func (m *importManager) runTableSourceFileWithOptions(
 	}
 	if tableOptions.Columns != nil {
 		mapping.Options["columns"] = tableOptions.Columns
+	}
+	if len(tableOptions.Tbl) > 0 {
+		mapping.Options["tbl"] = tableOptions.Tbl
 	}
 	result, err := m.runParser(mapping, python)
 	if err != nil {
@@ -1308,7 +1316,7 @@ func (m *importManager) runUploaded(
 		return nil, err
 	}
 	return m.runSourceFile(
-		schemeID, mappingIndex, signalName, tempPath, uploadedName, hasIndex)
+		schemeID, mappingIndex, signalName, tempPath, uploadedName, hasIndex, nil)
 }
 
 func (m *importManager) runTableUploaded(
@@ -1349,6 +1357,26 @@ func (m *importManager) runLocalFile(
 		sourcePath,
 		filepath.Base(sourcePath),
 		hasIndex,
+		nil,
+	)
+}
+
+func (m *importManager) runLocalFileWithOptions(
+	schemeID string,
+	mappingIndex int,
+	signalName string,
+	sourcePath string,
+	hasIndex bool,
+	options map[string]any,
+) (map[string]any, error) {
+	return m.runSourceFile(
+		schemeID,
+		mappingIndex,
+		signalName,
+		sourcePath,
+		filepath.Base(sourcePath),
+		hasIndex,
+		options,
 	)
 }
 

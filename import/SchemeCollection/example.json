@@ -6,7 +6,11 @@
       "usrGen": {
         "folder": ".",
         "grepKeys": "^SeqConvOutC.*\\.txt$",
-        "name": "SeqConvOutC"
+        "name": "SeqConvOutC",
+        "tbl": {
+          "0": "idle",
+          "1": "active"
+        }
       },
       "autoGen": {}
     },

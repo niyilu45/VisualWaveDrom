@@ -109,6 +109,15 @@ def _parse_index(value, line_number):
 
 def _normalize_value(value, options):
     raw = str(value).strip()
+    value_table = options.get("tbl")
+    if value_table is not None:
+        if not isinstance(value_table, dict):
+            raise FileProcError("tbl must be an object")
+        if raw in value_table:
+            keyword = value_table[raw]
+            if not isinstance(keyword, str):
+                raise FileProcError("tbl values must be strings")
+            return "=", raw + ":" + keyword
     state_map = options.get("stateMap", {})
     if not isinstance(state_map, dict):
         raise FileProcError("stateMap must be an object")

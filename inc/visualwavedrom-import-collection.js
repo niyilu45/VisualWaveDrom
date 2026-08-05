@@ -1061,6 +1061,22 @@
         }
         config.hasSeq = value.hasSeq;
       }
+      if (value.tbl !== undefined) {
+        if (!value.tbl || typeof value.tbl !== 'object' || Array.isArray(value.tbl)) {
+          throw validationError(fieldPath + '.tbl 必须是字典', fieldPath + '.tbl');
+        }
+        const table = Object.create(null);
+        Object.keys(value.tbl).forEach((rawValue) => {
+          if (typeof value.tbl[rawValue] !== 'string') {
+            throw validationError(
+              fieldPath + '.tbl[' + JSON.stringify(rawValue) + '] 必须是字符串',
+              fieldPath + '.tbl'
+            );
+          }
+          table[rawValue] = value.tbl[rawValue];
+        });
+        if (Object.keys(table).length) config.tbl = table;
+      }
       const columns = normalizeColumnRules(value.columns, value.renames, fieldPath);
       if (columns.length) config.columns = columns;
       return config;
@@ -1074,13 +1090,22 @@
       let usrGen;
       let autoGen;
       if (entry.usrGen !== undefined || entry.autoGen !== undefined) {
-        usrGen = normalizeRuleConfig(entry.usrGen, path + '.usrGen');
+        let rawUsrGen = entry.usrGen;
+        if (entry.tbl !== undefined && (
+          rawUsrGen === undefined || rawUsrGen === null ||
+          (typeof rawUsrGen === 'object' && !Array.isArray(rawUsrGen))
+        )) {
+          rawUsrGen = Object.assign({}, rawUsrGen || {});
+          if (rawUsrGen.tbl === undefined) rawUsrGen.tbl = entry.tbl;
+        }
+        usrGen = normalizeRuleConfig(rawUsrGen, path + '.usrGen');
         autoGen = normalizeRuleConfig(entry.autoGen, path + '.autoGen');
       } else {
         usrGen = normalizeRuleConfig({
           folder: entry.folder,
           grepKeys: entry.grepKeys,
-          name: entry.name
+          name: entry.name,
+          tbl: entry.tbl
         }, path + '.usrGen');
         autoGen = normalizeRuleConfig({
           importMode: 'single',
