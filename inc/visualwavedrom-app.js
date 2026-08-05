@@ -14143,14 +14143,23 @@ ${lines.join('\n')}`;
         if (typeof update.wave !== 'string' || !Array.isArray(update.data)) {
           throw new Error('信号 ' + signalName + ' 的解析结果无效');
         }
+        const rawSampleKind = /^(digital|bus|analog)$/.test(String(update.sampleKind || ''))
+          ? String(update.sampleKind)
+          : '';
+        const valueTable = {};
+        if (update.tbl && typeof update.tbl === 'object' && !Array.isArray(update.tbl)) {
+          Object.keys(update.tbl).forEach((key) => {
+            if (update.tbl[key] == null) return;
+            valueTable[String(key)] = String(update.tbl[key]);
+          });
+        }
         prepared.push({
           target: matches[0],
           update,
           wave: update.wave,
           data: update.data.map((value) => String(value == null ? '' : value)),
-          sampleKind: /^(digital|bus|analog)$/.test(String(update.sampleKind || ''))
-            ? String(update.sampleKind)
-            : '',
+          sampleKind: rawSampleKind === 'analog' ? 'analog' : (rawSampleKind ? 'bus' : ''),
+          tbl: valueTable,
           samples: Array.isArray(update.samples)
             ? update.samples.map((value) => {
               if (value == null) return null;
@@ -14168,13 +14177,16 @@ ${lines.join('\n')}`;
         extendedColumns += aligned.extendedColumns;
         if (item.data.length) item.target.signal.data = item.data;
         else delete item.target.signal.data;
+        const signalScope = Object.assign({}, item.target.signal.scope || {});
         if (item.sampleKind) {
-          item.target.signal.scope = Object.assign({}, item.target.signal.scope || {}, {
-            mode: item.sampleKind
-          });
-          if (item.samples.length) item.target.signal.scope.samples = item.samples;
-          else delete item.target.signal.scope.samples;
+          signalScope.mode = item.sampleKind;
+          if (item.samples.length) signalScope.samples = item.samples;
+          else delete signalScope.samples;
         }
+        if (Object.keys(item.tbl).length) signalScope.tbl = item.tbl;
+        else delete signalScope.tbl;
+        if (Object.keys(signalScope).length) item.target.signal.scope = signalScope;
+        else delete item.target.signal.scope;
       });
 
       const newText = JSON.stringify(parsed, null, 2);

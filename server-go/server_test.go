@@ -238,6 +238,10 @@ func TestTableImportPassesPresetValueTable(t *testing.T) {
 		labels[1] != "1:active" || labels[2] != "0" {
 		t.Fatalf("table labels = %#v, expected [0 1:active 0]", updates[0]["data"])
 	}
+	table, ok := updates[0]["tbl"].(map[string]string)
+	if !ok || table["1"] != "active" {
+		t.Fatalf("table mapping metadata was not returned: %#v", updates[0]["tbl"])
+	}
 	samples, ok := updates[0]["samples"].([]any)
 	if !ok || len(samples) != 4 || intValue(samples[0], -1) != 0 ||
 		intValue(samples[1], -1) != 1 || intValue(samples[2], -1) != 1 ||

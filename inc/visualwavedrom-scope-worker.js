@@ -190,6 +190,45 @@ function getBusFormat(source, row, rowIndex) {
   return normalizeBusFormat(localScope || globalScope);
 }
 
+function normalizeValueTable(candidate) {
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return {};
+  const table = {};
+  Object.keys(candidate).forEach((key) => {
+    if (candidate[key] == null) return;
+    table[String(key).trim()] = String(candidate[key]);
+  });
+  return table;
+}
+
+function inferredValueTable(labels) {
+  const table = {};
+  (labels || []).forEach((label) => {
+    const text = String(label == null ? '' : label);
+    const separator = text.indexOf(':');
+    if (separator <= 0) return;
+    const rawValue = text.slice(0, separator).trim();
+    if (!rawValue) return;
+    table[rawValue] = text.slice(separator + 1);
+  });
+  return table;
+}
+
+function getValueTable(source, row, rowIndex, inferred) {
+  const signal = row.source || {};
+  const localScope = signal.scope && typeof signal.scope === 'object' ? signal.scope : null;
+  const globalScope = getScopeSignalConfig(source, row, rowIndex);
+  if (localScope && Object.prototype.hasOwnProperty.call(localScope, 'tbl')) {
+    return normalizeValueTable(localScope.tbl);
+  }
+  if (Object.prototype.hasOwnProperty.call(signal, 'tbl')) {
+    return normalizeValueTable(signal.tbl);
+  }
+  if (globalScope && Object.prototype.hasOwnProperty.call(globalScope, 'tbl')) {
+    return normalizeValueTable(globalScope.tbl);
+  }
+  return normalizeValueTable(inferred);
+}
+
 function parseIntegerToken(value) {
   let token = String(value == null ? '' : value).trim().replace(/_/g, '');
   if (!token || /^(x|z)$/i.test(token)) return null;
@@ -228,6 +267,28 @@ function formatBusValue(value, candidate) {
     ? '0b'
     : (format.radix === 8 ? '0o' : (format.radix === 16 ? '0x' : ''));
   return (negative ? '-' : '') + prefix + digits;
+}
+
+function mappedValueTableEntry(value, valueTable) {
+  const table = valueTable && typeof valueTable === 'object' ? valueTable : {};
+  const rawValue = String(value == null ? '' : value).trim();
+  if (Object.prototype.hasOwnProperty.call(table, rawValue)) {
+    return { found: true, value: String(table[rawValue]) };
+  }
+  const numericValue = finiteNumber(rawValue);
+  if (numericValue != null) {
+    const canonical = String(numericValue);
+    if (Object.prototype.hasOwnProperty.call(table, canonical)) {
+      return { found: true, value: String(table[canonical]) };
+    }
+  }
+  return { found: false, value: '' };
+}
+
+function formatMappedBusValue(value, candidate, valueTable) {
+  const formatted = formatBusValue(value, candidate);
+  const mapped = mappedValueTableEntry(value, valueTable);
+  return mapped.found ? formatted + ':' + mapped.value : formatted;
 }
 
 function floatFromBits(rawValue, bitWidth) {
@@ -504,7 +565,15 @@ function parseWaveSegments(signal) {
   if (!segments.length) {
     segments.push({ start: 0, end: 1, kind: 'digital', state: 'x', value: 'x' });
   }
-  return { wave, segments, transitions, clockEdges, clockRanges, gaps };
+  return {
+    wave,
+    segments,
+    transitions,
+    clockEdges,
+    clockRanges,
+    gaps,
+    valueTable: inferredValueTable(labels)
+  };
 }
 
 function buildAnalogLevels(samples) {
@@ -578,10 +647,10 @@ function createSession(content) {
     const requestedMode = localScope && localScope.mode
       ? String(localScope.mode)
       : '';
-    const detectedMode = analogSamples
+    const detectedMode = analogSamples ? 'analog' : 'bus';
+    const mode = requestedMode === 'analog'
       ? 'analog'
-      : (parsedWave.segments.some((segment) => segment.kind === 'bus') ? 'bus' : 'digital');
-    const mode = /^(digital|bus|analog)$/.test(requestedMode) ? requestedMode : detectedMode;
+      : (/^(digital|bus)$/.test(requestedMode) ? 'bus' : detectedMode);
     const rowColumns = Math.max(
       parsedWave.wave.length,
       analogSamples ? analogSamples.length : 0,
@@ -607,6 +676,7 @@ function createSession(content) {
       analogLevels: analogSamples ? buildAnalogLevels(analogSamples) : [],
       range: analogSamples ? analogRange(analogSamples) : null,
       busFormat: getBusFormat(source, row, rowIndex),
+      valueTable: getValueTable(source, row, rowIndex, parsedWave.valueTable),
       analogFormat: getAnalogFormat(source, row, rowIndex, !!analogSamples),
       analogCache: new Map(),
       rowHeight: normalizeRowHeight(localScope && localScope.rowHeight),
@@ -698,7 +768,7 @@ function displaySegmentForMode(row, segment, column, mode, totalColumns, busForm
     return {
       kind: 'bus',
       state: 'bus',
-      value: formatBusValue(rawValue, busFormat)
+      value: formatMappedBusValue(rawValue, busFormat, row.valueTable)
     };
   }
   if (!row.samples || !row.samples.length || mode === 'analog') return segment;
@@ -730,7 +800,7 @@ function sampledSegmentsInWindow(row, start, end, mode, busFormat) {
       display = {
         kind: 'bus',
         state: 'bus',
-        value: formatBusValue(String(sample), busFormat)
+        value: formatMappedBusValue(String(sample), busFormat, row.valueTable)
       };
     } else {
       const state = sample === 0 || sample === 1 ? String(sample) : 'x';
@@ -786,7 +856,7 @@ function sampledBucketsInWindow(row, start, end, width, mode, busFormat) {
         key = 'x';
       } else if (mode === 'bus') {
         bus = true;
-        const formatted = formatBusValue(String(sample), busFormat);
+        const formatted = formatMappedBusValue(String(sample), busFormat, row.valueTable);
         if (!value) value = formatted;
         else if (value !== formatted) value = '*';
         key = 'bus:' + formatted;
@@ -1400,7 +1470,11 @@ function inspectCursor(payload) {
         index: row.index,
         mode,
         value: mode === 'bus'
-          ? formatBusValue(value, busFormats[row.index] || row.busFormat)
+          ? formatMappedBusValue(
+            value,
+            busFormats[row.index] || row.busFormat,
+            row.valueTable
+          )
           : value,
         symbol: mode === 'digital' ? clockSymbolAt(row, column) : ''
       };
@@ -1846,9 +1920,10 @@ function applyRowDisplayConfig(target, row, rowIndex, payload) {
     target.scope && typeof target.scope === 'object' ? target.scope : {}
   );
   const requestedMode = source.modes && source.modes[rowIndex];
-  const mode = /^(digital|bus|analog)$/.test(String(requestedMode || ''))
-    ? String(requestedMode)
-    : row.mode;
+  const requestedModeText = String(requestedMode || '');
+  const mode = requestedModeText === 'analog'
+    ? 'analog'
+    : (/^(digital|bus)$/.test(requestedModeText) ? 'bus' : row.mode);
   if (mode !== row.detectedMode || Object.prototype.hasOwnProperty.call(scope, 'mode')) {
     scope.mode = mode;
   } else {
@@ -2061,11 +2136,17 @@ function createSimplifiedModel(payload) {
       mode,
       values,
       analogFormat,
-      symbols: mode === 'digital'
-        ? columns.map((column) => clockSymbolAt(row, column))
-        : [],
+      symbols: [],
       gaps: columns.map((column) => gapAtColumn(row, column)),
-      labels: mode === 'bus' ? values.map((value) => String(value == null ? '' : value)) : []
+      labels: mode === 'bus' ? values.map((value) => (
+        value == null
+          ? ''
+          : formatMappedBusValue(
+            value,
+            payload.busFormats && payload.busFormats[row.index] || row.busFormat,
+            row.valueTable
+          )
+      )) : []
     };
   });
   const model = {
@@ -2076,16 +2157,13 @@ function createSimplifiedModel(payload) {
     rows
   };
   const content = buildSimplifiedContent(model, payload);
-  let digitalTransitions = 0;
   let busTransitions = 0;
   activeSession.rows.forEach((row) => {
     const mode = modes[row.index] || row.mode;
     if (mode === 'analog') return;
     row.transitions.forEach((column) => {
       if (column < rangeStart || column >= rangeEnd) return;
-      const segment = segmentAt(row, column + 1e-7);
-      if (segment && segment.kind === 'bus') busTransitions += 1;
-      else digitalTransitions += 1;
+      busTransitions += 1;
     });
   });
   const analogMaxError = calculateAnalogMaxError(columns, modes, analogFormats);
@@ -2098,7 +2176,6 @@ function createSimplifiedModel(payload) {
       compressionRatio: rangeEnd > rangeStart
         ? columns.length / (rangeEnd - rangeStart)
         : 1,
-      digitalTransitions,
       busTransitions,
       analogMaxError
     }

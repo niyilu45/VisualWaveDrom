@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260805-distributed-sampling-v1';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260805-bus-value-table-v1';
   const DEFAULT_ROW_HEIGHT = 42;
   const MIN_ANALOG_ROW_HEIGHT = 28;
   const MAX_ANALOG_ROW_HEIGHT = 480;
@@ -33,7 +33,6 @@
   ];
   const COLORS = COLOR_PRESETS.map((preset) => preset.value);
   const DISPLAY_MODE_LABELS = {
-    digital: '数字',
     bus: '总线',
     analog: '模拟'
   };
@@ -650,7 +649,6 @@
             <span class="scope-display-field-label">波形展示</span>
             <div class="scope-display-mode-options" id="scope-display-mode-options"
                 role="group" aria-label="波形展示类型">
-              <button type="button" data-scope-display-mode="digital">数字</button>
               <button type="button" data-scope-display-mode="bus">总线</button>
               <button type="button" data-scope-display-mode="analog">模拟</button>
             </div>
@@ -1325,7 +1323,7 @@
                 aria-label="${escapeHtml(row.name)} 显示设置"
                 aria-haspopup="dialog" aria-expanded="false"
                 aria-controls="scope-display-popover">
-              <span>${DISPLAY_MODE_LABELS[this.modes[row.index]] || DISPLAY_MODE_LABELS.digital}</span>
+              <span>${DISPLAY_MODE_LABELS[this.modes[row.index]] || DISPLAY_MODE_LABELS.bus}</span>
             </button>
             ${analogMode ? `
               <span class="scope-row-resize-handle" data-scope-row-resize="${row.index}"
@@ -1403,7 +1401,7 @@
         this.closeDisplayPopover();
         return;
       }
-      const mode = this.modes[row.index] || 'digital';
+      const mode = this.modes[row.index] || 'bus';
       this.displayPopoverTitle.textContent = row.name;
       this.displayModeOptions.querySelectorAll('[data-scope-display-mode]').forEach((button) => {
         const active = button.dataset.scopeDisplayMode === mode;
@@ -3966,7 +3964,6 @@
         '简化 ' + metrics.simplifiedPoints + ' 点',
         '保留 ' + (Math.round(ratio * 100) / 100) + '%'
       ];
-      if (metrics.digitalTransitions != null) parts.push('数字跳变 ' + metrics.digitalTransitions);
       if (metrics.busTransitions != null) parts.push('总线变化 ' + metrics.busTransitions);
       if (metrics.analogMaxError != null) parts.push('模拟最大误差 ' + metrics.analogMaxError);
       this.metricsEl.textContent = parts.join(' · ');

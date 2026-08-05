@@ -915,7 +915,7 @@ func importUpdate(mapping importMapping, result map[string]any, signalName strin
 	if samples == nil {
 		samples = []any{}
 	}
-	return map[string]any{
+	update := map[string]any{
 		"signal": signalName, "wave": result["wave"], "data": result["data"],
 		"sourceFile": mapping.DisplayPath, "parser": mapping.Parser,
 		"pointCount":    intValue(result["pointCount"], 0),
@@ -924,6 +924,10 @@ func importUpdate(mapping importMapping, result map[string]any, signalName strin
 		"explicitIndex": result["explicitIndex"], "sampleKind": stringValue(result["sampleKind"]),
 		"samples": samples,
 	}
+	if table, supplied := mapping.Options["tbl"]; supplied && table != nil {
+		update["tbl"] = table
+	}
+	return update
 }
 
 func importUpdates(
