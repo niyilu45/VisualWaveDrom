@@ -356,9 +356,9 @@ body.scope-wave-view > #vim-help-modal {
 .scope-signal-row {
   position: relative;
   display: grid;
-  grid-template-columns: 12px minmax(0, 1fr) 68px;
+  grid-template-columns: 16px 12px minmax(0, 1fr) 68px;
   align-items: center;
-  gap: 7px;
+  gap: 5px;
   box-sizing: border-box;
   padding: 3px 7px 3px 10px;
   border-bottom: 1px solid #dfe2e6;
@@ -382,6 +382,51 @@ body.scope-wave-view > #vim-help-modal {
 .scope-signal-row:focus-visible {
   outline: 2px solid #2f73bf;
   outline-offset: -2px;
+}
+
+.scope-row-collapse-button {
+  width: 16px;
+  height: 24px;
+  min-height: 0;
+  box-sizing: border-box;
+  padding: 0;
+  border: 1px solid #b9bec5;
+  border-radius: 2px;
+  color: #3e454d;
+  background: #f8f9fa;
+  font: 700 13px/1 Arial, sans-serif;
+  cursor: pointer;
+}
+
+.scope-row-collapse-button:hover {
+  border-color: #3978c5;
+  color: #1f5f9f;
+  background: #edf5fd;
+}
+
+.scope-row-collapse-button:focus-visible {
+  outline: 2px solid #2f73bf;
+  outline-offset: 1px;
+}
+
+.scope-signal-row.scope-signal-row-collapsed {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  min-height: 18px;
+  padding: 1px 7px 1px 10px;
+  background: #eef0f2;
+}
+
+.scope-signal-row.scope-signal-row-collapsed:hover,
+.scope-signal-row.scope-signal-row-collapsed.active {
+  background: #e5edf6;
+}
+
+.scope-signal-row-collapsed .scope-row-collapse-button {
+  height: 14px;
+  background: #ffffff;
+  font-size: 12px;
 }
 
 .scope-row-resize-handle {
@@ -583,7 +628,15 @@ body.scope-row-resizing * {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 6px;
+  gap: 4px;
+}
+
+.scope-overview-label-footer > span {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .scope-overview-label strong {

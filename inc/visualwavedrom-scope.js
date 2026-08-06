@@ -1,8 +1,9 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260806-cursor-continuation-v1';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260806-sparse-events-v2';
   const DEFAULT_ROW_HEIGHT = 42;
+  const COLLAPSED_ROW_HEIGHT = 18;
   const MIN_ANALOG_ROW_HEIGHT = 28;
   const MAX_ANALOG_ROW_HEIGHT = 480;
   const FULL_RESOLUTION_TARGET_LIMIT = 2000;
@@ -362,6 +363,7 @@
       this.analogFormats = {};
       this.rowStyles = {};
       this.rowHeights = [];
+      this.collapsedRows = new Set();
       this.signalNames = [];
       this.signalNameEditor = null;
       this.rowOffsets = [0];
@@ -444,6 +446,9 @@
         this.rowStyles[row.index] = normalizeRowStyle(row.style);
       });
       this.rowHeights = this.meta.rows.map((row) => row.rowHeight || DEFAULT_ROW_HEIGHT);
+      this.collapsedRows = new Set(Array.from(this.collapsedRows).filter(
+        (rowIndex) => rowIndex >= 0 && rowIndex < this.meta.rows.length
+      ));
       this.rebuildRowOffsets();
       this.viewStart = 0;
       this.viewEnd = this.meta.totalColumns;
@@ -597,6 +602,8 @@
               </div>
               <div class="scope-overview-label-footer">
                 <span>拖动定位</span>
+                <button type="button" class="scope-command-btn scope-overview-fit-btn"
+                    id="scope-expand-all" title="恢复所有已收起的信号行" disabled>全部展开</button>
                 <button type="button" class="scope-command-btn scope-overview-fit-btn"
                     id="scope-fit-cursors" title="显示 A、B 游标之间的区域">适应游标</button>
               </div>
@@ -754,6 +761,7 @@
       this.axisCanvas = root.querySelector('#scope-axis');
       this.plotCanvas = root.querySelector('#scope-plot');
       this.overviewCanvas = root.querySelector('#scope-overview');
+      this.expandAllRowsButton = root.querySelector('#scope-expand-all');
       this.methodSelect = root.querySelector('#scope-method');
       this.targetInput = root.querySelector('#scope-target-points');
       this.rangeStartInput = root.querySelector('#scope-range-start');
@@ -816,6 +824,7 @@
       this.root.querySelector('#scope-fit-cursors').addEventListener('click', () => {
         this.fitToCursors();
       });
+      this.expandAllRowsButton.addEventListener('click', () => this.expandAllRows());
       this.connectionButton.addEventListener('click', () => this.toggleConnectionMode());
       this.originalDataButton.addEventListener('click', () => this.toggleOriginalData());
       this.cursorAButton.addEventListener('click', () => this.toggleActiveCursor('A'));
@@ -910,6 +919,13 @@
       this.signalList.addEventListener('pointerup', (event) => this.finishRowResize(event));
       this.signalList.addEventListener('pointercancel', (event) => this.finishRowResize(event));
       this.signalList.addEventListener('click', (event) => {
+        const rowToggle = event.target.closest('[data-scope-toggle-row]');
+        if (rowToggle) {
+          event.preventDefault();
+          event.stopPropagation();
+          this.toggleRowCollapsed(Number(rowToggle.dataset.scopeToggleRow));
+          return;
+        }
         const displayButton = event.target.closest('[data-scope-display-row]');
         if (displayButton) {
           event.preventDefault();
@@ -1127,7 +1143,115 @@
       this.updateDraftState();
     }
 
+    isRowCollapsed(rowIndex) {
+      return this.collapsedRows.has(Math.floor(Number(rowIndex)));
+    }
+
+    updateCollapsedRowControls() {
+      if (!this.expandAllRowsButton) return;
+      const collapsedCount = this.collapsedRows.size;
+      this.expandAllRowsButton.disabled = collapsedCount === 0;
+      this.expandAllRowsButton.title = collapsedCount
+        ? '恢复全部 ' + collapsedCount + ' 个已收起的信号行'
+        : '当前没有已收起的信号行';
+    }
+
+    captureVerticalScrollAnchor() {
+      if (!this.meta || !this.meta.rows.length) return { rowIndex: 0, offset: 0 };
+      const scrollTop = Math.max(0, this.plotViewport.scrollTop);
+      const rowIndex = clamp(
+        this.rowIndexAtOffset(scrollTop),
+        0,
+        this.meta.rows.length - 1
+      );
+      return {
+        rowIndex,
+        offset: Math.max(0, scrollTop - this.rowTop(rowIndex))
+      };
+    }
+
+    restoreVerticalScrollAnchor(anchor) {
+      if (!anchor || !this.meta || !this.meta.rows.length) return;
+      const rowIndex = clamp(anchor.rowIndex, 0, this.meta.rows.length - 1);
+      const rowOffset = Math.min(
+        Math.max(0, Number(anchor.offset) || 0),
+        Math.max(0, this.rowHeight(rowIndex) - 1)
+      );
+      const contentHeight = this.rowOffsets[this.rowOffsets.length - 1] || 0;
+      const maximum = Math.max(0, contentHeight - this.plotViewport.clientHeight);
+      const nextScrollTop = clamp(this.rowTop(rowIndex) + rowOffset, 0, maximum);
+      this.plotViewport.scrollTop = nextScrollTop;
+      this.signalScroll.scrollTop = nextScrollTop;
+    }
+
+    toggleRowCollapsed(rowIndex) {
+      const index = Math.floor(Number(rowIndex));
+      if (!this.meta || !Number.isInteger(index) || !this.meta.rows[index]) return;
+      if (this.signalNameEditor) this.finishSignalNameEdit(true);
+      const anchor = this.captureVerticalScrollAnchor();
+      const collapse = !this.isRowCollapsed(index);
+      if (collapse) this.collapsedRows.add(index);
+      else this.collapsedRows.delete(index);
+      if (collapse) {
+        if (this.columnSelection && this.columnSelection.rowIndex === index) {
+          this.columnSelection = null;
+        }
+        if (this.selectedPoint && this.selectedPoint.rowIndex === index) {
+          this.selectedPoint = null;
+          this.updatePointEditor();
+        }
+        const selectedConnection = this.connections.find(
+          (connection) => connection.id === this.selectedConnectionId
+        );
+        if (selectedConnection
+            && (selectedConnection.start.rowIndex === index
+              || selectedConnection.end.rowIndex === index)) {
+          this.selectedConnectionId = '';
+        }
+        if (this.connectionDraftStart && this.connectionDraftStart.rowIndex === index) {
+          this.connectionDraftStart = null;
+          this.connectionHover = null;
+        } else if (this.connectionHover && this.connectionHover.rowIndex === index) {
+          this.connectionHover = null;
+        }
+      }
+      this.renderSignalRows();
+      this.restoreVerticalScrollAnchor(anchor);
+      this.positionPlotCanvas();
+      this.scheduleWindowRequest();
+      this.updateCollapsedRowControls();
+      this.updateMeasurements();
+      this.draw();
+      const rowName = this.signalDisplayName(index);
+      this.setStatus(collapse ? '已收起信号：' + rowName : '已展开信号：' + rowName);
+      this.log('scope-row-collapse', {
+        phase: collapse ? 'collapse' : 'expand',
+        rowIndex: index,
+        collapsedCount: this.collapsedRows.size
+      });
+    }
+
+    expandAllRows() {
+      if (!this.collapsedRows.size) return;
+      if (this.signalNameEditor) this.finishSignalNameEdit(true);
+      const anchor = this.captureVerticalScrollAnchor();
+      const expandedCount = this.collapsedRows.size;
+      this.collapsedRows.clear();
+      this.renderSignalRows();
+      this.restoreVerticalScrollAnchor(anchor);
+      this.positionPlotCanvas();
+      this.scheduleWindowRequest();
+      this.updateCollapsedRowControls();
+      this.draw();
+      this.setStatus('已展开全部 ' + expandedCount + ' 个信号行');
+      this.log('scope-row-collapse', {
+        phase: 'expand-all',
+        expandedCount
+      });
+    }
+
     rowHeight(rowIndex) {
+      if (this.isRowCollapsed(rowIndex)) return COLLAPSED_ROW_HEIGHT;
       if (this.modes[rowIndex] !== 'analog') return DEFAULT_ROW_HEIGHT;
       return clamp(
         Math.round(Number(this.rowHeights[rowIndex]) || DEFAULT_ROW_HEIGHT),
@@ -1297,13 +1421,31 @@
       this.signalList.innerHTML = this.meta.rows.map((row) => {
         const group = row.groups && row.groups.length ? row.groups.join(' / ') : '';
         const rowHeight = this.rowHeight(row.index);
+        const collapsed = this.isRowCollapsed(row.index);
         const analogMode = this.modes[row.index] === 'analog';
         const waveColor = this.rowWaveColor(row.index);
+        if (collapsed) {
+          return `
+            <div class="scope-signal-row scope-signal-row-collapsed${row.index === this.activeCursorRow ? ' active' : ''}"
+                data-row-index="${row.index}" data-scope-signal-row="${row.index}"
+                aria-label="已收起信号 ${escapeHtml(row.name)}"
+                style="height:${rowHeight}px">
+              <button type="button" class="scope-row-collapse-button"
+                  data-scope-toggle-row="${row.index}" aria-expanded="false"
+                  title="展开信号：${escapeHtml(row.name)}"
+                  aria-label="展开信号 ${escapeHtml(row.name)}">+</button>
+            </div>
+          `;
+        }
         return `
           <div class="scope-signal-row${row.index === this.activeCursorRow ? ' active' : ''}${analogMode ? ' scope-signal-row-analog' : ''}"
               data-row-index="${row.index}" data-scope-signal-row="${row.index}"
               tabindex="0" aria-label="选择信号 ${escapeHtml(row.name)}"
               style="height:${rowHeight}px">
+            <button type="button" class="scope-row-collapse-button"
+                data-scope-toggle-row="${row.index}" aria-expanded="true"
+                title="收起信号：${escapeHtml(row.name)}"
+                aria-label="收起信号 ${escapeHtml(row.name)}">-</button>
             <button type="button" class="scope-swatch" data-scope-swatch-row="${row.index}"
                 style="background:${waveColor}"
                 title="设置 ${escapeHtml(row.name)} 的波形和背景颜色"
@@ -1338,6 +1480,7 @@
         `;
       }).join('');
       if (this.cursorAButton) {
+        this.updateCollapsedRowControls();
         this.updateCursorControls();
         void this.updateCursorReadout();
       }
@@ -1834,7 +1977,7 @@
     }
 
     setAnalogRowHeight(rowIndex, height, handle) {
-      if (this.modes[rowIndex] !== 'analog') return false;
+      if (this.modes[rowIndex] !== 'analog' || this.isRowCollapsed(rowIndex)) return false;
       const nextHeight = clamp(
         Math.round(Number(height) || DEFAULT_ROW_HEIGHT),
         MIN_ANALOG_ROW_HEIGHT,
@@ -2173,6 +2316,40 @@
             context.fillRect(x1, yTop + 3, Math.max(1, x2 - x1), yBottom - yTop - 6);
             context.strokeStyle = color;
             context.strokeRect(x1, yTop + 3, Math.max(1, x2 - x1), yBottom - yTop - 6);
+            if (bucket.binary) {
+              const highY = yTop + 5;
+              const lowY = yBottom - 5;
+              context.lineWidth = 1.5;
+              context.beginPath();
+              if (bucket.high) {
+                context.moveTo(x1, highY);
+                context.lineTo(x2, highY);
+              }
+              if (bucket.low) {
+                context.moveTo(x1, lowY);
+                context.lineTo(x2, lowY);
+              }
+              context.stroke();
+            }
+            if (bucket.changes > 0) {
+              const firstColumn = Number.isFinite(Number(bucket.eventStart))
+                ? Number(bucket.eventStart)
+                : (bucket.start + bucket.end) / 2;
+              const lastColumn = Number.isFinite(Number(bucket.eventEnd))
+                ? Number(bucket.eventEnd)
+                : firstColumn;
+              const firstX = clamp(this.xForColumn(firstColumn, width), x1, x2);
+              const lastX = clamp(this.xForColumn(lastColumn, width), x1, x2);
+              context.lineWidth = 2;
+              context.beginPath();
+              context.moveTo(firstX, yTop + 2);
+              context.lineTo(firstX, yBottom - 2);
+              if (Math.abs(lastX - firstX) > 0.5) {
+                context.moveTo(lastX, yTop + 2);
+                context.lineTo(lastX, yBottom - 2);
+              }
+              context.stroke();
+            }
           }
           if (bucket.unknown) {
             this.drawUnknownDigitalSegment(context, x1, x2, yTop, yBottom, 1, true);
@@ -2710,6 +2887,8 @@
     connectionAtPoint(x, y, width) {
       for (let index = this.connections.length - 1; index >= 0; index -= 1) {
         const connection = this.connections[index];
+        if (this.isRowCollapsed(connection.start.rowIndex)
+            || this.isRowCollapsed(connection.end.rowIndex)) continue;
         const geometry = this.connectionGeometry(connection, width);
         if (this.pointToSegmentDistance(
           x,
@@ -2786,6 +2965,8 @@
 
     drawConnections(context, width, height) {
       this.connections.forEach((connection) => {
+        if (this.isRowCollapsed(connection.start.rowIndex)
+            || this.isRowCollapsed(connection.end.rowIndex)) return;
         this.drawConnection(
           context,
           connection,
@@ -2797,6 +2978,8 @@
       });
       if (!this.connectionMode || !this.connectionDraftStart) return;
       const end = this.connectionHover || this.connectionDraftStart;
+      if (this.isRowCollapsed(this.connectionDraftStart.rowIndex)
+          || this.isRowCollapsed(end.rowIndex)) return;
       this.drawConnection(context, {
         start: this.connectionDraftStart,
         end
@@ -2806,10 +2989,21 @@
     drawColumnSelection(context, width, height) {
       const selection = this.columnSelection;
       if (!selection || !this.meta.rows[selection.rowIndex]) return;
-      if (selection.end <= this.viewStart || selection.start >= this.viewEnd) return;
+      if (this.isRowCollapsed(selection.rowIndex)) return;
       const singleColumn = selection.end - selection.start === 1;
       if (singleColumn) {
-        const x = clamp(this.xForColumn(selection.start + 0.5, width), 0, width);
+        let markerColumn = selection.start + 0.5;
+        if (this.selectedPoint
+            && this.selectedPoint.rowIndex === selection.rowIndex
+            && this.simplified
+            && this.simplified.model) {
+          const pointColumn = Number(
+            this.simplified.model.columns[this.selectedPoint.pointIndex]
+          );
+          if (Number.isFinite(pointColumn)) markerColumn = pointColumn;
+        }
+        if (markerColumn < this.viewStart || markerColumn > this.viewEnd) return;
+        const x = clamp(this.xForColumn(markerColumn, width), 0, width);
         context.save();
         context.strokeStyle = '#2f73bf';
         context.lineWidth = 1.75;
@@ -2821,6 +3015,7 @@
         context.restore();
         return;
       }
+      if (selection.end <= this.viewStart || selection.start >= this.viewEnd) return;
       const rowTop = this.rowTop(selection.rowIndex) - this.plotViewport.scrollTop;
       const rowHeight = this.rowHeight(selection.rowIndex);
       if (rowTop >= height || rowTop + rowHeight <= 0) return;
@@ -2863,6 +3058,7 @@
           const rowHeight = this.rowHeight(rowIndex);
           const rowTop = this.rowTop(rowIndex) - scrollTop;
           if (rowTop > height || rowTop + rowHeight < 0) return;
+          if (this.isRowCollapsed(rowIndex)) return;
           this.drawRowBackground(context, rowIndex, rowTop, rowHeight, width);
         });
       }
@@ -2873,6 +3069,14 @@
           const rowHeight = this.rowHeight(rowIndex);
           const rowTop = this.rowTop(rowIndex) - scrollTop;
           if (rowTop > height || rowTop + rowHeight < 0) return;
+          if (this.isRowCollapsed(rowIndex)) {
+            context.strokeStyle = '#cfd4da';
+            context.beginPath();
+            context.moveTo(0, rowTop + rowHeight - 0.5);
+            context.lineTo(width, rowTop + rowHeight - 0.5);
+            context.stroke();
+            return;
+          }
           const color = this.rowWaveColor(rowIndex);
           context.strokeStyle = '#dfe2e6';
           context.beginPath();
@@ -2958,9 +3162,12 @@
       context.clearRect(0, 0, width, height);
       context.fillStyle = '#f8f9fa';
       context.fillRect(0, 0, width, height);
-      const rows = this.simplified ? this.simplified.model.rows.slice(0, 8) : [];
-      rows.forEach((row, rowIndex) => {
-        const yTop = 5 + rowIndex * Math.max(6, (height - 10) / Math.max(1, rows.length));
+      const rows = this.simplified
+        ? this.simplified.model.rows.filter((row) => !this.isRowCollapsed(row.index)).slice(0, 8)
+        : [];
+      rows.forEach((row, visibleRowIndex) => {
+        const rowIndex = row.index;
+        const yTop = 5 + visibleRowIndex * Math.max(6, (height - 10) / Math.max(1, rows.length));
         const yBottom = yTop + Math.max(4, (height - 14) / Math.max(1, rows.length) - 2);
         const color = this.rowWaveColor(rowIndex);
         this.drawOverviewRowBackground(context, rowIndex, yTop, yBottom, width);
@@ -3286,6 +3493,10 @@
         this.plotCanvas.setPointerCapture(event.pointerId);
         return;
       }
+      if (this.isRowCollapsed(rowIndex)) {
+        this.setStatus('该信号行已收起，请点击左侧 + 按钮恢复');
+        return;
+      }
       if (this.connectionMode) {
         this.handleConnectionPoint(this.connectionPointForPosition(x, y, rect.width));
         return;
@@ -3351,6 +3562,13 @@
         if (this.connectionMode && this.connectionDraftStart) {
           const y = event.clientY - rect.top;
           const next = this.connectionPointForPosition(x, y, rect.width);
+          if (this.isRowCollapsed(next.rowIndex)) {
+            if (this.connectionHover) {
+              this.connectionHover = null;
+              this.draw();
+            }
+            return;
+          }
           if (!this.connectionHover
               || next.column !== this.connectionHover.column
               || next.rowIndex !== this.connectionHover.rowIndex) {
@@ -3576,6 +3794,10 @@
     }
 
     handleConnectionPoint(point) {
+      if (!point || this.isRowCollapsed(point.rowIndex)) {
+        this.setStatus('收起的信号行不能作为连接线端点，请先展开该行', true);
+        return;
+      }
       if (!this.connectionDraftStart) {
         this.selectedConnectionId = '';
         this.connectionDraftStart = point;
@@ -3943,7 +4165,9 @@
           direction: direction < 0 ? -1 : 1,
           kind,
           expression,
-          column: result.column
+          column: result.column,
+          value: result.value,
+          source: result.source || ''
         });
       } catch (error) {
         if (sequence !== this.cursorNavigationSequence) return;
@@ -4099,11 +4323,25 @@
         else high = middle;
       }
       let pointIndex = low;
+      const onePixelInColumns = Math.max(
+        1e-7,
+        (this.viewEnd - this.viewStart) / Math.max(1, this.plotCanvas.clientWidth)
+      );
       if (pointIndex > 0
-          && Math.abs(columns[pointIndex - 1] - column) < Math.abs(columns[pointIndex] - column)) {
+          && Math.abs(columns[pointIndex - 1] - column)
+            <= Math.abs(columns[pointIndex] - column) + onePixelInColumns) {
         pointIndex -= 1;
       }
       this.selectedPoint = { rowIndex, pointIndex };
+      const selectedColumn = Number(columns[pointIndex]);
+      if (Number.isFinite(selectedColumn)) {
+        const selectedColumnIndex = clamp(
+          Math.floor(selectedColumn),
+          0,
+          Math.max(0, this.meta.totalColumns - 1)
+        );
+        this.updateColumnSelection(rowIndex, selectedColumnIndex, selectedColumnIndex);
+      }
       this.updatePointEditor();
       this.updateMeasurements();
       this.draw();
@@ -4445,6 +4683,9 @@
         this.rowStyles[row.index] = normalizeRowStyle(row.style);
       });
       this.rowHeights = this.meta.rows.map((row) => row.rowHeight || DEFAULT_ROW_HEIGHT);
+      this.collapsedRows = new Set(Array.from(this.collapsedRows).filter(
+        (rowIndex) => rowIndex >= 0 && rowIndex < this.meta.rows.length
+      ));
       this.rebuildRowOffsets();
       this.viewStart = 0;
       this.viewEnd = this.meta.totalColumns;

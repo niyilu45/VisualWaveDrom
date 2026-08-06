@@ -841,49 +841,80 @@ function sampledBucketsInWindow(row, start, end, width, mode, busFormat) {
   const bucketCount = Math.max(1, Math.floor(width));
   const span = end - start;
   const sampleCount = row.samples ? row.samples.length : 0;
+  const transitions = transitionColumnsForMode(row, mode);
+  const epsilon = 1e-7;
+  let transitionLow = 0;
+  let transitionHigh = transitions.length;
+  while (transitionLow < transitionHigh) {
+    const transitionMiddle = (transitionLow + transitionHigh) >> 1;
+    if (transitions[transitionMiddle] < start - epsilon) {
+      transitionLow = transitionMiddle + 1;
+    } else {
+      transitionHigh = transitionMiddle;
+    }
+  }
+  let transitionIndex = transitionLow;
   const buckets = [];
   for (let pixel = 0; pixel < bucketCount; pixel += 1) {
     const bucketStart = start + span * pixel / bucketCount;
     const bucketEnd = start + span * (pixel + 1) / bucketCount;
     const firstIndex = Math.max(0, Math.floor(bucketStart));
-    const lastIndex = Math.max(firstIndex + 1, Math.ceil(bucketEnd));
-    const availableCount = Math.max(1, lastIndex - firstIndex);
-    const probeCount = Math.min(8, availableCount);
     let high = false;
     let low = false;
     let unknown = false;
     let bus = false;
     let value = '';
+    let valueSet = false;
+    let binary = true;
+    let finiteSeen = false;
     let changes = 0;
-    let previousKey = '';
-    for (let probe = 0; probe < probeCount; probe += 1) {
-      const sampleIndex = probeCount <= 1
-        ? firstIndex
-        : firstIndex + Math.floor(probe * (availableCount - 1) / (probeCount - 1));
+    let eventStart = null;
+    let eventEnd = null;
+
+    function observeSample(sampleIndex) {
       const sample = sampleIndex < sampleCount ? row.samples[sampleIndex] : Number.NaN;
-      let key;
       if (!Number.isFinite(sample)) {
         unknown = true;
-        key = 'x';
+        binary = false;
       } else if (mode === 'bus') {
         bus = true;
+        finiteSeen = true;
+        if (sample === 1) high = true;
+        else if (sample === 0) low = true;
+        else binary = false;
         const formatted = formatMappedBusValue(String(sample), busFormat, row.valueTable);
-        if (!value) value = formatted;
+        if (!valueSet) {
+          value = formatted;
+          valueSet = true;
+        }
         else if (value !== formatted) value = '*';
-        key = 'bus:' + formatted;
       } else if (sample === 1) {
         high = true;
-        key = '1';
       } else if (sample === 0) {
         low = true;
-        key = '0';
       } else {
         unknown = true;
-        key = 'x';
       }
-      if (previousKey && previousKey !== key) changes += 1;
-      previousKey = key;
     }
+
+    observeSample(firstIndex);
+    while (transitionIndex < transitions.length
+        && transitions[transitionIndex] < bucketStart - epsilon) {
+      transitionIndex += 1;
+    }
+    let bucketTransitionIndex = transitionIndex;
+    while (bucketTransitionIndex < transitions.length
+        && transitions[bucketTransitionIndex] < bucketEnd - epsilon) {
+      const transition = transitions[bucketTransitionIndex];
+      if (transition > epsilon && transition >= bucketStart - epsilon) {
+        changes += 1;
+        if (eventStart == null) eventStart = transition;
+        eventEnd = transition;
+        observeSample(Math.floor(transition + epsilon));
+      }
+      bucketTransitionIndex += 1;
+    }
+    transitionIndex = bucketTransitionIndex;
     buckets.push({
       start: bucketStart,
       end: bucketEnd,
@@ -892,7 +923,10 @@ function sampledBucketsInWindow(row, start, end, width, mode, busFormat) {
       unknown,
       bus,
       value,
-      changes
+      binary: bus && finiteSeen && binary,
+      changes,
+      eventStart,
+      eventEnd
     });
   }
   return buckets;
@@ -1000,14 +1034,18 @@ function rowSegmentsInWindow(row, start, end, width, mode, totalColumns, busForm
 
 function sampleIndexForColumn(row, column) {
   if (!row.samples || !row.samples.length) return -1;
-  const index = Math.floor(Math.max(0, finiteNumber(column) || 0));
+  let position = Math.max(0, finiteNumber(column) || 0);
+  const nearestBoundary = Math.round(position);
+  if (nearestBoundary < row.samples.length
+      && Math.abs(position - nearestBoundary) <= 1e-7) {
+    position = nearestBoundary;
+  }
+  const index = Math.floor(position);
   return index < row.samples.length ? index : -1;
 }
 
 function discreteSampleIndexForColumn(row, column) {
-  if (!row.samples || !row.samples.length) return -1;
-  const index = Math.floor(Math.max(0, Number(column) || 0));
-  return index < row.samples.length ? index : -1;
+  return sampleIndexForColumn(row, column);
 }
 
 function appendAnalogUnknownRange(ranges, start, end) {
@@ -1325,10 +1363,17 @@ function chooseColumns(
       )
       : row;
     if (includeTransitions && mode !== 'analog') {
-      row.transitions.forEach((column) => {
-        if (column < rangeStart || column >= rangeEnd) return;
+      const rowTransitions = transitionColumnsForMode(row, mode).filter((column) => (
+        column >= rangeStart && column < rangeEnd
+      ));
+      const sparseTransitionLimit = Math.max(32, Math.floor(rowBudget * 0.5));
+      const preserveAllTransitions = rowTransitions.length <= sparseTransitionLimit;
+      rowTransitions.forEach((column) => {
         const segment = segmentAt(row, column + 1e-7);
-        add(column, segment && segment.kind === 'bus' ? 850 : 1000);
+        const transitionScore = preserveAllTransitions
+          ? 12000
+          : (segment && segment.kind === 'bus' ? 850 : 1000);
+        add(column, transitionScore);
       });
     }
     if (includeAnalog && analogRow.samples) {
@@ -1745,7 +1790,8 @@ function navigateCursor(payload) {
     found: true,
     rowIndex,
     column: targetColumn,
-    value: stateAtColumn(row, targetColumn, mode, analogFormat)
+    value: stateAtColumn(row, targetColumn, mode, analogFormat),
+    source: row.samples && row.samples.length ? 'samples' : 'wave'
   };
 }
 
@@ -2170,7 +2216,7 @@ function createSimplifiedModel(payload) {
   activeSession.rows.forEach((row) => {
     const mode = modes[row.index] || row.mode;
     if (mode === 'analog') return;
-    row.transitions.forEach((column) => {
+    transitionColumnsForMode(row, mode).forEach((column) => {
       if (column < rangeStart || column >= rangeEnd) return;
       busTransitions += 1;
     });
