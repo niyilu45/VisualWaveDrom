@@ -1147,6 +1147,17 @@
       return this.collapsedRows.has(Math.floor(Number(rowIndex)));
     }
 
+    isCollapsedRunStart(rowIndex) {
+      const index = Math.floor(Number(rowIndex));
+      return this.isRowCollapsed(index) && !this.isRowCollapsed(index - 1);
+    }
+
+    collapsedRunStart(rowIndex) {
+      let index = Math.floor(Number(rowIndex));
+      while (index > 0 && this.isRowCollapsed(index - 1)) index -= 1;
+      return index;
+    }
+
     updateCollapsedRowControls() {
       if (!this.expandAllRowsButton) return;
       const collapsedCount = this.collapsedRows.size;
@@ -1172,7 +1183,10 @@
 
     restoreVerticalScrollAnchor(anchor) {
       if (!anchor || !this.meta || !this.meta.rows.length) return;
-      const rowIndex = clamp(anchor.rowIndex, 0, this.meta.rows.length - 1);
+      const requestedIndex = clamp(anchor.rowIndex, 0, this.meta.rows.length - 1);
+      const rowIndex = this.isRowCollapsed(requestedIndex)
+        ? this.collapsedRunStart(requestedIndex)
+        : requestedIndex;
       const rowOffset = Math.min(
         Math.max(0, Number(anchor.offset) || 0),
         Math.max(0, this.rowHeight(rowIndex) - 1)
@@ -1251,7 +1265,9 @@
     }
 
     rowHeight(rowIndex) {
-      if (this.isRowCollapsed(rowIndex)) return COLLAPSED_ROW_HEIGHT;
+      if (this.isRowCollapsed(rowIndex)) {
+        return this.isCollapsedRunStart(rowIndex) ? COLLAPSED_ROW_HEIGHT : 0;
+      }
       if (this.modes[rowIndex] !== 'analog') return DEFAULT_ROW_HEIGHT;
       return clamp(
         Math.round(Number(this.rowHeights[rowIndex]) || DEFAULT_ROW_HEIGHT),
@@ -1425,15 +1441,28 @@
         const analogMode = this.modes[row.index] === 'analog';
         const waveColor = this.rowWaveColor(row.index);
         if (collapsed) {
+          if (!this.isCollapsedRunStart(row.index)) return '';
+          const runRows = [];
+          for (let index = row.index;
+            index < this.meta.rows.length && this.isRowCollapsed(index);
+            index += 1) {
+            runRows.push(this.meta.rows[index]);
+          }
+          const runEnd = runRows[runRows.length - 1].index;
+          const runActive = runRows.some((runRow) => runRow.index === this.activeCursorRow);
+          const runNames = runRows.map((runRow) => this.signalDisplayName(runRow.index));
           return `
-            <div class="scope-signal-row scope-signal-row-collapsed${row.index === this.activeCursorRow ? ' active' : ''}"
+            <div class="scope-signal-row scope-signal-row-collapsed${runActive ? ' active' : ''}"
                 data-row-index="${row.index}" data-scope-signal-row="${row.index}"
-                aria-label="已收起信号 ${escapeHtml(row.name)}"
+                data-scope-row-start="${row.index}" data-scope-row-end="${runEnd}"
+                role="group" aria-label="连续收起的 ${runRows.length} 个信号"
                 style="height:${rowHeight}px">
-              <button type="button" class="scope-row-collapse-button"
-                  data-scope-toggle-row="${row.index}" aria-expanded="false"
-                  title="展开信号：${escapeHtml(row.name)}"
-                  aria-label="展开信号 ${escapeHtml(row.name)}">+</button>
+              ${runRows.map((runRow, runIndex) => `
+                <button type="button" class="scope-row-collapse-button"
+                    data-scope-toggle-row="${runRow.index}" aria-expanded="false"
+                    title="展开信号：${escapeHtml(runNames[runIndex])}"
+                    aria-label="展开信号 ${escapeHtml(runNames[runIndex])}">+</button>
+              `).join('')}
             </div>
           `;
         }
@@ -3056,6 +3085,7 @@
         this.windowData.rows.forEach((rowResult) => {
           const rowIndex = rowResult.index;
           const rowHeight = this.rowHeight(rowIndex);
+          if (rowHeight <= 0) return;
           const rowTop = this.rowTop(rowIndex) - scrollTop;
           if (rowTop > height || rowTop + rowHeight < 0) return;
           if (this.isRowCollapsed(rowIndex)) return;
@@ -3067,6 +3097,7 @@
         this.windowData.rows.forEach((rowResult) => {
           const rowIndex = rowResult.index;
           const rowHeight = this.rowHeight(rowIndex);
+          if (rowHeight <= 0) return;
           const rowTop = this.rowTop(rowIndex) - scrollTop;
           if (rowTop > height || rowTop + rowHeight < 0) return;
           if (this.isRowCollapsed(rowIndex)) {
@@ -3981,7 +4012,9 @@
       this.cursorNavigationSequence += 1;
       this.activeCursorRow = next;
       this.signalList.querySelectorAll('[data-scope-signal-row]').forEach((row) => {
-        row.classList.toggle('active', Number(row.dataset.scopeSignalRow) === next);
+        const start = Number(row.dataset.scopeRowStart || row.dataset.scopeSignalRow);
+        const end = Number(row.dataset.scopeRowEnd || row.dataset.scopeSignalRow);
+        row.classList.toggle('active', next >= start && next <= end);
       });
       this.updateCursorControls();
       void this.updateCursorReadout();

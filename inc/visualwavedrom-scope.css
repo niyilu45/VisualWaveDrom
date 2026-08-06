@@ -412,10 +412,17 @@ body.scope-wave-view > #vim-help-modal {
 .scope-signal-row.scope-signal-row-collapsed {
   display: flex;
   align-items: center;
-  gap: 0;
+  gap: 2px;
   min-height: 18px;
   padding: 1px 7px 1px 10px;
+  overflow-x: auto;
+  overflow-y: hidden;
   background: #eef0f2;
+  scrollbar-width: none;
+}
+
+.scope-signal-row.scope-signal-row-collapsed::-webkit-scrollbar {
+  display: none;
 }
 
 .scope-signal-row.scope-signal-row-collapsed:hover,
@@ -424,6 +431,7 @@ body.scope-wave-view > #vim-help-modal {
 }
 
 .scope-signal-row-collapsed .scope-row-collapse-button {
+  flex: 0 0 16px;
   height: 14px;
   background: #ffffff;
   font-size: 12px;
