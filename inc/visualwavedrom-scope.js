@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260806-index-alignment-v1';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260806-cursor-continuation-v1';
   const DEFAULT_ROW_HEIGHT = 42;
   const MIN_ANALOG_ROW_HEIGHT = 28;
   const MAX_ANALOG_ROW_HEIGHT = 480;
@@ -11,6 +11,7 @@
   const OVERVIEW_HEIGHT = 76;
   const MAX_HISTORY = 100;
   const CURSOR_HIT_RADIUS = 10;
+  const CYCLE_DETAIL_MIN_PIXELS_PER_COLUMN = 1;
   const COLOR_PRESETS = [
     { name: '绿色', value: '#07853d' },
     { name: '青色', value: '#0097a7' },
@@ -365,6 +366,7 @@
       this.signalNameEditor = null;
       this.rowOffsets = [0];
       this.windowData = null;
+      this.rawCycleDetailActive = false;
       this.simplified = null;
       this.outputContent = '';
       this.viewStart = 0;
@@ -1939,6 +1941,35 @@
       return this.viewStart + clamp(x / Math.max(1, width), 0, 1) * (this.viewEnd - this.viewStart);
     }
 
+    isRawCycleDetailView(width) {
+      const span = this.viewEnd - this.viewStart;
+      return span > 0
+        && Number(width) / span >= CYCLE_DETAIL_MIN_PIXELS_PER_COLUMN;
+    }
+
+    hasExactWindowDetail(rowResult) {
+      const kind = rowResult && rowResult.data ? rowResult.data.kind : '';
+      if (kind !== 'segments' && kind !== 'points') return false;
+      const windowStart = Number(this.windowData && this.windowData.start);
+      const windowEnd = Number(this.windowData && this.windowData.end);
+      return Number.isFinite(windowStart)
+        && Number.isFinite(windowEnd)
+        && windowStart <= this.viewStart + 1e-7
+        && windowEnd >= this.viewEnd - 1e-7;
+    }
+
+    updateRawCycleDetailState(active) {
+      const next = Boolean(active);
+      if (next === this.rawCycleDetailActive) return;
+      this.rawCycleDetailActive = next;
+      this.log('scope-view', {
+        phase: 'cycle-detail',
+        active: next,
+        viewStart: this.viewStart,
+        viewEnd: this.viewEnd
+      });
+    }
+
     formatTime(column) {
       const value = column * this.meta.samplePeriod;
       const rounded = Math.abs(value) >= 1000
@@ -2193,26 +2224,28 @@
         if (segment.kind === 'bus' || mode === 'bus') {
           const top = yTop + 5;
           const bottom = yBottom - 5;
+          const segmentWidth = Math.max(0, x2 - x1);
+          const bevel = Math.min(4, segmentWidth / 2);
           context.fillStyle = 'rgba(0, 151, 167, 0.08)';
-          context.fillRect(x1, top, Math.max(1, x2 - x1), bottom - top);
+          context.fillRect(x1, top, Math.max(1, segmentWidth), bottom - top);
           context.strokeStyle = color;
           context.beginPath();
           context.moveTo(x1, (top + bottom) / 2);
-          context.lineTo(x1 + 4, top);
-          context.lineTo(Math.max(x1 + 4, x2 - 4), top);
+          context.lineTo(x1 + bevel, top);
+          context.lineTo(x2 - bevel, top);
           context.lineTo(x2, (top + bottom) / 2);
-          context.lineTo(Math.max(x1 + 4, x2 - 4), bottom);
-          context.lineTo(x1 + 4, bottom);
+          context.lineTo(x2 - bevel, bottom);
+          context.lineTo(x1 + bevel, bottom);
           context.closePath();
           context.stroke();
-          if (x2 - x1 > 38) {
+          if (segmentWidth > 38) {
             context.fillStyle = '#165d68';
             context.font = '11px "Segoe UI", sans-serif';
             context.textAlign = 'center';
             context.textBaseline = 'middle';
             const label = String(segment.value == null ? '' : segment.value);
             context.fillText(
-              compactBusLabel(label, x2 - x1),
+              compactBusLabel(label, segmentWidth),
               (x1 + x2) / 2,
               (top + bottom) / 2
             );
@@ -2509,20 +2542,24 @@
           }
         });
       }
-      if (this.selectedPoint && this.selectedPoint.rowIndex === rowIndex) {
-        const pointIndex = this.selectedPoint.pointIndex;
-        const column = columns[pointIndex];
-        if (column >= this.viewStart && column <= this.viewEnd) {
-          const x = this.xForColumn(column, width);
-          context.fillStyle = '#ffffff';
-          context.strokeStyle = '#b3261e';
-          context.lineWidth = 2;
-          context.beginPath();
-          context.arc(x, (yTop + yBottom) / 2, 5, 0, Math.PI * 2);
-          context.fill();
-          context.stroke();
-        }
-      }
+      this.drawSelectedPointMarker(context, rowIndex, yTop, yBottom, width);
+    }
+
+    drawSelectedPointMarker(context, rowIndex, yTop, yBottom, width) {
+      if (!this.selectedPoint || this.selectedPoint.rowIndex !== rowIndex
+          || !this.simplified || !this.simplified.model) return;
+      const pointIndex = this.selectedPoint.pointIndex;
+      const column = this.simplified.model.columns[pointIndex];
+      if (!Number.isFinite(Number(column))
+          || column < this.viewStart || column > this.viewEnd) return;
+      const x = this.xForColumn(column, width);
+      context.fillStyle = '#ffffff';
+      context.strokeStyle = '#b3261e';
+      context.lineWidth = 2;
+      context.beginPath();
+      context.arc(x, (yTop + yBottom) / 2, 5, 0, Math.PI * 2);
+      context.fill();
+      context.stroke();
     }
 
     drawCursors(context, width, height) {
@@ -2816,6 +2853,8 @@
       const context = resized.context;
       const width = resized.width;
       const height = resized.height;
+      const rawCycleDetail = this.isRawCycleDetailView(width);
+      this.updateRawCycleDetailState(rawCycleDetail);
       this.drawGrid(context, width, height);
       const scrollTop = this.plotViewport.scrollTop;
       if (this.windowData) {
@@ -2874,6 +2913,23 @@
               rowTop + rowHeight - 3,
               width,
               color
+            );
+          } else if (rawCycleDetail && this.hasExactWindowDetail(rowResult)) {
+            this.drawSegments(
+              context,
+              rowResult,
+              rowIndex,
+              rowTop + 3,
+              rowTop + rowHeight - 3,
+              width,
+              color
+            );
+            this.drawSelectedPointMarker(
+              context,
+              rowIndex,
+              rowTop + 3,
+              rowTop + rowHeight - 3,
+              width
             );
           } else {
             this.drawSimplifiedRow(
@@ -3079,25 +3135,51 @@
       );
     }
 
+    selectionZoomAnchor() {
+      const selection = this.columnSelection;
+      if (!selection || !Number.isFinite(Number(selection.start))) return null;
+      const firstColumn = clamp(
+        Math.floor(Number(selection.start)),
+        0,
+        Math.max(0, this.meta.totalColumns - 1)
+      );
+      return Math.min(this.meta.totalColumns, firstColumn + 0.5);
+    }
+
     zoom(factor, anchorColumn) {
       const span = this.viewEnd - this.viewStart;
       const minimum = Math.min(1, this.meta.totalColumns);
       const nextSpan = clamp(span * factor, minimum, this.meta.totalColumns);
       const activeCursorColumn = this.activeCursorColumn();
       const cursorAnchor = activeCursorColumn == null ? NaN : Number(activeCursorColumn);
+      const rawSelectedAnchor = this.selectionZoomAnchor();
+      const selectedAnchor = rawSelectedAnchor == null ? NaN : Number(rawSelectedAnchor);
       const explicitAnchor = anchorColumn == null ? NaN : Number(anchorColumn);
       const viewCenter = (this.viewStart + this.viewEnd) / 2;
       const cursorSelected = Boolean(this.activeCursor) && Number.isFinite(cursorAnchor);
+      const positionSelected = !cursorSelected && Number.isFinite(selectedAnchor);
       const anchor = cursorSelected
         ? cursorAnchor
-        : (Number.isFinite(explicitAnchor) ? explicitAnchor : viewCenter);
-      const ratio = cursorSelected
+        : (positionSelected
+          ? selectedAnchor
+          : (Number.isFinite(explicitAnchor) ? explicitAnchor : viewCenter));
+      const ratio = cursorSelected || positionSelected
         ? 0.5
         : (span > 0 ? clamp((anchor - this.viewStart) / span, 0, 1) : 0.5);
       let start = anchor - nextSpan * ratio;
       start = clamp(start, 0, Math.max(0, this.meta.totalColumns - nextSpan));
       this.viewStart = start;
       this.viewEnd = start + nextSpan;
+      this.log('scope-view', {
+        phase: 'zoom',
+        anchor,
+        anchorSource: cursorSelected
+          ? 'cursor'
+          : (positionSelected ? 'selection' : (Number.isFinite(explicitAnchor) ? 'pointer' : 'center')),
+        factor,
+        start: this.viewStart,
+        end: this.viewEnd
+      });
       this.scheduleWindowRequest();
       this.draw();
     }

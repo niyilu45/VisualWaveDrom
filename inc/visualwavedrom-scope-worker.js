@@ -69,10 +69,18 @@ function getAnalogSamples(source, row, rowIndex) {
   if (!candidate) return null;
   const values = new Float64Array(candidate.length);
   let validCount = 0;
+  let previousValue = Number.NaN;
+  let hasPreviousValue = false;
   for (let index = 0; index < candidate.length; index += 1) {
-    const value = finiteNumber(candidate[index]);
+    const rawValue = candidate[index];
+    const continuation = typeof rawValue === 'string' && rawValue.trim() === '.';
+    const value = continuation && hasPreviousValue
+      ? previousValue
+      : finiteNumber(rawValue);
     values[index] = value == null ? Number.NaN : value;
-    if (value != null) validCount += 1;
+    if (Number.isFinite(values[index])) validCount += 1;
+    previousValue = values[index];
+    hasPreviousValue = true;
   }
   return validCount ? values : null;
 }
@@ -496,11 +504,11 @@ function parseWaveSegments(signal) {
   let current = { kind: 'digital', state: 'x', value: 'x' };
   let clockMode = '';
 
-  function emit(start, end, next) {
-    if (!segments.length
-        || current.kind !== next.kind
-        || current.state !== next.state
-        || current.value !== next.value) {
+  function emit(start, end, next, continuation) {
+    const changed = current.kind !== next.kind
+      || current.state !== next.state
+      || current.value !== next.value;
+    if ((!segments.length && !continuation) || (segments.length && changed)) {
       transitions.push(start);
     }
     current = next;
@@ -543,7 +551,7 @@ function parseWaveSegments(signal) {
       continue;
     }
     if (character === '.' || character === ' ' || character === '|') {
-      emit(column, column + 1, current);
+      emit(column, column + 1, current, true);
       continue;
     }
     if (lower === 'p' || lower === 'n') {
@@ -673,6 +681,9 @@ function createSession(content) {
       clockRanges: parsedWave.clockRanges,
       gaps: parsedWave.gaps,
       samples: analogSamples,
+      initialTransition: !parsedWave.wave.length
+        || parsedWave.transitions.some((column) => Math.abs(column) < 1e-9),
+      sampleTransitionCache: new Map(),
       analogLevels: analogSamples ? buildAnalogLevels(analogSamples) : [],
       range: analogSamples ? analogRange(analogSamples) : null,
       busFormat: getBusFormat(source, row, rowIndex),
@@ -1455,8 +1466,34 @@ function inspectCursor(payload) {
   };
 }
 
-function edgeColumn(row, column, direction) {
-  const transitions = row.transitions || [];
+function sampleTransitionKey(value, mode) {
+  if (!Number.isFinite(value)) return 'unknown';
+  if (mode === 'digital') {
+    return value === 0 || value === 1 ? ('digital:' + value) : 'unknown';
+  }
+  return 'value:' + String(value);
+}
+
+function transitionColumnsForMode(row, mode) {
+  if (!row.samples || !row.samples.length) return row.transitions || [];
+  const cacheKey = mode === 'digital' ? 'digital' : 'numeric';
+  if (row.sampleTransitionCache && row.sampleTransitionCache.has(cacheKey)) {
+    return row.sampleTransitionCache.get(cacheKey);
+  }
+  const transitions = [];
+  if (row.initialTransition !== false) transitions.push(0);
+  let previous = sampleTransitionKey(row.samples[0], mode);
+  for (let index = 1; index < row.samples.length; index += 1) {
+    const current = sampleTransitionKey(row.samples[index], mode);
+    if (current !== previous) transitions.push(index);
+    previous = current;
+  }
+  if (row.sampleTransitionCache) row.sampleTransitionCache.set(cacheKey, transitions);
+  return transitions;
+}
+
+function edgeColumn(row, column, direction, mode) {
+  const transitions = transitionColumnsForMode(row, mode);
   const epsilon = 1e-7;
   if (direction > 0) {
     let low = 0;
@@ -1605,7 +1642,7 @@ function snapCursor(payload) {
       });
     }
   } else {
-    const transition = nearestSortedColumn(row.transitions, column);
+    const transition = nearestSortedColumn(transitionColumnsForMode(row, mode), column);
     if (transition != null) candidates.push({ column: transition, source: 'transition' });
   }
 
@@ -1681,7 +1718,7 @@ function navigateCursor(payload) {
   const kind = String(payload.kind || 'edge');
   let targetColumn = null;
   if (kind === 'edge') {
-    targetColumn = edgeColumn(row, column, direction);
+    targetColumn = edgeColumn(row, column, direction, mode);
   } else if (kind === 'value') {
     if (mode === 'analog') {
       targetColumn = analogValueColumn(row, column, direction, payload.value, analogFormat);
