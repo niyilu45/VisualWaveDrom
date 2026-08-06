@@ -2639,6 +2639,18 @@
       min-width: 0;
     }
 
+    .wave-collection-result-error {
+      grid-column: 1 / -1;
+      padding: 7px 9px;
+      border-left: 3px solid var(--error);
+      border-radius: 3px;
+      background: rgba(218, 82, 82, 0.08);
+      color: var(--error);
+      font-size: 0.72rem;
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
+
     .wave-collection-preview-toggle {
       min-width: 54px;
       min-height: 28px;

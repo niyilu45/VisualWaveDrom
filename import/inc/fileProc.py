@@ -524,8 +524,9 @@ def parse_table_data(file_path, options=None):
             "valueMode": signal_value_modes[index]
         }
         if index_column_index is None:
-            signal["targetLength"] = source_data_row_count
-            signal["fillTrailing"] = "x" if filter_columns else "."
+            # Rows without an explicit index are densely reindexed after filtering.
+            # Their length is the retained row count, not the source table length.
+            signal["targetLength"] = data_row_index
         signals.append(signal)
     return {
         "tableDetected": True,
@@ -641,8 +642,10 @@ def _complete_scalar_signal(parsed_signal, points, options):
     opts = options
     fill_leading = str(opts.get("fillLeading", opts.get("fillMissing", "x")) or "x")
     fill_gap = str(parsed_signal.get("fillGap", opts.get("fillGap") or ".") or ".")
+    default_trailing = "x" if bool(parsed_signal.get("explicitIndex")) else fill_gap
     fill_trailing = str(
-        parsed_signal.get("fillTrailing", opts.get("fillTrailing") or fill_gap) or fill_gap
+        parsed_signal.get("fillTrailing", opts.get("fillTrailing") or default_trailing)
+        or default_trailing
     )
     if len(fill_leading) != 1 or fill_leading not in WAVE_SYMBOLS:
         raise FileProcError("fillLeading must be one WaveDrom symbol")
@@ -714,7 +717,10 @@ def _complete_scalar_signal(parsed_signal, points, options):
         cursor = index + 1
         has_previous_value = True
 
-    target_length = max(cursor, int(parsed_signal.get("targetLength") or cursor))
+    target_length = max(
+        cursor,
+        int(parsed_signal.get("targetLength", opts.get("targetLength")) or cursor)
+    )
     while cursor < target_length:
         append_wave_state(fill_trailing)
         if all_numeric:

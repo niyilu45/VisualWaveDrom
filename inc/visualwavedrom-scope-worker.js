@@ -987,14 +987,10 @@ function rowSegmentsInWindow(row, start, end, width, mode, totalColumns, busForm
   return Object.assign({ kind: 'buckets', items: buckets }, decorations);
 }
 
-function sampleIndexForColumn(row, column, totalColumns) {
-  if (!row.samples || !row.samples.length) return 0;
-  if (totalColumns <= 1 || row.samples.length <= 1) return 0;
-  return clamp(
-    Math.round(column * (row.samples.length - 1) / (totalColumns - 1)),
-    0,
-    row.samples.length - 1
-  );
+function sampleIndexForColumn(row, column) {
+  if (!row.samples || !row.samples.length) return -1;
+  const index = Math.floor(Math.max(0, finiteNumber(column) || 0));
+  return index < row.samples.length ? index : -1;
 }
 
 function discreteSampleIndexForColumn(row, column) {
@@ -1015,30 +1011,20 @@ function appendAnalogUnknownRange(ranges, start, end) {
 
 function analogSampleBoundary(sampleIndex, sampleCount, totalColumns) {
   if (sampleIndex <= 0 || sampleCount <= 0) return 0;
-  if (sampleIndex >= sampleCount) return totalColumns;
-  return sampleIndex * totalColumns / sampleCount;
+  return clamp(sampleIndex, 0, totalColumns);
 }
 
 function analogWindow(row, start, end, width, totalColumns) {
   const sampleCount = row.samples ? row.samples.length : 0;
-  const scale = sampleCount <= 1 || totalColumns <= 1
-    ? 0
-    : (sampleCount - 1) / (totalColumns - 1);
-  const startIndex = clamp(Math.floor(start * scale), 0, Math.max(0, sampleCount - 1));
-  const endIndex = clamp(
-    Math.max(startIndex + 1, Math.ceil(end * scale) + 1),
-    startIndex + 1,
-    sampleCount
-  );
-  const sampleSpan = Math.max(1, endIndex - startIndex);
+  const startIndex = clamp(Math.floor(start), 0, sampleCount);
+  const endIndex = clamp(Math.ceil(end), startIndex, sampleCount);
+  const sampleSpan = Math.max(0, endIndex - startIndex);
   if (sampleSpan <= Math.max(64, width * 2)) {
     const points = [];
     const unknowns = [];
     for (let index = startIndex; index < endIndex && index < row.samples.length; index += 1) {
       const value = row.samples[index];
-      const column = row.samples.length <= 1
-        ? 0
-        : index * (totalColumns - 1) / (row.samples.length - 1);
+      const column = index;
       if (!Number.isFinite(value)) {
         points.push([column, null]);
         appendAnalogUnknownRange(
@@ -1050,6 +1036,7 @@ function analogWindow(row, start, end, width, totalColumns) {
         points.push([column, value]);
       }
     }
+    appendAnalogUnknownRange(unknowns, Math.max(start, sampleCount), end);
     return { kind: 'points', items: points, unknowns, range: row.range };
   }
 
@@ -1079,11 +1066,10 @@ function analogWindow(row, start, end, width, totalColumns) {
       );
     }
     if (!Number.isFinite(min) && !Number.isFinite(max)) continue;
-    const column = row.samples.length <= 1
-      ? 0
-      : sampleIndex * (totalColumns - 1) / (row.samples.length - 1);
+    const column = sampleIndex;
     items.push([column, min, max]);
   }
+  appendAnalogUnknownRange(unknowns, Math.max(start, sampleCount), end);
   return { kind: 'envelope', items, unknowns, range: row.range };
 }
 
@@ -1335,28 +1321,15 @@ function chooseColumns(
       });
     }
     if (includeAnalog && analogRow.samples) {
-      const sampleScale = analogRow.samples.length <= 1 || total <= 1
-        ? 0
-        : (analogRow.samples.length - 1) / (total - 1);
-      const sampleStart = clamp(
-        Math.floor(rangeStart * sampleScale),
-        0,
-        Math.max(0, analogRow.samples.length - 1)
-      );
-      const sampleEnd = clamp(
-        Math.max(sampleStart + 1, Math.ceil((rangeEnd - 1) * sampleScale) + 1),
-        sampleStart + 1,
-        analogRow.samples.length
-      );
+      const sampleStart = clamp(Math.floor(rangeStart), 0, analogRow.samples.length);
+      const sampleEnd = clamp(Math.ceil(rangeEnd), sampleStart, analogRow.samples.length);
       const rangeSamples = analogRow.samples.subarray(sampleStart, sampleEnd);
       lttbIndexes(
         rangeSamples,
         Math.min(rangeSamples.length, rowBudget)
       ).forEach((rangeSampleIndex) => {
         const sampleIndex = sampleStart + rangeSampleIndex;
-        const column = analogRow.samples.length <= 1
-          ? 0
-          : sampleIndex * (total - 1) / (analogRow.samples.length - 1);
+        const column = sampleIndex;
         if (column >= rangeStart && column < rangeEnd) add(column, 700);
       });
     }
@@ -1422,7 +1395,7 @@ function chooseColumns(
 function stateAtColumn(row, column, mode, analogFormat) {
   if (mode === 'analog') {
     const analogRow = analogRowForFormat(row, analogFormat, activeSession.totalColumns);
-    const index = sampleIndexForColumn(analogRow, column, activeSession.totalColumns);
+    const index = sampleIndexForColumn(analogRow, column);
     const value = analogRow.samples[index];
     return Number.isFinite(value) ? value : null;
   }
@@ -1551,8 +1524,12 @@ function analogValueColumn(row, column, direction, target, analogFormat) {
   const targetNumber = finiteNumber(target);
   const analogRow = analogRowForFormat(row, analogFormat, activeSession.totalColumns);
   if (targetNumber == null || !analogRow.samples || !analogRow.samples.length) return null;
-  const currentIndex = sampleIndexForColumn(analogRow, column, activeSession.totalColumns);
   const step = direction > 0 ? 1 : -1;
+  const currentIndex = clamp(
+    Math.floor(finiteNumber(column) || 0),
+    direction > 0 ? -1 : 0,
+    analogRow.samples.length
+  );
   const tolerance = Math.max(1e-9, Math.abs(targetNumber) * 1e-9);
   for (
     let index = currentIndex + step;
@@ -1561,9 +1538,7 @@ function analogValueColumn(row, column, direction, target, analogFormat) {
   ) {
     const value = analogRow.samples[index];
     if (!Number.isFinite(value) || Math.abs(value - targetNumber) > tolerance) continue;
-    return analogRow.samples.length <= 1
-      ? 0
-      : index * (activeSession.totalColumns - 1) / (analogRow.samples.length - 1);
+    return index;
   }
   return null;
 }
@@ -1602,8 +1577,8 @@ function conditionSegmentColumn(row, column, direction, mode, testCondition) {
 }
 
 function analogSampleColumn(sampleIndex, sampleCount, totalColumns) {
-  if (sampleCount <= 1 || totalColumns <= 1) return 0;
-  return sampleIndex * (totalColumns - 1) / (sampleCount - 1);
+  if (sampleIndex < 0 || sampleCount <= 0 || totalColumns <= 0) return Number.NaN;
+  return clamp(sampleIndex, 0, totalColumns - 1);
 }
 
 function snapCursor(payload) {
@@ -1622,11 +1597,13 @@ function snapCursor(payload) {
 
   if (mode === 'analog') {
     const analogRow = analogRowForFormat(row, payload.analogFormat, activeSession.totalColumns);
-    const sampleIndex = sampleIndexForColumn(analogRow, column, activeSession.totalColumns);
-    candidates.push({
-      column: analogSampleColumn(sampleIndex, analogRow.samples.length, activeSession.totalColumns),
-      source: 'sample'
-    });
+    const sampleIndex = sampleIndexForColumn(analogRow, column);
+    if (sampleIndex >= 0) {
+      candidates.push({
+        column: analogSampleColumn(sampleIndex, analogRow.samples.length, activeSession.totalColumns),
+        source: 'sample'
+      });
+    }
   } else {
     const transition = nearestSortedColumn(row.transitions, column);
     if (transition != null) candidates.push({ column: transition, source: 'transition' });
@@ -1657,11 +1634,8 @@ function conditionAnalogColumn(row, column, direction, testCondition, analogForm
   const analogRow = analogRowForFormat(row, analogFormat, activeSession.totalColumns);
   const samples = analogRow.samples;
   if (!samples || samples.length < 2) return null;
-  const scale = samples.length <= 1 || activeSession.totalColumns <= 1
-    ? 0
-    : (samples.length - 1) / (activeSession.totalColumns - 1);
   if (direction > 0) {
-    let index = Math.max(1, Math.floor(column * scale + 1e-7) + 1);
+    let index = Math.max(1, Math.floor(column + 1e-7) + 1);
     for (; index < samples.length; index += 1) {
       if (!testCondition(samples[index - 1]) && testCondition(samples[index])) {
         return analogSampleColumn(index, samples.length, activeSession.totalColumns);
@@ -1671,7 +1645,7 @@ function conditionAnalogColumn(row, column, direction, testCondition, analogForm
   }
   let index = Math.min(
     samples.length - 1,
-    Math.ceil(column * scale - 1e-7) - 1
+    Math.ceil(column - 1e-7) - 1
   );
   for (; index >= 1; index -= 1) {
     if (!testCondition(samples[index - 1]) && testCondition(samples[index])) {
@@ -2064,7 +2038,7 @@ function calculateAnalogMaxError(columns, modes, analogFormats) {
     );
     if (!analogRow.samples || !analogRow.samples.length) return;
     const selectedValues = columns.map((column) => {
-      const index = sampleIndexForColumn(analogRow, column, activeSession.totalColumns);
+      const index = sampleIndexForColumn(analogRow, column);
       return analogRow.samples[index];
     });
     const stride = Math.max(1, Math.floor(analogRow.samples.length / 50000));
@@ -2072,9 +2046,7 @@ function calculateAnalogMaxError(columns, modes, analogFormats) {
     for (let sampleIndex = 0; sampleIndex < analogRow.samples.length; sampleIndex += stride) {
       const actual = analogRow.samples[sampleIndex];
       if (!Number.isFinite(actual)) continue;
-      const column = analogRow.samples.length <= 1
-        ? 0
-        : sampleIndex * (activeSession.totalColumns - 1) / (analogRow.samples.length - 1);
+      const column = sampleIndex;
       if (column < columns[0] || column > columns[columns.length - 1]) continue;
       while (selectedIndex + 1 < columns.length && columns[selectedIndex + 1] < column) {
         selectedIndex += 1;

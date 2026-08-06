@@ -439,6 +439,13 @@
     function searchEntryStatus(entry) {
       if (!entry || typeof entry !== 'object') return null;
       const matches = Array.isArray(entry.matches) ? entry.matches : [];
+      if (entry.importError) {
+        return {
+          state: 'duplicate',
+          symbol: '×',
+          label: String(entry.importError)
+        };
+      }
       if (entry.status === 'duplicate-name' || entry.status === 'config-error') {
         return {
           state: 'duplicate',
@@ -1266,8 +1273,252 @@
       return 'parse_index_data';
     }
 
+    function firstSequenceField(line, delimiter) {
+      const source = String(line == null ? '' : line);
+      const trimmed = source.trim();
+      if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('//')) {
+        return null;
+      }
+      const normalized = String(delimiter || '').trim().toLowerCase();
+      if (normalized === 'comma' || normalized === 'csv') {
+        let cursor = 0;
+        while (cursor < source.length && /\s/.test(source[cursor])) cursor += 1;
+        let value = '';
+        if (source[cursor] === '"') {
+          cursor += 1;
+          while (cursor < source.length) {
+            if (source[cursor] !== '"') {
+              value += source[cursor];
+              cursor += 1;
+              continue;
+            }
+            if (source[cursor + 1] === '"') {
+              value += '"';
+              cursor += 2;
+              continue;
+            }
+            cursor += 1;
+            break;
+          }
+          while (cursor < source.length && /\s/.test(source[cursor])) cursor += 1;
+        } else {
+          const separator = source.indexOf(',', cursor);
+          if (separator < 0) return { value: source.slice(cursor).trim(), hasData: false };
+          value = source.slice(cursor, separator).trim();
+          cursor = separator;
+        }
+        return { value: value.trim(), hasData: source[cursor] === ',' };
+      }
+      if (normalized === 'tab' || normalized === 'tsv') {
+        const separator = source.indexOf('\t');
+        return {
+          value: (separator < 0 ? source : source.slice(0, separator)).trim(),
+          hasData: separator >= 0
+        };
+      }
+      const match = /^\s*(\S+)(?:\s+([\s\S]*))?$/.exec(source);
+      return match ? { value: match[1], hasData: match[2] !== undefined } : null;
+    }
+
+    function previewDataColumns(line, delimiter) {
+      const source = String(line == null ? '' : line);
+      const trimmed = source.trim();
+      if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('//')) return null;
+      const normalized = String(delimiter || '').trim().toLowerCase();
+      if (normalized === 'comma' || normalized === 'csv') {
+        const fields = [];
+        let value = '';
+        let quoted = false;
+        for (let index = 0; index < source.length; index += 1) {
+          const character = source[index];
+          if (quoted) {
+            if (character === '"' && source[index + 1] === '"') {
+              value += '"';
+              index += 1;
+            } else if (character === '"') {
+              quoted = false;
+            } else {
+              value += character;
+            }
+          } else if (character === '"' && !value.trim()) {
+            quoted = true;
+          } else if (character === ',') {
+            fields.push(value.trim());
+            value = '';
+          } else {
+            value += character;
+          }
+        }
+        fields.push(value.trim());
+        return fields;
+      }
+      if (normalized === 'tab' || normalized === 'tsv') {
+        return source.split('\t').map((value) => value.trim());
+      }
+      return trimmed.split(/\s+/);
+    }
+
+    function sequencePreviewError(lines, delimiter) {
+      const candidates = (Array.isArray(lines) ? lines : [])
+        .map((line, index) => {
+          const parsed = firstSequenceField(line && line.text, delimiter);
+          if (!parsed) return null;
+          return {
+            line: Math.max(1, Number(line && line.number || index + 1)),
+            text: String(line && line.text != null ? line.text : ''),
+            value: parsed.value,
+            hasData: parsed.hasData
+          };
+        })
+        .filter(Boolean);
+      if (!candidates.length) return '文件前 64 行中没有可检查的数据';
+
+      const validToken = (candidate) => candidate.hasData && /^\+?\d+$/.test(candidate.value);
+      let start = 0;
+      if (!validToken(candidates[0]) && candidates.length > 1
+          && validToken(candidates[1])
+          && /[A-Za-z_\u3400-\u9fff]/.test(candidates[0].text)) {
+        start = 1;
+      }
+      let previous = -1;
+      for (let index = start; index < candidates.length; index += 1) {
+        const candidate = candidates[index];
+        if (!/^\+?\d+$/.test(candidate.value)) {
+          return '第 ' + candidate.line + ' 行第一列不是整数序号：' + candidate.value;
+        }
+        if (!candidate.hasData) {
+          return '第 ' + candidate.line + ' 行只有序号，没有对应的数据列';
+        }
+        const value = Number(candidate.value.replace(/^\+/, ''));
+        if (!Number.isSafeInteger(value)) {
+          return '第 ' + candidate.line + ' 行序号超出可支持范围：' + candidate.value;
+        }
+        if (value <= previous) {
+          return '第 ' + candidate.line + ' 行序号 ' + value
+            + ' 没有大于上一序号 ' + previous;
+        }
+        previous = value;
+      }
+      return '';
+    }
+
+    function unsequencedPreviewError(lines, delimiter) {
+      const candidates = (Array.isArray(lines) ? lines : [])
+        .map((line, index) => {
+          const columns = previewDataColumns(line && line.text, delimiter);
+          if (!columns) return null;
+          return {
+            line: Math.max(1, Number(line && line.number || index + 1)),
+            text: String(line && line.text != null ? line.text : ''),
+            columns
+          };
+        })
+        .filter(Boolean);
+      if (!candidates.length) return '';
+      const numeric = (value) => String(value || '').trim() !== ''
+        && Number.isFinite(Number(value));
+      const validDataRow = (candidate) => {
+        if (candidate.columns.length <= 1) return true;
+        if (candidate.columns.length === 2) {
+          return numeric(candidate.columns[0]) && numeric(candidate.columns[1]);
+        }
+        return /[ij]/i.test(candidate.columns.join(''));
+      };
+      let start = 0;
+      if (!validDataRow(candidates[0]) && candidates.length > 1
+          && validDataRow(candidates[1])
+          && /[A-Za-z_\u3400-\u9fff]/.test(candidates[0].text)) {
+        start = 1;
+      }
+      for (let index = start; index < candidates.length; index += 1) {
+        const candidate = candidates[index];
+        if (validDataRow(candidate)) continue;
+        if (candidate.columns.length === 2) {
+          return '第 ' + candidate.line
+            + ' 行有两列，但不能作为数值 I/Q 复数解析；如果第一列是序号，请勾选“第一列为序号”';
+        }
+        return '第 ' + candidate.line
+          + ' 行包含过多数据列；如果第一列是序号，请勾选“第一列为序号”';
+      }
+      return '';
+    }
+
+    function presetForRawSequencePreview(preset, entryIndex) {
+      const copy = JSON.parse(JSON.stringify(preset));
+      const path = copy.paths && copy.paths[entryIndex];
+      if (!path) return copy;
+      path.usrGen = Object.assign({}, path.usrGen || {}, { hasSeq: false });
+      path.autoGen = Object.assign({}, path.autoGen || {}, { hasSeq: false });
+      return copy;
+    }
+
+    function revealEntryImportError(entryIndex) {
+      window.requestAnimationFrame(() => {
+        const row = resultsHost.querySelector('[data-entry-index="'
+          + String(entryIndex) + '"]');
+        if (row && typeof row.scrollIntoView === 'function') {
+          row.scrollIntoView({ block: 'nearest' });
+        }
+      });
+    }
+
+    async function validateSingleFileSelections(preset, variables, rootPath) {
+      const entries = Array.isArray(searchResult && searchResult.entries)
+        ? searchResult.entries
+        : [];
+      const targets = entries.filter((entry) => entry.importMode === 'single'
+        && Array.isArray(entry.matches)
+        && entry.matches.length > 0);
+      entries.forEach((entry) => { delete entry.importError; });
+      if (!targets.length) return true;
+
+      debug({
+        phase: 'single-parser-preflight-start',
+        entryIndexes: targets.map((entry) => entry.index)
+      });
+      for (const entry of targets) {
+        const payload = await post('single-preview', {
+          rootPath,
+          preset: presetForRawSequencePreview(preset, entry.index),
+          variables,
+          searchToken: searchResult.searchToken || '',
+          index: entry.index,
+          startLine: 1,
+          lineCount: 64
+        });
+        const validationError = entry.hasSeq
+          ? sequencePreviewError(payload.lines, entry.delimiter)
+          : unsequencedPreviewError(payload.lines, entry.delimiter);
+        if (!validationError) continue;
+        entry.importError = String(entry.name || '未命名信号')
+          + (entry.hasSeq ? ' 的“第一列为序号”设置有误：' : '：')
+          + validationError;
+        debug({
+          phase: 'single-parser-preflight-invalid',
+          entryIndex: entry.index,
+          relativePath: payload.relativePath || '',
+          message: entry.importError
+        });
+      }
+      const invalid = targets.filter((entry) => entry.importError);
+      if (!invalid.length) {
+        debug({ phase: 'single-parser-preflight-complete', valid: true });
+        return true;
+      }
+      renderSearchResults(searchResult);
+      setHint('导入前检查失败：' + invalid[0].importError, true);
+      revealEntryImportError(invalid[0].index);
+      debug({
+        phase: 'single-parser-preflight-complete',
+        valid: false,
+        invalidCount: invalid.length
+      });
+      return false;
+    }
+
     function syncEntryAutoGen(entry, reason) {
       if (!parsedPreset || !entry || !parsedPreset.paths[entry.index]) return;
+      delete entry.importError;
       const path = parsedPreset.paths[entry.index];
       const importMode = entry.importMode || 'single';
       const autoGen = Object.assign({}, path.autoGen || {}, {
@@ -1340,6 +1591,10 @@
       const errors = [];
       const owners = new Map();
       active.forEach((entry) => {
+        if (entry.importError) {
+          errors.push(String(entry.importError));
+          return;
+        }
         if (entry.status === 'config-error') {
           errors.push(entry.message || ('第 ' + (entry.index + 1) + ' 条规则配置有误'));
           return;
@@ -1429,7 +1684,9 @@
       scanPresetsButton.textContent = nextBusy && action === 'scan-presets'
         ? '正在搜索…'
         : '搜索预设';
-      confirmButton.textContent = nextBusy && action === 'import' ? '正在导入…' : '确定导入';
+      confirmButton.textContent = nextBusy
+        ? (action === 'import' ? '正在导入…' : (action === 'validate' ? '正在检查…' : '确定导入'))
+        : '确定导入';
       savePresetButton.textContent = nextBusy && action === 'save'
         ? '正在保存…'
         : (manualSavePathMode ? '保存到此路径' : '保存预设');
@@ -1553,11 +1810,15 @@
       resultsHost.innerHTML = '';
       entries.forEach((entry) => {
         const matches = Array.isArray(entry.matches) ? entry.matches : [];
+        const importError = String(entry.importError || '');
         const row = document.createElement('div');
+        row.dataset.entryIndex = String(entry.index);
         row.className = 'wave-collection-result '
-          + (entry.status === 'matched'
+          + (importError
+            ? 'is-error'
+            : (entry.status === 'matched'
             ? 'is-ready'
-            : (entry.status === 'multiple' ? 'is-warning' : 'is-error'));
+            : (entry.status === 'multiple' ? 'is-warning' : 'is-error')));
         const name = document.createElement('div');
         name.className = 'wave-collection-result-name';
         if (entry.importMode === 'table') {
@@ -1591,7 +1852,8 @@
         }
         const state = document.createElement('span');
         state.className = 'wave-collection-result-state';
-        if (entry.status === 'matched') state.textContent = '已匹配';
+        if (importError) state.textContent = '序号设置错误';
+        else if (entry.status === 'matched') state.textContent = '已匹配';
         else if (entry.status === 'multiple') state.textContent = matches.length + ' 个匹配，取第 1 个';
         else if (entry.status === 'duplicate-name') state.textContent = 'name重复';
         else if (entry.status === 'config-error') state.textContent = '配置错误';
@@ -1626,6 +1888,13 @@
         row.appendChild(name);
         row.appendChild(path);
         row.appendChild(actions);
+        if (importError) {
+          const error = document.createElement('div');
+          error.className = 'wave-collection-result-error';
+          error.textContent = importError;
+          error.setAttribute('role', 'alert');
+          row.appendChild(error);
+        }
         if (entry.importMode === 'single' && matches.length) {
           const config = document.createElement('div');
           config.className = 'wave-collection-single-config';
@@ -2646,6 +2915,21 @@
         return;
       }
       const rootPath = String(rootPathInput.value || '').trim();
+      let preflightValid = false;
+      setBusy(true, 'validate');
+      setHint('正在检查第一列和文件解析设置…', false);
+      try {
+        preflightValid = await validateSingleFileSelections(preset, variables, rootPath);
+      } catch (error) {
+        const message = error.message || String(error);
+        setHint('序号设置检查失败：' + message, true);
+        status(false, '导入前检查失败：' + message);
+        debug({ phase: 'single-parser-preflight-error', message });
+      } finally {
+        setBusy(false, '');
+      }
+      if (!preflightValid) return;
+
       const contextToken = typeof settings.getContextToken === 'function'
         ? settings.getContextToken()
         : '';
@@ -2709,9 +2993,32 @@
         busy = false;
         close();
       } catch (error) {
-        setHint(error.message || String(error), true);
-        status(false, '导入预设集合失败：' + (error.message || String(error)));
-        debug({ phase: 'import-error', message: error.message || String(error) });
+        const message = error.message || String(error);
+        const entries = Array.isArray(searchResult && searchResult.entries)
+          ? searchResult.entries
+          : [];
+        const failedEntry = entries.find((entry) => (entry.matches || []).some((match) => {
+          const candidates = [match.relativePath, match.fileName, match.path]
+            .map((value) => String(value || ''))
+            .filter(Boolean);
+          return candidates.some((value) => message.includes(value));
+        }));
+        if (failedEntry) {
+          failedEntry.importError = message;
+          renderSearchResults(searchResult);
+          revealEntryImportError(failedEntry.index);
+        }
+        setHint('导入失败：' + message, true);
+        status(false, '导入预设集合失败：' + message);
+        debug({
+          phase: 'import-error',
+          message,
+          failedEntryIndex: failedEntry ? failedEntry.index : -1,
+          progress: importProgressState,
+          sequenceSelections: entries
+            .filter((entry) => entry.importMode === 'single')
+            .map((entry) => ({ index: entry.index, hasSeq: !!entry.hasSeq }))
+        });
       } finally {
         setBusy(false, '');
       }

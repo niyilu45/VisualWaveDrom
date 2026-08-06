@@ -208,6 +208,53 @@ func TestPresetValueTableAddsLabelsWithoutChangingSamples(t *testing.T) {
 	}
 }
 
+func TestIndexedImportAllowsGapsAndKeepsUnknownEnds(t *testing.T) {
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := newImportManager(filepath.Dir(workingDirectory))
+	python := manager.pythonRuntime()
+	if !python.Available {
+		t.Skip("Python runtime is not available")
+	}
+	sourcePath := filepath.Join(t.TempDir(), "monotonic-gaps.txt")
+	if err = os.WriteFile(sourcePath, []byte("2 10\n5 20\n9 30\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := manager.runParser(importMapping{
+		Parser:      "parse_index_data",
+		SourcePath:  sourcePath,
+		DisplayPath: "monotonic-gaps.txt",
+		Options: map[string]any{
+			"hasIndex":    true,
+			"targetLength": 12,
+		},
+	}, python)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wave := stringValue(result["wave"]); wave != "x.=..=...=x." {
+		t.Fatalf("indexed gap wave = %q, expected %q", wave, "x.=..=...=x.")
+	}
+	samples, ok := result["samples"].([]any)
+	if !ok || len(samples) != 12 {
+		t.Fatalf("indexed gap samples = %#v, expected 12 samples", result["samples"])
+	}
+	expected := []any{nil, nil, 10, 10, 10, 20, 20, 20, 20, 30, nil, nil}
+	for index, value := range expected {
+		if value == nil {
+			if samples[index] != nil {
+				t.Fatalf("indexed gap sample %d = %#v, expected unknown", index, samples[index])
+			}
+			continue
+		}
+		if intValue(samples[index], -1) != value.(int) {
+			t.Fatalf("indexed gap sample %d = %#v, expected %d", index, samples[index], value)
+		}
+	}
+}
+
 func TestTableImportPassesPresetValueTable(t *testing.T) {
 	workingDirectory, err := os.Getwd()
 	if err != nil {
@@ -444,13 +491,64 @@ func TestTableImportFiltersRowsUsingDisabledControlColumn(t *testing.T) {
 	if !ok || len(labels) != 2 || labels[0] != "11" || labels[1] != "12" {
 		t.Fatalf("filtered values = %#v, expected [11 12]", updates[0]["data"])
 	}
-	if wave := stringValue(updates[0]["wave"]); wave != "==x." {
-		t.Fatalf("filtered wave = %q, expected reindexed data followed by unknowns %q", wave, "==x.")
+	if wave := stringValue(updates[0]["wave"]); wave != "==" {
+		t.Fatalf("filtered wave = %q, expected densely reindexed data %q", wave, "==")
 	}
 	samples, ok := updates[0]["samples"].([]any)
-	if !ok || len(samples) != 4 || intValue(samples[0], 0) != 11 ||
-		intValue(samples[1], 0) != 12 || samples[2] != nil || samples[3] != nil {
-		t.Fatalf("filtered samples = %#v, expected [11 12 nil nil]", updates[0]["samples"])
+	if !ok || len(samples) != 2 || intValue(samples[0], 0) != 11 ||
+		intValue(samples[1], 0) != 12 {
+		t.Fatalf("filtered samples = %#v, expected [11 12]", updates[0]["samples"])
+	}
+}
+
+func TestTableImportDoesNotExtendFilteredUnindexedContinuationData(t *testing.T) {
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := newImportManager(filepath.Dir(workingDirectory))
+	if python := manager.pythonRuntime(); !python.Available {
+		t.Skip("Python runtime is not available")
+	}
+	sourcePath := filepath.Join(t.TempDir(), "long-filtered-signals.csv")
+	data := "Value,Wave,Keep\n" + strings.Repeat("7,x,0\n", 10000) +
+		"7,1,1\n" + strings.Repeat("7,.,1\n", 9)
+	if err = os.WriteFile(sourcePath, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := manager.runTableLocalFileWithOptions(sourcePath, tableImportOptions{
+		HeaderRow: 1,
+		Delimiter: "comma",
+		Columns: []collectionColumnConfig{
+			{Source: "Value", Enabled: true, Name: "Value"},
+			{Source: "Wave", Enabled: true, Name: "Wave"},
+			{Source: "Keep", Enabled: false, Name: "Keep", Filter: "=1"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updates, ok := result["updates"].([]map[string]any)
+	if !ok || len(updates) != 2 {
+		t.Fatalf("unexpected long filtered updates: %#v", result["updates"])
+	}
+	if pointCount := intValue(updates[0]["pointCount"], 0); pointCount != 10 {
+		t.Fatalf("filtered point count = %d, expected 10", pointCount)
+	}
+	if wave := stringValue(updates[0]["wave"]); wave != "=........." {
+		t.Fatalf("filtered continuation wave = %q, expected %q", wave, "=.........")
+	}
+	samples, ok := updates[0]["samples"].([]any)
+	if !ok || len(samples) != 10 {
+		t.Fatalf("filtered samples length = %d, expected 10", len(samples))
+	}
+	for index, sample := range samples {
+		if intValue(sample, 0) != 7 {
+			t.Fatalf("filtered sample %d = %#v, expected 7", index, sample)
+		}
+	}
+	if wave := stringValue(updates[1]["wave"]); wave != "1........." {
+		t.Fatalf("filtered literal continuation wave = %q, expected %q", wave, "1.........")
 	}
 }
 
@@ -501,8 +599,8 @@ func TestTableImportRecognizesMultiStateIntegerColumnAsData(t *testing.T) {
 	if !ok || len(filteredUpdates) != 1 {
 		t.Fatalf("unexpected filtered state updates: %#v", filtered["updates"])
 	}
-	if wave := stringValue(filteredUpdates[0]["wave"]); wave != "=.x." {
-		t.Fatalf("filtered CurSt wave = %q, expected reindexed data and unknown tail %q", wave, "=.x.")
+	if wave := stringValue(filteredUpdates[0]["wave"]); wave != "=." {
+		t.Fatalf("filtered CurSt wave = %q, expected retained continuation data %q", wave, "=.")
 	}
 	if kind := stringValue(filteredUpdates[0]["sampleKind"]); kind != "bus" {
 		t.Fatalf("filtered CurSt sample kind = %q, expected bus", kind)

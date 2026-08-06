@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260805-bus-value-table-v1';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260806-index-alignment-v1';
   const DEFAULT_ROW_HEIGHT = 42;
   const MIN_ANALOG_ROW_HEIGHT = 28;
   const MAX_ANALOG_ROW_HEIGHT = 480;
@@ -2769,10 +2769,24 @@
     drawColumnSelection(context, width, height) {
       const selection = this.columnSelection;
       if (!selection || !this.meta.rows[selection.rowIndex]) return;
+      if (selection.end <= this.viewStart || selection.start >= this.viewEnd) return;
+      const singleColumn = selection.end - selection.start === 1;
+      if (singleColumn) {
+        const x = clamp(this.xForColumn(selection.start + 0.5, width), 0, width);
+        context.save();
+        context.strokeStyle = '#2f73bf';
+        context.lineWidth = 1.75;
+        context.setLineDash([10, 6]);
+        context.beginPath();
+        context.moveTo(x, 0);
+        context.lineTo(x, height);
+        context.stroke();
+        context.restore();
+        return;
+      }
       const rowTop = this.rowTop(selection.rowIndex) - this.plotViewport.scrollTop;
       const rowHeight = this.rowHeight(selection.rowIndex);
       if (rowTop >= height || rowTop + rowHeight <= 0) return;
-      if (selection.end <= this.viewStart || selection.start >= this.viewEnd) return;
       const x1 = clamp(this.xForColumn(selection.start, width), 0, width);
       const x2 = clamp(this.xForColumn(selection.end, width), 0, width);
       const left = Math.min(x1, x2);
@@ -3144,6 +3158,7 @@
       }
       this.updateColumnBackgroundAvailability();
       this.updateMeasurements();
+      this.scheduleCursorReadout();
     }
 
     onPlotPointerDown(event) {
@@ -3200,6 +3215,7 @@
         this.selectedPoint = null;
         this.updatePointEditor();
         this.updateMeasurements();
+        void this.updateCursorReadout();
         this.draw();
         this.setStatus('已选择连接线：' + hitConnection.label + '，按 Del 删除');
         this.log('scope-connection', {
@@ -3461,6 +3477,7 @@
         this.selectedConnectionId = '';
         this.updatePointEditor();
         this.updateMeasurements();
+        void this.updateCursorReadout();
       } else {
         this.connectionDraftStart = null;
         this.connectionHover = null;
@@ -3693,6 +3710,26 @@
       return String(value);
     }
 
+    readoutReference() {
+      const cursorColumn = this.activeCursorColumn();
+      if (this.activeCursor && cursorColumn != null) {
+        return {
+          column: cursorColumn,
+          label: this.activeCursor,
+          title: this.activeCursor
+        };
+      }
+      const selection = this.columnSelection;
+      if (!selection || !Number.isFinite(Number(selection.start))) return null;
+      const column = clamp(
+        Math.floor(Number(selection.start)),
+        0,
+        Math.max(0, this.meta.totalColumns - 1)
+      );
+      const columnLabel = '第 ' + (column + 1) + ' 列';
+      return { column, label: columnLabel, title: columnLabel };
+    }
+
     scheduleCursorReadout() {
       this.cursorReadoutQueued = true;
       if (this.cursorReadoutFrame || this.cursorReadoutInFlight) return;
@@ -3717,17 +3754,17 @@
     async updateCursorReadout() {
       if (!this.meta || !this.signalList) return;
       const sequence = ++this.cursorInspectSequence;
-      const column = this.activeCursorColumn();
-      if (column == null) {
+      const reference = this.readoutReference();
+      if (!reference) {
         this.signalList.querySelectorAll('[data-scope-cursor-value-row]').forEach((target) => {
           target.textContent = '游标：--';
-          target.title = '请先选择 A 或 B 游标';
+          target.title = '请选择 A/B 游标或波形列';
         });
         return;
       }
       try {
         const result = await this.worker.call('inspect', {
-          column,
+          column: reference.column,
           modes: this.modes,
           busFormats: this.busFormats,
           analogFormats: this.analogFormats
@@ -3738,8 +3775,8 @@
             '[data-scope-cursor-value-row="' + row.index + '"]'
           );
           if (!target) return;
-          target.textContent = this.activeCursor + '：' + this.formatCursorValue(row.value);
-          target.title = this.activeCursor + ' @ ' + this.formatTime(result.column)
+          target.textContent = reference.label + '：' + this.formatCursorValue(row.value);
+          target.title = reference.title + ' @ ' + this.formatTime(result.column)
             + ' = ' + this.formatCursorValue(row.value);
         });
       } catch (error) {
