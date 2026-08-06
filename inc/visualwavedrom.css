@@ -2341,7 +2341,7 @@
 
     .wave-collection-preset-nav-item {
       display: grid;
-      grid-template-columns: 24px minmax(0, 1fr);
+      grid-template-columns: 24px minmax(0, 1fr) 16px;
       align-items: center;
       column-gap: 6px;
       width: 100%;
@@ -2387,6 +2387,28 @@
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+    }
+
+    .wave-collection-preset-nav-status {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 16px;
+      height: 16px;
+      font: 800 0.72rem/1 Consolas, "Courier New", monospace;
+    }
+
+    .wave-collection-preset-nav-status.is-missing,
+    .wave-collection-preset-nav-status.is-duplicate {
+      color: var(--error);
+    }
+
+    .wave-collection-preset-nav-status.is-matched {
+      color: var(--success);
+    }
+
+    .wave-collection-preset-nav-status.is-multiple {
+      color: var(--warning);
     }
 
     .wave-collection-preset-editor-shell {

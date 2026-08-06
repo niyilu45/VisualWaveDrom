@@ -436,6 +436,69 @@
       debug({ phase: 'preset-navigation-jump', index, line: range.line });
     }
 
+    function searchEntryStatus(entry) {
+      if (!entry || typeof entry !== 'object') return null;
+      const matches = Array.isArray(entry.matches) ? entry.matches : [];
+      if (entry.status === 'duplicate-name' || entry.status === 'config-error') {
+        return {
+          state: 'duplicate',
+          symbol: '×',
+          label: entry.message
+            || (entry.status === 'duplicate-name' ? 'name 重复' : '配置错误')
+        };
+      }
+      if (matches.length === 1) {
+        return { state: 'matched', symbol: '✓', label: '搜索到 1 个文件' };
+      }
+      if (matches.length > 1) {
+        return {
+          state: 'multiple',
+          symbol: '!',
+          label: '搜索到 ' + matches.length + ' 个文件，默认取第一个'
+        };
+      }
+      return {
+        state: 'missing',
+        symbol: '!',
+        label: entry.message || '未搜索到文件'
+      };
+    }
+
+    function searchEntriesByIndex(payload) {
+      const entries = Array.isArray(payload && payload.entries) ? payload.entries : [];
+      const indexed = new Map();
+      entries.forEach((entry, fallbackIndex) => {
+        const parsedIndex = Number(entry && entry.index);
+        const entryIndex = Number.isInteger(parsedIndex) ? parsedIndex : fallbackIndex;
+        indexed.set(entryIndex, entry);
+      });
+      return indexed;
+    }
+
+    function renderPresetNavigationSearchStates(payload) {
+      if (!presetNavigation) return;
+      const entries = searchEntriesByIndex(payload);
+      presetNavigation.querySelectorAll('.wave-collection-preset-nav-item').forEach((button) => {
+        const previous = button.querySelector('.wave-collection-preset-nav-status');
+        if (previous) previous.remove();
+        const baseAriaLabel = button.dataset.baseAriaLabel || button.getAttribute('aria-label') || '';
+        const baseTitle = button.dataset.baseTitle || button.title || '';
+        const entry = entries.get(Number(button.dataset.pathIndex));
+        const statusInfo = searchEntryStatus(entry);
+        button.setAttribute('aria-label', statusInfo
+          ? (baseAriaLabel + '，' + statusInfo.label)
+          : baseAriaLabel);
+        button.title = statusInfo ? (baseTitle + ' · ' + statusInfo.label) : baseTitle;
+        if (!statusInfo) return;
+        const statusIcon = document.createElement('span');
+        statusIcon.className = 'wave-collection-preset-nav-status is-' + statusInfo.state;
+        statusIcon.textContent = statusInfo.symbol;
+        statusIcon.title = statusInfo.label;
+        statusIcon.setAttribute('aria-hidden', 'true');
+        button.appendChild(statusIcon);
+      });
+    }
+
     function renderPresetNavigation(preset, text) {
       if (!presetNavigation) return;
       const paths = preset && Array.isArray(preset.paths) ? preset.paths : [];
@@ -458,9 +521,11 @@
         button.type = 'button';
         button.className = 'wave-collection-preset-nav-item';
         button.dataset.pathIndex = String(index);
-        button.setAttribute('aria-label', (index + 1) + '. ' + label);
-        button.title = label + ' · paths[' + index + ']'
+        button.dataset.baseAriaLabel = (index + 1) + '. ' + label;
+        button.setAttribute('aria-label', button.dataset.baseAriaLabel);
+        button.dataset.baseTitle = label + ' · paths[' + index + ']'
           + (range ? (' · 第 ' + range.line + ' 行') : '');
+        button.title = button.dataset.baseTitle;
         const number = document.createElement('span');
         number.className = 'wave-collection-preset-nav-index';
         number.textContent = String(index + 1);
@@ -473,6 +538,7 @@
         fragment.appendChild(button);
       });
       presetNavigation.appendChild(fragment);
+      renderPresetNavigationSearchStates(searchResult);
       if (activePresetNavigationIndex >= paths.length) activePresetNavigationIndex = -1;
       setActivePresetNavigation(activePresetNavigationIndex);
     }
@@ -601,11 +667,13 @@
 
     function clearSearchMarkers() {
       if (presetCodeEditor) presetCodeEditor.clearGutter(SEARCH_GUTTER);
+      renderPresetNavigationSearchStates(null);
     }
 
     function renderSearchMarkers(payload) {
-      if (!presetCodeEditor) return;
       clearSearchMarkers();
+      renderPresetNavigationSearchStates(payload);
+      if (!presetCodeEditor) return;
       const lines = findPresetPathObjectLines(getPresetEditorValue());
       const entries = Array.isArray(payload && payload.entries) ? payload.entries : [];
       const markersByLine = new Map();
@@ -615,24 +683,10 @@
           : fallbackIndex;
         const lineNumber = lines[entryIndex];
         if (!lineNumber) return;
-        const matches = Array.isArray(entry.matches) ? entry.matches : [];
-        let state = 'missing';
-        let symbol = '!';
-        let label = '未搜索到文件';
-        if (entry.status === 'duplicate-name' || entry.status === 'config-error') {
-          state = 'duplicate';
-          symbol = '×';
-          label = entry.message || (entry.status === 'duplicate-name' ? 'name 重复' : '配置错误');
-        } else if (matches.length === 1) {
-          state = 'matched';
-          symbol = '✓';
-          label = '搜索到 1 个文件';
-        } else if (matches.length > 1) {
-          state = 'multiple';
-          label = '搜索到 ' + matches.length + ' 个文件，默认取第一个';
-        }
+        const statusInfo = searchEntryStatus(entry);
+        if (!statusInfo) return;
         if (!markersByLine.has(lineNumber)) markersByLine.set(lineNumber, []);
-        markersByLine.get(lineNumber).push({ state, symbol, label });
+        markersByLine.get(lineNumber).push(statusInfo);
       });
       markersByLine.forEach((items, lineNumber) => {
         const marker = document.createElement('span');
