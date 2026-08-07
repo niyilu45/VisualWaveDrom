@@ -335,6 +335,21 @@ function parseAnalogValue(value, analogFormat) {
     : numeric;
 }
 
+function conditionSeparatorLength(expression, index, separator) {
+  if (separator === ',') return expression[index] === ',' ? 1 : 0;
+  const symbol = separator === 'or' ? '||' : '&&';
+  if (expression.slice(index, index + symbol.length) === symbol) return symbol.length;
+
+  const word = separator.toLowerCase();
+  if (expression.slice(index, index + word.length).toLowerCase() !== word) return 0;
+  const previous = index > 0 ? expression[index - 1] : '';
+  const next = expression[index + word.length] || '';
+  const isIdentifierCharacter = (character) => /[A-Za-z0-9_]/.test(character);
+  return !isIdentifierCharacter(previous) && !isIdentifierCharacter(next)
+    ? word.length
+    : 0;
+}
+
 function splitConditionParts(expression, separator) {
   const parts = [];
   let start = 0;
@@ -358,10 +373,11 @@ function splitConditionParts(expression, separator) {
       quote = character;
       continue;
     }
-    if (expression.slice(index, index + separator.length) === separator) {
+    const separatorLength = conditionSeparatorLength(expression, index, separator);
+    if (separatorLength > 0) {
       parts.push(expression.slice(start, index));
-      start = index + separator.length;
-      index += separator.length - 1;
+      start = index + separatorLength;
+      index += separatorLength - 1;
     }
   }
   if (quote) throw new Error('条件中的引号没有闭合');
@@ -435,18 +451,29 @@ function compileCondition(expression, mode) {
   const source = String(expression == null ? '' : expression).trim();
   if (!source) throw new Error('条件不能为空');
   if (source.length > 256) throw new Error('条件长度不能超过 256 个字符');
-  const orParts = splitConditionParts(source, '||');
-  if (orParts.length > 16) throw new Error('条件组合数量过多');
+  const sequenceParts = splitConditionParts(source, ',');
+  if (sequenceParts.length > 16) throw new Error('连续条件不能超过 16 个 cycle');
   let atomCount = 0;
-  const groups = orParts.map((orPart) => {
-    const andParts = splitConditionParts(orPart, '&&');
-    atomCount += andParts.length;
-    if (atomCount > 32) throw new Error('条件组合数量过多');
-    return andParts.map((atom) => compileConditionAtom(atom, mode));
+  let groupCount = 0;
+  const sequence = sequenceParts.map((sequencePart) => {
+    const orParts = splitConditionParts(sequencePart, 'or');
+    groupCount += orParts.length;
+    if (groupCount > 32) throw new Error('条件组合数量过多');
+    const groups = orParts.map((orPart) => {
+      const andParts = splitConditionParts(orPart, 'and');
+      atomCount += andParts.length;
+      if (atomCount > 64) throw new Error('条件组合数量过多');
+      return andParts.map((atom) => compileConditionAtom(atom, mode));
+    });
+    return function testSequenceItem(value) {
+      return groups.some((group) => group.every((test) => test(value)));
+    };
   });
-  return function testCondition(value) {
-    return groups.some((group) => group.every((test) => test(value)));
+  const testCondition = function testCondition(value) {
+    return sequence[0](value);
   };
+  testCondition.sequence = sequence;
+  return testCondition;
 }
 
 function stateKind(character) {
@@ -1737,8 +1764,48 @@ function conditionAnalogColumn(row, column, direction, testCondition, analogForm
   return null;
 }
 
+function conditionSequenceColumn(row, column, direction, mode, testCondition, analogFormat) {
+  const sequence = Array.isArray(testCondition.sequence) ? testCondition.sequence : [];
+  if (sequence.length < 2) return null;
+  const segments = row.segments || [];
+  const lastSegment = segments.length ? segments[segments.length - 1] : null;
+  const rowColumnCount = row.samples && row.samples.length
+    ? row.samples.length
+    : Math.ceil(lastSegment ? lastSegment.end : String(row.wave || '').length);
+  const maxStart = rowColumnCount - sequence.length;
+  if (maxStart < 0) return null;
+
+  const matchesAt = (startColumn) => sequence.every((test, offset) => (
+    test(stateAtColumn(row, startColumn + offset, mode, analogFormat))
+  ));
+  const epsilon = 1e-7;
+  if (direction > 0) {
+    const firstStart = Math.max(0, Math.floor(column + epsilon) + 1);
+    for (let start = firstStart; start <= maxStart; start += 1) {
+      if (matchesAt(start)) return start;
+    }
+    return null;
+  }
+
+  const firstStart = Math.min(maxStart, Math.ceil(column - epsilon) - 1);
+  for (let start = firstStart; start >= 0; start -= 1) {
+    if (matchesAt(start)) return start;
+  }
+  return null;
+}
+
 function conditionRisingColumn(row, column, direction, mode, expression, analogFormat) {
   const testCondition = compileCondition(expression, mode);
+  if (Array.isArray(testCondition.sequence) && testCondition.sequence.length > 1) {
+    return conditionSequenceColumn(
+      row,
+      column,
+      direction,
+      mode,
+      testCondition,
+      analogFormat
+    );
+  }
   return mode === 'analog'
     ? conditionAnalogColumn(row, column, direction, testCondition, analogFormat)
     : conditionSegmentColumn(row, column, direction, mode, testCondition);

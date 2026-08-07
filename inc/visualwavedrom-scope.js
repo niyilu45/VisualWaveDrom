@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260806-sparse-events-v2';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260807-condition-sequence-v1';
   const DEFAULT_ROW_HEIGHT = 42;
   const COLLAPSED_ROW_HEIGHT = 18;
   const MIN_ANALOG_ROW_HEIGHT = 28;
@@ -525,9 +525,9 @@
             <button type="button" class="scope-cursor-choice" id="scope-cursor-b" aria-pressed="false">B</button>
             <span class="scope-cursor-signal" id="scope-cursor-signal"></span>
             <label>跳转
-              <input type="text" id="scope-cursor-jump" placeholder="1 或 &gt;=10"
+              <input type="text" id="scope-cursor-jump" placeholder="1,2 或 &gt;=1 and &lt;=2"
                   aria-label="游标跳转值或条件"
-                  title="留空跳到任意变化边沿；无比较符时按相等处理；支持 ==、!=、&gt;、&gt;=、&lt;、&lt;=、&amp;&amp;、||" disabled>
+                  title="留空跳到任意变化边沿；支持 and、or、&amp;&amp;、||；逗号表示连续 cycle 条件" disabled>
             </label>
             <button type="button" class="scope-icon-btn scope-small-icon" id="scope-cursor-prev"
                 title="跳到上一个匹配边沿（键盘左方向键）" aria-label="跳到上一个匹配边沿" disabled>◀</button>

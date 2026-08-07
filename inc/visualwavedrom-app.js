@@ -3568,6 +3568,88 @@ ${lines.join('\n')}`;
       return i;
     }
 
+    function findTopLevelPropertyValueRange(text, key) {
+      const source = String(text || '');
+      const expectedKey = String(key || '');
+      let depth = 0;
+      let inString = false;
+      let escape = false;
+      let stringStart = -1;
+
+      for (let i = 0; i < source.length; i++) {
+        const ch = source[i];
+        if (inString) {
+          if (escape) {
+            escape = false;
+            continue;
+          }
+          if (ch === '\\') {
+            escape = true;
+            continue;
+          }
+          if (ch !== '"') continue;
+
+          inString = false;
+          if (depth !== 1 || stringStart < 0) continue;
+          let decodedKey = '';
+          try {
+            decodedKey = JSON.parse(source.slice(stringStart, i + 1));
+          } catch (_e) {
+            continue;
+          }
+          let colon = i + 1;
+          while (colon < source.length && /\s/.test(source[colon])) colon++;
+          if (decodedKey !== expectedKey || source[colon] !== ':') continue;
+          let valueStart = colon + 1;
+          while (valueStart < source.length && /\s/.test(source[valueStart])) valueStart++;
+          return {
+            keyStart: stringStart,
+            keyEnd: i + 1,
+            valueStart,
+            valueEnd: findJsonValueEnd(source, valueStart)
+          };
+        }
+
+        if (ch === '"') {
+          inString = true;
+          stringStart = i;
+          continue;
+        }
+        if (ch === '{' || ch === '[') depth++;
+        else if (ch === '}' || ch === ']') depth--;
+      }
+      return null;
+    }
+
+    function replaceTopLevelStringFieldInSource(text, key, newValue) {
+      const source = String(text || '');
+      let parsed;
+      try {
+        parsed = JSON.parse(source);
+      } catch (_e) {
+        return source;
+      }
+      if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') return source;
+
+      const existing = findTopLevelPropertyValueRange(source, key);
+      const encodedValue = JSON.stringify(String(newValue == null ? '' : newValue));
+      if (existing) {
+        return source.slice(0, existing.valueStart) + encodedValue + source.slice(existing.valueEnd);
+      }
+
+      const rootClose = source.lastIndexOf('}');
+      if (rootClose < 0) return source;
+      const beforeClose = source.slice(0, rootClose).replace(/\s*$/, '');
+      const rootIndent = getIndentAt(source, rootClose) || '';
+      const propertyIndent = rootIndent + '  ';
+      const prefix = Object.keys(parsed).length ? ',\n' : '\n';
+      return beforeClose
+        + prefix
+        + propertyIndent + JSON.stringify(String(key)) + ': ' + encodedValue + '\n'
+        + rootIndent
+        + source.slice(rootClose);
+    }
+
     function flattenWaveText(node) {
       if (node == null) return '';
       if (typeof node === 'string') return node;
@@ -11730,12 +11812,21 @@ ${lines.join('\n')}`;
       [...gmarks.querySelectorAll(':scope > text')].forEach((textEl) => {
         const y = parseFloat(textEl.getAttribute('y') || '0');
         const field = y < 0 ? 'head' : 'foot';
-        if (!parsed[field]) return;
+        const usesTitleAsHead = field === 'head'
+          && !parsed.head
+          && typeof parsed.title === 'string';
+        if (!parsed[field] && !usesTitleAsHead) return;
 
         textEl.classList.add('wave-headfoot-text');
+        if (usesTitleAsHead) textEl.classList.add('wave-title-text');
         textEl.addEventListener('click', (e) => {
           if (!isTextEditModeActive()) return;
           e.stopPropagation();
+          if (usesTitleAsHead) {
+            const tag = getSavedTagByName(editingWaveDocumentName);
+            if (tag) startWaveDocumentTitleInlineEdit(tag, textEl);
+            return;
+          }
           startHeadFootInlineEdit(textEl, field);
         });
       });
@@ -16138,6 +16229,162 @@ ${lines.join('\n')}`;
       vwdDebugLog('wave-library', { phase: 'focus-document', documentName: documentName, found: !!target });
     }
 
+    function startWaveDocumentTitleInlineEdit(tag, titleEl) {
+      if (!isTextEditModeActive() || !tag || !titleEl) return;
+      if (tag.name !== editingWaveDocumentName || inlineEditActive) return;
+      exitWavePaintMode('wave-title');
+
+      let parsed;
+      try {
+        parsed = JSON.parse(editor.value || '');
+      } catch (_e) {
+        setStatus(false, '标题修改失败：当前 JSON 无法解析');
+        vwdDebugLog('wave-title', {
+          phase: 'open-error',
+          documentName: tag.name,
+          reason: 'invalid-json'
+        });
+        return;
+      }
+
+      const explicitTitle = typeof parsed.title === 'string' ? parsed.title : '';
+      const fallbackHead = parsed.head && typeof parsed.head.text === 'string'
+        ? parsed.head.text
+        : '';
+      const oldValue = explicitTitle || fallbackHead || getSavedTagTitle(tag);
+      const rect = titleEl.getBoundingClientRect();
+      const overlay = document.createElement('input');
+      overlay.className = 'wave-text-edit-overlay wave-document-title-overlay';
+      overlay.type = 'text';
+      overlay.value = oldValue;
+      overlay.setAttribute('aria-label', '波形图标题');
+      overlay.style.position = 'fixed';
+      overlay.style.top = Math.max(8, rect.top - 3) + 'px';
+      overlay.style.height = Math.max(28, rect.height + 6) + 'px';
+      overlay.style.margin = '0';
+      document.body.appendChild(overlay);
+
+      const resizeOverlay = () => {
+        const viewportWidth = Math.max(200, document.documentElement.clientWidth || window.innerWidth || 320);
+        const maxWidth = Math.max(160, viewportWidth - 16);
+        const minWidth = Math.min(maxWidth, Math.max(160, rect.width + 16));
+        const width = Math.max(minWidth, Math.min(maxWidth, measureInlineTextInputWidth(overlay)));
+        const left = Math.max(8, Math.min(rect.left, viewportWidth - width - 8));
+        overlay.style.boxSizing = 'border-box';
+        overlay.style.left = Math.round(left) + 'px';
+        overlay.style.width = Math.ceil(width) + 'px';
+        overlay.style.overflowX = measureInlineTextInputWidth(overlay) > maxWidth ? 'auto' : 'hidden';
+      };
+      overlay.addEventListener('input', resizeOverlay);
+      resizeOverlay();
+
+      inlineEditActive = true;
+      setActiveInlineEditState({
+        kind: 'wave-title',
+        documentName: tag.name,
+        overlay
+      });
+      trackInlineEditorHistoryState(overlay, oldValue);
+      overlay.focus();
+      overlay.select();
+      vwdDebugLog('wave-title', {
+        phase: 'open',
+        documentName: tag.name,
+        sourceField: explicitTitle ? 'title' : (fallbackHead ? 'head-fallback' : 'display-fallback'),
+        valueLength: oldValue.length
+      });
+
+      let committed = false;
+      const closeEditor = () => {
+        overlay.remove();
+        inlineEditActive = false;
+        setActiveInlineEditState(null);
+        updateUndoRedoButtons();
+      };
+      const commit = (reason) => {
+        if (committed) return;
+        committed = true;
+        const nextValue = overlay.value;
+        closeEditor();
+        if (nextValue === oldValue) {
+          vwdDebugLog('wave-title', {
+            phase: 'commit',
+            documentName: tag.name,
+            reason: reason || 'manual',
+            changed: false
+          });
+          return;
+        }
+
+        const currentText = editor.value || '';
+        const newText = replaceTopLevelStringFieldInSource(currentText, 'title', nextValue);
+        let verified;
+        try {
+          verified = JSON.parse(newText);
+        } catch (_e) {
+          setStatus(false, '标题保存失败：当前 JSON 无法解析');
+          vwdDebugLog('wave-title', {
+            phase: 'commit-error',
+            documentName: tag.name,
+            reason: 'invalid-json'
+          });
+          return;
+        }
+        if (verified.title !== nextValue) {
+          setStatus(false, '标题保存失败：无法写入 title 字段');
+          vwdDebugLog('wave-title', {
+            phase: 'commit-error',
+            documentName: tag.name,
+            reason: 'title-not-updated'
+          });
+          return;
+        }
+
+        pushUndoBeforeChange(newText);
+        const titleRange = findTopLevelPropertyValueRange(newText, 'title');
+        applyEditorChange(
+          newText,
+          titleRange ? titleRange.valueStart : editor.selectionStart,
+          titleRange ? titleRange.valueEnd : editor.selectionEnd
+        );
+        upsertSavedTag(tag.name, getCurrentStateSnapshot(), {
+          skipListRefresh: true,
+          skipSort: true
+        });
+        refreshWaveDocumentTitle(tag.name, true);
+        debouncedSaveUndo();
+        setStatus(true, '已更新波形图标题');
+        vwdDebugLog('wave-title', {
+          phase: 'commit',
+          documentName: tag.name,
+          reason: reason || 'manual',
+          changed: true,
+          valueLength: nextValue.length
+        });
+      };
+      overlay.__vwdCommit = commit;
+      overlay.addEventListener('blur', () => commit('blur'));
+      overlay.addEventListener('keydown', (event) => {
+        if (handleUndoRedoShortcut(event)) return;
+        event.stopPropagation();
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          commit('enter');
+          return;
+        }
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          committed = true;
+          closeEditor();
+          vwdDebugLog('wave-title', {
+            phase: 'cancel',
+            documentName: tag.name
+          });
+        }
+      });
+      requestAnimationFrame(resizeOverlay);
+    }
+
     function startWaveDocumentDescriptionEdit(tag, descriptionEl) {
       exitWavePaintMode('wave-description');
       if (!tag || !descriptionEl) return;
@@ -16799,6 +17046,20 @@ ${lines.join('\n')}`;
       const header = document.createElement('div');
       header.className = 'wave-document-card-header';
       const title = document.createElement('h2');
+      title.addEventListener('click', (event) => {
+        if (!isTextEditModeActive() || documentName !== editingWaveDocumentName) return;
+        event.stopPropagation();
+        const tag = getSavedTagByName(documentName);
+        if (tag) startWaveDocumentTitleInlineEdit(tag, title);
+      });
+      title.addEventListener('keydown', (event) => {
+        if (!isTextEditModeActive() || documentName !== editingWaveDocumentName) return;
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        event.stopPropagation();
+        const tag = getSavedTagByName(documentName);
+        if (tag) startWaveDocumentTitleInlineEdit(tag, title);
+      });
       const screenshotButton = document.createElement('button');
       screenshotButton.type = 'button';
       screenshotButton.className = 'wave-document-screenshot';
@@ -17228,6 +17489,11 @@ ${lines.join('\n')}`;
       const parent = findNavDocumentParent(navTreeState, tag.name);
       entry.title.textContent = getNavDocumentDisplayName(tag, parent);
       entry.card.classList.toggle('focused', isEditingDocument);
+      const titleEditable = isEditingDocument && isTextEditModeActive();
+      entry.title.classList.toggle('editable', titleEditable);
+      entry.title.title = titleEditable ? '单击编辑波形图标题' : '';
+      if (titleEditable) entry.title.setAttribute('tabindex', '0');
+      else entry.title.removeAttribute('tabindex');
 
       const descriptionText = getWaveDocumentDescription(tag);
       if (!entry.description.querySelector('textarea')) {

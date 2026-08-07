@@ -1290,6 +1290,20 @@
       white-space: nowrap;
     }
 
+    .app.text-edit-mode .wave-document-card.focused .wave-document-card-header h2.editable {
+      cursor: text;
+      border-radius: 3px;
+      outline: 1px solid transparent;
+      outline-offset: 2px;
+    }
+
+    .app.text-edit-mode .wave-document-card.focused .wave-document-card-header h2.editable:hover,
+    .app.text-edit-mode .wave-document-card.focused .wave-document-card-header h2.editable:focus-visible {
+      background: #e9f3fd;
+      color: #174f86;
+      outline-color: #79ace0;
+    }
+
     .wave-document-delete {
       width: 26px;
       height: 26px;
@@ -3584,7 +3598,8 @@
     .app.text-edit-mode .wave-group-label-hit,
     .app.text-edit-mode .wave-global-describe-text,
     .app.text-edit-mode .wave-headfoot-text,
-    .app.text-edit-mode .wave-edge-label-text {
+    .app.text-edit-mode .wave-edge-label-text,
+    .app.text-edit-mode .wave-document-card-header h2.editable {
       cursor: text;
     }
 
@@ -3729,6 +3744,14 @@
 
     .wave-text-edit-overlay[rows] {
       min-height: 48px;
+    }
+
+    .wave-document-title-overlay {
+      z-index: 1200;
+      font-family: inherit;
+      font-size: 14px;
+      font-weight: 600;
+      line-height: 1.3;
     }
 
     html, body {
