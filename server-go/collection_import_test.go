@@ -77,6 +77,51 @@ func collectionPresetValue(
 	}
 }
 
+func TestCollectionFormulaPresetCanSearchWithoutAFileRule(t *testing.T) {
+	preset, err := normalizeCollectionPreset(map[string]any{
+		"paths": []any{map[string]any{
+			"usrGen":  map[string]any{"name": "Derived"},
+			"autoGen": map[string]any{},
+			"formula": map[string]any{
+				"cycle0":    "{Source} + 1",
+				"cycle05":   "cmath.phase({Source})",
+				"libraries": []any{"math", "cmath", "math"},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	formula := preset.Paths[0].Formula
+	if preset.Paths[0].ImportMode != "formula" || formula == nil ||
+		formula.Cycle0 != "{Source} + 1" || formula.Cycle05 != "cmath.phase({Source})" ||
+		len(formula.Libraries) != 2 {
+		t.Fatalf("formula was not normalized: %#v", preset.Paths[0])
+	}
+	encoded, err := json.Marshal(preset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"formula"`) ||
+		!strings.Contains(string(encoded), `"cycle05"`) {
+		t.Fatalf("formula was not persisted: %s", encoded)
+	}
+
+	root := t.TempDir()
+	result, err := searchCollectionFiles(root, root, preset, map[string]string{}, runTestCollectionRegexSearch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Ready || result.ResultCount != 1 || len(result.Entries) != 1 ||
+		result.Entries[0].Status != "formula" || result.Entries[0].ImportMode != "formula" ||
+		len(result.Entries[0].Matches) != 0 {
+		t.Fatalf("formula-only search was not ready: %#v", result)
+	}
+	if err := validateCachedCollectionFiles(result); err != nil {
+		t.Fatalf("formula-only cache was rejected: %v", err)
+	}
+}
+
 func TestCollectionPresetNormalizesValueTable(t *testing.T) {
 	preset, err := normalizeCollectionPreset(map[string]any{
 		"paths": []any{map[string]any{

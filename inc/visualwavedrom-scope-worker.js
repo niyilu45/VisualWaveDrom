@@ -1,6 +1,15 @@
 (function (global) {
 'use strict';
 
+if (typeof document === 'undefined' && typeof global.importScripts === 'function'
+    && !global.VisualWaveDromFormula) {
+  try {
+    global.importScripts('visualwavedrom-formula.js?v=20260807-formula-v2');
+  } catch (_error) { /* surfaced when a formula is configured */ }
+}
+
+const FormulaEngine = global.VisualWaveDromFormula || null;
+
 let activeSession = null;
 const DEFAULT_ROW_HEIGHT = 42;
 const MIN_ANALOG_ROW_HEIGHT = 28;
@@ -18,6 +27,10 @@ function clamp(value, min, max) {
 
 function cloneJson(value) {
   return JSON.parse(JSON.stringify(value));
+}
+
+function own(object, key) {
+  return Object.prototype.hasOwnProperty.call(object || {}, key);
 }
 
 function flattenSignals(signals, rows, path, groups) {
@@ -83,6 +96,45 @@ function getAnalogSamples(source, row, rowIndex) {
     hasPreviousValue = true;
   }
   return validCount ? values : null;
+}
+
+function getScopeValues(source, row, rowIndex) {
+  const signal = row.source || {};
+  const localScope = signal.scope && typeof signal.scope === 'object' ? signal.scope : null;
+  const globalScope = getScopeSignalConfig(source, row, rowIndex);
+  const candidate = localScope && Array.isArray(localScope.values)
+    ? localScope.values
+    : (Array.isArray(signal.values)
+      ? signal.values
+      : (globalScope && Array.isArray(globalScope.values) ? globalScope.values : null));
+  if (!candidate) return null;
+  const values = [];
+  let previous = 'x';
+  candidate.forEach((rawValue) => {
+    const continuation = typeof rawValue === 'string' && rawValue.trim() === '.';
+    const value = continuation ? previous : (rawValue == null || rawValue === '' ? 'x' : rawValue);
+    values.push(value);
+    previous = value;
+  });
+  return values;
+}
+
+function normalizeSampleStep(value, fallback) {
+  const requested = finiteNumber(value);
+  if (requested == null || requested <= 0) return fallback || 1;
+  return Math.max(0.5, Math.round(requested * 2) / 2);
+}
+
+function rowSampleStep(row) {
+  return normalizeSampleStep(row && row.sampleStep, 1);
+}
+
+function sampleColumn(row, sampleIndex) {
+  return Math.max(0, Number(sampleIndex) || 0) * rowSampleStep(row);
+}
+
+function sampledColumnCount(row) {
+  return row && row.samples ? row.samples.length * rowSampleStep(row) : 0;
 }
 
 function normalizeAnalogFormat(candidate, fallbackType) {
@@ -611,6 +663,57 @@ function parseWaveSegments(signal) {
   };
 }
 
+function scopeValueDisplay(value) {
+  const text = String(value == null || value === '' ? 'x' : value);
+  const state = normalizedDigitalState(text, 'x');
+  if (/^(0|1|x|z)$/i.test(text)) {
+    return { kind: 'digital', state, value: state };
+  }
+  return { kind: 'bus', state: 'bus', value: text };
+}
+
+function segmentsFromScopeValues(values, sampleStep) {
+  const step = normalizeSampleStep(sampleStep, 0.5);
+  const segments = [];
+  const transitions = [];
+  (Array.isArray(values) ? values : []).forEach((value, index) => {
+    const display = scopeValueDisplay(value);
+    const start = index * step;
+    const end = start + step;
+    const previous = segments[segments.length - 1];
+    if (previous && previous.kind === display.kind
+        && previous.state === display.state && previous.value === display.value
+        && Math.abs(previous.end - start) < 1e-9) {
+      previous.end = end;
+      return;
+    }
+    transitions.push(start);
+    segments.push({
+      start,
+      end,
+      kind: display.kind,
+      state: display.state,
+      value: display.value
+    });
+  });
+  if (!segments.length) {
+    segments.push({ start: 0, end: 1, kind: 'digital', state: 'x', value: 'x' });
+  }
+  return { segments, transitions };
+}
+
+function numericSamplesFromScopeValues(values, format) {
+  if (!Array.isArray(values)) return null;
+  const samples = new Float64Array(values.length);
+  let finiteCount = 0;
+  values.forEach((value, index) => {
+    const parsed = parseAnalogValue(value, format);
+    samples[index] = parsed;
+    if (Number.isFinite(parsed)) finiteCount += 1;
+  });
+  return finiteCount ? samples : null;
+}
+
 function buildAnalogLevels(samples) {
   const levels = [];
   if (!samples || !samples.length) return levels;
@@ -669,16 +772,47 @@ function analogRange(samples) {
   return { min, max };
 }
 
-function createSession(content) {
-  const source = JSON.parse(String(content || '{}'));
+function createSession(content, transientState) {
+  const originalContent = String(content || '{}');
+  const source = JSON.parse(originalContent);
+  const transient = transientState && typeof transientState === 'object' ? transientState : {};
   const flat = flattenSignals(source.signal, []);
+  (Array.isArray(transient.extraSignals) ? transient.extraSignals : []).forEach((extra, index) => {
+    if (!extra || typeof extra !== 'object') return;
+    const id = String(extra.id || ('extra-' + index));
+    flat.push({
+      source: { name: String(extra.name || ''), wave: '' },
+      path: null,
+      groups: [],
+      name: String(extra.name || ''),
+      transient: true,
+      rowId: id.indexOf('extra:') === 0 ? id : ('extra:' + id)
+    });
+  });
   let totalColumns = 1;
   const rows = flat.map((row, rowIndex) => {
-    const parsedWave = parseWaveSegments(row.source);
-    const analogSamples = getAnalogSamples(source, row, rowIndex);
+    const rowId = row.rowId || ('source:' + rowIndex);
+    const configuredName = transient.signalNames && own(transient.signalNames, rowId)
+      ? String(transient.signalNames[rowId] == null ? '' : transient.signalNames[rowId])
+      : row.name;
+    let parsedWave = parseWaveSegments(row.source);
+    const scopeValues = getScopeValues(source, row, rowIndex);
     const localScope = row.source.scope && typeof row.source.scope === 'object'
       ? row.source.scope
       : null;
+    const sampleStep = normalizeSampleStep(
+      localScope && localScope.sampleStep,
+      scopeValues ? 0.5 : 1
+    );
+    if (scopeValues) {
+      const valueSegments = segmentsFromScopeValues(scopeValues, sampleStep);
+      parsedWave = Object.assign({}, parsedWave, valueSegments, {
+        clockEdges: [],
+        clockRanges: [],
+        gaps: []
+      });
+    }
+    let analogSamples = getAnalogSamples(source, row, rowIndex);
     const requestedMode = localScope && localScope.mode
       ? String(localScope.mode)
       : '';
@@ -686,19 +820,26 @@ function createSession(content) {
     const mode = requestedMode === 'analog'
       ? 'analog'
       : (/^(digital|bus)$/.test(requestedMode) ? 'bus' : detectedMode);
+    const analogFormat = getAnalogFormat(source, row, rowIndex, !!analogSamples);
+    if (!analogSamples && scopeValues && mode === 'analog') {
+      analogSamples = numericSamplesFromScopeValues(scopeValues, analogFormat);
+    }
     const rowColumns = Math.max(
       parsedWave.wave.length,
-      analogSamples ? analogSamples.length : 0,
+      analogSamples ? analogSamples.length * sampleStep : 0,
+      scopeValues ? scopeValues.length * sampleStep : 0,
       1
     );
     totalColumns = Math.max(totalColumns, rowColumns);
     return {
       index: rowIndex,
+      rowId,
+      transient: !!row.transient,
       source: row.source,
       path: row.path,
       groups: row.groups,
       sourceName: row.name,
-      name: row.name || ('signal_' + (rowIndex + 1)),
+      name: configuredName || ('signal_' + (rowIndex + 1)),
       mode,
       detectedMode,
       wave: parsedWave.wave,
@@ -708,6 +849,8 @@ function createSession(content) {
       clockRanges: parsedWave.clockRanges,
       gaps: parsedWave.gaps,
       samples: analogSamples,
+      scopeValues,
+      sampleStep,
       initialTransition: !parsedWave.wave.length
         || parsedWave.transitions.some((column) => Math.abs(column) < 1e-9),
       sampleTransitionCache: new Map(),
@@ -715,7 +858,7 @@ function createSession(content) {
       range: analogSamples ? analogRange(analogSamples) : null,
       busFormat: getBusFormat(source, row, rowIndex),
       valueTable: getValueTable(source, row, rowIndex, parsedWave.valueTable),
-      analogFormat: getAnalogFormat(source, row, rowIndex, !!analogSamples),
+      analogFormat,
       analogCache: new Map(),
       rowHeight: normalizeRowHeight(localScope && localScope.rowHeight),
       unit: String(
@@ -725,11 +868,73 @@ function createSession(content) {
       )
     };
   });
+
+  const formulaDefinitions = [];
+  rows.forEach((row) => {
+    const formula = transient.formulas && transient.formulas[row.rowId];
+    if (!formula) return;
+    formulaDefinitions.push({ id: row.rowId, name: row.name, formula });
+  });
+  let formulaAnalysis = null;
+  if (formulaDefinitions.length) {
+    if (!FormulaEngine) throw new Error('示波器公式模块未加载');
+    const signalNames = rows.map((row) => row.name);
+    formulaAnalysis = FormulaEngine.analyzeDefinitions(formulaDefinitions, signalNames);
+    const sourceRows = new Map();
+    rows.forEach((row) => {
+      if (!sourceRows.has(row.name)) sourceRows.set(row.name, row);
+    });
+    const evaluated = FormulaEngine.evaluateDefinitions(formulaDefinitions, signalNames, {
+      analysis: formulaAnalysis,
+      totalColumns,
+      resolveSource: (name, halfIndex) => {
+        const sourceRow = sourceRows.get(name);
+        return sourceRow ? sourceValueAtHalfIndex(sourceRow, halfIndex) : FormulaEngine.UNKNOWN;
+      }
+    });
+    const analysisById = new Map(formulaAnalysis.items.map((item) => [item.id, item]));
+    rows.forEach((row) => {
+      const item = analysisById.get(row.rowId);
+      if (!item) return;
+      row.formula = {
+        enabled: true,
+        valid: item.valid,
+        error: item.error,
+        references: item.references,
+        dependencies: item.dependencies,
+        libraries: item.libraries,
+        cycle0: item.formula.cycle0,
+        cycle05: item.formula.cycle05,
+        preview: []
+      };
+      const values = evaluated.outputs[row.name];
+      if (!item.valid || !Array.isArray(values)) return;
+      row.formula.preview = values.slice(0, 12);
+      row.scopeValues = values;
+      row.sampleStep = 0.5;
+      const generatedSegments = segmentsFromScopeValues(values, 0.5);
+      row.segments = generatedSegments.segments;
+      row.transitions = generatedSegments.transitions;
+      row.clockEdges = [];
+      row.clockRanges = [];
+      row.gaps = [];
+      row.samples = row.mode === 'analog'
+        ? numericSamplesFromScopeValues(values, row.analogFormat)
+        : null;
+      row.analogLevels = row.samples ? buildAnalogLevels(row.samples) : [];
+      row.range = row.samples ? analogRange(row.samples) : null;
+      row.sampleTransitionCache = new Map();
+    });
+  }
+  totalColumns = Math.max(1, Math.ceil(totalColumns));
   const scope = source.scope && typeof source.scope === 'object' ? source.scope : {};
   const samplePeriod = finiteNumber(scope.samplePeriod) || 1;
   const timeUnit = String(scope.timeUnit || 'cycle');
   return {
     source,
+    originalContent,
+    transient,
+    formulaAnalysis,
     rows,
     totalColumns,
     samplePeriod,
@@ -740,6 +945,25 @@ function createSession(content) {
       || 'Untitled waveform'
     )
   };
+}
+
+function sourceValueAtHalfIndex(row, halfIndex) {
+  if (!row || halfIndex < 0) return FormulaEngine ? FormulaEngine.UNKNOWN : null;
+  const column = halfIndex / 2;
+  if (Array.isArray(row.scopeValues)) {
+    const index = Math.floor((column + 1e-9) / rowSampleStep(row));
+    return index >= 0 && index < row.scopeValues.length
+      ? row.scopeValues[index]
+      : (FormulaEngine ? FormulaEngine.UNKNOWN : null);
+  }
+  if (row.samples && row.samples.length) {
+    const index = sampleIndexForColumn(row, column);
+    const value = index >= 0 ? row.samples[index] : Number.NaN;
+    return Number.isFinite(value) ? value : (FormulaEngine ? FormulaEngine.UNKNOWN : null);
+  }
+  const segment = segmentAt(row, column + 1e-7);
+  if (!segment) return FormulaEngine ? FormulaEngine.UNKNOWN : null;
+  return segment.kind === 'bus' ? segment.value : segment.state;
 }
 
 function findFirstSegment(segments, position) {
@@ -824,11 +1048,13 @@ function displaySegmentForMode(row, segment, column, mode, totalColumns, busForm
 function sampledSegmentsInWindow(row, start, end, mode, busFormat) {
   const selected = [];
   const sampleCount = row.samples ? row.samples.length : 0;
-  const firstIndex = Math.max(0, Math.floor(start));
-  const lastIndex = Math.min(sampleCount, Math.ceil(end));
+  const step = rowSampleStep(row);
+  const firstIndex = Math.max(0, Math.floor(start / step));
+  const lastIndex = Math.min(sampleCount, Math.ceil(end / step));
   for (let index = firstIndex; index < lastIndex; index += 1) {
-    const visibleStart = Math.max(start, index);
-    const visibleEnd = Math.min(end, index + 1);
+    const sampleStart = sampleColumn(row, index);
+    const visibleStart = Math.max(start, sampleStart);
+    const visibleEnd = Math.min(end, sampleStart + step);
     if (!(visibleEnd > visibleStart)) continue;
     const sample = row.samples[index];
     let display;
@@ -852,9 +1078,10 @@ function sampledSegmentsInWindow(row, start, end, mode, busFormat) {
       value: display.value
     });
   }
-  if (end > sampleCount) {
+  const coveredColumns = sampledColumnCount(row);
+  if (end > coveredColumns) {
     pushSegment(selected, {
-      start: Math.max(start, sampleCount),
+      start: Math.max(start, coveredColumns),
       end,
       kind: 'digital',
       state: 'x',
@@ -868,6 +1095,7 @@ function sampledBucketsInWindow(row, start, end, width, mode, busFormat) {
   const bucketCount = Math.max(1, Math.floor(width));
   const span = end - start;
   const sampleCount = row.samples ? row.samples.length : 0;
+  const step = rowSampleStep(row);
   const transitions = transitionColumnsForMode(row, mode);
   const epsilon = 1e-7;
   let transitionLow = 0;
@@ -885,7 +1113,7 @@ function sampledBucketsInWindow(row, start, end, width, mode, busFormat) {
   for (let pixel = 0; pixel < bucketCount; pixel += 1) {
     const bucketStart = start + span * pixel / bucketCount;
     const bucketEnd = start + span * (pixel + 1) / bucketCount;
-    const firstIndex = Math.max(0, Math.floor(bucketStart));
+    const firstIndex = Math.max(0, Math.floor(bucketStart / step));
     let high = false;
     let low = false;
     let unknown = false;
@@ -937,7 +1165,7 @@ function sampledBucketsInWindow(row, start, end, width, mode, busFormat) {
         changes += 1;
         if (eventStart == null) eventStart = transition;
         eventEnd = transition;
-        observeSample(Math.floor(transition + epsilon));
+        observeSample(Math.floor((transition + epsilon) / step));
       }
       bucketTransitionIndex += 1;
     }
@@ -968,7 +1196,8 @@ function rowSegmentsInWindow(row, start, end, width, mode, totalColumns, busForm
   if (row.samples && row.samples.length && mode !== 'analog') {
     const visibleSampleCount = Math.max(
       0,
-      Math.min(row.samples.length, Math.ceil(end)) - Math.max(0, Math.floor(start))
+      Math.min(row.samples.length, Math.ceil(end / rowSampleStep(row)))
+        - Math.max(0, Math.floor(start / rowSampleStep(row)))
     );
     if (visibleSampleCount > Math.max(64, width * 4)) {
       return Object.assign({
@@ -1061,7 +1290,8 @@ function rowSegmentsInWindow(row, start, end, width, mode, totalColumns, busForm
 
 function sampleIndexForColumn(row, column) {
   if (!row.samples || !row.samples.length) return -1;
-  let position = Math.max(0, finiteNumber(column) || 0);
+  const step = rowSampleStep(row);
+  let position = Math.max(0, finiteNumber(column) || 0) / step;
   const nearestBoundary = Math.round(position);
   if (nearestBoundary < row.samples.length
       && Math.abs(position - nearestBoundary) <= 1e-7) {
@@ -1085,34 +1315,35 @@ function appendAnalogUnknownRange(ranges, start, end) {
   ranges.push([start, end]);
 }
 
-function analogSampleBoundary(sampleIndex, sampleCount, totalColumns) {
+function analogSampleBoundary(row, sampleIndex, sampleCount, totalColumns) {
   if (sampleIndex <= 0 || sampleCount <= 0) return 0;
-  return clamp(sampleIndex, 0, totalColumns);
+  return clamp(sampleColumn(row, sampleIndex), 0, totalColumns);
 }
 
 function analogWindow(row, start, end, width, totalColumns) {
   const sampleCount = row.samples ? row.samples.length : 0;
-  const startIndex = clamp(Math.floor(start), 0, sampleCount);
-  const endIndex = clamp(Math.ceil(end), startIndex, sampleCount);
+  const step = rowSampleStep(row);
+  const startIndex = clamp(Math.floor(start / step), 0, sampleCount);
+  const endIndex = clamp(Math.ceil(end / step), startIndex, sampleCount);
   const sampleSpan = Math.max(0, endIndex - startIndex);
   if (sampleSpan <= Math.max(64, width * 2)) {
     const points = [];
     const unknowns = [];
     for (let index = startIndex; index < endIndex && index < row.samples.length; index += 1) {
       const value = row.samples[index];
-      const column = index;
+      const column = sampleColumn(row, index);
       if (!Number.isFinite(value)) {
         points.push([column, null]);
         appendAnalogUnknownRange(
           unknowns,
-          analogSampleBoundary(index, row.samples.length, totalColumns),
-          analogSampleBoundary(index + 1, row.samples.length, totalColumns)
+          analogSampleBoundary(row, index, row.samples.length, totalColumns),
+          analogSampleBoundary(row, index + 1, row.samples.length, totalColumns)
         );
       } else {
         points.push([column, value]);
       }
     }
-    appendAnalogUnknownRange(unknowns, Math.max(start, sampleCount), end);
+    appendAnalogUnknownRange(unknowns, Math.max(start, sampledColumnCount(row)), end);
     return { kind: 'points', items: points, unknowns, range: row.range };
   }
 
@@ -1133,8 +1364,9 @@ function analogWindow(row, start, end, width, totalColumns) {
     if (level.unknowns && level.unknowns[index]) {
       appendAnalogUnknownRange(
         unknowns,
-        analogSampleBoundary(sampleIndex, row.samples.length, totalColumns),
+        analogSampleBoundary(row, sampleIndex, row.samples.length, totalColumns),
         analogSampleBoundary(
+          row,
           Math.min(row.samples.length, sampleIndex + level.size),
           row.samples.length,
           totalColumns
@@ -1142,10 +1374,10 @@ function analogWindow(row, start, end, width, totalColumns) {
       );
     }
     if (!Number.isFinite(min) && !Number.isFinite(max)) continue;
-    const column = sampleIndex;
+    const column = sampleColumn(row, sampleIndex);
     items.push([column, min, max]);
   }
-  appendAnalogUnknownRange(unknowns, Math.max(start, sampleCount), end);
+  appendAnalogUnknownRange(unknowns, Math.max(start, sampledColumnCount(row)), end);
   return { kind: 'envelope', items, unknowns, range: row.range };
 }
 
@@ -1200,24 +1432,35 @@ function analogRowForFormat(row, requestedFormat, totalColumns) {
   const key = format.type + ':' + format.bitWidth + ':' + format.fractionalBits
     + ':' + totalColumns;
   if (row.analogCache && row.analogCache.has(key)) return row.analogCache.get(key);
-  const samples = new Float64Array(Math.max(1, totalColumns));
+  const sourceValues = Array.isArray(row.scopeValues) ? row.scopeValues : null;
+  const sampleStep = sourceValues ? rowSampleStep(row) : 1;
+  const samples = new Float64Array(sourceValues
+    ? Math.max(1, sourceValues.length)
+    : Math.max(1, totalColumns));
   samples.fill(Number.NaN);
-  const sourceLength = Math.min(samples.length, row.wave.length);
-  let segmentIndex = 0;
-  for (let column = 0; column < sourceLength; column += 1) {
-    while (segmentIndex < row.segments.length
-        && row.segments[segmentIndex].end <= column + 1e-7) {
-      segmentIndex += 1;
+  if (sourceValues) {
+    sourceValues.forEach((value, index) => {
+      samples[index] = parseAnalogValue(value, format);
+    });
+  } else {
+    const sourceLength = Math.min(samples.length, row.wave.length);
+    let segmentIndex = 0;
+    for (let column = 0; column < sourceLength; column += 1) {
+      while (segmentIndex < row.segments.length
+          && row.segments[segmentIndex].end <= column + 1e-7) {
+        segmentIndex += 1;
+      }
+      const segment = row.segments[Math.min(segmentIndex, row.segments.length - 1)];
+      if (!segment) continue;
+      samples[column] = parseAnalogValue(
+        segment.kind === 'bus' ? segment.value : segment.state,
+        format
+      );
     }
-    const segment = row.segments[Math.min(segmentIndex, row.segments.length - 1)];
-    if (!segment) continue;
-    samples[column] = parseAnalogValue(
-      segment.kind === 'bus' ? segment.value : segment.state,
-      format
-    );
   }
   const derived = Object.assign({}, row, {
     samples,
+    sampleStep,
     analogLevels: buildAnalogLevels(samples),
     range: analogRange(samples),
     analogFormat: format
@@ -1404,15 +1647,16 @@ function chooseColumns(
       });
     }
     if (includeAnalog && analogRow.samples) {
-      const sampleStart = clamp(Math.floor(rangeStart), 0, analogRow.samples.length);
-      const sampleEnd = clamp(Math.ceil(rangeEnd), sampleStart, analogRow.samples.length);
+      const step = rowSampleStep(analogRow);
+      const sampleStart = clamp(Math.floor(rangeStart / step), 0, analogRow.samples.length);
+      const sampleEnd = clamp(Math.ceil(rangeEnd / step), sampleStart, analogRow.samples.length);
       const rangeSamples = analogRow.samples.subarray(sampleStart, sampleEnd);
       lttbIndexes(
         rangeSamples,
         Math.min(rangeSamples.length, rowBudget)
       ).forEach((rangeSampleIndex) => {
         const sampleIndex = sampleStart + rangeSampleIndex;
-        const column = sampleIndex;
+        const column = sampleColumn(analogRow, sampleIndex);
         if (column >= rangeStart && column < rangeEnd) add(column, 700);
       });
     }
@@ -1557,7 +1801,7 @@ function transitionColumnsForMode(row, mode) {
   let previous = sampleTransitionKey(row.samples[0], mode);
   for (let index = 1; index < row.samples.length; index += 1) {
     const current = sampleTransitionKey(row.samples[index], mode);
-    if (current !== previous) transitions.push(index);
+    if (current !== previous) transitions.push(sampleColumn(row, index));
     previous = current;
   }
   if (row.sampleTransitionCache) row.sampleTransitionCache.set(cacheKey, transitions);
@@ -1635,7 +1879,7 @@ function analogValueColumn(row, column, direction, target, analogFormat) {
   if (targetNumber == null || !analogRow.samples || !analogRow.samples.length) return null;
   const step = direction > 0 ? 1 : -1;
   const currentIndex = clamp(
-    Math.floor(finiteNumber(column) || 0),
+    Math.floor((finiteNumber(column) || 0) / rowSampleStep(analogRow)),
     direction > 0 ? -1 : 0,
     analogRow.samples.length
   );
@@ -1647,7 +1891,7 @@ function analogValueColumn(row, column, direction, target, analogFormat) {
   ) {
     const value = analogRow.samples[index];
     if (!Number.isFinite(value) || Math.abs(value - targetNumber) > tolerance) continue;
-    return index;
+    return sampleColumn(analogRow, index);
   }
   return null;
 }
@@ -1685,9 +1929,9 @@ function conditionSegmentColumn(row, column, direction, mode, testCondition) {
   return null;
 }
 
-function analogSampleColumn(sampleIndex, sampleCount, totalColumns) {
+function analogSampleColumn(row, sampleIndex, sampleCount, totalColumns) {
   if (sampleIndex < 0 || sampleCount <= 0 || totalColumns <= 0) return Number.NaN;
-  return clamp(sampleIndex, 0, totalColumns - 1);
+  return clamp(sampleColumn(row, sampleIndex), 0, totalColumns - 1e-7);
 }
 
 function snapCursor(payload) {
@@ -1709,7 +1953,8 @@ function snapCursor(payload) {
     const sampleIndex = sampleIndexForColumn(analogRow, column);
     if (sampleIndex >= 0) {
       candidates.push({
-        column: analogSampleColumn(sampleIndex, analogRow.samples.length, activeSession.totalColumns),
+        column: analogSampleColumn(
+          analogRow, sampleIndex, analogRow.samples.length, activeSession.totalColumns),
         source: 'sample'
       });
     }
@@ -1743,22 +1988,23 @@ function conditionAnalogColumn(row, column, direction, testCondition, analogForm
   const analogRow = analogRowForFormat(row, analogFormat, activeSession.totalColumns);
   const samples = analogRow.samples;
   if (!samples || samples.length < 2) return null;
+  const step = rowSampleStep(analogRow);
   if (direction > 0) {
-    let index = Math.max(1, Math.floor(column + 1e-7) + 1);
+    let index = Math.max(1, Math.floor((column + 1e-7) / step) + 1);
     for (; index < samples.length; index += 1) {
       if (!testCondition(samples[index - 1]) && testCondition(samples[index])) {
-        return analogSampleColumn(index, samples.length, activeSession.totalColumns);
+        return analogSampleColumn(analogRow, index, samples.length, activeSession.totalColumns);
       }
     }
     return null;
   }
   let index = Math.min(
     samples.length - 1,
-    Math.ceil(column - 1e-7) - 1
+    Math.ceil((column - 1e-7) / step) - 1
   );
   for (; index >= 1; index -= 1) {
     if (!testCondition(samples[index - 1]) && testCondition(samples[index])) {
-      return analogSampleColumn(index, samples.length, activeSession.totalColumns);
+      return analogSampleColumn(analogRow, index, samples.length, activeSession.totalColumns);
     }
   }
   return null;
@@ -1770,7 +2016,7 @@ function conditionSequenceColumn(row, column, direction, mode, testCondition, an
   const segments = row.segments || [];
   const lastSegment = segments.length ? segments[segments.length - 1] : null;
   const rowColumnCount = row.samples && row.samples.length
-    ? row.samples.length
+    ? Math.ceil(sampledColumnCount(row))
     : Math.ceil(lastSegment ? lastSegment.end : String(row.wave || '').length);
   const maxStart = rowColumnCount - sequence.length;
   if (maxStart < 0) return null;
@@ -1902,6 +2148,7 @@ function applySignalNames(source, payload) {
     : null;
   const originalSignalConfigs = signalConfigs ? Object.assign({}, signalConfigs) : null;
   activeSession.rows.forEach((row) => {
+    if (row.transient || !Array.isArray(row.path)) return;
     const nextName = names[row.index];
     const previousName = String(row.sourceName == null ? '' : row.sourceName);
     if (signalConfigs && previousName && previousName !== nextName
@@ -1921,6 +2168,7 @@ function applySignalNames(source, payload) {
   });
   if (signalConfigs) {
     activeSession.rows.forEach((row) => {
+      if (row.transient || !Array.isArray(row.path)) return;
       const previousName = String(row.sourceName == null ? '' : row.sourceName);
       if (previousName && !names.includes(previousName)) delete signalConfigs[previousName];
     });
@@ -2087,7 +2335,9 @@ function buildStyledSource(payload) {
   applySignalNames(source, payload);
   const rowStyles = payload.rowStyles || {};
   activeSession.rows.forEach((row) => {
+    if (row.transient || !Array.isArray(row.path)) return;
     const target = signalAtPath(source, row.path);
+    if (!target || typeof target !== 'object') return;
     applyRowStyle(target, rowStyles[row.index], activeSession.totalColumns, null);
     applyRowDisplayConfig(target, row, row.index, payload);
   });
@@ -2105,6 +2355,7 @@ function buildSimplifiedContent(model, options) {
   }
   model.rows.forEach((rowModel, rowIndex) => {
     const rowMeta = activeSession.rows[rowIndex];
+    if (!rowMeta || rowMeta.transient || !Array.isArray(rowMeta.path)) return;
     const target = signalAtPath(source, rowMeta.path);
     if (!target || typeof target !== 'object') return;
     const built = buildWaveFromValues(
@@ -2196,7 +2447,7 @@ function calculateAnalogMaxError(columns, modes, analogFormats) {
     for (let sampleIndex = 0; sampleIndex < analogRow.samples.length; sampleIndex += stride) {
       const actual = analogRow.samples[sampleIndex];
       if (!Number.isFinite(actual)) continue;
-      const column = sampleIndex;
+      const column = sampleColumn(analogRow, sampleIndex);
       if (column < columns[0] || column > columns[columns.length - 1]) continue;
       while (selectedIndex + 1 < columns.length && columns[selectedIndex + 1] < column) {
         selectedIndex += 1;
@@ -2312,6 +2563,8 @@ function prepareResponse() {
     timeUnit: activeSession.timeUnit,
     rows: activeSession.rows.map((row) => ({
       index: row.index,
+      rowId: row.rowId,
+      transient: !!row.transient,
       name: row.name,
       sourceName: row.sourceName,
       groups: row.groups,
@@ -2323,7 +2576,11 @@ function prepareResponse() {
       analogFormat: row.analogFormat,
       rowHeight: row.rowHeight,
       style: normalizeRowStyle(row.source.scope, activeSession.totalColumns),
-      sampleCount: row.samples ? row.samples.length : row.wave.length
+      formula: row.formula || null,
+      sampleStep: rowSampleStep(row),
+      sampleCount: Array.isArray(row.scopeValues)
+        ? row.scopeValues.length
+        : (row.samples ? row.samples.length : row.wave.length)
     }))
   };
 }
@@ -2334,7 +2591,11 @@ function handleRequest(message) {
   try {
     let result;
     if (request.type === 'prepare') {
-      activeSession = createSession(request.content);
+      activeSession = createSession(request.content, request.transient);
+      result = prepareResponse();
+    } else if (request.type === 'formulas') {
+      if (!activeSession) throw new Error('Scope session has not been prepared');
+      activeSession = createSession(activeSession.originalContent, request.transient);
       result = prepareResponse();
     } else if (request.type === 'window') {
       result = createWindow(request);

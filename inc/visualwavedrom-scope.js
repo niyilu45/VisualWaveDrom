@@ -1,7 +1,8 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260807-condition-sequence-v1';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260807-formula-v2';
+  const FormulaEngine = global.VisualWaveDromFormula || null;
   const DEFAULT_ROW_HEIGHT = 42;
   const COLLAPSED_ROW_HEIGHT = 18;
   const MIN_ANALOG_ROW_HEIGHT = 28;
@@ -72,6 +73,45 @@
 
   function clone(value) {
     return JSON.parse(JSON.stringify(value));
+  }
+
+  function normalizeTransientFormulaState(value) {
+    const source = value && typeof value === 'object' ? value : {};
+    const formulas = {};
+    if (source.formulas && typeof source.formulas === 'object' && !Array.isArray(source.formulas)) {
+      Object.keys(source.formulas).forEach((rowId) => {
+        try {
+          formulas[String(rowId)] = FormulaEngine
+            ? FormulaEngine.normalizeDefinition(source.formulas[rowId])
+            : clone(source.formulas[rowId]);
+        } catch (_error) {
+          const raw = source.formulas[rowId];
+          formulas[String(rowId)] = typeof raw === 'string'
+            ? { cycle0: raw, cycle05: '', libraries: [] }
+            : clone(raw && typeof raw === 'object' ? raw : {
+              cycle0: '', cycle05: '', libraries: []
+            });
+        }
+      });
+    }
+    const signalNames = {};
+    if (source.signalNames && typeof source.signalNames === 'object'
+        && !Array.isArray(source.signalNames)) {
+      Object.keys(source.signalNames).forEach((rowId) => {
+        signalNames[String(rowId)] = String(source.signalNames[rowId] == null
+          ? '' : source.signalNames[rowId]);
+      });
+    }
+    const seenIds = new Set();
+    const extraSignals = (Array.isArray(source.extraSignals) ? source.extraSignals : [])
+      .map((entry, index) => {
+        const rawId = String(entry && entry.id || ('signal-' + index));
+        const id = rawId.indexOf('extra:') === 0 ? rawId.slice(6) : rawId;
+        if (!id || seenIds.has(id)) return null;
+        seenIds.add(id);
+        return { id, name: String(entry && entry.name || '') };
+      }).filter(Boolean);
+    return { version: 1, extraSignals, formulas, signalNames };
   }
 
   function debounce(callback, delay) {
@@ -407,6 +447,16 @@
       this.saveInFlight = false;
       this.displayControlRow = null;
       this.displayPopoverAnchor = null;
+      this.transientFormulaState = {
+        version: 1,
+        extraSignals: [],
+        formulas: {},
+        signalNames: {}
+      };
+      this.formulaRefreshSequence = 0;
+      this.formulaRefreshInFlight = false;
+      this.formulaRefreshQueued = false;
+      this.formulaEditorActive = false;
       this.styleControlRow = null;
       this.stylePopoverAnchor = null;
       this.columnBackgroundColor = BACKGROUND_COLOR_PRESETS[0].value;
@@ -415,6 +465,9 @@
       this.resizeObserver = null;
       this.scheduleWindowRequest = debounce(() => this.requestWindow(), 24);
       this.scheduleBuild = debounce(() => this.rebuildOutput(), 80);
+      this.scheduleFormulaRefresh = debounce(() => {
+        void this.refreshFormulaSession({ preservePopover: true, persist: true });
+      }, 260);
       this.handleBeforeUnload = (event) => {
         if (!this.hasUnsavedChanges()) return;
         event.preventDefault();
@@ -431,7 +484,22 @@
       if (!this.document || typeof this.document.content !== 'string') {
         throw new Error('指定的波形图不存在或尚未载入');
       }
-      this.meta = await this.worker.call('prepare', { content: this.document.content });
+      if (typeof this.adapter.getTransientState === 'function') {
+        try {
+          this.transientFormulaState = normalizeTransientFormulaState(
+            await this.adapter.getTransientState()
+          );
+        } catch (error) {
+          this.log('scope-formula', {
+            phase: 'transient-load-error',
+            message: error && error.message ? error.message : String(error)
+          });
+        }
+      }
+      this.meta = await this.worker.call('prepare', {
+        content: this.document.content,
+        transient: clone(this.transientFormulaState)
+      });
       this.signalNames = this.meta.rows.map((row) => String(
         row.sourceName == null ? row.name || '' : row.sourceName
       ));
@@ -514,6 +582,8 @@
             <span id="scope-library-name"></span>
           </div>
           <div class="scope-toolbar-group" aria-label="视图控制">
+            <button type="button" class="scope-command-btn" id="scope-add-signal"
+                title="新增一个仅在当前网页会话保留的空波形">新增波形</button>
             <button type="button" class="scope-command-btn" id="scope-connections"
                 aria-pressed="false">连接线</button>
             <button type="button" class="scope-command-btn" id="scope-original-data"
@@ -660,6 +730,7 @@
                 role="group" aria-label="波形展示类型">
               <button type="button" data-scope-display-mode="bus">总线</button>
               <button type="button" data-scope-display-mode="analog">模拟</button>
+              <button type="button" id="scope-formula-toggle" aria-pressed="false">公式</button>
             </div>
           </div>
           <div class="scope-analog-settings scope-bus-settings" id="scope-signal-bus-settings"
@@ -712,6 +783,34 @@
                     min="0" max="63" step="1" value="0">
               </label>
             </div>
+          </div>
+          <div class="scope-formula-settings" id="scope-formula-settings" hidden>
+            <div class="scope-formula-dependencies">
+              <span class="scope-display-field-label">依赖库</span>
+              <span class="scope-formula-library" data-scope-formula-library="math">math</span>
+              <span class="scope-formula-library" data-scope-formula-library="cmath">cmath</span>
+            </div>
+            <label class="scope-formula-field">
+              <span>0 cycle</span>
+              <textarea id="scope-formula-cycle0" rows="3" spellcheck="false"
+                  placeholder="例如：math.sin({Signal1})"></textarea>
+              <code class="scope-formula-highlight" id="scope-formula-cycle0-highlight"></code>
+            </label>
+            <label class="scope-formula-field">
+              <span>0.5 cycle</span>
+              <textarea id="scope-formula-cycle05" rows="3" spellcheck="false"
+                  placeholder="留空时使用 0 cycle 公式"></textarea>
+              <code class="scope-formula-highlight" id="scope-formula-cycle05-highlight"></code>
+            </label>
+            <div class="scope-formula-feedback" id="scope-formula-feedback" aria-live="polite"></div>
+            <div class="scope-formula-preview-values" id="scope-formula-preview-values"></div>
+            <details class="scope-formula-python">
+              <summary>转换后的 Python 代码</summary>
+              <pre id="scope-formula-python-preview"></pre>
+            </details>
+            <button type="button" class="scope-command-btn" id="scope-formula-export-json">
+              导出 JSON
+            </button>
           </div>
         </div>
         <div class="scope-style-popover" id="scope-style-popover" role="dialog"
@@ -768,6 +867,7 @@
       this.rangeEndInput = root.querySelector('#scope-range-end');
       this.outputTitleInput = root.querySelector('#scope-output-title');
       this.connectionButton = root.querySelector('#scope-connections');
+      this.addSignalButton = root.querySelector('#scope-add-signal');
       this.originalDataButton = root.querySelector('#scope-original-data');
       this.cursorAButton = root.querySelector('#scope-cursor-a');
       this.cursorBButton = root.querySelector('#scope-cursor-b');
@@ -779,6 +879,16 @@
       this.displayPopoverTitle = root.querySelector('#scope-display-popover-title');
       this.displayPopoverCloseButton = root.querySelector('#scope-display-popover-close');
       this.displayModeOptions = root.querySelector('#scope-display-mode-options');
+      this.formulaToggleButton = root.querySelector('#scope-formula-toggle');
+      this.formulaSettings = root.querySelector('#scope-formula-settings');
+      this.formulaCycle0Input = root.querySelector('#scope-formula-cycle0');
+      this.formulaCycle05Input = root.querySelector('#scope-formula-cycle05');
+      this.formulaCycle0Highlight = root.querySelector('#scope-formula-cycle0-highlight');
+      this.formulaCycle05Highlight = root.querySelector('#scope-formula-cycle05-highlight');
+      this.formulaFeedback = root.querySelector('#scope-formula-feedback');
+      this.formulaPreviewValues = root.querySelector('#scope-formula-preview-values');
+      this.formulaPythonPreview = root.querySelector('#scope-formula-python-preview');
+      this.formulaExportButton = root.querySelector('#scope-formula-export-json');
       this.signalBusSettings = root.querySelector('#scope-signal-bus-settings');
       this.signalBusRadixSelect = root.querySelector('#scope-signal-bus-radix');
       this.signalBusWidthInput = root.querySelector('#scope-signal-bus-width');
@@ -825,6 +935,9 @@
         this.fitToCursors();
       });
       this.expandAllRowsButton.addEventListener('click', () => this.expandAllRows());
+      this.addSignalButton.addEventListener('click', () => {
+        void this.addTransientSignal();
+      });
       this.connectionButton.addEventListener('click', () => this.toggleConnectionMode());
       this.originalDataButton.addEventListener('click', () => this.toggleOriginalData());
       this.cursorAButton.addEventListener('click', () => this.toggleActiveCursor('A'));
@@ -848,6 +961,20 @@
         if (!button || this.displayControlRow == null) return;
         this.applySignalDisplayMode(this.displayControlRow, button.dataset.scopeDisplayMode);
       });
+      this.formulaToggleButton.addEventListener('click', () => {
+        void this.toggleSignalFormula();
+      });
+      const handleFormulaInput = () => {
+        this.updateFormulaDraftFromInputs();
+      };
+      this.formulaCycle0Input.addEventListener('input', handleFormulaInput);
+      this.formulaCycle05Input.addEventListener('input', handleFormulaInput);
+      [this.formulaCycle0Input, this.formulaCycle05Input].forEach((input) => {
+        input.addEventListener('focus', () => { this.formulaEditorActive = true; });
+        input.addEventListener('blur', () => { this.formulaEditorActive = false; });
+        input.addEventListener('keydown', (event) => event.stopPropagation());
+      });
+      this.formulaExportButton.addEventListener('click', () => this.exportCurrentFormulaJson());
       this.signalBusRadixSelect.addEventListener('change', () => this.applySignalBusFormat());
       this.signalBusWidthInput.addEventListener('change', () => this.applySignalBusFormat());
       this.signalBusSignedOptions.addEventListener('click', (event) => {
@@ -1378,9 +1505,15 @@
         ? ''
         : String(this.signalNames[index]);
       const enteredName = editor.input.value.trim();
-      const nextName = commit
+      let nextName = commit
         ? (previousName === '' && enteredName === editor.initialValue ? '' : enteredName)
         : previousName;
+      if (commit && nextName && this.signalNames.some((name, rowIndex) => (
+        rowIndex !== index && String(name || '') === nextName
+      ))) {
+        nextName = previousName;
+        this.setStatus('信号名不能重复：' + enteredName, true);
+      }
       editor.button.textContent = nextName || ('signal_' + (index + 1));
       editor.input.replaceWith(editor.button);
       if (!commit || nextName === previousName) {
@@ -1390,9 +1523,19 @@
         });
         return;
       }
-      if (this.simplified) this.pushHistory();
+      const row = this.meta.rows[index];
+      if (!row.transient && this.simplified) this.pushHistory();
       this.signalNames[index] = nextName;
       this.syncSignalNameMetadata();
+      const rowId = String(row.rowId || ('source:' + row.index));
+      this.transientFormulaState.signalNames[rowId] = nextName;
+      if (row.transient) {
+        const extraId = rowId.indexOf('extra:') === 0 ? rowId.slice(6) : rowId;
+        const extra = this.transientFormulaState.extraSignals.find(
+          (entry) => String(entry.id) === extraId
+        );
+        if (extra) extra.name = nextName;
+      }
       if (this.simplified && this.simplified.model.rows[index]) {
         this.simplified.model.rows[index].name = nextName;
       }
@@ -1420,7 +1563,11 @@
       this.updateCursorControls();
       this.updatePointEditor();
       this.scheduleBuild();
-      this.markDraftDirty('presentation');
+      if (row.transient) this.persistTransientFormulaState();
+      else this.markDraftDirty('presentation');
+      if (Object.keys(this.transientFormulaState.formulas).length) {
+        this.scheduleFormulaRefresh();
+      }
       this.setStatus('信号名已修改为：' + displayName);
       this.log('scope-signal-name', {
         phase: 'changed',
@@ -1428,6 +1575,304 @@
         previousName,
         nextName
       });
+    }
+
+    rowId(rowIndex) {
+      const row = this.meta && this.meta.rows[Math.max(0, Math.floor(Number(rowIndex) || 0))];
+      return row ? String(row.rowId || ('source:' + row.index)) : '';
+    }
+
+    syncTransientSignalNames() {
+      if (!this.meta) return;
+      this.meta.rows.forEach((row) => {
+        const rowId = String(row.rowId || ('source:' + row.index));
+        this.transientFormulaState.signalNames[rowId] = String(
+          this.signalNames[row.index] == null ? row.name || '' : this.signalNames[row.index]
+        );
+        if (row.transient) {
+          const extraId = rowId.indexOf('extra:') === 0 ? rowId.slice(6) : rowId;
+          const extra = this.transientFormulaState.extraSignals.find(
+            (entry) => String(entry.id) === extraId
+          );
+          if (extra) extra.name = this.transientFormulaState.signalNames[rowId];
+        }
+      });
+    }
+
+    persistTransientFormulaState() {
+      if (typeof this.adapter.setTransientState !== 'function') return;
+      try {
+        this.adapter.setTransientState(clone(this.transientFormulaState));
+      } catch (error) {
+        this.log('scope-formula', {
+          phase: 'transient-save-error',
+          message: error && error.message ? error.message : String(error)
+        });
+      }
+    }
+
+    scopeFormulaDefinitions() {
+      if (!this.meta) return [];
+      return this.meta.rows.map((row) => {
+        const rowId = String(row.rowId || ('source:' + row.index));
+        const formula = this.transientFormulaState.formulas[rowId];
+        if (!formula) return null;
+        return {
+          id: rowId,
+          name: String(this.signalNames[row.index] == null ? row.name : this.signalNames[row.index]),
+          formula
+        };
+      }).filter(Boolean);
+    }
+
+    analyzeScopeFormulas() {
+      if (!FormulaEngine) return null;
+      return FormulaEngine.analyzeDefinitions(
+        this.scopeFormulaDefinitions(),
+        this.meta.rows.map((row) => String(
+          this.signalNames[row.index] == null ? row.name : this.signalNames[row.index]
+        ))
+      );
+    }
+
+    formulaItemForRow(rowIndex, analysis) {
+      const rowId = this.rowId(rowIndex);
+      const source = analysis || this.analyzeScopeFormulas();
+      return source && source.items.find((item) => item.id === rowId) || null;
+    }
+
+    updateFormulaControls() {
+      if (!this.meta || this.displayControlRow == null) return;
+      const row = this.meta.rows[this.displayControlRow];
+      if (!row) return;
+      const rowId = String(row.rowId || ('source:' + row.index));
+      const formula = this.transientFormulaState.formulas[rowId] || null;
+      const active = !!formula;
+      this.formulaToggleButton.classList.toggle('active', active);
+      this.formulaToggleButton.setAttribute('aria-pressed', String(active));
+      this.formulaSettings.hidden = !active;
+      this.displayPopover.classList.toggle('formula-active', active);
+      if (!active) return;
+      if (!this.formulaEditorActive) {
+        this.formulaCycle0Input.value = String(formula.cycle0 || '');
+        this.formulaCycle05Input.value = String(formula.cycle05 || '');
+      }
+      const analysis = this.analyzeScopeFormulas();
+      const item = this.formulaItemForRow(row.index, analysis);
+      const names = this.meta.rows.map((entry) => String(
+        this.signalNames[entry.index] == null ? entry.name : this.signalNames[entry.index]
+      ));
+      this.formulaCycle0Highlight.innerHTML = FormulaEngine
+        ? FormulaEngine.highlightExpression(
+          formula.cycle0 || '', item && item.cycle0, names, row.name)
+        : escapeHtml(formula.cycle0 || '');
+      this.formulaCycle05Highlight.innerHTML = FormulaEngine
+        ? FormulaEngine.highlightExpression(
+          formula.cycle05 || '', item && item.cycle05, names, row.name)
+        : escapeHtml(formula.cycle05 || '');
+      const libraries = new Set(item ? item.libraries : (formula.libraries || []));
+      this.formulaSettings.querySelectorAll('[data-scope-formula-library]').forEach((chip) => {
+        chip.classList.toggle('active', libraries.has(chip.dataset.scopeFormulaLibrary));
+      });
+      const workerFormula = row.formula || null;
+      const error = item && item.error ? item.error : (workerFormula && workerFormula.error || '');
+      this.formulaFeedback.textContent = error
+        ? error
+        : ((formula.cycle0 || formula.cycle05)
+          ? '公式有效；边界无法取值时输出 x'
+          : '两个公式均为空，当前输出为 x');
+      this.formulaFeedback.classList.toggle('is-error', !!error);
+      const preview = workerFormula && Array.isArray(workerFormula.preview)
+        ? workerFormula.preview
+        : [];
+      this.formulaPreviewValues.textContent = preview.length
+        ? ('预览：' + preview.map((value, index) => (
+          String(index / 2) + '=' + String(value)
+        )).join('  '))
+        : '预览：等待计算';
+      this.formulaPythonPreview.textContent = item && FormulaEngine
+        ? FormulaEngine.pythonPreview(item)
+        : '';
+      this.formulaExportButton.disabled = !!error;
+    }
+
+    updateFormulaDraftFromInputs() {
+      if (!this.meta || this.displayControlRow == null) return;
+      const rowId = this.rowId(this.displayControlRow);
+      if (!rowId || !this.transientFormulaState.formulas[rowId]) return;
+      this.transientFormulaState.formulas[rowId] = {
+        cycle0: this.formulaCycle0Input.value,
+        cycle05: this.formulaCycle05Input.value,
+        libraries: []
+      };
+      this.updateFormulaControls();
+      this.positionDisplayPopover();
+      this.scheduleFormulaRefresh();
+    }
+
+    async toggleSignalFormula() {
+      if (!this.meta || this.displayControlRow == null || !FormulaEngine) {
+        this.setStatus('公式模块不可用', true);
+        return;
+      }
+      const rowId = this.rowId(this.displayControlRow);
+      if (!rowId) return;
+      if (this.transientFormulaState.formulas[rowId]) {
+        delete this.transientFormulaState.formulas[rowId];
+        this.setStatus('已取消该信号的临时公式');
+      } else {
+        this.transientFormulaState.formulas[rowId] = {
+          cycle0: '',
+          cycle05: '',
+          libraries: []
+        };
+        this.setStatus('已启用公式，可分别填写 0 cycle 和 0.5 cycle');
+      }
+      await this.refreshFormulaSession({ preservePopover: true, persist: true });
+    }
+
+    async addTransientSignal() {
+      if (!this.meta) return;
+      const names = new Set(this.meta.rows.map((row) => String(
+        this.signalNames[row.index] == null ? row.name : this.signalNames[row.index]
+      )));
+      let number = 1;
+      while (names.has('Signal' + number)) number += 1;
+      const name = 'Signal' + number;
+      const id = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 9);
+      this.transientFormulaState.extraSignals.push({ id, name });
+      this.transientFormulaState.signalNames['extra:' + id] = name;
+      await this.refreshFormulaSession({ focusRowId: 'extra:' + id, persist: true });
+      this.setStatus('已新增临时空波形：' + name);
+      this.log('scope-formula', { phase: 'signal-added', id, name });
+    }
+
+    async refreshFormulaSession(options) {
+      if (!this.meta) return;
+      if (this.formulaRefreshInFlight && !(options && options.force)) {
+        this.formulaRefreshQueued = true;
+        return;
+      }
+      const settings = options || {};
+      const sequence = ++this.formulaRefreshSequence;
+      const previousRows = this.meta.rows.slice();
+      const selectedRow = previousRows[this.activeCursorRow];
+      const activeRowId = settings.focusRowId
+        || (selectedRow && String(selectedRow.rowId || ('source:' + selectedRow.index)));
+      const popupRow = settings.preservePopover && this.displayControlRow != null
+        ? previousRows[this.displayControlRow]
+        : null;
+      const popupRowId = popupRow && String(popupRow.rowId || ('source:' + popupRow.index));
+      const previousById = new Map(previousRows.map((row) => {
+        const rowId = String(row.rowId || ('source:' + row.index));
+        return [rowId, {
+          mode: this.modes[row.index],
+          busFormat: this.busFormats[row.index],
+          analogFormat: this.analogFormats[row.index],
+          style: this.rowStyles[row.index],
+          height: this.rowHeights[row.index],
+          collapsed: this.collapsedRows.has(row.index)
+        }];
+      }));
+      this.syncTransientSignalNames();
+      this.formulaRefreshInFlight = true;
+      try {
+        const nextMeta = await this.worker.call('formulas', {
+          transient: clone(this.transientFormulaState)
+        });
+        if (sequence !== this.formulaRefreshSequence) return;
+        this.meta = nextMeta;
+        this.modes = {};
+        this.busFormats = {};
+        this.analogFormats = {};
+        this.rowStyles = {};
+        this.rowHeights = [];
+        this.collapsedRows = new Set();
+        this.signalNames = nextMeta.rows.map((row) => String(row.sourceName == null
+          ? row.name || ''
+          : (this.transientFormulaState.signalNames[row.rowId] == null
+            ? row.name || row.sourceName
+            : this.transientFormulaState.signalNames[row.rowId])));
+        nextMeta.rows.forEach((row) => {
+          const previous = previousById.get(String(row.rowId || ('source:' + row.index)));
+          this.modes[row.index] = previous ? previous.mode : row.mode;
+          this.busFormats[row.index] = normalizeBusFormat(previous ? previous.busFormat : row.busFormat);
+          this.analogFormats[row.index] = normalizeAnalogFormat(
+            previous ? previous.analogFormat : row.analogFormat,
+            row.detectedMode === 'analog' ? 'float' : 'unsigned'
+          );
+          this.rowStyles[row.index] = normalizeRowStyle(previous ? previous.style : row.style);
+          this.rowHeights[row.index] = previous ? previous.height : (row.rowHeight || DEFAULT_ROW_HEIGHT);
+          if (previous && previous.collapsed) this.collapsedRows.add(row.index);
+        });
+        const activeIndex = nextMeta.rows.findIndex((row) => String(
+          row.rowId || ('source:' + row.index)
+        ) === activeRowId);
+        this.activeCursorRow = activeIndex >= 0 ? activeIndex : 0;
+        this.viewStart = clamp(this.viewStart, 0, Math.max(0, nextMeta.totalColumns - 1));
+        this.viewEnd = clamp(this.viewEnd, this.viewStart + 1e-6, nextMeta.totalColumns);
+        this.syncSignalNameMetadata();
+        this.renderSignalRows();
+        this.updateLayout();
+        await this.requestWindow();
+        await this.runSimplify(false);
+        await this.updateCursorReadout();
+        if (settings.persist) this.persistTransientFormulaState();
+        if (popupRowId) {
+          const popupIndex = nextMeta.rows.findIndex((row) => String(
+            row.rowId || ('source:' + row.index)
+          ) === popupRowId);
+          const anchor = popupIndex >= 0 && this.signalList.querySelector(
+            '[data-scope-display-row="' + popupIndex + '"]'
+          );
+          if (anchor) this.openDisplayPopover(popupIndex, anchor);
+        }
+      } catch (error) {
+        this.setStatus('公式计算失败：' + (error.message || String(error)), true);
+        this.log('scope-formula', {
+          phase: 'refresh-error',
+          message: error && error.message ? error.message : String(error)
+        });
+      } finally {
+        this.formulaRefreshInFlight = false;
+        if (this.formulaRefreshQueued) {
+          this.formulaRefreshQueued = false;
+          this.scheduleFormulaRefresh();
+        }
+      }
+    }
+
+    exportCurrentFormulaJson() {
+      if (!this.meta || this.displayControlRow == null || !FormulaEngine) return;
+      const row = this.meta.rows[this.displayControlRow];
+      const rowId = this.rowId(row.index);
+      const formula = this.transientFormulaState.formulas[rowId];
+      const item = this.formulaItemForRow(row.index);
+      if (!formula || !item || !item.valid) {
+        this.setStatus('请先修正公式错误再导出', true);
+        return;
+      }
+      const name = String(this.signalNames[row.index] || row.name);
+      const payload = {
+        usrGen: { name },
+        formula: {
+          cycle0: String(formula.cycle0 || ''),
+          cycle05: String(formula.cycle05 || ''),
+          libraries: item.libraries.slice()
+        }
+      };
+      const text = JSON.stringify(payload, null, 2);
+      const blob = new Blob([text], { type: 'application/json;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'formula-' + name.replace(/[\\/:*?"<>|]+/g, '_') + '.json';
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).catch(() => {});
+      }
+      this.setStatus('公式 JSON 已导出，并尝试复制到剪贴板');
     }
 
     renderSignalRows() {
@@ -1496,7 +1941,11 @@
                 aria-label="${escapeHtml(row.name)} 显示设置"
                 aria-haspopup="dialog" aria-expanded="false"
                 aria-controls="scope-display-popover">
-              <span>${DISPLAY_MODE_LABELS[this.modes[row.index]] || DISPLAY_MODE_LABELS.bus}</span>
+              <span>${DISPLAY_MODE_LABELS[this.modes[row.index]] || DISPLAY_MODE_LABELS.bus}${
+                this.transientFormulaState.formulas[String(row.rowId || ('source:' + row.index))]
+                  ? ' · fx'
+                  : ''
+              }</span>
             </button>
             ${analogMode ? `
               <span class="scope-row-resize-handle" data-scope-row-resize="${row.index}"
@@ -1606,6 +2055,8 @@
       const fixedPoint = format.type === 'ufixed' || format.type === 'sfixed';
       this.signalAnalogFractionInput.disabled = !fixedPoint;
       this.signalAnalogFractionInput.max = String(Math.max(0, format.bitWidth - 1));
+      this.updateFormulaControls();
+      this.positionDisplayPopover();
     }
 
     closeDisplayPopover(restoreFocus) {
@@ -1617,6 +2068,7 @@
       }
       this.displayControlRow = null;
       this.displayPopoverAnchor = null;
+      this.formulaEditorActive = false;
       this.displayPopover.hidden = true;
       this.displayPopover.style.visibility = '';
       if (restoreFocus && anchor && anchor.isConnected) anchor.focus({ preventScroll: true });
@@ -4690,16 +5142,25 @@
         busFormats: clone(this.busFormats),
         analogFormats: clone(this.analogFormats),
         rowStyles: clone(this.rowStyles),
-        rowHeights: this.rowHeights.slice()
+        rowHeights: this.rowHeights.slice(),
+        signalNames: this.signalNames.slice()
       });
       return result.content;
     }
 
     async reloadSavedDocument(saved) {
       this.document = saved;
-      this.meta = await this.worker.call('prepare', { content: saved.content });
+      Object.keys(this.transientFormulaState.signalNames).forEach((rowId) => {
+        if (rowId.indexOf('source:') === 0) delete this.transientFormulaState.signalNames[rowId];
+      });
+      this.meta = await this.worker.call('prepare', {
+        content: saved.content,
+        transient: clone(this.transientFormulaState)
+      });
       this.signalNames = this.meta.rows.map((row) => String(
-        row.sourceName == null ? row.name || '' : row.sourceName
+        this.transientFormulaState.signalNames[row.rowId] == null
+          ? (row.sourceName == null ? row.name || '' : row.sourceName)
+          : this.transientFormulaState.signalNames[row.rowId]
       ));
       this.syncSignalNameMetadata();
       this.modes = {};

@@ -140,6 +140,7 @@
     let presetNavigationRanges = [];
     let presetNavigationHighlightLine = null;
     let presetNavigationHighlightTimer = 0;
+    let formulaDiagnostics = new Map();
     const variableValues = new Map();
     const singlePreviewStates = new Map();
 
@@ -439,6 +440,16 @@
     function searchEntryStatus(entry) {
       if (!entry || typeof entry !== 'object') return null;
       const matches = Array.isArray(entry.matches) ? entry.matches : [];
+      if (entry.status === 'formula-ready') {
+        return { state: 'matched', symbol: '✓', label: '公式有效，可以导入' };
+      }
+      if (entry.status === 'formula-error') {
+        return {
+          state: 'duplicate',
+          symbol: '×',
+          label: entry.message || '公式有误，本项将跳过'
+        };
+      }
       if (entry.importError) {
         return {
           state: 'duplicate',
@@ -478,6 +489,19 @@
         const parsedIndex = Number(entry && entry.index);
         const entryIndex = Number.isInteger(parsedIndex) ? parsedIndex : fallbackIndex;
         indexed.set(entryIndex, entry);
+      });
+      formulaDiagnostics.forEach((diagnostic, entryIndex) => {
+        const existing = indexed.get(entryIndex) || {};
+        indexed.set(entryIndex, Object.assign({}, existing, {
+          index: entryIndex,
+          name: diagnostic.name,
+          importMode: 'formula',
+          formula: diagnostic.formula,
+          outputNames: diagnostic.name ? [diagnostic.name] : [],
+          matches: [],
+          status: diagnostic.valid ? 'formula-ready' : 'formula-error',
+          message: diagnostic.error || ''
+        }));
       });
       return indexed;
     }
@@ -682,7 +706,7 @@
       renderPresetNavigationSearchStates(payload);
       if (!presetCodeEditor) return;
       const lines = findPresetPathObjectLines(getPresetEditorValue());
-      const entries = Array.isArray(payload && payload.entries) ? payload.entries : [];
+      const entries = Array.from(searchEntriesByIndex(payload).values());
       const markersByLine = new Map();
       entries.forEach((entry, fallbackIndex) => {
         const entryIndex = Number.isInteger(Number(entry.index))
@@ -1143,11 +1167,55 @@
       return config;
     }
 
+    function normalizeFormulaConfig(value, fieldPath) {
+      const errors = [];
+      let source = value;
+      if (typeof source === 'string') source = { cycle0: source };
+      if (!source || typeof source !== 'object' || Array.isArray(source)) {
+        errors.push(fieldPath + ' 必须是字典');
+        source = {};
+      }
+      const readText = (keys, label) => {
+        const key = keys.find((candidate) => source[candidate] !== undefined);
+        if (!key || source[key] == null) return '';
+        if (typeof source[key] !== 'string') {
+          errors.push(fieldPath + '.' + label + ' 必须是字符串');
+        }
+        return String(source[key]);
+      };
+      let libraries = [];
+      if (source.libraries !== undefined) {
+        if (!Array.isArray(source.libraries)) {
+          errors.push(fieldPath + '.libraries 必须是列表');
+        } else {
+          libraries = source.libraries.map((name, index) => {
+            if (typeof name !== 'string') {
+              errors.push(fieldPath + '.libraries[' + index + '] 必须是字符串');
+            }
+            return String(name == null ? '' : name).trim().toLowerCase();
+          }).filter(Boolean);
+        }
+      }
+      const normalized = {
+        cycle0: readText(['cycle0', '0 cycle', 'at0'], 'cycle0'),
+        cycle05: readText(['cycle05', 'cycle0_5', '0.5 cycle', 'at05'], 'cycle05'),
+        libraries: Array.from(new Set(libraries))
+      };
+      Object.defineProperty(normalized, '__vwdStructureErrors', {
+        value: errors,
+        enumerable: false
+      });
+      return normalized;
+    }
+
     function normalizePresetPath(entry, index) {
       const path = 'paths[' + index + ']';
       if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
         throw validationError(path + ' 必须是字典', path);
       }
+      const formula = entry.formula === undefined
+        ? null
+        : normalizeFormulaConfig(entry.formula, path + '.formula');
       let usrGen;
       let autoGen;
       if (entry.usrGen !== undefined || entry.autoGen !== undefined) {
@@ -1172,6 +1240,12 @@
           importMode: 'single',
           hasSeq: entry.hasSeq
         }, path + '.autoGen');
+      }
+      if (formula) {
+        if (!usrGen.name) {
+          throw validationError(path + '.usrGen.name 必须是非空信号名', path + '.usrGen.name');
+        }
+        return { usrGen: { name: usrGen.name }, autoGen, formula };
       }
       if (!usrGen.folder) usrGen.folder = '.';
       if (!usrGen.grepKeys) {
@@ -1209,9 +1283,132 @@
       });
       const paths = value.paths.map((entry, index) => normalizePresetPath(entry, index));
       paths.forEach((entry) => {
+        if (entry.formula) return;
         extractTemplateVariables(entry.usrGen.grepKeys).forEach((name) => names.add(name));
       });
       return { vars: Array.from(names), paths };
+    }
+
+    function formulaSignalNames(preset, payload) {
+      const names = new Set();
+      if (typeof settings.getFormulaSignalNames === 'function') {
+        try {
+          (settings.getFormulaSignalNames() || []).forEach((name) => {
+            const normalized = String(name || '').trim();
+            if (normalized) names.add(normalized);
+          });
+        } catch (error) {
+          debug({ phase: 'formula-signal-names-error', message: error.message || String(error) });
+        }
+      }
+      const entries = Array.isArray(payload && payload.entries) ? payload.entries : [];
+      entries.forEach((entry) => {
+        if (entry && entry.importMode === 'formula') return;
+        (Array.isArray(entry && entry.outputNames) ? entry.outputNames : []).forEach((name) => {
+          const normalized = String(name || '').trim();
+          if (normalized) names.add(normalized);
+        });
+      });
+      (preset && Array.isArray(preset.paths) ? preset.paths : []).forEach((entry) => {
+        if (!entry || entry.formula) return;
+        const config = entry.usrGen || {};
+        const name = String(config.name || '').trim();
+        if (name) names.add(name);
+        const columns = Array.isArray(config.columns) && config.columns.length
+          ? config.columns
+          : (entry.autoGen && Array.isArray(entry.autoGen.columns) ? entry.autoGen.columns : []);
+        columns.forEach((column) => {
+          if (column && column.enabled === false) return;
+          const columnName = String(column && (column.name || column.source) || '').trim();
+          if (columnName) names.add(columnName);
+        });
+      });
+      return Array.from(names);
+    }
+
+    function refreshFormulaDiagnostics(preset, payload) {
+      formulaDiagnostics = new Map();
+      const formulaEngine = window.VisualWaveDromFormula;
+      const definitions = [];
+      (preset && Array.isArray(preset.paths) ? preset.paths : []).forEach((entry, index) => {
+        if (!entry || !entry.formula) return;
+        definitions.push({
+          id: String(index),
+          name: String(entry.usrGen && entry.usrGen.name || '').trim(),
+          formula: entry.formula
+        });
+      });
+      if (!definitions.length) return formulaDiagnostics;
+      if (!formulaEngine) {
+        definitions.forEach((definition) => {
+          formulaDiagnostics.set(Number(definition.id), {
+            index: Number(definition.id),
+            name: definition.name,
+            formula: definition.formula,
+            valid: false,
+            error: '公式模块未加载',
+            references: [],
+            dependencies: [],
+            libraries: []
+          });
+        });
+        return formulaDiagnostics;
+      }
+      const analysis = formulaEngine.analyzeDefinitions(
+        definitions,
+        formulaSignalNames(preset, payload)
+      );
+      analysis.items.forEach((item) => {
+        const index = Number(item.id);
+        const entry = preset.paths[index];
+        const structureErrors = entry && entry.formula
+          && Array.isArray(entry.formula.__vwdStructureErrors)
+          ? entry.formula.__vwdStructureErrors
+          : [];
+        const errors = Array.from(new Set(structureErrors.concat(item.errors || [])));
+        formulaDiagnostics.set(index, Object.assign({}, item, {
+          index,
+          valid: errors.length === 0,
+          errors,
+          error: errors.join('；')
+        }));
+      });
+      debug({
+        phase: 'formula-diagnostics',
+        total: formulaDiagnostics.size,
+        valid: Array.from(formulaDiagnostics.values()).filter((item) => item.valid).length,
+        invalid: Array.from(formulaDiagnostics.values()).filter((item) => !item.valid).length
+      });
+      return formulaDiagnostics;
+    }
+
+    function decorateFormulaSearchResult(payload, preset) {
+      if (!payload || typeof payload !== 'object') return payload;
+      refreshFormulaDiagnostics(preset, payload);
+      const indexed = new Map();
+      (Array.isArray(payload.entries) ? payload.entries : []).forEach((entry, fallbackIndex) => {
+        const parsedIndex = Number(entry && entry.index);
+        indexed.set(Number.isInteger(parsedIndex) ? parsedIndex : fallbackIndex, entry);
+      });
+      formulaDiagnostics.forEach((diagnostic, index) => {
+        const existing = indexed.get(index) || {};
+        indexed.set(index, Object.assign({}, existing, {
+          index,
+          name: diagnostic.name,
+          importMode: 'formula',
+          formula: diagnostic.formula,
+          outputNames: diagnostic.name ? [diagnostic.name] : [],
+          matches: [],
+          status: diagnostic.valid ? 'formula-ready' : 'formula-error',
+          message: diagnostic.error || ''
+        }));
+      });
+      payload.entries = Array.from(indexed.values()).sort((left, right) =>
+        Number(left.index) - Number(right.index));
+      payload.formulaCount = Array.from(formulaDiagnostics.values())
+        .filter((item) => item.valid).length;
+      payload.formulaErrorCount = formulaDiagnostics.size - payload.formulaCount;
+      return payload;
     }
 
     function parseEditor(showError) {
@@ -1223,6 +1420,7 @@
           : '';
         const nextVariables = nextPreset.vars.join('\u0000');
         parsedPreset = nextPreset;
+        refreshFormulaDiagnostics(nextPreset, searchResult);
         presetState.textContent = '从 grepKeys 自动识别 ' + nextPreset.vars.length + ' 个变量，'
           + nextPreset.paths.length + ' 条搜索规则';
         if (previousVariables !== nextVariables || !variablesHost.childElementCount) {
@@ -1230,11 +1428,13 @@
         }
         renderPresetNavigation(nextPreset, editorText);
         clearJsonErrorMarker();
+        renderSearchMarkers(searchResult);
         setHint('', false);
         updateButtons();
         return nextPreset;
       } catch (error) {
         parsedPreset = null;
+        formulaDiagnostics = new Map();
         renderPresetNavigation(null, editorText);
         presetState.textContent = '预设 JSON 有错误';
         const location = renderJsonErrorMarker(error, editorText);
@@ -1253,6 +1453,7 @@
     function adoptGeneratedPreset(value, reason) {
       const normalized = validatePresetShape(value);
       parsedPreset = normalized;
+      refreshFormulaDiagnostics(normalized, searchResult);
       setPresetEditorValue(JSON.stringify(normalized, null, 2), { keepHistory: true });
       presetState.textContent = '从 grepKeys 自动识别 ' + normalized.vars.length + ' 个变量，'
         + normalized.paths.length + ' 条搜索规则；autoGen 已更新';
@@ -1587,10 +1788,12 @@
         ? searchResult.entries
         : [];
       const active = entries.filter((entry) =>
-        Array.isArray(entry.matches) && entry.matches.length > 0);
+        entry.status === 'formula-ready'
+          || (Array.isArray(entry.matches) && entry.matches.length > 0));
       const errors = [];
       const owners = new Map();
       active.forEach((entry) => {
+        if (entry.status === 'formula-ready') return;
         if (entry.importError) {
           errors.push(String(entry.importError));
           return;
@@ -1629,6 +1832,17 @@
         count: active.length,
         errors
       };
+    }
+
+    function validFormulaDefinitions() {
+      return Array.from(formulaDiagnostics.values())
+        .filter((item) => item.valid)
+        .sort((left, right) => left.index - right.index)
+        .map((item) => ({
+          id: String(item.index),
+          name: item.name,
+          formula: item.formula
+        }));
     }
 
     function scheduleEditorParse() {
@@ -1806,22 +2020,30 @@
     }
 
     function renderSearchResults(payload) {
-      const entries = Array.isArray(payload && payload.entries) ? payload.entries : [];
+      const entries = Array.from(searchEntriesByIndex(payload).values())
+        .sort((left, right) => Number(left.index) - Number(right.index));
+      if (payload && typeof payload === 'object') payload.entries = entries;
       resultsHost.innerHTML = '';
       entries.forEach((entry) => {
         const matches = Array.isArray(entry.matches) ? entry.matches : [];
         const importError = String(entry.importError || '');
+        const formulaError = entry.status === 'formula-error'
+          ? String(entry.message || '公式有误')
+          : '';
+        const displayedError = importError || formulaError;
         const row = document.createElement('div');
         row.dataset.entryIndex = String(entry.index);
         row.className = 'wave-collection-result '
-          + (importError
+          + (displayedError
             ? 'is-error'
-            : (entry.status === 'matched'
+            : (entry.status === 'matched' || entry.status === 'formula-ready'
             ? 'is-ready'
             : (entry.status === 'multiple' ? 'is-warning' : 'is-error')));
         const name = document.createElement('div');
         name.className = 'wave-collection-result-name';
-        if (entry.importMode === 'table') {
+        if (entry.importMode === 'formula') {
+          name.textContent = String(entry.name || '未命名信号') + '（公式）';
+        } else if (entry.importMode === 'table') {
           const importableColumns = (entry.columns || [])
             .filter((column) => String(column.source || '') !== String(entry.indexColumn || ''));
           const enabledCount = (entry.columns || [])
@@ -1835,7 +2057,18 @@
         }
         const path = document.createElement('div');
         path.className = 'wave-collection-result-path';
-        if (matches.length === 1) {
+        if (entry.importMode === 'formula') {
+          const diagnostic = formulaDiagnostics.get(Number(entry.index));
+          const references = diagnostic && Array.isArray(diagnostic.references)
+            ? diagnostic.references : [];
+          const libraries = diagnostic && Array.isArray(diagnostic.libraries)
+            ? diagnostic.libraries : [];
+          path.textContent = displayedError || [
+            references.length ? ('依赖信号：' + references.join('、')) : '无信号依赖',
+            libraries.length ? ('依赖库：' + libraries.join('、')) : ''
+          ].filter(Boolean).join('；');
+          path.title = displayedError || path.textContent;
+        } else if (matches.length === 1) {
           path.textContent = matches[0].path;
           path.title = '正则：' + String(entry.resolvedPattern || '');
         } else if (matches.length > 1) {
@@ -1853,6 +2086,8 @@
         const state = document.createElement('span');
         state.className = 'wave-collection-result-state';
         if (importError) state.textContent = '序号设置错误';
+        else if (entry.status === 'formula-ready') state.textContent = '公式有效';
+        else if (entry.status === 'formula-error') state.textContent = '公式错误，跳过';
         else if (entry.status === 'matched') state.textContent = '已匹配';
         else if (entry.status === 'multiple') state.textContent = matches.length + ' 个匹配，取第 1 个';
         else if (entry.status === 'duplicate-name') state.textContent = 'name重复';
@@ -1888,10 +2123,10 @@
         row.appendChild(name);
         row.appendChild(path);
         row.appendChild(actions);
-        if (importError) {
+        if (displayedError) {
           const error = document.createElement('div');
           error.className = 'wave-collection-result-error';
-          error.textContent = importError;
+          error.textContent = displayedError;
           error.setAttribute('role', 'alert');
           row.appendChild(error);
         }
@@ -2366,16 +2601,21 @@
       renderSearchMarkers(payload);
       const multipleCount = entries.filter((entry) => entry.status === 'multiple').length;
       const skippedCount = entries.filter((entry) =>
-        entry.status === 'missing' || entry.status === 'folder-missing').length;
+        entry.status === 'missing' || entry.status === 'folder-missing'
+          || entry.status === 'formula-error').length;
+      const formulaCount = entries.filter((entry) => entry.status === 'formula-ready').length;
+      const fileCount = entries.filter((entry) =>
+        entry.importMode !== 'formula'
+          && Array.isArray(entry.matches) && entry.matches.length > 0).length;
       const selection = collectionSelectionStatus();
       payload.ready = selection.valid;
       resultSummary.textContent = selection.valid
-        ? ('已选择 ' + selection.count + ' 个文件，可以导入'
-          + (skippedCount ? '；跳过 ' + skippedCount + ' 条未匹配规则' : '')
+        ? ('已选择 ' + fileCount + ' 个文件、' + formulaCount + ' 个公式，可以导入'
+          + (skippedCount ? '；跳过 ' + skippedCount + ' 条无效或未匹配规则' : '')
           + (multipleCount ? '；' + multipleCount + ' 条规则默认取第一个' : ''))
         : (selection.count > 0
           ? (selection.errors[0] || '请检查导入配置')
-          : '没有找到可导入的文件');
+          : '没有找到可导入的文件或有效公式');
       updateButtons();
     }
 
@@ -2853,9 +3093,12 @@
       try {
         const payload = await post('search', { rootPath, preset, variables });
         searchResult = payload;
+        let effectivePreset = preset;
         if (payload.preset) {
-          adoptGeneratedPreset(payload.preset, 'search-autogen');
+          effectivePreset = adoptGeneratedPreset(payload.preset, 'search-autogen');
         }
+        decorateFormulaSearchResult(payload, effectivePreset);
+        searchResult = payload;
         renderSearchResults(payload);
         const searchDetails = '扫描 ' + Number(payload.visitedFiles || 0)
           + ' 个文件、' + Number(payload.scanCount || 0) + ' 个目录根，耗时 '
@@ -2867,14 +3110,17 @@
           ? payload.entries.filter((entry) =>
             entry.status === 'missing' || entry.status === 'folder-missing').length
           : 0;
-        setHint(payload.ready
+        const selection = collectionSelectionStatus();
+        const validFormulaCount = Number(payload.formulaCount || 0);
+        setHint(selection.valid
           ? ('搜索完成：' + searchDetails + '。确认结果后点击“确定导入”'
             + (skippedCount ? '；' + skippedCount + ' 条未匹配规则将被跳过' : '')
-            + (multipleCount ? '；多匹配规则已默认选择第一个文件' : ''))
+            + (multipleCount ? '；多匹配规则已默认选择第一个文件' : '')
+            + (validFormulaCount ? '；' + validFormulaCount + ' 个公式有效' : ''))
           : ('搜索完成：' + searchDetails
-            + (Number(payload.resultCount || 0) > 0
+            + (selection.count > 0
               ? '。请修改重复信号名'
-              : '。没有找到可导入文件')), !payload.ready);
+              : '。没有找到可导入文件或有效公式')), !selection.valid);
         debug({
           phase: 'search-complete',
           ready: !!payload.ready,
@@ -2934,9 +3180,13 @@
         ? settings.getContextToken()
         : '';
       setBusy(true, 'import');
-      const fileCount = Number(searchResult.resultCount || 0);
+      const fileCount = (searchResult.entries || []).filter((entry) =>
+        entry.importMode !== 'formula'
+          && Array.isArray(entry.matches) && entry.matches.length > 0).length;
+      const formulas = validFormulaDefinitions();
       const progressToken = createImportProgressToken();
-      startProgress('正在核对并解析 ' + fileCount + ' 个文件…');
+      startProgress('正在核对并解析 ' + fileCount + ' 个文件、'
+        + formulas.length + ' 个公式…');
       startImportProgressPolling(progressToken, fileCount);
       const startedAt = progressStartedAt;
       debug({
@@ -2954,6 +3204,7 @@
           searchToken: searchResult.searchToken || '',
           progressToken
         });
+        payload.formulas = formulas;
         stopImportProgressPolling();
         applyImportProgress(payload.progress);
         if (typeof settings.getContextToken === 'function'
@@ -2976,6 +3227,7 @@
           true,
           (result.changed ? '已批量导入 ' : '批量导入内容未变化：')
             + completedFiles + ' 个文件，' + result.count + ' 个信号行'
+            + (formulas.length ? '（含 ' + formulas.length + ' 个公式）' : '')
             + (result.createdCount ? '，新增 ' + result.createdCount + ' 行' : '')
             + '，耗时 ' + elapsedSeconds + ' 秒'
         );

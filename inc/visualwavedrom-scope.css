@@ -811,6 +811,12 @@ body.scope-row-resizing * {
 
 .scope-display-popover {
   width: min(304px, calc(100vw - 16px));
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+}
+
+.scope-display-popover.formula-active {
+  width: min(560px, calc(100vw - 16px));
 }
 
 .scope-display-popover-section {
@@ -923,6 +929,134 @@ body.scope-row-resizing * {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
+}
+
+.scope-formula-settings {
+  display: grid;
+  gap: 9px;
+  margin-top: 9px;
+  padding-top: 9px;
+  border-top: 1px solid #dfe2e6;
+}
+
+.scope-formula-settings[hidden] {
+  display: none;
+}
+
+.scope-formula-dependencies {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.scope-formula-library {
+  min-width: 46px;
+  box-sizing: border-box;
+  padding: 3px 7px;
+  border: 1px solid #c9cdd2;
+  border-radius: 4px;
+  color: #737982;
+  background: #f5f6f7;
+  font: 11px Consolas, "Courier New", monospace;
+  text-align: center;
+}
+
+.scope-formula-library.active {
+  border-color: #4477a9;
+  color: #173f70;
+  background: #e9f1fa;
+  font-weight: 700;
+}
+
+.scope-formula-field {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+  color: #555b63;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.scope-formula-field textarea {
+  width: 100%;
+  min-height: 66px;
+  max-height: 180px;
+  box-sizing: border-box;
+  resize: vertical;
+  border: 1px solid #b9bec5;
+  border-radius: 4px;
+  padding: 7px 8px;
+  color: #20242a;
+  background: #ffffff;
+  font: 12px/1.5 Consolas, "Courier New", monospace;
+}
+
+.scope-formula-field textarea:focus {
+  border-color: #2f73bf;
+  outline: 2px solid rgba(47, 115, 191, 0.18);
+}
+
+.scope-formula-highlight {
+  min-height: 22px;
+  box-sizing: border-box;
+  display: block;
+  overflow-wrap: anywhere;
+  padding: 3px 6px;
+  border-left: 3px solid #c9cdd2;
+  color: #4e545c;
+  background: #f7f8f9;
+  font: 11px/1.45 Consolas, "Courier New", monospace;
+  white-space: pre-wrap;
+}
+
+.scope-formula-variable.is-valid {
+  color: #123f76;
+  font-weight: 700;
+}
+
+.scope-formula-variable.is-invalid {
+  color: #b3261e;
+  text-decoration: underline wavy #b3261e;
+}
+
+.scope-formula-feedback,
+.scope-formula-preview-values {
+  overflow-wrap: anywhere;
+  color: #35613f;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.scope-formula-feedback.is-error {
+  color: #a1261f;
+  font-weight: 600;
+}
+
+.scope-formula-preview-values {
+  max-height: 54px;
+  overflow: auto;
+  color: #555b63;
+  font-family: Consolas, "Courier New", monospace;
+}
+
+.scope-formula-python summary {
+  color: #3f464e;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.scope-formula-python pre {
+  max-height: 160px;
+  overflow: auto;
+  margin: 6px 0 0;
+  padding: 7px 8px;
+  border: 1px solid #d5d9de;
+  border-radius: 4px;
+  color: #26313d;
+  background: #f5f7f9;
+  font: 11px/1.45 Consolas, "Courier New", monospace;
+  white-space: pre-wrap;
 }
 
 .scope-style-popover-header {

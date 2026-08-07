@@ -1049,6 +1049,7 @@ ${lines.join('\n')}`;
     let pendingWaveCopyButton = null;
     let waveLibrarySyncChannel = null;
     const scopeWindowOpenStates = new Map();
+    const scopeTransientStates = new Map();
     let pageExitStateFlushed = false;
 
     document.body.classList.toggle('single-wave-view', singleWaveViewActive);
@@ -13073,6 +13074,10 @@ ${lines.join('\n')}`;
       return params;
     }
 
+    function scopeTransientStateKey(libraryId, documentName) {
+      return String(libraryId || '') + '\u0000' + String(documentName || '');
+    }
+
     function getWaveDocumentScopeViewUrl(documentName, scopeToken) {
       const params = getWaveDocumentScopeViewParams(documentName, scopeToken);
       if (!params) return '';
@@ -13254,20 +13259,23 @@ ${lines.join('\n')}`;
       }
       return new Promise((resolve, reject) => {
         let settled = false;
-        const finish = (error, documentSnapshot) => {
+        const finish = (error, responsePayload) => {
           if (settled) return;
           settled = true;
           clearTimeout(timeout);
           window.removeEventListener('message', onMessage);
           if (error) reject(error);
-          else resolve(documentSnapshot || null);
+          else resolve(responsePayload || null);
         };
         const onMessage = (event) => {
           const message = event.data || {};
           if (message.type !== 'visualwavedrom-scope-source-response'
               || message.scopeToken !== requestedScopeToken) return;
           if (message.error) finish(new Error(message.error));
-          else finish(null, message.document);
+          else finish(null, {
+            document: message.document || null,
+            transientState: message.transientState || null
+          });
         };
         const timeout = setTimeout(() => finish(null, null), 10000);
         window.addEventListener('message', onMessage);
@@ -13288,7 +13296,9 @@ ${lines.join('\n')}`;
       if (!window.VisualWaveDromScope || typeof window.VisualWaveDromScope.mount !== 'function') {
         throw new Error('示波器窗口模块未加载');
       }
-      const openerDocument = await requestScopeSourceFromOpener();
+      const openerPayload = await requestScopeSourceFromOpener();
+      const openerDocument = openerPayload && openerPayload.document;
+      let scopeTransientState = openerPayload && openerPayload.transientState || null;
       if (openerDocument) {
         const incoming = normalizeSavedTag(openerDocument);
         if (incoming) {
@@ -13307,6 +13317,22 @@ ${lines.join('\n')}`;
       await window.VisualWaveDromScope.mount({
         libraryName: currentWaveLibraryFile || 'SQLite 波形库',
         getDocument: async () => Object.assign({}, getSavedTagByName(tag.name)),
+        getTransientState: async () => scopeTransientState,
+        setTransientState: (state) => {
+          scopeTransientState = state && typeof state === 'object'
+            ? JSON.parse(JSON.stringify(state))
+            : null;
+          try {
+            if (window.opener && !window.opener.closed) {
+              window.opener.postMessage({
+                type: 'visualwavedrom-scope-transient-state',
+                libraryId: currentWaveLibraryId,
+                waveId: tag.name,
+                state: scopeTransientState
+              }, '*');
+            }
+          } catch (_error) { /* opener may have been closed */ }
+        },
         saveInstance: saveScopeDisplayInstance,
         saveSource: overwriteScopeSourceDocument,
         openNormalView: () => {
@@ -14003,7 +14029,11 @@ ${lines.join('\n')}`;
               type: 'visualwavedrom-scope-source-response',
               scopeToken: message.scopeToken,
               libraryId: currentWaveLibraryId,
-              document: documentSnapshot
+              document: documentSnapshot,
+              transientState: scopeTransientStates.get(scopeTransientStateKey(
+                currentWaveLibraryId,
+                state.documentName
+              )) || null
             }, '*');
           }).catch((error) => {
             event.source.postMessage({
@@ -14011,6 +14041,29 @@ ${lines.join('\n')}`;
               scopeToken: message.scopeToken,
               error: error && error.message ? error.message : String(error)
             }, '*');
+          });
+          return;
+        }
+        if (message.type === 'visualwavedrom-scope-transient-state') {
+          if (currentWaveLibraryId && message.libraryId
+              && message.libraryId !== currentWaveLibraryId) return;
+          const waveId = String(message.waveId || '');
+          if (!waveId) return;
+          const key = scopeTransientStateKey(currentWaveLibraryId, waveId);
+          if (message.state && typeof message.state === 'object') {
+            scopeTransientStates.set(key, JSON.parse(JSON.stringify(message.state)));
+          } else {
+            scopeTransientStates.delete(key);
+          }
+          vwdDebugLog('scope-formula', {
+            phase: 'transient-state-received',
+            waveId,
+            formulaCount: message.state && message.state.formulas
+              ? Object.keys(message.state.formulas).length
+              : 0,
+            extraSignalCount: message.state && Array.isArray(message.state.extraSignals)
+              ? message.state.extraSignals.length
+              : 0
           });
           return;
         }
@@ -14257,7 +14310,15 @@ ${lines.join('\n')}`;
               const number = Number(value);
               return Number.isFinite(number) ? number : null;
             })
-            : []
+            : [],
+          values: Array.isArray(update.values)
+            ? update.values.map((value) => {
+              if (value == null || value === '') return 'x';
+              if (typeof value === 'number') return Number.isFinite(value) ? value : 'x';
+              return String(value);
+            })
+            : [],
+          sampleStep: Number(update.sampleStep) > 0 ? Number(update.sampleStep) : 0
         });
       });
 
@@ -14271,8 +14332,20 @@ ${lines.join('\n')}`;
         const signalScope = Object.assign({}, item.target.signal.scope || {});
         if (item.sampleKind) {
           signalScope.mode = item.sampleKind;
-          if (item.samples.length) signalScope.samples = item.samples;
-          else delete signalScope.samples;
+          if (item.values.length) {
+            signalScope.values = item.values;
+            signalScope.sampleStep = item.sampleStep || 0.5;
+            delete signalScope.samples;
+          } else {
+            delete signalScope.values;
+            if (item.samples.length) {
+              signalScope.samples = item.samples;
+              signalScope.sampleStep = item.sampleStep || 1;
+            } else {
+              delete signalScope.samples;
+              delete signalScope.sampleStep;
+            }
+          }
         }
         if (Object.keys(item.tbl).length) signalScope.tbl = item.tbl;
         else delete signalScope.tbl;
@@ -14305,6 +14378,49 @@ ${lines.join('\n')}`;
         extendedColumns,
         formatPromise: Promise.resolve(true)
       };
+    }
+
+    function importedPayloadWithFormulas(payload) {
+      const definitions = payload && Array.isArray(payload.formulas) ? payload.formulas : [];
+      if (!definitions.length) return payload;
+      const formulaEngine = window.VisualWaveDromFormula;
+      if (!formulaEngine) throw new Error('公式模块未加载');
+      const importedUpdates = Array.isArray(payload.updates) ? payload.updates : [];
+      const built = formulaEngine.buildFormulaUpdates(editor.value, importedUpdates, definitions);
+      const invalid = built.analysis.items.filter((item) => !item.valid);
+      const merged = [];
+      const positions = new Map();
+      importedUpdates.concat(built.updates).forEach((update) => {
+        const name = String(update && update.signal || '').trim();
+        if (!name) return;
+        if (positions.has(name)) {
+          merged[positions.get(name)] = update;
+        } else {
+          positions.set(name, merged.length);
+          merged.push(update);
+        }
+      });
+      if (!merged.length) {
+        throw new Error(invalid.length
+          ? ('没有可导入的有效公式：' + invalid[0].error)
+          : '导入方案没有返回任何信号行');
+      }
+      vwdDebugLog('collection-import', {
+        phase: 'formula-build',
+        requestedCount: definitions.length,
+        validCount: built.updates.length,
+        invalidCount: invalid.length,
+        totalColumns: built.totalColumns,
+        errors: invalid.map((item) => ({ name: item.name, error: item.error }))
+      });
+      return Object.assign({}, payload, {
+        updates: merged,
+        formulaResult: {
+          requestedCount: definitions.length,
+          validCount: built.updates.length,
+          invalid: invalid.map((item) => ({ name: item.name, error: item.error }))
+        }
+      });
     }
 
     async function persistImportedWaveRows(result) {
@@ -19411,14 +19527,26 @@ ${lines.join('\n')}`;
       ? window.VWDImportCollection.create({
         isServerMode: () => waveLibraryServerMode,
         getContextToken: () => currentWaveLibraryId + '\u0000' + editingWaveDocumentName,
+        getFormulaSignalNames: () => {
+          try {
+            const source = JSON.parse(editor.value);
+            return flattenSignals(source && source.signal)
+              .map((signal) => String(signal && signal.name || '').trim())
+              .filter(Boolean);
+          } catch (_error) {
+            return [];
+          }
+        },
         setStatus,
         debugLog: vwdDebugLog,
         refreshEditors: () => {
           if (codeMirrorEditor) codeMirrorEditor.refresh();
         },
         applyImport: async (payload) => {
-          const result = applyImportedWaveRows(payload, { createMissing: true });
+          const resolvedPayload = importedPayloadWithFormulas(payload);
+          const result = applyImportedWaveRows(resolvedPayload, { createMissing: true });
           await persistImportedWaveRows(result);
+          result.formulaResult = resolvedPayload.formulaResult || null;
           return result;
         }
       })

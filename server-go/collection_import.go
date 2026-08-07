@@ -63,8 +63,9 @@ var collectionUnresolvedVariablePattern = regexp.MustCompile(
 var collectionImportProgressTokenPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
 
 type collectionPresetPath struct {
-	UsrGen  collectionRuleConfig `json:"usrGen"`
-	AutoGen collectionRuleConfig `json:"autoGen"`
+	UsrGen  collectionRuleConfig     `json:"usrGen"`
+	AutoGen collectionRuleConfig     `json:"autoGen"`
+	Formula *collectionFormulaConfig `json:"formula,omitempty"`
 
 	// Effective values keep the search/import code and legacy tests simple.
 	Folder      string                   `json:"-"`
@@ -79,6 +80,12 @@ type collectionPresetPath struct {
 	Columns     []collectionColumnConfig `json:"-"`
 	SchemaHash  string                   `json:"-"`
 	Tbl         map[string]string        `json:"-"`
+}
+
+type collectionFormulaConfig struct {
+	Cycle0    string   `json:"cycle0"`
+	Cycle05   string   `json:"cycle05"`
+	Libraries []string `json:"libraries,omitempty"`
 }
 
 type collectionColumnConfig struct {
@@ -156,6 +163,7 @@ type collectionSearchEntry struct {
 	HasSeq           bool                     `json:"hasSeq"`
 	Name             string                   `json:"name"`
 	ImportMode       string                   `json:"importMode"`
+	Formula          *collectionFormulaConfig `json:"formula,omitempty"`
 	HeaderRow        int                      `json:"headerRow,omitempty"`
 	IndexColumn      string                   `json:"indexColumn,omitempty"`
 	Delimiter        string                   `json:"delimiter,omitempty"`
@@ -623,6 +631,66 @@ func extractCollectionTemplateVariables(template string) []string {
 	return result
 }
 
+func normalizeCollectionFormula(value any, fieldPath string) (*collectionFormulaConfig, error) {
+	raw := map[string]any{}
+	if text, ok := value.(string); ok {
+		raw["cycle0"] = text
+	} else {
+		var valid bool
+		raw, valid = value.(map[string]any)
+		if !valid {
+			return nil, fmt.Errorf("%s must be an object", fieldPath)
+		}
+	}
+	readExpression := func(keys ...string) (string, error) {
+		for _, key := range keys {
+			value, supplied := raw[key]
+			if !supplied || value == nil {
+				continue
+			}
+			text, ok := value.(string)
+			if !ok {
+				return "", fmt.Errorf("%s.%s must be a string", fieldPath, key)
+			}
+			if len(text) > 65536 {
+				return "", fmt.Errorf("%s.%s is too long", fieldPath, key)
+			}
+			return text, nil
+		}
+		return "", nil
+	}
+	cycle0, err := readExpression("cycle0", "0 cycle", "at0")
+	if err != nil {
+		return nil, err
+	}
+	cycle05, err := readExpression("cycle05", "cycle0_5", "0.5 cycle", "at05")
+	if err != nil {
+		return nil, err
+	}
+	libraries := []string{}
+	seenLibraries := make(map[string]bool)
+	if value, supplied := raw["libraries"]; supplied {
+		items, ok := anyList(value)
+		if !ok {
+			return nil, fmt.Errorf("%s.libraries must be an array", fieldPath)
+		}
+		for index, item := range items {
+			name, ok := item.(string)
+			name = strings.ToLower(strings.TrimSpace(name))
+			if !ok || name == "" {
+				return nil, fmt.Errorf("%s.libraries[%d] must be a non-empty string", fieldPath, index)
+			}
+			if !seenLibraries[name] {
+				seenLibraries[name] = true
+				libraries = append(libraries, name)
+			}
+		}
+	}
+	return &collectionFormulaConfig{
+		Cycle0: cycle0, Cycle05: cycle05, Libraries: libraries,
+	}, nil
+}
+
 func normalizeCollectionPreset(value any) (collectionPreset, error) {
 	raw, ok := value.(map[string]any)
 	if !ok {
@@ -670,6 +738,15 @@ func normalizeCollectionPreset(value any) (collectionPreset, error) {
 		if !ok {
 			return collectionPreset{}, fmt.Errorf("paths[%d] must be an object", index)
 		}
+		var formula *collectionFormulaConfig
+		if rawFormula, supplied := entry["formula"]; supplied {
+			var formulaErr error
+			formula, formulaErr = normalizeCollectionFormula(
+				rawFormula, fmt.Sprintf("paths[%d].formula", index))
+			if formulaErr != nil {
+				return collectionPreset{}, formulaErr
+			}
+		}
 		usrRaw := map[string]any{}
 		autoRaw := map[string]any{}
 		_, nestedUsr := entry["usrGen"]
@@ -715,6 +792,23 @@ func normalizeCollectionPreset(value any) (collectionPreset, error) {
 			autoRaw, fmt.Sprintf("paths[%d].autoGen", index), true)
 		if configErr != nil {
 			return collectionPreset{}, configErr
+		}
+		if formula != nil {
+			if usrGen.Name == "" {
+				return collectionPreset{}, fmt.Errorf(
+					"paths[%d].usrGen.name must be a non-empty signal name", index)
+			}
+			if len(usrGen.Name) > 256 {
+				return collectionPreset{}, fmt.Errorf("paths[%d].usrGen.name is too long", index)
+			}
+			if _, nameErr := normalizeSignalName(usrGen.Name); nameErr != nil {
+				return collectionPreset{}, fmt.Errorf("paths[%d].usrGen.name: %w", index, nameErr)
+			}
+			effective := effectiveCollectionPresetPath(usrGen, autoGen)
+			effective.Formula = formula
+			effective.ImportMode = "formula"
+			preset.Paths = append(preset.Paths, effective)
+			continue
 		}
 		if usrGen.Folder == "" {
 			usrGen.Folder = "."
@@ -2190,6 +2284,24 @@ func searchCollectionFiles(
 	}
 	rules := make([]collectionCompiledRule, 0, len(preset.Paths))
 	for index, rule := range preset.Paths {
+		if rule.Formula != nil {
+			signalName, expandErr := expandCollectionTemplate(
+				rule.Name, preset, variables, false)
+			if expandErr != nil {
+				return collectionSearchResult{}, fmt.Errorf("paths[%d].name: %w", index, expandErr)
+			}
+			signalName, expandErr = normalizeSignalName(signalName)
+			if expandErr != nil {
+				return collectionSearchResult{}, fmt.Errorf("paths[%d].name: %w", index, expandErr)
+			}
+			result.Entries = append(result.Entries, collectionSearchEntry{
+				Index: index, Name: signalName, ImportMode: "formula",
+				Formula: rule.Formula, OutputNames: []string{signalName},
+				Status: "formula", Matches: []collectionFileMatch{},
+			})
+			result.ResultCount++
+			continue
+		}
 		folder, expandErr := expandCollectionTemplate(rule.Folder, preset, variables, false)
 		if expandErr != nil {
 			return collectionSearchResult{}, fmt.Errorf("paths[%d].folder: %w", index, expandErr)
@@ -2248,6 +2360,9 @@ func searchCollectionFiles(
 	}
 	for index := range result.Entries {
 		entry := &result.Entries[index]
+		if entry.Status == "formula" {
+			continue
+		}
 		sort.Slice(entry.Matches, func(left, right int) bool {
 			return entry.Matches[left].RelativePath < entry.Matches[right].RelativePath
 		})
@@ -2332,14 +2447,16 @@ func collectionSearchSignature(
 	variables map[string]string,
 ) string {
 	type searchRule struct {
-		Folder   string `json:"folder"`
-		GrepKeys string `json:"grepKeys"`
-		Name     string `json:"name"`
+		Folder   string                   `json:"folder"`
+		GrepKeys string                   `json:"grepKeys"`
+		Name     string                   `json:"name"`
+		Formula  *collectionFormulaConfig `json:"formula,omitempty"`
 	}
 	rules := make([]searchRule, len(preset.Paths))
 	for index, rule := range preset.Paths {
 		rules[index] = searchRule{
 			Folder: rule.Folder, GrepKeys: rule.GrepKeys, Name: rule.Name,
+			Formula: rule.Formula,
 		}
 	}
 	payload := struct {
@@ -2403,7 +2520,12 @@ func validateCachedCollectionFiles(
 		return errors.New("cached search results are incomplete")
 	}
 	matchedCount := 0
+	formulaCount := 0
 	for _, entry := range result.Entries {
+		if entry.Status == "formula" && entry.ImportMode == "formula" {
+			formulaCount++
+			continue
+		}
 		if entry.Status == "missing" || entry.Status == "folder-missing" {
 			if len(entry.Matches) != 0 {
 				return errors.New("cached skipped search result contains a match")
@@ -2428,7 +2550,8 @@ func validateCachedCollectionFiles(
 			return fmt.Errorf("matched file changed after searching: %s", match.RelativePath)
 		}
 	}
-	if matchedCount == 0 || (mustBeReady && matchedCount != result.ResultCount) {
+	selectedCount := matchedCount + formulaCount
+	if selectedCount == 0 || (mustBeReady && selectedCount != result.ResultCount) {
 		return errors.New("cached search result count is invalid")
 	}
 	return nil
@@ -2711,15 +2834,27 @@ func (s *service) importCollectionFiles(
 		return nil, err
 	}
 	importEntries := make([]collectionSearchEntry, 0, search.ResultCount)
+	formulaCount := 0
 	for _, entry := range search.Entries {
-		if len(entry.Matches) > 0 {
+		if entry.ImportMode == "formula" && entry.Status == "formula" {
+			formulaCount++
+		} else if len(entry.Matches) > 0 {
 			importEntries = append(importEntries, entry)
 		}
 	}
-	if len(importEntries) == 0 {
+	if len(importEntries) == 0 && formulaCount == 0 {
 		return nil, errors.New("search did not find any files to import")
 	}
 	s.setCollectionImportProgressTotal(progressToken, len(importEntries))
+	if len(importEntries) == 0 {
+		return map[string]any{
+			"rootPath": search.RootPath, "preset": preset, "variables": variables,
+			"search": search, "files": []map[string]any{}, "updates": []map[string]any{},
+			"skippedCount": len(search.Entries) - formulaCount,
+			"formulaCount": formulaCount, "workerCount": 0, "parseDurationMs": int64(0),
+			"durationMs": time.Since(startedAt).Milliseconds(),
+		}, nil
+	}
 	catalog := s.imports.listSchemes()
 	if len(catalog.Schemes) == 0 {
 		return nil, errors.New("import/Scheme does not contain a usable parser preset")
@@ -2797,7 +2932,8 @@ func (s *service) importCollectionFiles(
 	return map[string]any{
 		"rootPath": search.RootPath, "preset": preset, "variables": variables,
 		"search": search, "files": files, "updates": updates,
-		"skippedCount": len(search.Entries) - len(importEntries),
+		"skippedCount": len(search.Entries) - len(importEntries) - formulaCount,
+		"formulaCount": formulaCount,
 		"workerCount":  workerCount, "parseDurationMs": parseDurationMS,
 		"durationMs": time.Since(startedAt).Milliseconds(),
 	}, nil
