@@ -14334,7 +14334,7 @@ ${lines.join('\n')}`;
           signalScope.mode = item.sampleKind;
           if (item.values.length) {
             signalScope.values = item.values;
-            signalScope.sampleStep = item.sampleStep || 0.5;
+            signalScope.sampleStep = item.sampleStep || 1;
             delete signalScope.samples;
           } else {
             delete signalScope.values;

@@ -809,14 +809,105 @@ body.scope-row-resizing * {
   display: none;
 }
 
+.scope-row-move-popover {
+  position: fixed;
+  z-index: 32;
+  width: min(260px, calc(100vw - 16px));
+  box-sizing: border-box;
+  padding: 8px;
+  border: 1px solid #aeb4bc;
+  border-radius: 6px;
+  background: #ffffff;
+  box-shadow: 0 8px 24px rgba(37, 40, 45, 0.2);
+}
+
+.scope-row-move-popover[hidden] {
+  display: none;
+}
+
+.scope-row-move-body {
+  display: grid;
+  gap: 10px;
+  padding-top: 9px;
+}
+
+.scope-row-move-directions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.scope-row-move-directions button {
+  height: 30px;
+  border: 1px solid #b9bec5;
+  border-radius: 4px;
+  color: #30353b;
+  background: #ffffff;
+  font: 12px "Segoe UI", "Microsoft YaHei", sans-serif;
+  cursor: pointer;
+}
+
+.scope-row-move-directions button:hover {
+  border-color: #3978c5;
+  background: #f2f7fc;
+}
+
+.scope-row-move-directions button.active {
+  border-color: #2669b5;
+  color: #ffffff;
+  background: #2f73bf;
+}
+
+.scope-row-move-count {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  color: #555b63;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.scope-row-move-count input {
+  width: 100%;
+  height: 30px;
+  box-sizing: border-box;
+  border: 1px solid #b9bec5;
+  border-radius: 4px;
+  padding: 3px 7px;
+  color: #25282d;
+  background: #ffffff;
+  font: 12px "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+
+.scope-row-move-count input:focus {
+  border-color: #2f73bf;
+  outline: 2px solid rgba(47, 115, 191, 0.18);
+}
+
 .scope-display-popover {
   width: min(304px, calc(100vw - 16px));
   max-height: calc(100vh - 16px);
-  overflow-y: auto;
+  max-height: calc(100dvh - 16px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .scope-display-popover.formula-active {
   width: min(560px, calc(100vw - 16px));
+}
+
+.scope-display-popover > .scope-style-popover-header {
+  flex: 0 0 auto;
+}
+
+.scope-display-popover-body {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 2px;
+  scrollbar-gutter: stable;
 }
 
 .scope-display-popover-section {
@@ -968,6 +1059,98 @@ body.scope-row-resizing * {
   font-weight: 700;
 }
 
+.scope-formula-variable-tools {
+  position: relative;
+  display: flex;
+  justify-content: flex-start;
+}
+
+.scope-formula-variable-picker {
+  position: absolute;
+  z-index: 3;
+  top: calc(100% + 5px);
+  left: 0;
+  width: min(320px, 100%);
+  max-height: min(300px, calc(100vh - 80px));
+  max-height: min(300px, calc(100dvh - 80px));
+  box-sizing: border-box;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 7px;
+  padding: 8px;
+  border: 1px solid #aeb4bc;
+  border-radius: 5px;
+  background: #ffffff;
+  box-shadow: 0 8px 20px rgba(37, 40, 45, 0.2);
+}
+
+.scope-formula-variable-picker[hidden] {
+  display: none;
+}
+
+.scope-formula-variable-picker-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.scope-formula-variable-picker-header strong {
+  color: #2c5d94;
+  font-size: 12px;
+}
+
+.scope-formula-variable-picker input {
+  width: 100%;
+  height: 30px;
+  box-sizing: border-box;
+  padding: 0 7px;
+  border: 1px solid #b9bec5;
+  border-radius: 4px;
+  color: #30353b;
+  background: #ffffff;
+  font: 12px "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+
+.scope-formula-variable-picker input:focus {
+  border-color: #2f73bf;
+  outline: 2px solid rgba(47, 115, 191, 0.18);
+}
+
+.scope-formula-variable-list {
+  min-height: 36px;
+  overflow-y: auto;
+  display: grid;
+  align-content: start;
+  gap: 3px;
+}
+
+.scope-formula-variable-list button {
+  min-height: 28px;
+  padding: 4px 7px;
+  border: 0;
+  border-radius: 3px;
+  color: #30353b;
+  background: #ffffff;
+  font: 12px/1.35 Consolas, "Courier New", monospace;
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.scope-formula-variable-list button:hover,
+.scope-formula-variable-list button:focus-visible {
+  color: #173f70;
+  background: #e9f1fa;
+  outline: none;
+}
+
+.scope-formula-variable-empty {
+  padding: 8px 6px;
+  color: #737982;
+  font-size: 11px;
+}
+
 .scope-formula-field {
   min-width: 0;
   display: grid;
@@ -1032,6 +1215,11 @@ body.scope-row-resizing * {
   font-weight: 600;
 }
 
+.scope-formula-feedback.is-pending {
+  color: #795019;
+  font-weight: 600;
+}
+
 .scope-formula-preview-values {
   max-height: 54px;
   overflow: auto;
@@ -1039,15 +1227,17 @@ body.scope-row-resizing * {
   font-family: Consolas, "Courier New", monospace;
 }
 
-.scope-formula-python summary {
+.scope-formula-python summary,
+.scope-formula-json summary {
   color: #3f464e;
   font-size: 11px;
   font-weight: 600;
   cursor: pointer;
 }
 
-.scope-formula-python pre {
-  max-height: 160px;
+.scope-formula-python pre,
+.scope-formula-json pre {
+  max-height: 220px;
   overflow: auto;
   margin: 6px 0 0;
   padding: 7px 8px;
@@ -1057,6 +1247,18 @@ body.scope-row-resizing * {
   background: #f5f7f9;
   font: 11px/1.45 Consolas, "Courier New", monospace;
   white-space: pre-wrap;
+}
+
+.scope-formula-actions {
+  position: sticky;
+  bottom: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 2px;
+  padding-top: 9px;
+  border-top: 1px solid #dfe2e6;
+  background: #ffffff;
 }
 
 .scope-style-popover-header {

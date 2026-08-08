@@ -251,6 +251,32 @@ func TestCollectionPresetInfersVariablesFromGrepKeys(t *testing.T) {
 	}
 }
 
+func TestCollectionPresetPrunesUnusedVariables(t *testing.T) {
+	preset, err := normalizeCollectionPreset(map[string]any{
+		"vars": []any{"unused", "label", "case"},
+		"paths": []any{
+			map[string]any{
+				"folder":   "capture_{folder}",
+				"grepKeys": `^{case}_{generated}\.txt$`,
+				"hasSeq":   false,
+				"name":     "signal_{label}",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := []string{"label", "case", "folder", "generated"}
+	if len(preset.Vars) != len(expected) {
+		t.Fatalf("pruned variables = %#v", preset.Vars)
+	}
+	for index, name := range expected {
+		if preset.Vars[index] != name {
+			t.Fatalf("pruned variables = %#v", preset.Vars)
+		}
+	}
+}
+
 func TestCollectionPresetMigratesLegacyAndPersistsAutoGen(t *testing.T) {
 	root := t.TempDir()
 	preset, err := normalizeCollectionPreset(collectionPresetValue(

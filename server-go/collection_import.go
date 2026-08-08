@@ -712,18 +712,37 @@ func normalizeCollectionPreset(value any) (collectionPreset, error) {
 		Vars:  make([]string, 0, len(rawVars)),
 		Paths: []collectionPresetPath{},
 	}
-	seenVariables := make(map[string]bool)
+	declaredVariables := make([]string, 0, len(rawVars))
+	seenDeclaredVariables := make(map[string]bool)
 	for index, rawVariable := range rawVars {
 		name, ok := rawVariable.(string)
 		name = strings.TrimSpace(name)
 		if !ok || name == "" || !collectionVariableNamePattern.MatchString(name) {
 			return collectionPreset{}, fmt.Errorf("vars[%d] is not a valid variable name", index)
 		}
-		if seenVariables[name] {
+		if seenDeclaredVariables[name] {
 			return collectionPreset{}, fmt.Errorf("vars contains duplicate variable %s", name)
 		}
-		seenVariables[name] = true
-		preset.Vars = append(preset.Vars, name)
+		seenDeclaredVariables[name] = true
+		declaredVariables = append(declaredVariables, name)
+	}
+	referencedVariables := []string{}
+	seenReferencedVariables := make(map[string]bool)
+	collectReferencedVariables := func(template string) error {
+		for _, variableName := range extractCollectionTemplateVariables(template) {
+			if seenReferencedVariables[variableName] {
+				continue
+			}
+			if len(referencedVariables) >= collectionMaxVariables {
+				return fmt.Errorf(
+					"preset templates cannot contain more than %d variables",
+					collectionMaxVariables,
+				)
+			}
+			seenReferencedVariables[variableName] = true
+			referencedVariables = append(referencedVariables, variableName)
+		}
+		return nil
 	}
 
 	rawPaths, ok := anyList(raw["paths"])
@@ -826,23 +845,30 @@ func normalizeCollectionPreset(value any) (collectionPreset, error) {
 				return collectionPreset{}, fmt.Errorf("paths[%d].usrGen.name: %w", index, nameErr)
 			}
 		}
-		for _, variableName := range extractCollectionTemplateVariables(usrGen.GrepKeys) {
-			if seenVariables[variableName] {
-				continue
+		for _, template := range []string{usrGen.Folder, usrGen.GrepKeys, usrGen.Name} {
+			if collectErr := collectReferencedVariables(template); collectErr != nil {
+				return collectionPreset{}, collectErr
 			}
-			if len(preset.Vars) >= collectionMaxVariables {
-				return collectionPreset{}, fmt.Errorf(
-					"grepKeys cannot contain more than %d variables",
-					collectionMaxVariables,
-				)
-			}
-			seenVariables[variableName] = true
-			preset.Vars = append(preset.Vars, variableName)
 		}
 		preset.Paths = append(
 			preset.Paths,
 			effectiveCollectionPresetPath(usrGen, autoGen),
 		)
+	}
+	addedVariables := make(map[string]bool)
+	for _, name := range declaredVariables {
+		if !seenReferencedVariables[name] || addedVariables[name] {
+			continue
+		}
+		addedVariables[name] = true
+		preset.Vars = append(preset.Vars, name)
+	}
+	for _, name := range referencedVariables {
+		if addedVariables[name] {
+			continue
+		}
+		addedVariables[name] = true
+		preset.Vars = append(preset.Vars, name)
 	}
 	return preset, nil
 }

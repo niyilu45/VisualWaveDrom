@@ -2,7 +2,7 @@
   'use strict';
 
   const UNKNOWN = Object.freeze({ unknown: true });
-  const ALLOWED_LIBRARIES = new Set(['math', 'cmath']);
+  const ALLOWED_LIBRARIES = new Set(['math', 'cmath', 'numpy']);
   const BUILTIN_FUNCTIONS = new Set([
     'abs', 'bool', 'complex', 'float', 'int', 'max', 'min', 'pow', 'round'
   ]);
@@ -18,6 +18,15 @@
     'rect', 'sin', 'sinh', 'sqrt', 'tan', 'tanh'
   ]);
   const MATH_CONSTANTS = new Set(['e', 'inf', 'nan', 'pi', 'tau']);
+  const NUMPY_FUNCTIONS = new Set([
+    'abs', 'absolute', 'acos', 'acosh', 'arccos', 'arccosh', 'arcsin', 'arcsinh',
+    'arctan', 'arctan2', 'arctanh', 'asin', 'asinh', 'atan', 'atan2', 'atanh',
+    'ceil', 'clip', 'cos', 'cosh', 'deg2rad', 'degrees', 'exp', 'expm1', 'fabs',
+    'floor', 'fmod', 'hypot', 'isfinite', 'isinf', 'isnan', 'log', 'log10',
+    'log1p', 'log2', 'maximum', 'minimum', 'power', 'rad2deg', 'radians', 'rint',
+    'round', 'sign', 'sin', 'sinh', 'sqrt', 'tan', 'tanh', 'trunc'
+  ]);
+  const NUMPY_CONSTANTS = new Set(['e', 'euler_gamma', 'inf', 'nan', 'pi']);
 
   function own(object, key) {
     return Object.prototype.hasOwnProperty.call(object || {}, key);
@@ -60,7 +69,7 @@
     ));
     const unsupported = libraries.filter((name) => !ALLOWED_LIBRARIES.has(name));
     if (unsupported.length) {
-      throw new Error('不支持的依赖库：' + unsupported.join('、') + '；当前仅支持 math 和 cmath');
+      throw new Error('不支持的依赖库：' + unsupported.join('、') + '；当前仅支持 math、cmath 和 numpy');
     }
     return { cycle0, cycle05, libraries };
   }
@@ -529,21 +538,23 @@
       return;
     }
     if (node.type === 'name') {
-      if (!BUILTIN_FUNCTIONS.has(node.name) && node.name !== 'math' && node.name !== 'cmath') {
+      if (!BUILTIN_FUNCTIONS.has(node.name) && !ALLOWED_LIBRARIES.has(node.name)) {
         state.errors.push('名称 ' + node.name + ' 不可用；信号变量需要写在 {} 中');
       }
       return;
     }
     if (node.type === 'attribute') {
       if (!node.object || node.object.type !== 'name'
-          || (node.object.name !== 'math' && node.object.name !== 'cmath')) {
-        state.errors.push('只允许访问 math 或 cmath 的成员');
+          || !ALLOWED_LIBRARIES.has(node.object.name)) {
+        state.errors.push('只允许访问 math、cmath 或 numpy 的成员');
         return;
       }
       const library = node.object.name;
       const allowed = library === 'math'
         ? (MATH_FUNCTIONS.has(node.property) || MATH_CONSTANTS.has(node.property))
-        : CMATH_FUNCTIONS.has(node.property);
+        : (library === 'cmath'
+          ? CMATH_FUNCTIONS.has(node.property)
+          : (NUMPY_FUNCTIONS.has(node.property) || NUMPY_CONSTANTS.has(node.property)));
       if (!allowed) state.errors.push(library + ' 不支持成员 ' + node.property);
       state.libraries.add(library);
       return;
@@ -556,7 +567,7 @@
       } else if (node.target.type === 'attribute') {
         validateAst(node.target, context, state);
       } else {
-        state.errors.push('只允许调用受支持的内置函数、math 或 cmath 函数');
+        state.errors.push('只允许调用受支持的内置函数、math、cmath 或 numpy 函数');
       }
       node.args.forEach((argument) => validateAst(argument, context, state));
       return;
@@ -796,6 +807,39 @@
       : UNKNOWN;
   }
 
+  function callNumpy(name, args) {
+    if (args.some(isUnknown) || args.some(isComplex)) return UNKNOWN;
+    const values = args.map(Number);
+    if (name === 'isfinite') return Number.isFinite(values[0]);
+    if (name === 'isinf') return !Number.isNaN(values[0]) && !Number.isFinite(values[0]);
+    if (name === 'isnan') return Number.isNaN(values[0]);
+    if (values.some((value) => !Number.isFinite(value))) return UNKNOWN;
+    if (name === 'abs' || name === 'absolute' || name === 'fabs') return Math.abs(values[0]);
+    if (name === 'clip') return Math.min(Math.max(values[0], values[1]), values[2]);
+    if (name === 'maximum') return Math.max(values[0], values[1]);
+    if (name === 'minimum') return Math.min(values[0], values[1]);
+    if (name === 'power') return Math.pow(values[0], values[1]);
+    if (name === 'sign') return Math.sign(values[0]);
+    if (name === 'rint') return Math.round(values[0]);
+    if (name === 'round') {
+      const digits = values.length > 1 ? Math.trunc(values[1]) : 0;
+      const factor = Math.pow(10, digits);
+      return Math.round(values[0] * factor) / factor;
+    }
+    const aliases = {
+      arccos: 'acos',
+      arccosh: 'acosh',
+      arcsin: 'asin',
+      arcsinh: 'asinh',
+      arctan: 'atan',
+      arctan2: 'atan2',
+      arctanh: 'atanh',
+      deg2rad: 'radians',
+      rad2deg: 'degrees'
+    };
+    return callMath(aliases[name] || name, values);
+  }
+
   function callCmath(name, args) {
     if (args.some(isUnknown)) return UNKNOWN;
     const value = asComplex(args[0]);
@@ -843,14 +887,16 @@
     if (node.type === 'literal') return node.value;
     if (node.type === 'reference') return resolveReference(node.resolvedName || node.name, node.offset);
     if (node.type === 'name') {
-      if (node.name === 'math' || node.name === 'cmath') return node.name;
+      if (ALLOWED_LIBRARIES.has(node.name)) return node.name;
       return UNKNOWN;
     }
     if (node.type === 'attribute') {
-      if (node.object.type === 'name' && node.object.name === 'math') {
+      if (node.object.type === 'name'
+          && (node.object.name === 'math' || node.object.name === 'numpy')) {
         if (node.property === 'pi') return Math.PI;
         if (node.property === 'e') return Math.E;
         if (node.property === 'tau') return Math.PI * 2;
+        if (node.property === 'euler_gamma') return 0.5772156649015329;
         if (node.property === 'inf') return Number.POSITIVE_INFINITY;
         if (node.property === 'nan') return Number.NaN;
       }
@@ -879,9 +925,9 @@
       const args = node.args.map((argument) => evaluateAst(argument, resolveReference));
       if (node.target.type === 'name') return callBuiltin(node.target.name, args);
       if (node.target.type === 'attribute' && node.target.object.type === 'name') {
-        return node.target.object.name === 'math'
-          ? callMath(node.target.property, args)
-          : callCmath(node.target.property, args);
+        if (node.target.object.name === 'math') return callMath(node.target.property, args);
+        if (node.target.object.name === 'numpy') return callNumpy(node.target.property, args);
+        return callCmath(node.target.property, args);
       }
     }
     return UNKNOWN;
@@ -981,7 +1027,7 @@
   function waveValues(signal, totalColumns) {
     const localScope = signal && signal.scope && typeof signal.scope === 'object' ? signal.scope : {};
     if (Array.isArray(localScope.values)) {
-      return repeatedSamples(localScope.values, localScope.sampleStep || 0.5, totalColumns);
+      return repeatedSamples(localScope.values, localScope.sampleStep || 1, totalColumns);
     }
     if (Array.isArray(localScope.samples)) {
       return repeatedSamples(localScope.samples, localScope.sampleStep || 1, totalColumns);
@@ -1030,7 +1076,7 @@
   function valueLengthFromSignal(signal) {
     const localScope = signal && signal.scope && typeof signal.scope === 'object' ? signal.scope : {};
     if (Array.isArray(localScope.values)) {
-      return Math.ceil(localScope.values.length * (Number(localScope.sampleStep) || 0.5));
+      return Math.ceil(localScope.values.length * (Number(localScope.sampleStep) || 1));
     }
     if (Array.isArray(localScope.samples)) {
       return Math.ceil(localScope.samples.length * (Number(localScope.sampleStep) || 1));
@@ -1045,7 +1091,7 @@
     signals.forEach((signal) => { totalColumns = Math.max(totalColumns, valueLengthFromSignal(signal)); });
     (Array.isArray(updates) ? updates : []).forEach((update) => {
       if (Array.isArray(update.values)) {
-        totalColumns = Math.max(totalColumns, Math.ceil(update.values.length * (Number(update.sampleStep) || 0.5)));
+        totalColumns = Math.max(totalColumns, Math.ceil(update.values.length * (Number(update.sampleStep) || 1)));
       } else if (Array.isArray(update.samples)) {
         totalColumns = Math.max(totalColumns, Math.ceil(update.samples.length * (Number(update.sampleStep) || 1)));
       } else {
@@ -1065,7 +1111,7 @@
       if (!name) return;
       if (!names.includes(name)) names.push(name);
       if (Array.isArray(update.values)) {
-        sources[name] = repeatedSamples(update.values, update.sampleStep || 0.5, totalColumns);
+        sources[name] = repeatedSamples(update.values, update.sampleStep || 1, totalColumns);
       } else if (Array.isArray(update.samples)) {
         sources[name] = repeatedSamples(update.samples, update.sampleStep || 1, totalColumns);
       } else {

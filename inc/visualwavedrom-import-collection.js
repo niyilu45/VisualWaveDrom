@@ -1038,7 +1038,7 @@
       if (!variableNames.length) {
         const empty = document.createElement('div');
         empty.className = 'modal-empty-state';
-        empty.textContent = 'grepKeys 中没有模板变量';
+        empty.textContent = '预设模板中没有变量';
         variablesHost.appendChild(empty);
         return;
       }
@@ -1262,12 +1262,13 @@
         throw validationError('预设顶层必须是 JSON 对象', '');
       }
       if (value.vars !== undefined && !Array.isArray(value.vars)) {
-        throw validationError('vars 必须是列表；也可以省略并由 grepKeys 自动提取', 'vars');
+        throw validationError('vars 必须是列表；也可以省略并由预设模板自动提取', 'vars');
       }
       if (!Array.isArray(value.paths)) {
         throw validationError('paths 必须是列表', 'paths');
       }
-      const names = new Set();
+      const declaredNames = [];
+      const declaredNameSet = new Set();
       (value.vars || []).forEach((name, index) => {
         if (typeof name !== 'string' || !name.trim()) {
           throw validationError('vars[' + index + '] 必须是非空字符串', 'vars[' + index + ']');
@@ -1276,17 +1277,59 @@
         if (!VARIABLE_NAME_PATTERN.test(normalizedName)) {
           throw validationError('vars[' + index + '] 不是有效变量名', 'vars[' + index + ']');
         }
-        if (names.has(normalizedName)) {
+        if (declaredNameSet.has(normalizedName)) {
           throw validationError('vars 中变量名不能重复', 'vars[' + index + ']');
         }
-        names.add(normalizedName);
+        declaredNameSet.add(normalizedName);
+        declaredNames.push(normalizedName);
       });
       const paths = value.paths.map((entry, index) => normalizePresetPath(entry, index));
+      const referencedNames = [];
+      const referencedNameSet = new Set();
       paths.forEach((entry) => {
         if (entry.formula) return;
-        extractTemplateVariables(entry.usrGen.grepKeys).forEach((name) => names.add(name));
+        ['folder', 'grepKeys', 'name'].forEach((field) => {
+          extractTemplateVariables(entry.usrGen[field]).forEach((name) => {
+            if (referencedNameSet.has(name)) return;
+            referencedNameSet.add(name);
+            referencedNames.push(name);
+          });
+        });
       });
-      return { vars: Array.from(names), paths };
+      const vars = [];
+      const addedNames = new Set();
+      declaredNames.forEach((name) => {
+        if (!referencedNameSet.has(name)) return;
+        addedNames.add(name);
+        vars.push(name);
+      });
+      referencedNames.forEach((name) => {
+        if (addedNames.has(name)) return;
+        addedNames.add(name);
+        vars.push(name);
+      });
+      return { vars, paths };
+    }
+
+    function synchronizeLoadedPresetVariables(preset) {
+      if (!preset || !Array.isArray(preset.vars)) return preset;
+      let raw;
+      try {
+        raw = JSON.parse(getPresetEditorValue());
+      } catch (_error) {
+        return preset;
+      }
+      const current = Array.isArray(raw.vars) ? raw.vars : [];
+      if (JSON.stringify(current) === JSON.stringify(preset.vars)) return preset;
+      raw.vars = preset.vars.slice();
+      setPresetEditorValue(JSON.stringify(raw, null, 2));
+      debug({
+        phase: 'preset-vars-pruned',
+        previousCount: current.length,
+        nextCount: preset.vars.length,
+        removed: current.filter((name) => !preset.vars.includes(name))
+      });
+      return parseEditor(false) || preset;
     }
 
     function formulaSignalNames(preset, payload) {
@@ -1421,7 +1464,7 @@
         const nextVariables = nextPreset.vars.join('\u0000');
         parsedPreset = nextPreset;
         refreshFormulaDiagnostics(nextPreset, searchResult);
-        presetState.textContent = '从 grepKeys 自动识别 ' + nextPreset.vars.length + ' 个变量，'
+        presetState.textContent = '从预设模板自动识别 ' + nextPreset.vars.length + ' 个变量，'
           + nextPreset.paths.length + ' 条搜索规则';
         if (previousVariables !== nextVariables || !variablesHost.childElementCount) {
           renderVariables(nextPreset.vars);
@@ -1455,7 +1498,7 @@
       parsedPreset = normalized;
       refreshFormulaDiagnostics(normalized, searchResult);
       setPresetEditorValue(JSON.stringify(normalized, null, 2), { keepHistory: true });
-      presetState.textContent = '从 grepKeys 自动识别 ' + normalized.vars.length + ' 个变量，'
+      presetState.textContent = '从预设模板自动识别 ' + normalized.vars.length + ' 个变量，'
         + normalized.paths.length + ' 条搜索规则；autoGen 已更新';
       if (searchResult) searchResult.preset = normalized;
       renderVariables(normalized.vars);
@@ -2708,11 +2751,11 @@
         setPresetEditorValue(presetText);
         variableValues.clear();
         parsedPreset = null;
-        const loadedPreset = parseEditor(true);
+        const loadedPreset = synchronizeLoadedPresetVariables(parseEditor(true));
         invalidateSearch('preset-loaded');
         rememberState('preset-loaded');
         if (loadedPreset) {
-          setHint('预设已读取；变量从 grepKeys 自动识别，留空按 0 匹配', false);
+          setHint('预设已读取；变量从预设模板自动识别，留空按 0 匹配', false);
         }
         debug({
           phase: 'preset-load-complete',
@@ -2756,7 +2799,7 @@
         setPresetEditorValue(presetText);
         variableValues.clear();
         parsedPreset = null;
-        const loadedPreset = parseEditor(true);
+        const loadedPreset = synchronizeLoadedPresetVariables(parseEditor(true));
         invalidateSearch('preset-discovered-loaded');
         updateDiscoveredPresetSelection();
         rememberState('preset-discovered-loaded');
@@ -2809,7 +2852,7 @@
         setPresetEditorValue(text);
         variableValues.clear();
         parsedPreset = null;
-        const loadedPreset = parseEditor(true);
+        const loadedPreset = synchronizeLoadedPresetVariables(parseEditor(true));
         invalidateSearch('preset-browser-loaded');
         rememberState('preset-browser-loaded');
         if (loadedPreset) setHint('已读取预设文件：' + file.name, false);

@@ -4,7 +4,7 @@
 if (typeof document === 'undefined' && typeof global.importScripts === 'function'
     && !global.VisualWaveDromFormula) {
   try {
-    global.importScripts('visualwavedrom-formula.js?v=20260807-formula-v2');
+    global.importScripts('visualwavedrom-formula.js?v=20260808-formula-card-v1');
   } catch (_error) { /* surfaced when a formula is configured */ }
 }
 
@@ -673,7 +673,7 @@ function scopeValueDisplay(value) {
 }
 
 function segmentsFromScopeValues(values, sampleStep) {
-  const step = normalizeSampleStep(sampleStep, 0.5);
+  const step = normalizeSampleStep(sampleStep, 1);
   const segments = [];
   const transitions = [];
   (Array.isArray(values) ? values : []).forEach((value, index) => {
@@ -777,32 +777,60 @@ function createSession(content, transientState) {
   const source = JSON.parse(originalContent);
   const transient = transientState && typeof transientState === 'object' ? transientState : {};
   const flat = flattenSignals(source.signal, []);
+  flat.forEach((row, sourceIndex) => {
+    row.rowId = 'source:' + sourceIndex;
+    row.sourceIndex = sourceIndex;
+  });
   (Array.isArray(transient.extraSignals) ? transient.extraSignals : []).forEach((extra, index) => {
     if (!extra || typeof extra !== 'object') return;
     const id = String(extra.id || ('extra-' + index));
     flat.push({
-      source: { name: String(extra.name || ''), wave: '' },
+      source: {
+        name: String(extra.name || ''),
+        wave: '',
+        scope: { numericType: 'float', bitWidth: 32, fractionalBits: 0 }
+      },
       path: null,
       groups: [],
       name: String(extra.name || ''),
       transient: true,
-      rowId: id.indexOf('extra:') === 0 ? id : ('extra:' + id)
+      rowId: id.indexOf('extra:') === 0 ? id : ('extra:' + id),
+      sourceIndex: -1
     });
   });
+  const hiddenRows = new Set((Array.isArray(transient.hiddenRows) ? transient.hiddenRows : [])
+    .map((rowId) => String(rowId || '')).filter(Boolean));
+  const flatById = new Map(flat.map((row) => [String(row.rowId), row]));
+  const orderedFlat = [];
+  const appended = new Set();
+  (Array.isArray(transient.rowOrder) ? transient.rowOrder : []).forEach((candidate) => {
+    const rowId = String(candidate || '');
+    const row = flatById.get(rowId);
+    if (!row || hiddenRows.has(rowId) || appended.has(rowId)) return;
+    orderedFlat.push(row);
+    appended.add(rowId);
+  });
+  flat.forEach((row) => {
+    const rowId = String(row.rowId);
+    if (hiddenRows.has(rowId) || appended.has(rowId)) return;
+    orderedFlat.push(row);
+    appended.add(rowId);
+  });
   let totalColumns = 1;
-  const rows = flat.map((row, rowIndex) => {
+  const rows = orderedFlat.map((row, rowIndex) => {
     const rowId = row.rowId || ('source:' + rowIndex);
+    const sourceIndex = Number.isInteger(row.sourceIndex) ? row.sourceIndex : rowIndex;
     const configuredName = transient.signalNames && own(transient.signalNames, rowId)
       ? String(transient.signalNames[rowId] == null ? '' : transient.signalNames[rowId])
       : row.name;
     let parsedWave = parseWaveSegments(row.source);
-    const scopeValues = getScopeValues(source, row, rowIndex);
+    const scopeValues = getScopeValues(source, row, sourceIndex);
     const localScope = row.source.scope && typeof row.source.scope === 'object'
       ? row.source.scope
       : null;
     const sampleStep = normalizeSampleStep(
       localScope && localScope.sampleStep,
-      scopeValues ? 0.5 : 1
+      1
     );
     if (scopeValues) {
       const valueSegments = segmentsFromScopeValues(scopeValues, sampleStep);
@@ -812,7 +840,7 @@ function createSession(content, transientState) {
         gaps: []
       });
     }
-    let analogSamples = getAnalogSamples(source, row, rowIndex);
+    let analogSamples = getAnalogSamples(source, row, sourceIndex);
     const requestedMode = localScope && localScope.mode
       ? String(localScope.mode)
       : '';
@@ -820,7 +848,7 @@ function createSession(content, transientState) {
     const mode = requestedMode === 'analog'
       ? 'analog'
       : (/^(digital|bus)$/.test(requestedMode) ? 'bus' : detectedMode);
-    const analogFormat = getAnalogFormat(source, row, rowIndex, !!analogSamples);
+    const analogFormat = getAnalogFormat(source, row, sourceIndex, !!analogSamples);
     if (!analogSamples && scopeValues && mode === 'analog') {
       analogSamples = numericSamplesFromScopeValues(scopeValues, analogFormat);
     }
@@ -856,8 +884,8 @@ function createSession(content, transientState) {
       sampleTransitionCache: new Map(),
       analogLevels: analogSamples ? buildAnalogLevels(analogSamples) : [],
       range: analogSamples ? analogRange(analogSamples) : null,
-      busFormat: getBusFormat(source, row, rowIndex),
-      valueTable: getValueTable(source, row, rowIndex, parsedWave.valueTable),
+      busFormat: getBusFormat(source, row, sourceIndex),
+      valueTable: getValueTable(source, row, sourceIndex, parsedWave.valueTable),
       analogFormat,
       analogCache: new Map(),
       rowHeight: normalizeRowHeight(localScope && localScope.rowHeight),
@@ -1320,6 +1348,101 @@ function analogSampleBoundary(row, sampleIndex, sampleCount, totalColumns) {
   return clamp(sampleColumn(row, sampleIndex), 0, totalColumns);
 }
 
+function analogExtremeSampleIndex(row, levelIndex, bucketIndex, useMinimum) {
+  let currentLevelIndex = levelIndex;
+  let currentBucketIndex = bucketIndex;
+  while (currentLevelIndex > 0) {
+    const level = row.analogLevels[currentLevelIndex];
+    const values = useMinimum ? level.mins : level.maxs;
+    const target = values[currentBucketIndex];
+    const childLevel = row.analogLevels[currentLevelIndex - 1];
+    const childValues = useMinimum ? childLevel.mins : childLevel.maxs;
+    const left = currentBucketIndex * 2;
+    const right = left + 1;
+    currentBucketIndex = left < childValues.length && childValues[left] === target
+      ? left
+      : Math.min(right, childValues.length - 1);
+    currentLevelIndex -= 1;
+  }
+  return currentBucketIndex;
+}
+
+function analogBucketStats(row, startIndex, endIndex) {
+  const result = {
+    min: Number.POSITIVE_INFINITY,
+    max: Number.NEGATIVE_INFINITY,
+    minIndex: -1,
+    maxIndex: -1,
+    unknown: false
+  };
+  let cursor = startIndex;
+  while (cursor < endIndex) {
+    let levelIndex = 0;
+    for (let candidate = row.analogLevels.length - 1; candidate > 0; candidate -= 1) {
+      const size = row.analogLevels[candidate].size;
+      if (cursor % size === 0 && cursor + size <= endIndex) {
+        levelIndex = candidate;
+        break;
+      }
+    }
+    const level = row.analogLevels[levelIndex];
+    const bucketIndex = Math.floor(cursor / level.size);
+    const min = level.mins[bucketIndex];
+    const max = level.maxs[bucketIndex];
+    result.unknown = result.unknown || !!(level.unknowns && level.unknowns[bucketIndex]);
+    if (Number.isFinite(min) && min < result.min) {
+      result.min = min;
+      result.minIndex = analogExtremeSampleIndex(row, levelIndex, bucketIndex, true);
+    }
+    if (Number.isFinite(max) && max > result.max) {
+      result.max = max;
+      result.maxIndex = analogExtremeSampleIndex(row, levelIndex, bucketIndex, false);
+    }
+    cursor += level.size;
+  }
+  return result;
+}
+
+function decimatedAnalogPoints(row, startIndex, endIndex, width, totalColumns) {
+  const sampleSpan = Math.max(0, endIndex - startIndex);
+  const bucketCount = Math.max(1, Math.min(sampleSpan, Math.floor(width)));
+  const points = [];
+  const unknowns = [];
+  for (let bucket = 0; bucket < bucketCount; bucket += 1) {
+    const firstIndex = startIndex + Math.floor(sampleSpan * bucket / bucketCount);
+    const nextIndex = startIndex + Math.floor(sampleSpan * (bucket + 1) / bucketCount);
+    if (nextIndex <= firstIndex) continue;
+    const lastIndex = nextIndex - 1;
+    const stats = analogBucketStats(row, firstIndex, nextIndex);
+    if (stats.unknown) {
+      appendAnalogUnknownRange(
+        unknowns,
+        analogSampleBoundary(row, firstIndex, row.samples.length, totalColumns),
+        analogSampleBoundary(row, nextIndex, row.samples.length, totalColumns)
+      );
+      points.push([sampleColumn(row, firstIndex), null]);
+      points.push([sampleColumn(row, lastIndex), null]);
+      continue;
+    }
+    const candidates = [
+      { index: firstIndex, value: row.samples[firstIndex] },
+      { index: stats.minIndex, value: stats.min },
+      { index: stats.maxIndex, value: stats.max },
+      { index: lastIndex, value: row.samples[lastIndex] }
+    ].filter((item) => item.index >= firstIndex
+      && item.index < nextIndex
+      && Number.isFinite(item.value));
+    candidates.sort((left, right) => left.index - right.index);
+    let previousIndex = -1;
+    candidates.forEach((item) => {
+      if (item.index === previousIndex) return;
+      points.push([sampleColumn(row, item.index), item.value]);
+      previousIndex = item.index;
+    });
+  }
+  return { points, unknowns, bucketCount };
+}
+
 function analogWindow(row, start, end, width, totalColumns) {
   const sampleCount = row.samples ? row.samples.length : 0;
   const step = rowSampleStep(row);
@@ -1347,38 +1470,20 @@ function analogWindow(row, start, end, width, totalColumns) {
     return { kind: 'points', items: points, unknowns, range: row.range };
   }
 
-  const samplesPerPixel = sampleSpan / Math.max(1, width);
-  let level = row.analogLevels[0];
-  for (let index = 1; index < row.analogLevels.length; index += 1) {
-    if (row.analogLevels[index].size > samplesPerPixel * 2) break;
-    level = row.analogLevels[index];
-  }
-  const firstBucket = Math.floor(startIndex / level.size);
-  const lastBucket = Math.min(level.mins.length, Math.ceil(endIndex / level.size));
-  const items = [];
-  const unknowns = [];
-  for (let index = firstBucket; index < lastBucket; index += 1) {
-    const min = level.mins[index];
-    const max = level.maxs[index];
-    const sampleIndex = index * level.size;
-    if (level.unknowns && level.unknowns[index]) {
-      appendAnalogUnknownRange(
-        unknowns,
-        analogSampleBoundary(row, sampleIndex, row.samples.length, totalColumns),
-        analogSampleBoundary(
-          row,
-          Math.min(row.samples.length, sampleIndex + level.size),
-          row.samples.length,
-          totalColumns
-        )
-      );
-    }
-    if (!Number.isFinite(min) && !Number.isFinite(max)) continue;
-    const column = sampleColumn(row, sampleIndex);
-    items.push([column, min, max]);
-  }
-  appendAnalogUnknownRange(unknowns, Math.max(start, sampledColumnCount(row)), end);
-  return { kind: 'envelope', items, unknowns, range: row.range };
+  const decimated = decimatedAnalogPoints(row, startIndex, endIndex, width, totalColumns);
+  appendAnalogUnknownRange(
+    decimated.unknowns,
+    Math.max(start, sampledColumnCount(row)),
+    end
+  );
+  return {
+    kind: 'points',
+    items: decimated.points,
+    unknowns: decimated.unknowns,
+    range: row.range,
+    decimated: true,
+    bucketCount: decimated.bucketCount
+  };
 }
 
 function createWindow(payload) {
