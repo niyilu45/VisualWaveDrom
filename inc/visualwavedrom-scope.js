@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260808-numpy-abs-v1';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260808-continuous-density-v1';
   const FormulaEngine = global.VisualWaveDromFormula || null;
   const DEFAULT_ROW_HEIGHT = 42;
   const COLLAPSED_ROW_HEIGHT = 18;
@@ -13,8 +13,6 @@
   const OVERVIEW_HEIGHT = 76;
   const MAX_HISTORY = 100;
   const CURSOR_HIT_RADIUS = 10;
-  const CYCLE_DETAIL_BLEND_START = 0.25;
-  const CYCLE_DETAIL_BLEND_END = 2;
   const COLOR_PRESETS = [
     { name: '绿色', value: '#07853d' },
     { name: '青色', value: '#0097a7' },
@@ -78,6 +76,32 @@
 
   function own(object, key) {
     return Object.prototype.hasOwnProperty.call(object || {}, key);
+  }
+
+  function mergedDisplayBuckets(items) {
+    const result = [];
+    (Array.isArray(items) ? items : []).forEach((bucket) => {
+      const candidate = Object.assign({}, bucket);
+      const previous = result[result.length - 1];
+      const contiguous = previous
+        && Math.abs(Number(previous.end) - Number(candidate.start)) <= 1e-7;
+      const quiet = Number(previous && previous.changes || 0) === 0
+        && Number(candidate.changes || 0) === 0;
+      const sameState = previous
+        && !!previous.high === !!candidate.high
+        && !!previous.low === !!candidate.low
+        && !!previous.unknown === !!candidate.unknown
+        && !!previous.bus === !!candidate.bus
+        && !!previous.binary === !!candidate.binary
+        && String(previous.value == null ? '' : previous.value)
+          === String(candidate.value == null ? '' : candidate.value);
+      if (contiguous && quiet && sameState) {
+        previous.end = candidate.end;
+        return;
+      }
+      result.push(candidate);
+    });
+    return result;
   }
 
   function normalizeTransientFormulaState(value) {
@@ -429,8 +453,8 @@
       this.signalNameEditor = null;
       this.rowOffsets = [0];
       this.windowData = null;
-      this.rawCycleDetailActive = false;
       this.simplified = null;
+      this.simplifiedDisplayActive = false;
       this.outputContent = '';
       this.viewStart = 0;
       this.viewEnd = 1;
@@ -3267,19 +3291,6 @@
       return this.viewStart + clamp(x / Math.max(1, width), 0, 1) * (this.viewEnd - this.viewStart);
     }
 
-    cycleDetailBlend(width) {
-      const span = this.viewEnd - this.viewStart;
-      if (!(span > 0)) return 0;
-      const pixelsPerCycle = Number(width) / span;
-      const position = clamp(
-        (pixelsPerCycle - CYCLE_DETAIL_BLEND_START)
-          / (CYCLE_DETAIL_BLEND_END - CYCLE_DETAIL_BLEND_START),
-        0,
-        1
-      );
-      return position * position * (3 - 2 * position);
-    }
-
     hasCurrentWindowData(rowResult) {
       const kind = rowResult && rowResult.data ? rowResult.data.kind : '';
       if (!['segments', 'points', 'buckets', 'envelope'].includes(kind)) return false;
@@ -3289,18 +3300,6 @@
         && Number.isFinite(windowEnd)
         && windowStart <= this.viewStart + 1e-7
         && windowEnd >= this.viewEnd - 1e-7;
-    }
-
-    updateRawCycleDetailState(active) {
-      const next = Boolean(active);
-      if (next === this.rawCycleDetailActive) return;
-      this.rawCycleDetailActive = next;
-      this.log('scope-view', {
-        phase: 'cycle-detail',
-        active: next,
-        viewStart: this.viewStart,
-        viewEnd: this.viewEnd
-      });
     }
 
     formatTime(column) {
@@ -3498,7 +3497,7 @@
         return;
       }
       if (data.kind === 'buckets') {
-        data.items.forEach((bucket) => {
+        mergedDisplayBuckets(data.items).forEach((bucket) => {
           const x1 = this.xForColumn(bucket.start, width);
           const x2 = this.xForColumn(bucket.end, width);
           if (bucket.bus) {
@@ -4254,8 +4253,6 @@
       const context = resized.context;
       const width = resized.width;
       const height = resized.height;
-      const detailBlend = this.cycleDetailBlend(width);
-      this.updateRawCycleDetailState(detailBlend >= 1 - 1e-7);
       this.drawGrid(context, width, height);
       const scrollTop = this.plotViewport.scrollTop;
       if (this.windowData) {
@@ -4329,27 +4326,16 @@
           } else {
             const hasSimplifiedRow = !!simplifiedRow;
             const hasWindowData = this.hasCurrentWindowData(rowResult);
-            const windowWeight = hasWindowData
-              ? (hasSimplifiedRow ? detailBlend : 1)
-              : 0;
-            const simplifiedWeight = hasSimplifiedRow ? 1 - windowWeight : 0;
-            if (simplifiedWeight > 1e-7) {
-              context.save();
-              context.globalAlpha *= simplifiedWeight;
+            if (this.simplifiedDisplayActive && hasSimplifiedRow) {
               this.drawSimplifiedRow(
                 context,
                 rowIndex,
                 rowTop + 3,
                 rowTop + rowHeight - 3,
                 width,
-                color,
-                false
+                color
               );
-              context.restore();
-            }
-            if (windowWeight > 1e-7) {
-              context.save();
-              context.globalAlpha *= windowWeight;
+            } else if (hasWindowData || !hasSimplifiedRow) {
               this.drawSegments(
                 context,
                 rowResult,
@@ -4359,15 +4345,21 @@
                 width,
                 color
               );
-              context.restore();
-            }
-            if (hasSimplifiedRow || windowWeight > 1e-7) {
               this.drawSelectedPointMarker(
                 context,
                 rowIndex,
                 rowTop + 3,
                 rowTop + rowHeight - 3,
                 width
+              );
+            } else {
+              this.drawSimplifiedRow(
+                context,
+                rowIndex,
+                rowTop + 3,
+                rowTop + rowHeight - 3,
+                width,
+                color
               );
             }
           }
@@ -5513,6 +5505,7 @@
         const options = this.getSimplifyOptions();
         const result = await this.worker.call('simplify', options);
         this.simplified = result;
+        if (recordHistory) this.simplifiedDisplayActive = true;
         this.outputContent = result.content;
         this.outputTitleInput.value = result.model.title;
         this.selectedPoint = null;
@@ -5645,7 +5638,8 @@
         connectionSequence: this.connectionSequence,
         outputTitle: this.outputTitleInput.value,
         presentationDraftDirty: this.presentationDraftDirty,
-        dataDraftDirty: this.dataDraftDirty
+        dataDraftDirty: this.dataDraftDirty,
+        simplifiedDisplayActive: this.simplifiedDisplayActive
       };
       if (options && options.includeRowState) {
         snapshot.rowState = {
@@ -5715,6 +5709,7 @@
       this.outputTitleInput.value = snapshot.outputTitle || this.simplified.model.title;
       this.presentationDraftDirty = !!snapshot.presentationDraftDirty;
       this.dataDraftDirty = !!snapshot.dataDraftDirty;
+      this.simplifiedDisplayActive = !!snapshot.simplifiedDisplayActive;
       const scrollTop = snapshot.rowState
         ? Math.max(0, Number(snapshot.rowState.plotScrollTop) || 0)
         : this.plotViewport.scrollTop;
@@ -5813,6 +5808,7 @@
         }
       }
       this.pushHistory();
+      this.simplifiedDisplayActive = true;
       if (row.mode === 'digital') {
         row.symbols = row.symbols || new Array(row.values.length).fill('');
         row.gaps = row.gaps || new Array(row.values.length).fill(false);
@@ -5841,6 +5837,7 @@
     insertSelectedPoint() {
       if (!this.selectedPoint || !this.simplified) return;
       this.pushHistory();
+      this.simplifiedDisplayActive = true;
       const pointIndex = this.selectedPoint.pointIndex;
       const columns = this.simplified.model.columns;
       const current = columns[pointIndex];
@@ -5868,6 +5865,7 @@
         return;
       }
       this.pushHistory();
+      this.simplifiedDisplayActive = true;
       const pointIndex = this.selectedPoint.pointIndex;
       const removedColumn = columns[pointIndex];
       columns.splice(pointIndex, 1);

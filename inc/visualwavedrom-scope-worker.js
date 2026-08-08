@@ -15,6 +15,10 @@ const DEFAULT_ROW_HEIGHT = 42;
 const MIN_ANALOG_ROW_HEIGHT = 28;
 const MAX_ANALOG_ROW_HEIGHT = 480;
 
+function windowPixelBudget(width) {
+  return Math.max(1, Math.floor(finiteNumber(width) || 1));
+}
+
 function finiteNumber(value) {
   if (value == null || (typeof value === 'string' && !value.trim())) return null;
   const number = Number(value);
@@ -1029,7 +1033,7 @@ function pointEventsInWindow(events, start, end, width) {
     low += 1;
   }
   const count = low - first;
-  const limit = Math.max(64, Math.floor(width * 2));
+  const limit = windowPixelBudget(width);
   if (count <= limit) return events.slice(first, low);
   const result = [];
   for (let index = 0; index < limit; index += 1) {
@@ -1227,7 +1231,7 @@ function rowSegmentsInWindow(row, start, end, width, mode, totalColumns, busForm
       Math.min(row.samples.length, Math.ceil(end / rowSampleStep(row)))
         - Math.max(0, Math.floor(start / rowSampleStep(row)))
     );
-    if (visibleSampleCount > Math.max(64, width * 4)) {
+    if (visibleSampleCount > windowPixelBudget(width)) {
       return Object.assign({
         kind: 'buckets',
         items: sampledBucketsInWindow(row, start, end, width, mode, busFormat)
@@ -1269,7 +1273,7 @@ function rowSegmentsInWindow(row, start, end, width, mode, totalColumns, busForm
       });
     }
   }
-  if (selected.length <= Math.max(64, width * 4)) {
+  if (selected.length <= windowPixelBudget(width)) {
     return Object.assign({ kind: 'segments', items: selected }, decorations);
   }
 
@@ -1290,6 +1294,8 @@ function rowSegmentsInWindow(row, start, end, width, mode, totalColumns, busForm
     let bus = false;
     let value = '';
     let changes = 0;
+    let eventStart = null;
+    let eventEnd = null;
     while (cursor < selected.length && selected[cursor].start < bucketEnd) {
       const segment = selected[cursor];
       if (segment.kind === 'bus') {
@@ -1299,7 +1305,11 @@ function rowSegmentsInWindow(row, start, end, width, mode, totalColumns, busForm
       } else if (segment.state === '1') high = true;
       else if (segment.state === '0') low = true;
       else unknown = true;
-      changes += 1;
+      if (segment.start > bucketStart + 1e-7 && segment.start < bucketEnd - 1e-7) {
+        changes += 1;
+        if (eventStart == null) eventStart = segment.start;
+        eventEnd = segment.start;
+      }
       cursor += 1;
     }
     buckets.push({
@@ -1310,7 +1320,9 @@ function rowSegmentsInWindow(row, start, end, width, mode, totalColumns, busForm
       unknown,
       bus,
       value,
-      changes
+      changes,
+      eventStart,
+      eventEnd
     });
   }
   return Object.assign({ kind: 'buckets', items: buckets }, decorations);
@@ -1449,7 +1461,7 @@ function analogWindow(row, start, end, width, totalColumns) {
   const startIndex = clamp(Math.floor(start / step), 0, sampleCount);
   const endIndex = clamp(Math.ceil(end / step), startIndex, sampleCount);
   const sampleSpan = Math.max(0, endIndex - startIndex);
-  if (sampleSpan <= Math.max(64, width * 2)) {
+  if (sampleSpan <= windowPixelBudget(width)) {
     const points = [];
     const unknowns = [];
     for (let index = startIndex; index < endIndex && index < row.samples.length; index += 1) {
