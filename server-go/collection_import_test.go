@@ -80,13 +80,14 @@ func collectionPresetValue(
 func TestCollectionFormulaPresetCanSearchWithoutAFileRule(t *testing.T) {
 	preset, err := normalizeCollectionPreset(map[string]any{
 		"paths": []any{map[string]any{
-			"usrGen":  map[string]any{"name": "Derived"},
-			"autoGen": map[string]any{},
-			"formula": map[string]any{
-				"cycle0":    "{Source} + 1",
-				"cycle05":   "cmath.phase({Source})",
-				"libraries": []any{"math", "cmath", "math"},
+			"usrGen": map[string]any{
+				"name": "Derived",
+				"formula": map[string]any{
+					"cycle05":   "cmath.phase({Source})",
+					"libraries": []any{"cmath"},
+				},
 			},
+			"autoGen": map[string]any{},
 		}},
 	})
 	if err != nil {
@@ -94,16 +95,17 @@ func TestCollectionFormulaPresetCanSearchWithoutAFileRule(t *testing.T) {
 	}
 	formula := preset.Paths[0].Formula
 	if preset.Paths[0].ImportMode != "formula" || formula == nil ||
-		formula.Cycle0 != "{Source} + 1" || formula.Cycle05 != "cmath.phase({Source})" ||
-		len(formula.Libraries) != 2 {
+		formula.Cycle0 != "" || formula.Cycle05 != "cmath.phase({Source})" {
 		t.Fatalf("formula was not normalized: %#v", preset.Paths[0])
 	}
 	encoded, err := json.Marshal(preset)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(encoded), `"formula"`) ||
-		!strings.Contains(string(encoded), `"cycle05"`) {
+	if !strings.Contains(string(encoded), `"usrGen":{"name":"Derived","formula"`) ||
+		!strings.Contains(string(encoded), `"cycle05"`) ||
+		strings.Contains(string(encoded), `"libraries"`) ||
+		strings.Contains(string(encoded), `"autoGen":{},"formula"`) {
 		t.Fatalf("formula was not persisted: %s", encoded)
 	}
 
@@ -119,6 +121,31 @@ func TestCollectionFormulaPresetCanSearchWithoutAFileRule(t *testing.T) {
 	}
 	if err := validateCachedCollectionFiles(result); err != nil {
 		t.Fatalf("formula-only cache was rejected: %v", err)
+	}
+}
+
+func TestCollectionFormulaMigratesLegacyCycle0Only(t *testing.T) {
+	preset, err := normalizeCollectionPreset(map[string]any{
+		"paths": []any{map[string]any{
+			"usrGen":  map[string]any{"name": "LegacyDerived"},
+			"autoGen": map[string]any{},
+			"formula": map[string]any{"cycle0": "numpy.abs({Source})"},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	formula := preset.Paths[0].Formula
+	if formula == nil || formula.Cycle0 != "numpy.abs({Source})" || formula.Cycle05 != "" {
+		t.Fatalf("legacy cycle0-only formula was not normalized: %#v", preset.Paths[0])
+	}
+	encoded, err := json.Marshal(preset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), `"autoGen":{},"formula"`) ||
+		!strings.Contains(string(encoded), `"usrGen":{"name":"LegacyDerived","formula"`) {
+		t.Fatalf("legacy formula was not migrated into usrGen: %s", encoded)
 	}
 }
 

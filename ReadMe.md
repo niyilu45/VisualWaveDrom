@@ -363,6 +363,24 @@ Linux 可直接粘贴 `/home/user/data.csv`、`~/data.csv` 或 `file:///home/use
   例如 `"1": "active"` 会在波形上显示 `1:active`。未配置 `tbl` 或原值不在字典中时，
   保持原显示不变。JSON 对象的键必须使用引号；示波器会把数值样本转换为字符串后匹配，
   因此数值 `1` 能匹配键 `"1"`，并在总线上显示映射标签。映射不会改变原始样本值。
+- `usrGen.formula`：可选的公式波形。只需填写 `cycle0`、`cycle05` 中的任意一个，
+  也可以同时填写；只填写一个时，另一个半周期自动复用它。依赖的 `math`、`cmath`、
+  `numpy` 会根据公式自动识别，预设中不需要填写 `libraries`。例如：
+
+```json
+{
+  "usrGen": {
+    "name": "Magnitude",
+    "formula": {
+      "cycle0": "numpy.abs({SeqConvOutC})"
+    }
+  },
+  "autoGen": {}
+}
+```
+
+  旧版位于 `paths[i].formula` 的公式仍可读取，保存预设后会自动迁移到
+  `paths[i].usrGen.formula`，旧的 `libraries` 字段会被移除。
 - `autoGen`：程序根据文件检测结果和预览选择生成的配置。单信号会记录解析方式及是否含序号；
   表格会记录 `headerRow`、`indexColumn`、`delimiter`、`schemaHash` 和列规则。
 - `autoGen.indexColumn`：可选的表格序号列。选择后，该列只用于放置数据，不会生成同名波形；

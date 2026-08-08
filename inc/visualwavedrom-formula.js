@@ -401,8 +401,35 @@
     return !!(value && value.complex === true && Number.isFinite(value.re) && Number.isFinite(value.im));
   }
 
+  function parseComplexText(value) {
+    if (typeof value !== 'string') return null;
+    let text = value.trim().replace(/\s+/g, '');
+    if (text[0] === '(' && text[text.length - 1] === ')') text = text.slice(1, -1);
+    if (!/[ij]$/i.test(text)) return null;
+    const body = text.slice(0, -1);
+    let separator = -1;
+    for (let index = body.length - 1; index > 0; index -= 1) {
+      if ((body[index] === '+' || body[index] === '-')
+          && body[index - 1] !== 'e' && body[index - 1] !== 'E') {
+        separator = index;
+        break;
+      }
+    }
+    const realText = separator >= 0 ? body.slice(0, separator) : '0';
+    let imaginaryText = separator >= 0 ? body.slice(separator) : body;
+    if (imaginaryText === '' || imaginaryText === '+') imaginaryText = '1';
+    if (imaginaryText === '-') imaginaryText = '-1';
+    const real = Number(realText);
+    const imaginary = Number(imaginaryText);
+    return Number.isFinite(real) && Number.isFinite(imaginary)
+      ? complex(real, imaginary)
+      : null;
+  }
+
   function asComplex(value) {
     if (isComplex(value)) return value;
+    const parsed = parseComplexText(value);
+    if (parsed) return parsed;
     const number = Number(value);
     return Number.isFinite(number) ? complex(number, 0) : null;
   }
@@ -771,7 +798,10 @@
 
   function callBuiltin(name, args) {
     if (args.some(isUnknown)) return UNKNOWN;
-    if (name === 'abs') return isComplex(args[0]) ? complexMagnitude(args[0]) : Math.abs(Number(args[0]));
+    if (name === 'abs') {
+      const value = asComplex(args[0]);
+      return value ? complexMagnitude(value) : UNKNOWN;
+    }
     if (name === 'bool') return !!args[0];
     if (name === 'complex') return complex(Number(args[0]) || 0, Number(args[1]) || 0);
     if (name === 'float') return Number(args[0]);
@@ -808,13 +838,18 @@
   }
 
   function callNumpy(name, args) {
-    if (args.some(isUnknown) || args.some(isComplex)) return UNKNOWN;
+    if (args.some(isUnknown)) return UNKNOWN;
+    if (name === 'abs' || name === 'absolute') {
+      const value = asComplex(args[0]);
+      return value ? complexMagnitude(value) : UNKNOWN;
+    }
+    if (args.some(isComplex)) return UNKNOWN;
     const values = args.map(Number);
     if (name === 'isfinite') return Number.isFinite(values[0]);
     if (name === 'isinf') return !Number.isNaN(values[0]) && !Number.isFinite(values[0]);
     if (name === 'isnan') return Number.isNaN(values[0]);
     if (values.some((value) => !Number.isFinite(value))) return UNKNOWN;
-    if (name === 'abs' || name === 'absolute' || name === 'fabs') return Math.abs(values[0]);
+    if (name === 'fabs') return Math.abs(values[0]);
     if (name === 'clip') return Math.min(Math.max(values[0], values[1]), values[2]);
     if (name === 'maximum') return Math.max(values[0], values[1]);
     if (name === 'minimum') return Math.min(values[0], values[1]);

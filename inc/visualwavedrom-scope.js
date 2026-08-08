@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260808-scope-connection-step-v1';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260808-numpy-abs-v1';
   const FormulaEngine = global.VisualWaveDromFormula || null;
   const DEFAULT_ROW_HEIGHT = 42;
   const COLLAPSED_ROW_HEIGHT = 18;
@@ -13,7 +13,8 @@
   const OVERVIEW_HEIGHT = 76;
   const MAX_HISTORY = 100;
   const CURSOR_HIT_RADIUS = 10;
-  const CYCLE_DETAIL_MIN_PIXELS_PER_COLUMN = 1;
+  const CYCLE_DETAIL_BLEND_START = 0.25;
+  const CYCLE_DETAIL_BLEND_END = 2;
   const COLOR_PRESETS = [
     { name: '绿色', value: '#07853d' },
     { name: '青色', value: '#0097a7' },
@@ -886,15 +887,15 @@
               <summary id="scope-formula-json-summary">公式 JSON 预览</summary>
               <pre id="scope-formula-json-preview"></pre>
             </details>
-            <div class="scope-formula-actions">
-              <button type="button" class="scope-command-btn scope-primary" id="scope-formula-apply">
-                应用
-              </button>
-              <button type="button" class="scope-command-btn" id="scope-formula-copy-json">
-                复制 JSON
-              </button>
-            </div>
           </div>
+          </div>
+          <div class="scope-formula-actions">
+            <button type="button" class="scope-command-btn scope-primary" id="scope-formula-apply">
+              应用
+            </button>
+            <button type="button" class="scope-command-btn" id="scope-formula-copy-json">
+              复制 JSON
+            </button>
           </div>
         </div>
         <div class="scope-style-popover" id="scope-style-popover" role="dialog"
@@ -1912,22 +1913,23 @@
       return Array.from(libraries).sort();
     }
 
-    formulaJsonPayload(row, formula, libraries) {
+    formulaJsonPayload(row, formula) {
       const name = String(this.signalNames[row.index] == null
         ? row.name || ''
         : this.signalNames[row.index]);
+      const definition = {};
+      const cycle0 = String(formula && formula.cycle0 || '');
+      const cycle05 = String(formula && formula.cycle05 || '');
+      if (cycle0.trim()) definition.cycle0 = cycle0;
+      if (cycle05.trim()) definition.cycle05 = cycle05;
       return {
-        usrGen: { name },
-        formula: {
-          cycle0: String(formula && formula.cycle0 || ''),
-          cycle05: String(formula && formula.cycle05 || ''),
-          libraries: Array.from(new Set(libraries || [])).sort()
-        }
+        usrGen: { name, formula: definition },
+        autoGen: {}
       };
     }
 
-    formulaJsonText(row, formula, libraries) {
-      return JSON.stringify(this.formulaJsonPayload(row, formula, libraries), null, 2);
+    formulaJsonText(row, formula) {
+      return JSON.stringify(this.formulaJsonPayload(row, formula), null, 2);
     }
 
     updateFormulaControls() {
@@ -2001,8 +2003,7 @@
         : (item && FormulaEngine ? FormulaEngine.pythonPreview(item) : '');
       this.formulaJsonPreview.textContent = this.formulaJsonText(
         row,
-        displayedFormula,
-        displayedLibraries
+        displayedFormula
       );
       this.formulaJsonSummary.textContent = dirty
         ? '公式 JSON 预览（未应用）'
@@ -2543,7 +2544,7 @@
         this.setStatus('请先修正并应用公式，再复制 JSON', true);
         return;
       }
-      const text = this.formulaJsonText(row, formula, item.libraries);
+      const text = this.formulaJsonText(row, formula);
       try {
         let copied = false;
         if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -2700,11 +2701,14 @@
       if (left + popoverRect.width > viewportWidth - margin) {
         left = anchorRect.left - popoverRect.width - 8;
       }
-      const top = clamp(
-        anchorRect.top,
-        margin,
-        Math.max(margin, viewportHeight - popoverRect.height - margin)
-      );
+      const formulaActive = this.displayPopover.classList.contains('formula-active');
+      const top = formulaActive
+        ? margin
+        : clamp(
+          anchorRect.top,
+          margin,
+          Math.max(margin, viewportHeight - popoverRect.height - margin)
+        );
       this.displayPopover.style.left = clamp(
         left,
         margin,
@@ -3263,15 +3267,22 @@
       return this.viewStart + clamp(x / Math.max(1, width), 0, 1) * (this.viewEnd - this.viewStart);
     }
 
-    isRawCycleDetailView(width) {
+    cycleDetailBlend(width) {
       const span = this.viewEnd - this.viewStart;
-      return span > 0
-        && Number(width) / span >= CYCLE_DETAIL_MIN_PIXELS_PER_COLUMN;
+      if (!(span > 0)) return 0;
+      const pixelsPerCycle = Number(width) / span;
+      const position = clamp(
+        (pixelsPerCycle - CYCLE_DETAIL_BLEND_START)
+          / (CYCLE_DETAIL_BLEND_END - CYCLE_DETAIL_BLEND_START),
+        0,
+        1
+      );
+      return position * position * (3 - 2 * position);
     }
 
-    hasExactWindowDetail(rowResult) {
+    hasCurrentWindowData(rowResult) {
       const kind = rowResult && rowResult.data ? rowResult.data.kind : '';
-      if (kind !== 'segments' && kind !== 'points') return false;
+      if (!['segments', 'points', 'buckets', 'envelope'].includes(kind)) return false;
       const windowStart = Number(this.windowData && this.windowData.start);
       const windowEnd = Number(this.windowData && this.windowData.end);
       return Number.isFinite(windowStart)
@@ -3702,7 +3713,7 @@
       });
     }
 
-    drawSimplifiedRow(context, rowIndex, yTop, yBottom, width, color) {
+    drawSimplifiedRow(context, rowIndex, yTop, yBottom, width, color, drawMarker) {
       if (!this.simplified || !this.simplified.model.rows[rowIndex]) return;
       const row = this.simplified.model.rows[rowIndex];
       const columns = this.simplified.model.columns;
@@ -3898,7 +3909,9 @@
           }
         });
       }
-      this.drawSelectedPointMarker(context, rowIndex, yTop, yBottom, width);
+      if (drawMarker !== false) {
+        this.drawSelectedPointMarker(context, rowIndex, yTop, yBottom, width);
+      }
     }
 
     drawSelectedPointMarker(context, rowIndex, yTop, yBottom, width) {
@@ -4241,8 +4254,8 @@
       const context = resized.context;
       const width = resized.width;
       const height = resized.height;
-      const rawCycleDetail = this.isRawCycleDetailView(width);
-      this.updateRawCycleDetailState(rawCycleDetail);
+      const detailBlend = this.cycleDetailBlend(width);
+      this.updateRawCycleDetailState(detailBlend >= 1 - 1e-7);
       this.drawGrid(context, width, height);
       const scrollTop = this.plotViewport.scrollTop;
       if (this.windowData) {
@@ -4313,32 +4326,50 @@
               width,
               color
             );
-          } else if (rawCycleDetail && this.hasExactWindowDetail(rowResult)) {
-            this.drawSegments(
-              context,
-              rowResult,
-              rowIndex,
-              rowTop + 3,
-              rowTop + rowHeight - 3,
-              width,
-              color
-            );
-            this.drawSelectedPointMarker(
-              context,
-              rowIndex,
-              rowTop + 3,
-              rowTop + rowHeight - 3,
-              width
-            );
           } else {
-            this.drawSimplifiedRow(
-              context,
-              rowIndex,
-              rowTop + 3,
-              rowTop + rowHeight - 3,
-              width,
-              color
-            );
+            const hasSimplifiedRow = !!simplifiedRow;
+            const hasWindowData = this.hasCurrentWindowData(rowResult);
+            const windowWeight = hasWindowData
+              ? (hasSimplifiedRow ? detailBlend : 1)
+              : 0;
+            const simplifiedWeight = hasSimplifiedRow ? 1 - windowWeight : 0;
+            if (simplifiedWeight > 1e-7) {
+              context.save();
+              context.globalAlpha *= simplifiedWeight;
+              this.drawSimplifiedRow(
+                context,
+                rowIndex,
+                rowTop + 3,
+                rowTop + rowHeight - 3,
+                width,
+                color,
+                false
+              );
+              context.restore();
+            }
+            if (windowWeight > 1e-7) {
+              context.save();
+              context.globalAlpha *= windowWeight;
+              this.drawSegments(
+                context,
+                rowResult,
+                rowIndex,
+                rowTop + 3,
+                rowTop + rowHeight - 3,
+                width,
+                color
+              );
+              context.restore();
+            }
+            if (hasSimplifiedRow || windowWeight > 1e-7) {
+              this.drawSelectedPointMarker(
+                context,
+                rowIndex,
+                rowTop + 3,
+                rowTop + rowHeight - 3,
+                width
+              );
+            }
           }
         });
       }

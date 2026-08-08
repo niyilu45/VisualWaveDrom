@@ -1183,24 +1183,11 @@
         }
         return String(source[key]);
       };
-      let libraries = [];
-      if (source.libraries !== undefined) {
-        if (!Array.isArray(source.libraries)) {
-          errors.push(fieldPath + '.libraries 必须是列表');
-        } else {
-          libraries = source.libraries.map((name, index) => {
-            if (typeof name !== 'string') {
-              errors.push(fieldPath + '.libraries[' + index + '] 必须是字符串');
-            }
-            return String(name == null ? '' : name).trim().toLowerCase();
-          }).filter(Boolean);
-        }
-      }
-      const normalized = {
-        cycle0: readText(['cycle0', '0 cycle', 'at0'], 'cycle0'),
-        cycle05: readText(['cycle05', 'cycle0_5', '0.5 cycle', 'at05'], 'cycle05'),
-        libraries: Array.from(new Set(libraries))
-      };
+      const cycle0 = readText(['cycle0', '0 cycle', 'at0'], 'cycle0');
+      const cycle05 = readText(['cycle05', 'cycle0_5', '0.5 cycle', 'at05'], 'cycle05');
+      const normalized = {};
+      if (cycle0.trim()) normalized.cycle0 = cycle0;
+      if (cycle05.trim()) normalized.cycle05 = cycle05;
       Object.defineProperty(normalized, '__vwdStructureErrors', {
         value: errors,
         enumerable: false
@@ -1213,13 +1200,10 @@
       if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
         throw validationError(path + ' 必须是字典', path);
       }
-      const formula = entry.formula === undefined
-        ? null
-        : normalizeFormulaConfig(entry.formula, path + '.formula');
       let usrGen;
       let autoGen;
+      let rawUsrGen = entry.usrGen;
       if (entry.usrGen !== undefined || entry.autoGen !== undefined) {
-        let rawUsrGen = entry.usrGen;
         if (entry.tbl !== undefined && (
           rawUsrGen === undefined || rawUsrGen === null ||
           (typeof rawUsrGen === 'object' && !Array.isArray(rawUsrGen))
@@ -1241,11 +1225,22 @@
           hasSeq: entry.hasSeq
         }, path + '.autoGen');
       }
+      const hasUsrFormula = !!rawUsrGen
+        && typeof rawUsrGen === 'object'
+        && !Array.isArray(rawUsrGen)
+        && Object.prototype.hasOwnProperty.call(rawUsrGen, 'formula');
+      const formulaValue = hasUsrFormula ? rawUsrGen.formula : entry.formula;
+      const formula = formulaValue === undefined
+        ? null
+        : normalizeFormulaConfig(
+          formulaValue,
+          hasUsrFormula ? path + '.usrGen.formula' : path + '.formula'
+        );
       if (formula) {
         if (!usrGen.name) {
           throw validationError(path + '.usrGen.name 必须是非空信号名', path + '.usrGen.name');
         }
-        return { usrGen: { name: usrGen.name }, autoGen, formula };
+        return { usrGen: { name: usrGen.name, formula }, autoGen };
       }
       if (!usrGen.folder) usrGen.folder = '.';
       if (!usrGen.grepKeys) {
@@ -1255,6 +1250,12 @@
         );
       }
       return { usrGen, autoGen };
+    }
+
+    function presetPathFormula(entry) {
+      return entry && entry.usrGen && entry.usrGen.formula
+        ? entry.usrGen.formula
+        : null;
     }
 
     function validatePresetShape(value) {
@@ -1287,7 +1288,7 @@
       const referencedNames = [];
       const referencedNameSet = new Set();
       paths.forEach((entry) => {
-        if (entry.formula) return;
+        if (presetPathFormula(entry)) return;
         ['folder', 'grepKeys', 'name'].forEach((field) => {
           extractTemplateVariables(entry.usrGen[field]).forEach((name) => {
             if (referencedNameSet.has(name)) return;
@@ -1353,7 +1354,7 @@
         });
       });
       (preset && Array.isArray(preset.paths) ? preset.paths : []).forEach((entry) => {
-        if (!entry || entry.formula) return;
+        if (!entry || presetPathFormula(entry)) return;
         const config = entry.usrGen || {};
         const name = String(config.name || '').trim();
         if (name) names.add(name);
@@ -1374,11 +1375,12 @@
       const formulaEngine = window.VisualWaveDromFormula;
       const definitions = [];
       (preset && Array.isArray(preset.paths) ? preset.paths : []).forEach((entry, index) => {
-        if (!entry || !entry.formula) return;
+        const formula = presetPathFormula(entry);
+        if (!entry || !formula) return;
         definitions.push({
           id: String(index),
           name: String(entry.usrGen && entry.usrGen.name || '').trim(),
-          formula: entry.formula
+          formula
         });
       });
       if (!definitions.length) return formulaDiagnostics;
@@ -1404,9 +1406,10 @@
       analysis.items.forEach((item) => {
         const index = Number(item.id);
         const entry = preset.paths[index];
-        const structureErrors = entry && entry.formula
-          && Array.isArray(entry.formula.__vwdStructureErrors)
-          ? entry.formula.__vwdStructureErrors
+        const formula = presetPathFormula(entry);
+        const structureErrors = formula
+          && Array.isArray(formula.__vwdStructureErrors)
+          ? formula.__vwdStructureErrors
           : [];
         const errors = Array.from(new Set(structureErrors.concat(item.errors || [])));
         formulaDiagnostics.set(index, Object.assign({}, item, {

@@ -65,7 +65,7 @@ var collectionImportProgressTokenPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za
 type collectionPresetPath struct {
 	UsrGen  collectionRuleConfig     `json:"usrGen"`
 	AutoGen collectionRuleConfig     `json:"autoGen"`
-	Formula *collectionFormulaConfig `json:"formula,omitempty"`
+	Formula *collectionFormulaConfig `json:"-"`
 
 	// Effective values keep the search/import code and legacy tests simple.
 	Folder      string                   `json:"-"`
@@ -83,9 +83,8 @@ type collectionPresetPath struct {
 }
 
 type collectionFormulaConfig struct {
-	Cycle0    string   `json:"cycle0"`
-	Cycle05   string   `json:"cycle05"`
-	Libraries []string `json:"libraries,omitempty"`
+	Cycle0  string `json:"cycle0,omitempty"`
+	Cycle05 string `json:"cycle05,omitempty"`
 }
 
 type collectionColumnConfig struct {
@@ -108,6 +107,7 @@ type collectionRuleConfig struct {
 	Columns     []collectionColumnConfig `json:"columns,omitempty"`
 	SchemaHash  string                   `json:"schemaHash,omitempty"`
 	Tbl         map[string]string        `json:"tbl,omitempty"`
+	Formula     *collectionFormulaConfig `json:"formula,omitempty"`
 }
 
 type collectionPreset struct {
@@ -514,6 +514,7 @@ func effectiveCollectionPresetPath(
 	autoGen collectionRuleConfig,
 ) collectionPresetPath {
 	effective := collectionPresetPath{UsrGen: usrGen, AutoGen: autoGen}
+	effective.Formula = usrGen.Formula
 	effective.Folder = usrGen.Folder
 	if effective.Folder == "" {
 		effective.Folder = autoGen.Folder
@@ -667,28 +668,7 @@ func normalizeCollectionFormula(value any, fieldPath string) (*collectionFormula
 	if err != nil {
 		return nil, err
 	}
-	libraries := []string{}
-	seenLibraries := make(map[string]bool)
-	if value, supplied := raw["libraries"]; supplied {
-		items, ok := anyList(value)
-		if !ok {
-			return nil, fmt.Errorf("%s.libraries must be an array", fieldPath)
-		}
-		for index, item := range items {
-			name, ok := item.(string)
-			name = strings.ToLower(strings.TrimSpace(name))
-			if !ok || name == "" {
-				return nil, fmt.Errorf("%s.libraries[%d] must be a non-empty string", fieldPath, index)
-			}
-			if !seenLibraries[name] {
-				seenLibraries[name] = true
-				libraries = append(libraries, name)
-			}
-		}
-	}
-	return &collectionFormulaConfig{
-		Cycle0: cycle0, Cycle05: cycle05, Libraries: libraries,
-	}, nil
+	return &collectionFormulaConfig{Cycle0: cycle0, Cycle05: cycle05}, nil
 }
 
 func normalizeCollectionPreset(value any) (collectionPreset, error) {
@@ -757,15 +737,6 @@ func normalizeCollectionPreset(value any) (collectionPreset, error) {
 		if !ok {
 			return collectionPreset{}, fmt.Errorf("paths[%d] must be an object", index)
 		}
-		var formula *collectionFormulaConfig
-		if rawFormula, supplied := entry["formula"]; supplied {
-			var formulaErr error
-			formula, formulaErr = normalizeCollectionFormula(
-				rawFormula, fmt.Sprintf("paths[%d].formula", index))
-			if formulaErr != nil {
-				return collectionPreset{}, formulaErr
-			}
-		}
 		usrRaw := map[string]any{}
 		autoRaw := map[string]any{}
 		_, nestedUsr := entry["usrGen"]
@@ -802,6 +773,20 @@ func normalizeCollectionPreset(value any) (collectionPreset, error) {
 				autoRaw["hasSeq"] = value
 			}
 		}
+		var formula *collectionFormulaConfig
+		rawFormula, formulaSupplied := usrRaw["formula"]
+		formulaPath := fmt.Sprintf("paths[%d].usrGen.formula", index)
+		if !formulaSupplied {
+			rawFormula, formulaSupplied = entry["formula"]
+			formulaPath = fmt.Sprintf("paths[%d].formula", index)
+		}
+		if formulaSupplied {
+			var formulaErr error
+			formula, formulaErr = normalizeCollectionFormula(rawFormula, formulaPath)
+			if formulaErr != nil {
+				return collectionPreset{}, formulaErr
+			}
+		}
 		usrGen, configErr := normalizeCollectionRuleConfig(
 			usrRaw, fmt.Sprintf("paths[%d].usrGen", index), false)
 		if configErr != nil {
@@ -813,6 +798,7 @@ func normalizeCollectionPreset(value any) (collectionPreset, error) {
 			return collectionPreset{}, configErr
 		}
 		if formula != nil {
+			usrGen.Formula = formula
 			if usrGen.Name == "" {
 				return collectionPreset{}, fmt.Errorf(
 					"paths[%d].usrGen.name must be a non-empty signal name", index)
@@ -824,7 +810,6 @@ func normalizeCollectionPreset(value any) (collectionPreset, error) {
 				return collectionPreset{}, fmt.Errorf("paths[%d].usrGen.name: %w", index, nameErr)
 			}
 			effective := effectiveCollectionPresetPath(usrGen, autoGen)
-			effective.Formula = formula
 			effective.ImportMode = "formula"
 			preset.Paths = append(preset.Paths, effective)
 			continue
