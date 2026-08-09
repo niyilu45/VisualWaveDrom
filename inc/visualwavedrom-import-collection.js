@@ -1333,6 +1333,33 @@
       return parseEditor(false) || preset;
     }
 
+    function collectionEntryOutputNames(entry) {
+      if (!entry || entry.importMode === 'formula') return [];
+      const existing = (Array.isArray(entry.outputNames) ? entry.outputNames : [])
+        .map((name) => String(name || '').trim()).filter(Boolean);
+      if (entry.importMode === 'table') {
+        const complexSources = new Set(
+          (Array.isArray(entry.complexSources) ? entry.complexSources : [])
+            .map((source) => String(source || '').trim()).filter(Boolean)
+        );
+        const configured = (entry.columns || [])
+          .filter((column) => column && column.enabled !== false
+            && String(column.source || '') !== String(entry.indexColumn || ''))
+          .reduce((names, column) => {
+            const source = String(column.source || '').trim();
+            const name = String(column.name || source).trim();
+            if (!name) return names;
+            if (complexSources.has(source)) names.push(name + '_I', name + '_Q');
+            else names.push(name);
+            return names;
+          }, []);
+        return configured.length ? configured : existing;
+      }
+      const name = String(entry.name || '').trim();
+      if (!name) return existing;
+      return entry.complexDetected ? [name + '_I', name + '_Q'] : [name];
+    }
+
     function formulaSignalNames(preset, payload) {
       const names = new Set();
       if (typeof settings.getFormulaSignalNames === 'function') {
@@ -1348,7 +1375,7 @@
       const entries = Array.isArray(payload && payload.entries) ? payload.entries : [];
       entries.forEach((entry) => {
         if (entry && entry.importMode === 'formula') return;
-        (Array.isArray(entry && entry.outputNames) ? entry.outputNames : []).forEach((name) => {
+        collectionEntryOutputNames(entry).forEach((name) => {
           const normalized = String(name || '').trim();
           if (normalized) names.add(normalized);
         });
@@ -1367,7 +1394,9 @@
           if (columnName) names.add(columnName);
         });
       });
-      return Array.from(names);
+      const result = Array.from(names);
+      debug({ phase: 'formula-signal-names', count: result.length, names: result });
+      return result;
     }
 
     function refreshFormulaDiagnostics(preset, payload) {
@@ -1808,13 +1837,7 @@
         if (autoGen[key] === '') delete autoGen[key];
       });
       path.autoGen = autoGen;
-      entry.outputNames = entry.importMode === 'table'
-        ? (entry.columns || [])
-          .filter((column) => column.enabled !== false
-            && String(column.source || '') !== String(entry.indexColumn || ''))
-          .map((column) => String(column.name || column.source || '').trim())
-          .filter(Boolean)
-        : [String(entry.name || '').trim()].filter(Boolean);
+      entry.outputNames = collectionEntryOutputNames(entry);
       if (entry.status === 'duplicate-name') {
         entry.status = Array.isArray(entry.matches) && entry.matches.length > 1
           ? 'multiple'
@@ -1823,7 +1846,10 @@
       }
       setPresetEditorValue(JSON.stringify(parsedPreset, null, 2), { keepHistory: true });
       renderPresetNavigation(parsedPreset, getPresetEditorValue());
-      if (searchResult) searchResult.preset = parsedPreset;
+      if (searchResult) {
+        searchResult.preset = parsedPreset;
+        decorateFormulaSearchResult(searchResult, parsedPreset);
+      }
       renderSearchMarkers(searchResult);
       scheduleRememberState(reason || 'autogen-edited');
       updateButtons();
@@ -1855,12 +1881,7 @@
               + ' 的过滤条件有误：' + filterError);
           }
         });
-        const names = entry.importMode === 'table'
-          ? (entry.columns || [])
-            .filter((column) => column.enabled !== false
-              && String(column.source || '') !== String(entry.indexColumn || ''))
-            .map((column) => String(column.name || column.source || '').trim())
-          : [String(entry.name || '').trim()];
+        const names = collectionEntryOutputNames(entry);
         if (!names.length || names.some((name) => !name)) {
           errors.push('第 ' + (entry.index + 1) + ' 条规则至少选择一个有效信号');
           return;

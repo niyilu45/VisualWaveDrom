@@ -124,6 +124,72 @@ func TestCollectionFormulaPresetCanSearchWithoutAFileRule(t *testing.T) {
 	}
 }
 
+func TestCollectionSearchExposesComplexOutputNamesToFormulas(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(root, "iq.txt"),
+		[]byte("1+2j\n3+4j\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(root, "table.csv"),
+		[]byte("Tick,Feedback,State\n0,5+6j,1\n1,7+8j,0\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	preset, err := normalizeCollectionPreset(map[string]any{
+		"paths": []any{
+			map[string]any{
+				"usrGen": map[string]any{
+					"folder": ".", "grepKeys": `^iq\.txt$`, "name": "Input",
+				},
+				"autoGen": map[string]any{},
+			},
+			map[string]any{
+				"usrGen": map[string]any{
+					"folder": ".", "grepKeys": `^table\.csv$`,
+				},
+				"autoGen": map[string]any{},
+			},
+			map[string]any{
+				"usrGen": map[string]any{
+					"name": "Derived",
+					"formula": map[string]any{
+						"cycle0": "{Input_I} + {Input_Q} + {Feedback_I} + {Feedback_Q}",
+					},
+				},
+				"autoGen": map[string]any{},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := searchCollectionFiles(
+		root, root, preset, map[string]string{}, runTestCollectionRegexSearch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Ready || result.ResultCount != 3 || len(result.Entries) != 3 {
+		t.Fatalf("unexpected complex search result: %#v", result)
+	}
+	single := result.Entries[0]
+	if !single.ComplexDetected || len(single.OutputNames) != 2 ||
+		single.OutputNames[0] != "Input_I" || single.OutputNames[1] != "Input_Q" {
+		t.Fatalf("single complex outputs were not exposed: %#v", single)
+	}
+	table := result.Entries[1]
+	if !table.ComplexDetected || len(table.ComplexSources) != 1 ||
+		table.ComplexSources[0] != "Feedback" ||
+		len(table.OutputNames) != 4 || table.OutputNames[1] != "Feedback_I" ||
+		table.OutputNames[2] != "Feedback_Q" {
+		t.Fatalf("table complex outputs were not exposed: %#v", table)
+	}
+}
+
 func TestCollectionFormulaMigratesLegacyCycle0Only(t *testing.T) {
 	preset, err := normalizeCollectionPreset(map[string]any{
 		"paths": []any{map[string]any{

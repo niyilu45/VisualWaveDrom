@@ -171,6 +171,8 @@ type collectionSearchEntry struct {
 	Columns          []collectionColumnConfig `json:"columns,omitempty"`
 	SchemaHash       string                   `json:"schemaHash,omitempty"`
 	OutputNames      []string                 `json:"outputNames,omitempty"`
+	ComplexDetected  bool                     `json:"complexDetected,omitempty"`
+	ComplexSources   []string                 `json:"complexSources,omitempty"`
 	PreviewColumns   []string                 `json:"previewColumns,omitempty"`
 	PreviewRows      [][]string               `json:"previewRows,omitempty"`
 	PreviewTruncated bool                     `json:"previewTruncated,omitempty"`
@@ -178,6 +180,76 @@ type collectionSearchEntry struct {
 	Status           string                   `json:"status"`
 	Message          string                   `json:"message,omitempty"`
 	Matches          []collectionFileMatch    `json:"matches"`
+}
+
+func collectionTableComplexSources(
+	lines []string,
+	headerRow int,
+	delimiter string,
+	headers []string,
+	configuredColumns []collectionColumnConfig,
+	indexColumn string,
+) ([]string, error) {
+	headerIndexes := make(map[string]int, len(headers))
+	for index, header := range headers {
+		headerIndexes[header] = index
+	}
+	filters := make([]collectionPreviewFilter, 0)
+	selected := make([]collectionColumnConfig, 0, len(configuredColumns))
+	for _, column := range configuredColumns {
+		columnIndex, found := headerIndexes[column.Source]
+		if !found {
+			continue
+		}
+		if strings.TrimSpace(column.Filter) != "" {
+			groups, err := compileCollectionPreviewFilter(column.Filter, column.Source)
+			if err != nil {
+				return nil, err
+			}
+			filters = append(filters, collectionPreviewFilter{
+				columnIndex: columnIndex,
+				groups:      groups,
+			})
+		}
+		if column.Enabled && column.Source != indexColumn {
+			selected = append(selected, column)
+		}
+	}
+	complexSources := make(map[string]bool)
+	for index := headerRow; index < len(lines); index++ {
+		line := strings.TrimSpace(lines[index])
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
+			continue
+		}
+		values := collectionSplitColumns(line, delimiter)
+		matches := true
+		for _, filter := range filters {
+			value := ""
+			if filter.columnIndex < len(values) {
+				value = values[filter.columnIndex]
+			}
+			if !collectionPreviewFilterMatches(value, filter.groups) {
+				matches = false
+				break
+			}
+		}
+		if !matches {
+			continue
+		}
+		for _, column := range selected {
+			columnIndex := headerIndexes[column.Source]
+			if columnIndex < len(values) && looksComplexLiteral(values[columnIndex]) {
+				complexSources[column.Source] = true
+			}
+		}
+	}
+	result := make([]string, 0, len(complexSources))
+	for _, column := range selected {
+		if complexSources[column.Source] {
+			result = append(result, column.Source)
+		}
+	}
+	return result, nil
 }
 
 type collectionSearchResult struct {
@@ -2220,9 +2292,25 @@ func prepareCollectionEntry(
 		entry.PreviewColumns = previewColumns
 		entry.PreviewRows = previewRows
 		entry.PreviewTruncated = previewTruncated
+		complexSources, complexErr := collectionTableComplexSources(
+			lines, header.HeaderRow, header.Delimiter, header.Headers, columns, indexColumn)
+		if complexErr != nil {
+			return rule, entry, complexErr
+		}
+		entry.ComplexDetected = len(complexSources) > 0
+		entry.ComplexSources = complexSources
+		complexSourceSet := make(map[string]bool, len(complexSources))
+		for _, source := range complexSources {
+			complexSourceSet[source] = true
+		}
 		for _, column := range columns {
 			if column.Enabled && column.Source != indexColumn {
-				entry.OutputNames = append(entry.OutputNames, column.Name)
+				if complexSourceSet[column.Source] {
+					entry.OutputNames = append(
+						entry.OutputNames, column.Name+"_I", column.Name+"_Q")
+				} else {
+					entry.OutputNames = append(entry.OutputNames, column.Name)
+				}
 			}
 		}
 		if len(entry.OutputNames) == 0 {
@@ -2268,7 +2356,12 @@ func prepareCollectionEntry(
 		entry.Delimiter = autoGen.Delimiter
 		entry.Parser = autoGen.Parser
 		entry.SchemaHash = autoGen.SchemaHash
-		entry.OutputNames = []string{entry.Name}
+		entry.ComplexDetected = boolValue(analysis["complexDetected"], false)
+		if entry.ComplexDetected {
+			entry.OutputNames = []string{entry.Name + "_I", entry.Name + "_Q"}
+		} else {
+			entry.OutputNames = []string{entry.Name}
+		}
 	}
 	before, _ := json.Marshal(rule.AutoGen)
 	after, _ := json.Marshal(prepared.AutoGen)
@@ -2421,6 +2514,8 @@ func searchCollectionFiles(
 		entry.Columns = preparedEntry.Columns
 		entry.SchemaHash = preparedEntry.SchemaHash
 		entry.OutputNames = preparedEntry.OutputNames
+		entry.ComplexDetected = preparedEntry.ComplexDetected
+		entry.ComplexSources = preparedEntry.ComplexSources
 		entry.PreviewColumns = preparedEntry.PreviewColumns
 		entry.PreviewRows = preparedEntry.PreviewRows
 		entry.PreviewTruncated = preparedEntry.PreviewTruncated
