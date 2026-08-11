@@ -407,6 +407,7 @@ if (!window.VWDCodeEditorPairs) {
     let copiedWaveDataSlots = [];
     let copiedWaveRows = [];
     let waveSelectionDrag = null;
+    let waveCellTooltip = null;
     let waveClipboardShortcutActive = false;
     let groupDeleteShortcutActive = false;
     let selectedGroupIndex = -1;
@@ -1049,6 +1050,7 @@ ${lines.join('\n')}`;
     let pendingWaveCopyButton = null;
     let waveLibrarySyncChannel = null;
     const scopeWindowOpenStates = new Map();
+    const scopeWindowRefs = new Map();
     const scopeTransientStates = new Map();
     let pageExitStateFlushed = false;
 
@@ -10249,6 +10251,100 @@ ${lines.join('\n')}`;
       return getWaveDataSlots(value).find((slot) => slot.col === slotCol) || null;
     }
 
+    function getWaveCellHoverValue(signal, columnIndex) {
+      const signalValue = signal && typeof signal === 'object' ? signal : {};
+      const scope = signalValue.scope && typeof signalValue.scope === 'object'
+        ? signalValue.scope
+        : {};
+      const sampleValues = Array.isArray(scope.values)
+        ? scope.values
+        : (Array.isArray(scope.samples) ? scope.samples : null);
+      let value;
+      if (sampleValues) {
+        const sampleStep = Number(scope.sampleStep) > 0 ? Number(scope.sampleStep) : 1;
+        const sampleIndex = Math.floor(Math.max(0, columnIndex) / sampleStep + 1e-9);
+        if (sampleIndex >= 0 && sampleIndex < sampleValues.length) {
+          value = sampleValues[sampleIndex];
+          if (value == null || value === '') value = 'x';
+        }
+      }
+
+      const wave = String(signalValue.wave || '');
+      if (value === undefined) {
+        const slot = getWaveDataSlotAtColumn(wave, columnIndex);
+        if (slot) {
+          const data = normalizeWaveDataValues(signalValue.data);
+          if (slot.dataIdx < data.length && data[slot.dataIdx] !== '') {
+            value = data[slot.dataIdx];
+          }
+        }
+      }
+      if (value === undefined) {
+        let sourceColumn = Math.min(Math.max(0, columnIndex), Math.max(0, wave.length - 1));
+        while (sourceColumn > 0 && (wave[sourceColumn] === '.' || wave[sourceColumn] === '|')) {
+          sourceColumn -= 1;
+        }
+        const symbol = wave[columnIndex] === '|' && sourceColumn === columnIndex
+          ? '|'
+          : (wave[sourceColumn] || '');
+        value = symbol || '空';
+      }
+
+      const text = String(value);
+      const table = scope.tbl && typeof scope.tbl === 'object' && !Array.isArray(scope.tbl)
+        ? scope.tbl
+        : null;
+      if (table && Object.prototype.hasOwnProperty.call(table, text)) {
+        const mapped = String(table[text] == null ? '' : table[text]);
+        if (mapped && mapped !== text && text.indexOf(':' + mapped) < 0) {
+          return text + ':' + mapped;
+        }
+      }
+      return text;
+    }
+
+    function ensureWaveCellTooltip() {
+      if (waveCellTooltip && waveCellTooltip.isConnected) return waveCellTooltip;
+      waveCellTooltip = document.createElement('div');
+      waveCellTooltip.className = 'wave-cell-tooltip';
+      waveCellTooltip.hidden = true;
+      waveCellTooltip.setAttribute('role', 'tooltip');
+      document.body.appendChild(waveCellTooltip);
+      return waveCellTooltip;
+    }
+
+    function hideWaveCellTooltip() {
+      if (waveCellTooltip) waveCellTooltip.hidden = true;
+    }
+
+    function showWaveCellTooltip(signal, columnIndex, event) {
+      const tooltip = ensureWaveCellTooltip();
+      const name = String(signal && signal.name || '').trim() || '未命名信号';
+      const value = getWaveCellHoverValue(signal, columnIndex);
+      const nameEl = document.createElement('strong');
+      const valueEl = document.createElement('span');
+      nameEl.textContent = name;
+      valueEl.textContent = '第 ' + (columnIndex + 1) + ' 列 · ' + value;
+      tooltip.replaceChildren(nameEl, valueEl);
+      tooltip.hidden = false;
+
+      const gap = 14;
+      const margin = 8;
+      let left = event.clientX + gap;
+      let top = event.clientY + gap;
+      tooltip.style.left = left + 'px';
+      tooltip.style.top = top + 'px';
+      const rect = tooltip.getBoundingClientRect();
+      if (left + rect.width > window.innerWidth - margin) {
+        left = Math.max(margin, event.clientX - rect.width - gap);
+      }
+      if (top + rect.height > window.innerHeight - margin) {
+        top = Math.max(margin, event.clientY - rect.height - gap);
+      }
+      tooltip.style.left = Math.round(left) + 'px';
+      tooltip.style.top = Math.round(top) + 'px';
+    }
+
     function hasUsableInlineEditAnchor(element) {
       if (!element || typeof element.getBoundingClientRect !== 'function') return false;
       try {
@@ -11992,6 +12088,7 @@ ${lines.join('\n')}`;
     }
 
     function attachWaveInteractivity(jsonText, parsedSource) {
+      hideWaveCellTooltip();
       const svg = waveContainer.querySelector('svg');
       if (!svg) return;
 
@@ -12271,7 +12368,32 @@ ${lines.join('\n')}`;
             finishWaveRangeSelection(e, e.buttons !== 0);
           };
 
+          const updateWaveCellHover = (e) => {
+            if ((e.pointerType && e.pointerType !== 'mouse') || e.buttons !== 0
+                || waveSelectionDrag || inlineEditActive) {
+              hideWaveCellTooltip();
+              return;
+            }
+            const target = getEventTargetElement(e);
+            if (target && target.closest(
+              'text.info, .wave-name-click-zone, .wave-describe-text, .wave-text-edit-overlay'
+            )) {
+              hideWaveCellTooltip();
+              return;
+            }
+            const drawGroup = lane.querySelector('[id^="wavelane_draw_"]');
+            if (drawGroup) {
+              const drawRect = drawGroup.getBoundingClientRect();
+              if (e.clientX < drawRect.left - 1 || e.clientX > drawRect.right + 1) {
+                hideWaveCellTooltip();
+                return;
+              }
+            }
+            showWaveCellTooltip(entry.signal, resolveLaneColumnIndex(e.clientX, false), e);
+          };
+
           lane.addEventListener('pointerdown', (e) => {
+            hideWaveCellTooltip();
             if (!canStartWaveRangeSelection(e)) return;
             setWaveClipboardShortcutActive(true, 'wave-pointerdown');
             setGroupDeleteShortcutActive(false, 'wave-selected');
@@ -12298,6 +12420,8 @@ ${lines.join('\n')}`;
           });
 
           lane.addEventListener('pointermove', moveWaveRangeSelection);
+          lane.addEventListener('pointermove', updateWaveCellHover, { passive: true });
+          lane.addEventListener('pointerleave', hideWaveCellTooltip);
           lane.addEventListener('pointerup', completeWaveRangeSelection);
           lane.addEventListener('pointercancel', cancelWaveRangeSelection);
           lane.addEventListener('lostpointercapture', loseWaveRangePointerCapture);
@@ -13125,6 +13249,8 @@ ${lines.join('\n')}`;
         return getWaveDocumentServerSnapshot(stored, documentName === editingWaveDocumentName);
       })();
       scopeWindowOpenStates.set(scopeToken, { documentName, promise: savePromise });
+      if (!scopeWindowRefs.has(documentName)) scopeWindowRefs.set(documentName, new Set());
+      scopeWindowRefs.get(documentName).add(opened);
       setTimeout(() => scopeWindowOpenStates.delete(scopeToken), 60000);
       savePromise.catch((error) => {
         setStatus(false, '打开示波器失败：' + (error && error.message ? error.message : String(error)));
@@ -14021,6 +14147,21 @@ ${lines.join('\n')}`;
     function initScopeWindowSync() {
       window.addEventListener('message', (event) => {
         const message = event.data || {};
+        if (message.type === 'visualwavedrom-scope-import-applied') {
+          if (!scopeWaveViewActive || String(message.waveId || '') !== requestedWaveDocumentName) return;
+          if (currentWaveLibraryId && message.libraryId
+              && message.libraryId !== currentWaveLibraryId) return;
+          const scopeView = window.__visualWaveDromScopeView;
+          if (!scopeView || typeof scopeView.applyImportedSource !== 'function') return;
+          void scopeView.applyImportedSource(message.document, message.transientState).catch((error) => {
+            setStatus(false, '示波器同步导入结果失败：' + (error.message || String(error)));
+            vwdDebugLog('scope-sync', {
+              phase: 'import-apply-error',
+              message: error && error.message ? error.message : String(error)
+            });
+          });
+          return;
+        }
         if (message.type === 'visualwavedrom-scope-source-request') {
           const state = scopeWindowOpenStates.get(String(message.scopeToken || ''));
           if (!state || state.documentName !== String(message.waveId || '') || !event.source) return;
@@ -14243,6 +14384,8 @@ ${lines.join('\n')}`;
       const updates = payload && Array.isArray(payload.updates) ? payload.updates : [];
       if (!updates.length) throw new Error('导入方案没有返回任何信号行');
       const allowCreateMissing = !!(importOptions && importOptions.createMissing);
+      const replaceScopeFormulas = !!(importOptions && importOptions.replaceScopeFormulas);
+      const formulaEngine = window.VisualWaveDromFormula;
 
       let parsed;
       try {
@@ -14290,6 +14433,15 @@ ${lines.join('\n')}`;
         const rawSampleKind = /^(digital|bus|analog)$/.test(String(update.sampleKind || ''))
           ? String(update.sampleKind)
           : '';
+        let formula = null;
+        if (replaceScopeFormulas
+            && Object.prototype.hasOwnProperty.call(update, 'formula')
+            && update.formula != null) {
+          if (!formulaEngine || typeof formulaEngine.normalizeDefinition !== 'function') {
+            throw new Error('公式模块未加载');
+          }
+          formula = formulaEngine.normalizeDefinition(update.formula);
+        }
         const valueTable = {};
         if (update.tbl && typeof update.tbl === 'object' && !Array.isArray(update.tbl)) {
           Object.keys(update.tbl).forEach((key) => {
@@ -14303,6 +14455,7 @@ ${lines.join('\n')}`;
           wave: update.wave,
           data: update.data.map((value) => String(value == null ? '' : value)),
           sampleKind: rawSampleKind === 'analog' ? 'analog' : (rawSampleKind ? 'bus' : ''),
+          formula,
           tbl: valueTable,
           samples: Array.isArray(update.samples)
             ? update.samples.map((value) => {
@@ -14349,6 +14502,16 @@ ${lines.join('\n')}`;
         }
         if (Object.keys(item.tbl).length) signalScope.tbl = item.tbl;
         else delete signalScope.tbl;
+        if (replaceScopeFormulas) {
+          if (item.formula) {
+            signalScope.formula = {
+              cycle0: String(item.formula.cycle0 || ''),
+              cycle05: String(item.formula.cycle05 || '')
+            };
+          } else {
+            delete signalScope.formula;
+          }
+        }
         if (Object.keys(signalScope).length) item.target.signal.scope = signalScope;
         else delete item.target.signal.scope;
       });
@@ -14420,6 +14583,129 @@ ${lines.join('\n')}`;
           validCount: built.updates.length,
           invalid: invalid.map((item) => ({ name: item.name, error: item.error }))
         }
+      });
+    }
+
+    function reconcileScopeTransientStateAfterCollectionImport(payload) {
+      const documentName = editingWaveDocumentName;
+      if (!documentName) return null;
+      const updates = payload && Array.isArray(payload.updates) ? payload.updates : [];
+      if (!updates.length) return null;
+
+      let source;
+      try {
+        source = JSON.parse(editor.value);
+      } catch (_error) {
+        return null;
+      }
+      const sourceRows = flattenSignals(source && source.signal);
+      const sourceRowIds = new Map();
+      sourceRows.forEach((signal, index) => {
+        const name = String(signal && signal.name || '').trim();
+        if (name && !sourceRowIds.has(name)) sourceRowIds.set(name, 'source:' + index);
+      });
+
+      const key = scopeTransientStateKey(currentWaveLibraryId, documentName);
+      const current = scopeTransientStates.get(key);
+      const state = current && typeof current === 'object'
+        ? JSON.parse(JSON.stringify(current))
+        : {};
+      state.version = 1;
+      state.extraSignals = Array.isArray(state.extraSignals) ? state.extraSignals : [];
+      state.formulas = state.formulas && typeof state.formulas === 'object'
+        && !Array.isArray(state.formulas) ? state.formulas : {};
+      state.signalNames = state.signalNames && typeof state.signalNames === 'object'
+        && !Array.isArray(state.signalNames) ? state.signalNames : {};
+      state.rowOrder = Array.isArray(state.rowOrder) ? state.rowOrder.map(String) : [];
+      state.hiddenRows = Array.isArray(state.hiddenRows) ? state.hiddenRows.map(String) : [];
+
+      const importedNames = new Set(updates.map((update) => String(
+        update && update.signal || ''
+      ).trim()).filter(Boolean));
+      const replacements = new Map();
+      const removedExtraRowIds = new Set();
+      state.extraSignals = state.extraSignals.filter((entry, index) => {
+        const rawId = String(entry && entry.id || ('signal-' + index));
+        const extraId = rawId.indexOf('extra:') === 0 ? rawId.slice(6) : rawId;
+        const rowId = 'extra:' + extraId;
+        const displayName = Object.prototype.hasOwnProperty.call(state.signalNames, rowId)
+          ? String(state.signalNames[rowId] || '').trim()
+          : String(entry && entry.name || '').trim();
+        const sourceRowId = sourceRowIds.get(displayName);
+        if (!sourceRowId || !importedNames.has(displayName)) return true;
+        replacements.set(rowId, sourceRowId);
+        removedExtraRowIds.add(rowId);
+        delete state.formulas[rowId];
+        delete state.signalNames[rowId];
+        return false;
+      });
+
+      const seenOrder = new Set();
+      state.rowOrder = state.rowOrder.map((rowId) => replacements.get(rowId) || rowId)
+        .filter((rowId) => {
+          if (!rowId || removedExtraRowIds.has(rowId) || seenOrder.has(rowId)) return false;
+          seenOrder.add(rowId);
+          return true;
+        });
+      state.hiddenRows = state.hiddenRows.filter((rowId) => !removedExtraRowIds.has(rowId));
+
+      const formulaEngine = window.VisualWaveDromFormula;
+      updates.forEach((update) => {
+        const name = String(update && update.signal || '').trim();
+        const sourceRowId = sourceRowIds.get(name);
+        if (!sourceRowId) return;
+        state.signalNames[sourceRowId] = name;
+        state.hiddenRows = state.hiddenRows.filter((rowId) => rowId !== sourceRowId);
+        if (Object.prototype.hasOwnProperty.call(update, 'formula') && update.formula != null) {
+          state.formulas[sourceRowId] = formulaEngine
+            ? formulaEngine.normalizeDefinition(update.formula)
+            : JSON.parse(JSON.stringify(update.formula));
+        } else {
+          delete state.formulas[sourceRowId];
+        }
+      });
+
+      scopeTransientStates.set(key, state);
+      vwdDebugLog('collection-import', {
+        phase: 'scope-state-reconciled',
+        documentName,
+        importedNames: Array.from(importedNames),
+        removedExtraCount: removedExtraRowIds.size,
+        formulaCount: Object.keys(state.formulas).length
+      });
+      return state;
+    }
+
+    function notifyOpenScopeWindowsAfterCollectionImport(documentName, transientState) {
+      const refs = scopeWindowRefs.get(documentName);
+      if (!refs || !refs.size) return;
+      const tag = getSavedTagByName(documentName);
+      const snapshot = getWaveDocumentServerSnapshot(tag, true);
+      if (!snapshot) return;
+      let notified = 0;
+      Array.from(refs).forEach((scopeWindow) => {
+        if (!scopeWindow || scopeWindow.closed) {
+          refs.delete(scopeWindow);
+          return;
+        }
+        try {
+          scopeWindow.postMessage({
+            type: 'visualwavedrom-scope-import-applied',
+            libraryId: currentWaveLibraryId,
+            waveId: documentName,
+            document: snapshot,
+            transientState: transientState || null
+          }, '*');
+          notified += 1;
+        } catch (_error) {
+          refs.delete(scopeWindow);
+        }
+      });
+      if (!refs.size) scopeWindowRefs.delete(documentName);
+      vwdDebugLog('collection-import', {
+        phase: 'scope-windows-notified',
+        documentName,
+        notified
       });
     }
 
@@ -19544,8 +19830,18 @@ ${lines.join('\n')}`;
         },
         applyImport: async (payload) => {
           const resolvedPayload = importedPayloadWithFormulas(payload);
-          const result = applyImportedWaveRows(resolvedPayload, { createMissing: true });
+          const result = applyImportedWaveRows(resolvedPayload, {
+            createMissing: true,
+            replaceScopeFormulas: true
+          });
+          const scopeTransientState = reconcileScopeTransientStateAfterCollectionImport(
+            resolvedPayload
+          );
           await persistImportedWaveRows(result);
+          notifyOpenScopeWindowsAfterCollectionImport(
+            editingWaveDocumentName,
+            scopeTransientState
+          );
           result.formulaResult = resolvedPayload.formulaResult || null;
           return result;
         }

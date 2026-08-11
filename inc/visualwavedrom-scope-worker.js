@@ -903,7 +903,12 @@ function createSession(content, transientState) {
 
   const formulaDefinitions = [];
   rows.forEach((row) => {
-    const formula = transient.formulas && transient.formulas[row.rowId];
+    const sourceScope = row.source && row.source.scope && typeof row.source.scope === 'object'
+      ? row.source.scope
+      : null;
+    const formula = transient.formulas && transient.formulas[row.rowId]
+      ? transient.formulas[row.rowId]
+      : (sourceScope && sourceScope.formula);
     if (!formula) return;
     formulaDefinitions.push({ id: row.rowId, name: row.name, formula });
   });

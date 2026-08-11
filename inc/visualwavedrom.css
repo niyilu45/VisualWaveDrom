@@ -3361,6 +3361,41 @@
       fill: rgba(59, 130, 246, 0.08);
     }
 
+    .wave-cell-tooltip {
+      position: fixed;
+      z-index: 10000;
+      display: grid;
+      gap: 3px;
+      max-width: min(360px, calc(100vw - 16px));
+      padding: 7px 9px;
+      border: 1px solid #536273;
+      border-radius: 6px;
+      background: #17202a;
+      color: #f4f7fa;
+      box-shadow: var(--shadow-float);
+      pointer-events: none;
+      overflow-wrap: anywhere;
+      letter-spacing: 0;
+    }
+
+    .wave-cell-tooltip[hidden] {
+      display: none;
+    }
+
+    .wave-cell-tooltip strong {
+      font-size: 12px;
+      line-height: 16px;
+      font-weight: 650;
+    }
+
+    .wave-cell-tooltip span {
+      color: #c8d4df;
+      font-family: var(--editor-font);
+      font-size: 11px;
+      line-height: 15px;
+      white-space: pre-wrap;
+    }
+
     .wave-lane-interactive.wave-lane-selected > rect.lane-hover-bg {
       fill: rgba(59, 130, 246, 0.14);
       stroke: rgba(59, 130, 246, 0.55);

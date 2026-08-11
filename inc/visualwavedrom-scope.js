@@ -159,6 +159,62 @@
     };
   }
 
+  function flattenSourceSignals(entries, result) {
+    const target = result || [];
+    (Array.isArray(entries) ? entries : []).forEach((entry) => {
+      if (Array.isArray(entry)) {
+        flattenSourceSignals(typeof entry[0] === 'string' ? entry.slice(1) : entry, target);
+      } else if (entry && typeof entry === 'object') {
+        target.push(entry);
+      }
+    });
+    return target;
+  }
+
+  function reconcileTransientStateWithDocument(content, value) {
+    const state = normalizeTransientFormulaState(value);
+    let source;
+    try {
+      source = JSON.parse(String(content || '{}'));
+    } catch (_error) {
+      return state;
+    }
+    const sourceRows = flattenSourceSignals(source && source.signal, []);
+    const sourceIdsByName = new Map();
+    sourceRows.forEach((signal, index) => {
+      const name = String(signal && signal.name || '').trim();
+      if (name && !sourceIdsByName.has(name)) sourceIdsByName.set(name, 'source:' + index);
+    });
+    const replacements = new Map();
+    const removedIds = new Set();
+    state.extraSignals = state.extraSignals.filter((entry) => {
+      const rowId = 'extra:' + String(entry.id || '');
+      const name = own(state.signalNames, rowId)
+        ? String(state.signalNames[rowId] || '').trim()
+        : String(entry.name || '').trim();
+      const sourceRowId = sourceIdsByName.get(name);
+      if (!sourceRowId) return true;
+      replacements.set(rowId, sourceRowId);
+      removedIds.add(rowId);
+      delete state.formulas[rowId];
+      delete state.signalNames[rowId];
+      if (!own(state.signalNames, sourceRowId)) state.signalNames[sourceRowId] = name;
+      return false;
+    });
+    const seen = new Set();
+    state.rowOrder = state.rowOrder.map((rowId) => replacements.get(rowId) || rowId)
+      .filter((rowId) => {
+        if (!rowId || removedIds.has(rowId) || seen.has(rowId)) return false;
+        seen.add(rowId);
+        return true;
+      });
+    const replacedSourceIds = new Set(replacements.values());
+    state.hiddenRows = state.hiddenRows.filter((rowId) => (
+      !removedIds.has(rowId) && !replacedSourceIds.has(rowId)
+    ));
+    return state;
+  }
+
   function debounce(callback, delay) {
     let timer = null;
     return function debounced() {
@@ -550,10 +606,15 @@
           });
         }
       }
+      this.transientFormulaState = reconcileTransientStateWithDocument(
+        this.document.content,
+        this.transientFormulaState
+      );
       this.meta = await this.worker.call('prepare', {
         content: this.document.content,
         transient: clone(this.transientFormulaState)
       });
+      this.adoptPreparedFormulaDefinitions();
       this.signalNames = this.meta.rows.map((row) => String(
         row.sourceName == null ? row.name || '' : row.sourceName
       ));
@@ -1808,6 +1869,25 @@
           message: error && error.message ? error.message : String(error)
         });
       }
+    }
+
+    adoptPreparedFormulaDefinitions() {
+      if (!this.meta || !Array.isArray(this.meta.rows)) return false;
+      let changed = false;
+      this.meta.rows.forEach((row) => {
+        const rowId = String(row.rowId || ('source:' + row.index));
+        if (!row.formula || this.transientFormulaState.formulas[rowId]) return;
+        this.transientFormulaState.formulas[rowId] = {
+          cycle0: String(row.formula.cycle0 || ''),
+          cycle05: String(row.formula.cycle05 || ''),
+          libraries: Array.isArray(row.formula.libraries)
+            ? row.formula.libraries.slice()
+            : []
+        };
+        changed = true;
+      });
+      if (changed) this.persistTransientFormulaState();
+      return changed;
     }
 
     scopeFormulaDefinitions(overrides) {
@@ -5970,10 +6050,15 @@
       Object.keys(this.transientFormulaState.signalNames).forEach((rowId) => {
         if (rowId.indexOf('source:') === 0) delete this.transientFormulaState.signalNames[rowId];
       });
+      this.transientFormulaState = reconcileTransientStateWithDocument(
+        saved.content,
+        this.transientFormulaState
+      );
       this.meta = await this.worker.call('prepare', {
         content: saved.content,
         transient: clone(this.transientFormulaState)
       });
+      this.adoptPreparedFormulaDefinitions();
       this.signalNames = this.meta.rows.map((row) => String(
         this.transientFormulaState.signalNames[row.rowId] == null
           ? (row.sourceName == null ? row.name || '' : row.sourceName)
@@ -6032,6 +6117,30 @@
       await this.requestWindow();
       await this.runSimplify(false);
       await this.updateCursorReadout();
+    }
+
+    async applyImportedSource(saved, transientState) {
+      if (!saved || typeof saved.content !== 'string') {
+        throw new Error('导入结果缺少波形内容');
+      }
+      this.closeDisplayPopover();
+      this.closeStylePopover();
+      this.closeRowMovePopover();
+      this.formulaDrafts.clear();
+      this.transientFormulaState = reconcileTransientStateWithDocument(
+        saved.content,
+        transientState
+      );
+      await this.reloadSavedDocument(saved);
+      this.persistTransientFormulaState();
+      this.clearDraftDirty();
+      this.setStatus('预设波形已同步；同名临时波形已由导入内容覆盖');
+      this.log('scope-sync', {
+        phase: 'import-applied',
+        waveId: saved.name || '',
+        rowCount: this.meta && this.meta.rows ? this.meta.rows.length : 0,
+        formulaCount: Object.keys(this.transientFormulaState.formulas).length
+      });
     }
 
     async saveChanges() {
