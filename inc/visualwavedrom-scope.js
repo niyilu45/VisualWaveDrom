@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260812-preset-formula-v2';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260812-preset-formula-v3';
   const FormulaEngine = global.VisualWaveDromFormula || null;
   const DEFAULT_ROW_HEIGHT = 42;
   const COLLAPSED_ROW_HEIGHT = 18;
@@ -619,6 +619,7 @@
         transient: clone(this.transientFormulaState)
       });
       this.adoptPreparedFormulaDefinitions();
+      this.logFormulaDiagnostics('prepare');
       this.signalNames = this.meta.rows.map((row) => String(
         row.sourceName == null ? row.name || '' : row.sourceName
       ));
@@ -1894,6 +1895,24 @@
       return changed;
     }
 
+    logFormulaDiagnostics(phase) {
+      if (!this.meta || !Array.isArray(this.meta.rows)) return;
+      const formulas = this.meta.rows.filter((row) => row.formula).map((row) => ({
+        rowId: String(row.rowId || ('source:' + row.index)),
+        name: String(row.name || ''),
+        valid: !!row.formula.valid,
+        error: String(row.formula.error || ''),
+        references: Array.isArray(row.formula.references)
+          ? row.formula.references.slice() : [],
+        valueSource: String(row.formula.valueSource || ''),
+        computedKnownCount: Number(row.formula.computedKnownCount || 0),
+        cachedKnownCount: Number(row.formula.cachedKnownCount || 0),
+        preview: Array.isArray(row.formula.preview) ? row.formula.preview.slice(0, 6) : []
+      }));
+      if (!formulas.length) return;
+      this.log('scope-formula', { phase: phase || 'diagnostics', formulas });
+    }
+
     scopeFormulaDefinitions(overrides) {
       if (!this.meta) return [];
       return this.meta.rows.map((row) => {
@@ -2548,6 +2567,7 @@
         });
         if (sequence !== this.formulaRefreshSequence) return;
         this.meta = nextMeta;
+        this.logFormulaDiagnostics('refresh');
         this.modes = {};
         this.busFormats = {};
         this.analogFormats = {};
@@ -6063,6 +6083,7 @@
         transient: clone(this.transientFormulaState)
       });
       this.adoptPreparedFormulaDefinitions();
+      this.logFormulaDiagnostics('reload');
       this.signalNames = this.meta.rows.map((row) => String(
         this.transientFormulaState.signalNames[row.rowId] == null
           ? (row.sourceName == null ? row.name || '' : row.sourceName)

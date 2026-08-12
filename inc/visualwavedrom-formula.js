@@ -992,6 +992,7 @@
         return values && halfIndex >= 0 && halfIndex < values.length ? values[halfIndex] : UNKNOWN;
       };
     const outputs = Object.create(null);
+    const outputKnownCounts = Object.create(null);
     const ordered = [];
     const visiting = new Set();
     const visited = new Set();
@@ -1018,7 +1019,27 @@
           if (targetIndex < 0 || targetIndex >= halfCount) return UNKNOWN;
           if (requestedName !== item.name && own(outputs, requestedName)) {
             const generated = outputs[requestedName];
-            return targetIndex < generated.length ? generated[targetIndex] : UNKNOWN;
+            const generatedValue = targetIndex < generated.length
+              ? generated[targetIndex]
+              : UNKNOWN;
+            const generatedUnknown = isUnknown(generatedValue)
+              || generatedValue == null
+              || generatedValue === ''
+              || String(generatedValue).toLowerCase() === 'x';
+            if (!generatedUnknown) return generatedValue;
+            if (outputKnownCounts[requestedName] === 0
+                && typeof settings.resolveGeneratedFallback === 'function') {
+              const fallback = settings.resolveGeneratedFallback(
+                requestedName,
+                targetIndex,
+                item.name
+              );
+              if (!isUnknown(fallback) && fallback != null && fallback !== ''
+                  && String(fallback).toLowerCase() !== 'x') {
+                return fallback;
+              }
+            }
+            return UNKNOWN;
           }
           const raw = source(requestedName, targetIndex, item.name);
           return raw == null || raw === '' || String(raw).toLowerCase() === 'x' ? UNKNOWN : raw;
@@ -1026,6 +1047,10 @@
         values[halfIndex] = serializableValue(result);
       }
       outputs[item.name] = values;
+      outputKnownCounts[item.name] = values.reduce((count, value) => (
+        !isUnknown(value) && value != null && value !== ''
+          && String(value).toLowerCase() !== 'x' ? count + 1 : count
+      ), 0);
     });
     return { analysis, outputs, totalColumns };
   }

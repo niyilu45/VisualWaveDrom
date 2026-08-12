@@ -4,7 +4,7 @@
 if (typeof document === 'undefined' && typeof global.importScripts === 'function'
     && !global.VisualWaveDromFormula) {
   try {
-    global.importScripts('visualwavedrom-formula.js?v=20260812-preset-formula-v2');
+    global.importScripts('visualwavedrom-formula.js?v=20260812-preset-formula-v3');
   } catch (_error) { /* surfaced when a formula is configured */ }
 }
 
@@ -926,12 +926,31 @@ function createSession(content, transientState) {
     rows.forEach((row) => {
       if (!sourceRows.has(row.name)) sourceRows.set(row.name, row);
     });
+    const cachedFormulaRows = new Map();
+    rows.forEach((row) => {
+      const sourceScope = row.source && row.source.scope
+        && typeof row.source.scope === 'object' ? row.source.scope : null;
+      const sourceFormula = sourceScope && sourceScope.formula;
+      const activeFormula = transient.formulas && transient.formulas[row.rowId]
+        ? transient.formulas[row.rowId]
+        : sourceFormula;
+      if (!sourceFormula || !activeFormula || !Array.isArray(row.scopeValues)) return;
+      if (normalizedFormulaKey(sourceFormula) !== normalizedFormulaKey(activeFormula)) return;
+      if (formulaKnownValueCount(row.scopeValues) < 1) return;
+      if (!cachedFormulaRows.has(row.name)) cachedFormulaRows.set(row.name, row);
+    });
     const evaluated = FormulaEngine.evaluateDefinitions(formulaDefinitions, signalNames, {
       analysis: formulaAnalysis,
       totalColumns,
       resolveSource: (name, halfIndex) => {
         const sourceRow = sourceRows.get(name);
         return sourceRow ? sourceValueAtHalfIndex(sourceRow, halfIndex) : FormulaEngine.UNKNOWN;
+      },
+      resolveGeneratedFallback: (name, halfIndex) => {
+        const cachedRow = cachedFormulaRows.get(name);
+        return cachedRow
+          ? sourceValueAtHalfIndex(cachedRow, halfIndex)
+          : FormulaEngine.UNKNOWN;
       }
     });
     const analysisById = new Map(formulaAnalysis.items.map((item) => [item.id, item]));
@@ -949,8 +968,17 @@ function createSession(content, transientState) {
         cycle05: item.formula.cycle05,
         preview: []
       };
-      const values = evaluated.outputs[row.name];
-      if (!item.valid || !Array.isArray(values)) return;
+      const computedValues = evaluated.outputs[row.name];
+      if (!item.valid || !Array.isArray(computedValues)) return;
+      const cachedValues = Array.isArray(row.scopeValues) ? row.scopeValues : null;
+      const computedKnownCount = formulaKnownValueCount(computedValues);
+      const cachedKnownCount = formulaKnownValueCount(cachedValues);
+      const canUseCached = cachedFormulaRows.get(row.name) === row;
+      const useCached = computedKnownCount < 1 && cachedKnownCount > 0 && canUseCached;
+      const values = useCached ? cachedValues.slice() : computedValues;
+      row.formula.valueSource = useCached ? 'import-cache' : 'computed';
+      row.formula.computedKnownCount = computedKnownCount;
+      row.formula.cachedKnownCount = cachedKnownCount;
       row.formula.preview = values.slice(0, 12);
       row.scopeValues = values;
       row.sampleStep = 0.5;
@@ -1006,6 +1034,25 @@ function sourceValueAtHalfIndex(row, halfIndex) {
   const segment = segmentAt(row, column + 1e-7);
   if (!segment) return FormulaEngine ? FormulaEngine.UNKNOWN : null;
   return segment.kind === 'bus' ? segment.value : segment.state;
+}
+
+function formulaKnownValueCount(values) {
+  if (!Array.isArray(values)) return 0;
+  return values.reduce((count, value) => (
+    value != null && value !== '' && String(value).toLowerCase() !== 'x'
+      ? count + 1
+      : count
+  ), 0);
+}
+
+function normalizedFormulaKey(value) {
+  if (!FormulaEngine) return '';
+  try {
+    const normalized = FormulaEngine.normalizeDefinition(value);
+    return String(normalized.cycle0 || '') + '\u0000' + String(normalized.cycle05 || '');
+  } catch (_error) {
+    return '';
+  }
 }
 
 function findFirstSegment(segments, position) {
