@@ -4,7 +4,7 @@
 if (typeof document === 'undefined' && typeof global.importScripts === 'function'
     && !global.VisualWaveDromFormula) {
   try {
-    global.importScripts('visualwavedrom-formula.js?v=20260808-numpy-abs-v1');
+    global.importScripts('visualwavedrom-formula.js?v=20260812-empty-samples-v1');
   } catch (_error) { /* surfaced when a formula is configured */ }
 }
 

@@ -1125,9 +1125,9 @@
     let totalColumns = 1;
     signals.forEach((signal) => { totalColumns = Math.max(totalColumns, valueLengthFromSignal(signal)); });
     (Array.isArray(updates) ? updates : []).forEach((update) => {
-      if (Array.isArray(update.values)) {
+      if (Array.isArray(update.values) && update.values.length) {
         totalColumns = Math.max(totalColumns, Math.ceil(update.values.length * (Number(update.sampleStep) || 1)));
-      } else if (Array.isArray(update.samples)) {
+      } else if (Array.isArray(update.samples) && update.samples.length) {
         totalColumns = Math.max(totalColumns, Math.ceil(update.samples.length * (Number(update.sampleStep) || 1)));
       } else {
         totalColumns = Math.max(totalColumns, String(update.wave || '').length || 1);
@@ -1145,9 +1145,9 @@
       const name = String(update && update.signal || '').trim();
       if (!name) return;
       if (!names.includes(name)) names.push(name);
-      if (Array.isArray(update.values)) {
+      if (Array.isArray(update.values) && update.values.length) {
         sources[name] = repeatedSamples(update.values, update.sampleStep || 1, totalColumns);
-      } else if (Array.isArray(update.samples)) {
+      } else if (Array.isArray(update.samples) && update.samples.length) {
         sources[name] = repeatedSamples(update.samples, update.sampleStep || 1, totalColumns);
       } else {
         sources[name] = waveValues(update, totalColumns);
