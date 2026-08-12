@@ -1258,6 +1258,41 @@
         : null;
     }
 
+    function presetForCollectionService(preset) {
+      const copy = JSON.parse(JSON.stringify(preset || EMPTY_PRESET));
+      copy.paths = (Array.isArray(copy.paths) ? copy.paths : []).map((entry, index) => {
+        if (!presetPathFormula(entry)) return entry;
+        const name = String(entry && entry.usrGen && entry.usrGen.name || '').trim()
+          || ('formula_' + (index + 1));
+        return {
+          usrGen: {
+            folder: '.',
+            grepKeys: '(?!)',
+            name
+          },
+          autoGen: {
+            importMode: 'single',
+            hasSeq: false
+          }
+        };
+      });
+      return copy;
+    }
+
+    function mergeGeneratedPresetWithFormulas(generatedPreset, sourcePreset) {
+      const generated = JSON.parse(JSON.stringify(generatedPreset || EMPTY_PRESET));
+      const source = sourcePreset && typeof sourcePreset === 'object'
+        ? sourcePreset
+        : null;
+      if (!source || !Array.isArray(source.paths)) return generated;
+      generated.paths = Array.isArray(generated.paths) ? generated.paths : [];
+      source.paths.forEach((entry, index) => {
+        if (!presetPathFormula(entry)) return;
+        generated.paths[index] = JSON.parse(JSON.stringify(entry));
+      });
+      return generated;
+    }
+
     function validatePresetShape(value) {
       if (!value || typeof value !== 'object' || Array.isArray(value)) {
         throw validationError('预设顶层必须是 JSON 对象', '');
@@ -1525,8 +1560,9 @@
       }
     }
 
-    function adoptGeneratedPreset(value, reason) {
-      const normalized = validatePresetShape(value);
+    function adoptGeneratedPreset(value, reason, sourcePreset) {
+      const merged = mergeGeneratedPresetWithFormulas(value, sourcePreset || parsedPreset);
+      const normalized = validatePresetShape(merged);
       parsedPreset = normalized;
       refreshFormulaDiagnostics(normalized, searchResult);
       setPresetEditorValue(JSON.stringify(normalized, null, 2), { keepHistory: true });
@@ -1755,7 +1791,9 @@
       for (const entry of targets) {
         const payload = await post('single-preview', {
           rootPath,
-          preset: presetForRawSequencePreview(preset, entry.index),
+          preset: presetForCollectionService(
+            presetForRawSequencePreview(preset, entry.index)
+          ),
           variables,
           searchToken: searchResult.searchToken || '',
           index: entry.index,
@@ -2043,7 +2081,7 @@
         const variables = collectVariableValues().values;
         const payload = await post('single-preview', {
           rootPath: String(rootPathInput.value || '').trim(),
-          preset: parsedPreset,
+          preset: presetForCollectionService(parsedPreset),
           variables,
           searchToken: searchResult.searchToken || '',
           index: entryIndex,
@@ -2694,13 +2732,17 @@
       try {
         const payload = await post('preview', {
           rootPath: String(rootPathInput.value || '').trim(),
-          preset: parsedPreset,
+          preset: presetForCollectionService(parsedPreset),
           variables,
           searchToken: searchResult.searchToken || '',
           index: entryIndex,
           headerRow
         });
-        const normalized = adoptGeneratedPreset(payload.preset, 'header-row-preview');
+        const normalized = adoptGeneratedPreset(
+          payload.preset,
+          'header-row-preview',
+          parsedPreset
+        );
         const position = searchResult.entries.findIndex((entry) => entry.index === entryIndex);
         if (position >= 0) searchResult.entries[position] = payload.entry;
         searchResult.preset = normalized;
@@ -3158,11 +3200,15 @@
       setEmptyResults('正在搜索…');
       debug({ phase: 'search-start', rootPath, variables });
       try {
-        const payload = await post('search', { rootPath, preset, variables });
+        const payload = await post('search', {
+          rootPath,
+          preset: presetForCollectionService(preset),
+          variables
+        });
         searchResult = payload;
         let effectivePreset = preset;
         if (payload.preset) {
-          effectivePreset = adoptGeneratedPreset(payload.preset, 'search-autogen');
+          effectivePreset = adoptGeneratedPreset(payload.preset, 'search-autogen', preset);
         }
         decorateFormulaSearchResult(payload, effectivePreset);
         searchResult = payload;
@@ -3261,16 +3307,33 @@
         rootPath,
         variables,
         fileCount,
+        formulaCount: formulas.length,
         hasSearchToken: !!searchResult.searchToken
       });
       try {
-        const payload = await post('import', {
-          rootPath,
-          preset,
-          variables,
-          searchToken: searchResult.searchToken || '',
-          progressToken
-        });
+        const payload = fileCount > 0
+          ? await post('import', {
+            rootPath,
+            preset: presetForCollectionService(preset),
+            variables,
+            searchToken: searchResult.searchToken || '',
+            progressToken
+          })
+          : {
+            files: [],
+            updates: [],
+            skippedCount: 0,
+            formulaCount: formulas.length,
+            progress: {
+              phase: 'complete',
+              totalFiles: 0,
+              completedFiles: 0,
+              successfulFiles: 0,
+              failedFiles: 0,
+              signalCount: 0,
+              done: true
+            }
+          };
         payload.formulas = formulas;
         stopImportProgressPolling();
         applyImportProgress(payload.progress);
