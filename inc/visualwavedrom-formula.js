@@ -1037,7 +1037,10 @@
       if (Array.isArray(entry)) {
         flattenDocumentSignals(entry.slice(1), rows);
       } else if (entry && typeof entry === 'object') {
-        rows.push(entry);
+        const hasChildren = Array.isArray(entry.children);
+        const hasSignalField = ['name', 'wave', 'node', 'data', 'period', 'phase']
+          .some((key) => own(entry, key));
+        if (!hasChildren || hasSignalField) rows.push(entry);
         if (Array.isArray(entry.children)) flattenDocumentSignals(entry.children, rows);
       }
     });
@@ -1059,12 +1062,32 @@
     return result;
   }
 
+  function hasUsableSamples(values) {
+    if (!Array.isArray(values) || !values.length) return false;
+    let hasPrevious = false;
+    return values.some((raw) => {
+      if (typeof raw === 'string' && raw.trim() === '.') return hasPrevious;
+      if (raw == null || (typeof raw === 'string' && !raw.trim())) return false;
+      const number = Number(raw);
+      if (!Number.isFinite(number)) return false;
+      hasPrevious = true;
+      return true;
+    });
+  }
+
+  function signalSourceKind(signal) {
+    const localScope = signal && signal.scope && typeof signal.scope === 'object' ? signal.scope : {};
+    if (Array.isArray(localScope.values) && localScope.values.length) return 'values';
+    if (hasUsableSamples(localScope.samples)) return 'samples';
+    return 'wave';
+  }
+
   function waveValues(signal, totalColumns) {
     const localScope = signal && signal.scope && typeof signal.scope === 'object' ? signal.scope : {};
-    if (Array.isArray(localScope.values)) {
+    if (Array.isArray(localScope.values) && localScope.values.length) {
       return repeatedSamples(localScope.values, localScope.sampleStep || 1, totalColumns);
     }
-    if (Array.isArray(localScope.samples)) {
+    if (hasUsableSamples(localScope.samples)) {
       return repeatedSamples(localScope.samples, localScope.sampleStep || 1, totalColumns);
     }
     const wave = String(signal && signal.wave || '');
@@ -1110,10 +1133,10 @@
 
   function valueLengthFromSignal(signal) {
     const localScope = signal && signal.scope && typeof signal.scope === 'object' ? signal.scope : {};
-    if (Array.isArray(localScope.values)) {
+    if (Array.isArray(localScope.values) && localScope.values.length) {
       return Math.ceil(localScope.values.length * (Number(localScope.sampleStep) || 1));
     }
-    if (Array.isArray(localScope.samples)) {
+    if (hasUsableSamples(localScope.samples)) {
       return Math.ceil(localScope.samples.length * (Number(localScope.sampleStep) || 1));
     }
     return Math.max(1, String(signal && signal.wave || '').length);
@@ -1127,19 +1150,21 @@
     (Array.isArray(updates) ? updates : []).forEach((update) => {
       if (Array.isArray(update.values) && update.values.length) {
         totalColumns = Math.max(totalColumns, Math.ceil(update.values.length * (Number(update.sampleStep) || 1)));
-      } else if (Array.isArray(update.samples) && update.samples.length) {
+      } else if (hasUsableSamples(update.samples)) {
         totalColumns = Math.max(totalColumns, Math.ceil(update.samples.length * (Number(update.sampleStep) || 1)));
       } else {
         totalColumns = Math.max(totalColumns, String(update.wave || '').length || 1);
       }
     });
     const sources = Object.create(null);
+    const sourceKinds = Object.create(null);
     const names = [];
     signals.forEach((signal) => {
       const name = String(signal && signal.name || '').trim();
       if (!name || own(sources, name)) return;
       names.push(name);
       sources[name] = waveValues(signal, totalColumns);
+      sourceKinds[name] = signalSourceKind(signal);
     });
     (Array.isArray(updates) ? updates : []).forEach((update) => {
       const name = String(update && update.signal || '').trim();
@@ -1147,13 +1172,16 @@
       if (!names.includes(name)) names.push(name);
       if (Array.isArray(update.values) && update.values.length) {
         sources[name] = repeatedSamples(update.values, update.sampleStep || 1, totalColumns);
-      } else if (Array.isArray(update.samples) && update.samples.length) {
+        sourceKinds[name] = 'values';
+      } else if (hasUsableSamples(update.samples)) {
         sources[name] = repeatedSamples(update.samples, update.sampleStep || 1, totalColumns);
+        sourceKinds[name] = 'samples';
       } else {
         sources[name] = waveValues(update, totalColumns);
+        sourceKinds[name] = 'wave';
       }
     });
-    return { source, signals, sources, names, totalColumns };
+    return { source, signals, sources, sourceKinds, names, totalColumns };
   }
 
   function waveFromHalfValues(values, totalColumns) {
@@ -1185,11 +1213,13 @@
       totalColumns: sourceData.totalColumns
     });
     const updates = [];
+    const allUnknown = [];
     analysis.items.forEach((item) => {
       if (!item.valid || !own(evaluated.outputs, item.name)) return;
       const values = evaluated.outputs[item.name];
       const built = waveFromHalfValues(values, sourceData.totalColumns);
       const known = values.filter((value) => String(value).toLowerCase() !== 'x');
+      if (!known.length) allUnknown.push(item.name);
       const numeric = known.length > 0 && known.every((value) => Number.isFinite(Number(value)));
       const binary = numeric && known.every((value) => Number(value) === 0 || Number(value) === 1);
       updates.push({
@@ -1203,7 +1233,13 @@
         formula: item.formula
       });
     });
-    return { updates, analysis, totalColumns: sourceData.totalColumns };
+    return {
+      updates,
+      analysis,
+      totalColumns: sourceData.totalColumns,
+      allUnknown,
+      sourceKinds: sourceData.sourceKinds
+    };
   }
 
   function highlightExpression(text, compiled, knownNames, selfName) {

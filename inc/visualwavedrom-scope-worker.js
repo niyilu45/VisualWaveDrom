@@ -4,7 +4,7 @@
 if (typeof document === 'undefined' && typeof global.importScripts === 'function'
     && !global.VisualWaveDromFormula) {
   try {
-    global.importScripts('visualwavedrom-formula.js?v=20260812-empty-samples-v1');
+    global.importScripts('visualwavedrom-formula.js?v=20260812-preset-formula-v2');
   } catch (_error) { /* surfaced when a formula is configured */ }
 }
 
@@ -50,13 +50,18 @@ function flattenSignals(signals, rows, path, groups) {
       return;
     }
     if (!entry || typeof entry !== 'object') return;
-    result.push({
-      source: entry,
-      path: entryPath,
-      groups: groupStack.slice(),
-      name: String(entry.name == null ? '' : entry.name)
-    });
-    if (Array.isArray(entry.children)) {
+    const hasChildren = Array.isArray(entry.children);
+    const hasSignalField = ['name', 'wave', 'node', 'data', 'period', 'phase']
+      .some((key) => own(entry, key));
+    if (!hasChildren || hasSignalField) {
+      result.push({
+        source: entry,
+        path: entryPath,
+        groups: groupStack.slice(),
+        name: String(entry.name == null ? '' : entry.name)
+      });
+    }
+    if (hasChildren) {
       flattenSignals(entry.children, result, entryPath.concat('children'), groupStack);
     }
   });
@@ -111,7 +116,7 @@ function getScopeValues(source, row, rowIndex) {
     : (Array.isArray(signal.values)
       ? signal.values
       : (globalScope && Array.isArray(globalScope.values) ? globalScope.values : null));
-  if (!candidate) return null;
+  if (!candidate || !candidate.length) return null;
   const values = [];
   let previous = 'x';
   candidate.forEach((rawValue) => {

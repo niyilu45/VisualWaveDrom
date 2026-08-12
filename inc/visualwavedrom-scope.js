@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260812-empty-samples-v1';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260812-preset-formula-v2';
   const FormulaEngine = global.VisualWaveDromFormula || null;
   const DEFAULT_ROW_HEIGHT = 42;
   const COLLAPSED_ROW_HEIGHT = 18;
@@ -165,7 +165,11 @@
       if (Array.isArray(entry)) {
         flattenSourceSignals(typeof entry[0] === 'string' ? entry.slice(1) : entry, target);
       } else if (entry && typeof entry === 'object') {
-        target.push(entry);
+        const hasChildren = Array.isArray(entry.children);
+        const hasSignalField = ['name', 'wave', 'node', 'data', 'period', 'phase']
+          .some((key) => own(entry, key));
+        if (!hasChildren || hasSignalField) target.push(entry);
+        if (hasChildren) flattenSourceSignals(entry.children, target);
       }
     });
     return target;

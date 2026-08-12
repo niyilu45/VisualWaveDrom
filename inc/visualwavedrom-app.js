@@ -14385,6 +14385,7 @@ ${lines.join('\n')}`;
       if (!updates.length) throw new Error('导入方案没有返回任何信号行');
       const allowCreateMissing = !!(importOptions && importOptions.createMissing);
       const replaceScopeFormulas = !!(importOptions && importOptions.replaceScopeFormulas);
+      const previewOnly = !!(importOptions && importOptions.previewOnly);
       const formulaEngine = window.VisualWaveDromFormula;
 
       let parsed;
@@ -14517,6 +14518,16 @@ ${lines.join('\n')}`;
       });
 
       const newText = JSON.stringify(parsed, null, 2);
+      if (previewOnly) {
+        return {
+          changed: newText !== editor.value,
+          count: prepared.length,
+          createdCount,
+          extendedColumns,
+          text: newText,
+          formatPromise: Promise.resolve(true)
+        };
+      }
       if (newText === editor.value) {
         return {
           changed: false,
@@ -14543,13 +14554,21 @@ ${lines.join('\n')}`;
       };
     }
 
-    function importedPayloadWithFormulas(payload) {
+    function importedPayloadWithFormulas(payload, options) {
       const definitions = payload && Array.isArray(payload.formulas) ? payload.formulas : [];
       if (!definitions.length) return payload;
       const formulaEngine = window.VisualWaveDromFormula;
       if (!formulaEngine) throw new Error('公式模块未加载');
+      const opts = options || {};
       const importedUpdates = Array.isArray(payload.updates) ? payload.updates : [];
-      const built = formulaEngine.buildFormulaUpdates(editor.value, importedUpdates, definitions);
+      const sourceUpdates = Array.isArray(opts.formulaSourceUpdates)
+        ? opts.formulaSourceUpdates
+        : importedUpdates;
+      const built = formulaEngine.buildFormulaUpdates(
+        typeof opts.documentValue === 'string' ? opts.documentValue : editor.value,
+        sourceUpdates,
+        definitions
+      );
       const invalid = built.analysis.items.filter((item) => !item.valid);
       const merged = [];
       const positions = new Map();
@@ -14574,6 +14593,8 @@ ${lines.join('\n')}`;
         validCount: built.updates.length,
         invalidCount: invalid.length,
         totalColumns: built.totalColumns,
+        allUnknown: Array.isArray(built.allUnknown) ? built.allUnknown : [],
+        sourceKinds: built.sourceKinds || {},
         errors: invalid.map((item) => ({ name: item.name, error: item.error }))
       });
       return Object.assign({}, payload, {
@@ -19829,7 +19850,22 @@ ${lines.join('\n')}`;
           if (codeMirrorEditor) codeMirrorEditor.refresh();
         },
         applyImport: async (payload) => {
-          const resolvedPayload = importedPayloadWithFormulas(payload);
+          const definitions = payload && Array.isArray(payload.formulas) ? payload.formulas : [];
+          let resolvedPayload = payload;
+          if (definitions.length) {
+            const importedUpdates = Array.isArray(payload.updates) ? payload.updates : [];
+            const importedPreview = importedUpdates.length
+              ? applyImportedWaveRows(payload, {
+                createMissing: true,
+                replaceScopeFormulas: true,
+                previewOnly: true
+              })
+              : { text: editor.value };
+            resolvedPayload = importedPayloadWithFormulas(payload, {
+              documentValue: importedPreview.text,
+              formulaSourceUpdates: []
+            });
+          }
           const result = applyImportedWaveRows(resolvedPayload, {
             createMissing: true,
             replaceScopeFormulas: true
