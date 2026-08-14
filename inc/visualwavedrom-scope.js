@@ -152,6 +152,14 @@
         multiWaves[String(rowId)] = normalizeMultiWaveDefinition(source.multiWaves[rowId]);
       });
     }
+    const multiWaveHidden = {};
+    if (source.multiWaveHidden && typeof source.multiWaveHidden === 'object'
+        && !Array.isArray(source.multiWaveHidden)) {
+      Object.keys(source.multiWaveHidden).forEach((rowId) => {
+        const hidden = normalizeMultiWaveDefinition(source.multiWaveHidden[rowId]);
+        if (hidden.length) multiWaveHidden[String(rowId)] = hidden;
+      });
+    }
     const seenIds = new Set();
     const extraSignals = (Array.isArray(source.extraSignals) ? source.extraSignals : [])
       .map((entry, index) => {
@@ -175,6 +183,7 @@
       extraSignals,
       formulas,
       multiWaves,
+      multiWaveHidden,
       signalNames,
       rowOrder: uniqueRowIds(source.rowOrder),
       hiddenRows: uniqueRowIds(source.hiddenRows)
@@ -226,6 +235,10 @@
       if (own(state.multiWaves, rowId)) {
         state.multiWaves[sourceRowId] = state.multiWaves[rowId].slice();
         delete state.multiWaves[rowId];
+      }
+      if (own(state.multiWaveHidden, rowId)) {
+        state.multiWaveHidden[sourceRowId] = state.multiWaveHidden[rowId].slice();
+        delete state.multiWaveHidden[rowId];
       }
       delete state.signalNames[rowId];
       if (!own(state.signalNames, sourceRowId)) state.signalNames[sourceRowId] = name;
@@ -572,6 +585,9 @@
       this.signalRowDrag = null;
       this.signalRowDragAutoScrollFrame = 0;
       this.suppressSignalRowClickUntil = 0;
+      this.multiWaveLegendHover = null;
+      this.multiWaveLegendDrag = null;
+      this.suppressMultiWaveLegendClickUntil = 0;
       this.windowRequestSequence = 0;
       this.windowSessionRevision = 0;
       this.windowBuildKey = '';
@@ -596,6 +612,7 @@
         extraSignals: [],
         formulas: {},
         multiWaves: {},
+        multiWaveHidden: {},
         signalNames: {},
         rowOrder: [],
         hiddenRows: []
@@ -1368,6 +1385,11 @@
       this.redoButton.addEventListener('click', () => { void this.redo(); });
 
       this.signalList.addEventListener('pointerdown', (event) => {
+        const legendItem = event.target.closest('[data-scope-multi-wave-legend-item]');
+        if (legendItem) {
+          this.startMultiWaveLegendDrag(event, legendItem);
+          return;
+        }
         const handle = event.target.closest('[data-scope-row-resize]');
         if (handle) {
           this.startRowResize(event, handle);
@@ -1377,26 +1399,56 @@
         if (dragTarget) this.startSignalRowDrag(event, dragTarget);
       });
       this.signalList.addEventListener('pointermove', (event) => {
+        this.moveMultiWaveLegendDrag(event);
         this.moveRowResize(event);
         this.moveSignalRowDrag(event);
       });
       this.signalList.addEventListener('pointerup', (event) => {
+        this.finishMultiWaveLegendDrag(event, false);
         this.finishRowResize(event);
         this.finishSignalRowDrag(event, false);
       });
       this.signalList.addEventListener('pointercancel', (event) => {
+        this.finishMultiWaveLegendDrag(event, true);
         this.finishRowResize(event);
         this.finishSignalRowDrag(event, true);
       });
       this.signalList.addEventListener('lostpointercapture', (event) => {
+        if (this.multiWaveLegendDrag
+            && this.multiWaveLegendDrag.pointerId === event.pointerId) {
+          this.finishMultiWaveLegendDrag(event, true);
+        }
         if (this.signalRowDrag && this.signalRowDrag.pointerId === event.pointerId) {
           this.finishSignalRowDrag(event, true);
         }
+      });
+      this.signalList.addEventListener('pointerover', (event) => {
+        const item = event.target.closest('[data-scope-multi-wave-legend-item]');
+        const related = event.relatedTarget;
+        if (!item || (related && related.nodeType && item.contains(related))) return;
+        this.setMultiWaveLegendHover(item);
+      });
+      this.signalList.addEventListener('pointerout', (event) => {
+        const item = event.target.closest('[data-scope-multi-wave-legend-item]');
+        const related = event.relatedTarget;
+        if (!item || (related && related.nodeType && item.contains(related))) return;
+        this.clearMultiWaveLegendHover(item);
       });
       this.signalList.addEventListener('click', (event) => {
         const clickTime = global.performance && typeof global.performance.now === 'function'
           ? global.performance.now()
           : Date.now();
+        const legendItem = event.target.closest('[data-scope-multi-wave-legend-item]');
+        if (legendItem) {
+          event.preventDefault();
+          event.stopPropagation();
+          if (clickTime < this.suppressMultiWaveLegendClickUntil) {
+            this.suppressMultiWaveLegendClickUntil = 0;
+            return;
+          }
+          this.toggleMultiWaveLegendSource(legendItem);
+          return;
+        }
         if (clickTime < this.suppressSignalRowClickUntil) {
           event.preventDefault();
           event.stopPropagation();
@@ -1933,6 +1985,22 @@
           multiWaveReferencesChanged = true;
         }
       });
+      Object.keys(this.transientFormulaState.multiWaveHidden).forEach((multiRowId) => {
+        const currentHidden = normalizeMultiWaveDefinition(
+          this.transientFormulaState.multiWaveHidden[multiRowId]
+        );
+        const nextHidden = normalizeMultiWaveDefinition(currentHidden.map((sourceName) => (
+          sourceName === previousName ? nextName : sourceName
+        )));
+        if (currentHidden.length !== nextHidden.length
+            || nextHidden.some((sourceName, sourceIndex) => (
+              sourceName !== currentHidden[sourceIndex]
+            ))) {
+          if (nextHidden.length) this.transientFormulaState.multiWaveHidden[multiRowId] = nextHidden;
+          else delete this.transientFormulaState.multiWaveHidden[multiRowId];
+          multiWaveReferencesChanged = true;
+        }
+      });
       if (this.simplified && this.simplified.model.rows[index]) {
         this.simplified.model.rows[index].name = nextName;
       }
@@ -2051,6 +2119,43 @@
         return normalizeMultiWaveDefinition(this.transientFormulaState.multiWaves[rowId]);
       }
       return normalizeMultiWaveDefinition(row.multiWave && row.multiWave.signals);
+    }
+
+    multiWaveHiddenDefinition(rowIndex) {
+      const row = this.meta && this.meta.rows[Math.max(0, Math.floor(Number(rowIndex) || 0))];
+      if (!row) return [];
+      const rowId = String(row.rowId || ('source:' + row.index));
+      return normalizeMultiWaveDefinition(this.transientFormulaState.multiWaveHidden[rowId]);
+    }
+
+    orderedMultiWaveEntries(rowIndex, entries) {
+      const order = this.multiWaveDefinition(rowIndex);
+      const ranks = new Map(order.map((name, index) => [name, index]));
+      return (Array.isArray(entries) ? entries : []).map((entry, index) => ({
+        entry,
+        index,
+        rank: ranks.has(String(entry && entry.name || ''))
+          ? ranks.get(String(entry && entry.name || ''))
+          : order.length + index
+      })).sort((left, right) => left.rank - right.rank || left.index - right.index)
+        .map((item) => item.entry);
+    }
+
+    visibleMultiWaveEntries(rowIndex, entries) {
+      const hidden = new Set(this.multiWaveHiddenDefinition(rowIndex));
+      return this.orderedMultiWaveEntries(rowIndex, entries).filter(
+        (entry) => !hidden.has(String(entry && entry.name || ''))
+      );
+    }
+
+    highlightedMultiWaveSource(rowIndex) {
+      const row = this.meta && this.meta.rows[Math.max(0, Math.floor(Number(rowIndex) || 0))];
+      if (!row) return '';
+      const rowId = String(row.rowId || ('source:' + row.index));
+      const active = this.multiWaveLegendDrag && this.multiWaveLegendDrag.started
+        ? this.multiWaveLegendDrag
+        : this.multiWaveLegendHover;
+      return active && active.rowId === rowId ? String(active.sourceName || '') : '';
     }
 
     isMultiWaveRow(rowIndex) {
@@ -2237,9 +2342,18 @@
 
     selectedMultiWaveSources() {
       if (!this.multiWaveSourceList) return [];
-      return Array.from(this.multiWaveSourceList.querySelectorAll(
+      const checked = Array.from(this.multiWaveSourceList.querySelectorAll(
         'input[data-scope-multi-wave-source]:checked'
       )).map((input) => String(input.value || '').trim()).filter(Boolean);
+      if (!this.meta || this.displayControlRow == null) return checked;
+      const checkedSet = new Set(checked);
+      const ordered = this.multiWaveDefinition(this.displayControlRow).filter(
+        (name) => checkedSet.has(name)
+      );
+      checked.forEach((name) => {
+        if (ordered.indexOf(name) < 0) ordered.push(name);
+      });
+      return ordered;
     }
 
     multiWaveJsonPayload(row, sources) {
@@ -2314,6 +2428,11 @@
           && current.every((name, index) => name === sources[index])) return;
       const applied = await this.commitRowOperation(() => {
         this.transientFormulaState.multiWaves[rowId] = sources;
+        const hidden = this.multiWaveHiddenDefinition(row.index).filter(
+          (sourceName) => sources.indexOf(sourceName) >= 0
+        );
+        if (hidden.length) this.transientFormulaState.multiWaveHidden[rowId] = hidden;
+        else delete this.transientFormulaState.multiWaveHidden[rowId];
         delete this.transientFormulaState.formulas[rowId];
         this.formulaDrafts.delete(rowId);
       }, {
@@ -2545,6 +2664,7 @@
       } else {
         this.persistTransientFormulaState();
         this.updateFormulaControls();
+        this.positionDisplayPopover();
       }
     }
 
@@ -2765,6 +2885,7 @@
           );
           delete this.transientFormulaState.formulas[rowId];
           delete this.transientFormulaState.multiWaves[rowId];
+          delete this.transientFormulaState.multiWaveHidden[rowId];
           delete this.transientFormulaState.signalNames[rowId];
           this.formulaDrafts.delete(rowId);
         } else if (this.transientFormulaState.hiddenRows.indexOf(rowId) < 0) {
@@ -2884,6 +3005,203 @@
           to: targetIndex
         }
       });
+    }
+
+    setMultiWaveLegendHover(item) {
+      if (!item || !this.meta) return;
+      const rowIndex = Number(item.dataset.scopeMultiWaveRow);
+      const sourceName = String(item.dataset.scopeMultiWaveName || '');
+      const row = this.meta.rows[rowIndex];
+      if (!row || !sourceName) return;
+      const rowId = String(row.rowId || ('source:' + row.index));
+      if (this.multiWaveLegendHover
+          && this.multiWaveLegendHover.rowId === rowId
+          && this.multiWaveLegendHover.sourceName === sourceName) return;
+      this.signalList.querySelectorAll('.scope-multi-wave-legend-item.is-hovered')
+        .forEach((entry) => entry.classList.remove('is-hovered'));
+      item.classList.add('is-hovered');
+      this.multiWaveLegendHover = { rowId, sourceName };
+      this.draw();
+    }
+
+    clearMultiWaveLegendHover(item) {
+      if (!item || this.multiWaveLegendDrag) return;
+      item.classList.remove('is-hovered');
+      const rowIndex = Number(item.dataset.scopeMultiWaveRow);
+      const row = this.meta && this.meta.rows[rowIndex];
+      const rowId = row ? String(row.rowId || ('source:' + row.index)) : '';
+      const sourceName = String(item.dataset.scopeMultiWaveName || '');
+      if (!this.multiWaveLegendHover
+          || this.multiWaveLegendHover.rowId !== rowId
+          || this.multiWaveLegendHover.sourceName !== sourceName) return;
+      this.multiWaveLegendHover = null;
+      this.draw();
+    }
+
+    updateMultiWaveLegendItemState(item, visible) {
+      if (!item) return;
+      const sourceName = String(item.dataset.scopeMultiWaveName || '');
+      item.classList.toggle('is-hidden', !visible);
+      item.setAttribute('aria-pressed', String(visible));
+      item.setAttribute(
+        'aria-label',
+        sourceName + (visible ? '，当前显示，单击隐藏' : '，当前隐藏，单击显示')
+      );
+      item.title = (visible ? '单击隐藏 ' : '单击显示 ') + sourceName
+        + '；按住鼠标左键拖动可调整显示层级';
+    }
+
+    toggleMultiWaveLegendSource(item) {
+      if (!item || !this.meta) return;
+      const rowIndex = Number(item.dataset.scopeMultiWaveRow);
+      const sourceName = String(item.dataset.scopeMultiWaveName || '');
+      const row = this.meta.rows[rowIndex];
+      if (!row || !sourceName || !this.isMultiWaveRow(rowIndex)) return;
+      const rowId = String(row.rowId || ('source:' + row.index));
+      const hidden = new Set(this.multiWaveHiddenDefinition(rowIndex));
+      const historySnapshot = this.snapshot({ includeRowState: true });
+      const nextVisible = hidden.has(sourceName);
+      if (nextVisible) hidden.delete(sourceName);
+      else hidden.add(sourceName);
+      if (hidden.size) this.transientFormulaState.multiWaveHidden[rowId] = Array.from(hidden);
+      else delete this.transientFormulaState.multiWaveHidden[rowId];
+      this.persistTransientFormulaState();
+      this.pushHistorySnapshot(historySnapshot);
+      this.setActiveCursorRow(rowIndex);
+      this.updateMultiWaveLegendItemState(item, nextVisible);
+      this.draw();
+      this.setStatus(sourceName + (nextVisible ? ' 已显示' : ' 已隐藏'));
+      this.log('scope-multi-wave-legend', {
+        phase: 'visibility', rowId, sourceName, visible: nextVisible
+      });
+    }
+
+    applyMultiWaveLegendOrder(rowIndex, requestedOrder) {
+      const row = this.meta && this.meta.rows[rowIndex];
+      if (!row || !this.isMultiWaveRow(rowIndex)) return;
+      const current = this.multiWaveDefinition(rowIndex);
+      const allowed = new Set(current);
+      const next = normalizeMultiWaveDefinition(requestedOrder).filter((name) => allowed.has(name));
+      current.forEach((name) => {
+        if (next.indexOf(name) < 0) next.push(name);
+      });
+      if (current.length === next.length
+          && current.every((name, index) => name === next[index])) return;
+      const historySnapshot = this.snapshot({ includeRowState: true });
+      const rowId = String(row.rowId || ('source:' + row.index));
+      this.transientFormulaState.multiWaves[rowId] = next;
+      if (row.multiWave) {
+        row.multiWave.signals = next.slice();
+        row.multiWave.sources = this.orderedMultiWaveEntries(rowIndex, row.multiWave.sources);
+      }
+      this.persistTransientFormulaState();
+      this.pushHistorySnapshot(historySnapshot);
+      const scrollTop = this.signalScroll.scrollTop;
+      this.renderSignalRows();
+      this.signalScroll.scrollTop = scrollTop;
+      this.plotViewport.scrollTop = scrollTop;
+      this.draw();
+      this.setStatus('已更新 ' + this.signalDisplayName(rowIndex) + ' 的波形显示层级');
+      this.log('scope-multi-wave-legend', {
+        phase: 'order', rowId, order: next.slice()
+      });
+    }
+
+    startMultiWaveLegendDrag(event, item) {
+      if (!item || event.button !== 0 || this.multiWaveLegendDrag || !this.meta) return;
+      const rowIndex = Number(item.dataset.scopeMultiWaveRow);
+      const sourceName = String(item.dataset.scopeMultiWaveName || '');
+      const row = this.meta.rows[rowIndex];
+      const legend = item.closest('.scope-multi-wave-legend');
+      if (!row || !legend || !sourceName) return;
+      event.stopPropagation();
+      const rowId = String(row.rowId || ('source:' + row.index));
+      this.setActiveCursorRow(rowIndex);
+      this.multiWaveLegendHover = { rowId, sourceName };
+      this.multiWaveLegendDrag = {
+        pointerId: event.pointerId,
+        rowIndex,
+        rowId,
+        sourceName,
+        startX: event.clientX,
+        startY: event.clientY,
+        started: false,
+        item,
+        legend
+      };
+      try { item.setPointerCapture(event.pointerId); } catch (_error) {}
+    }
+
+    moveMultiWaveLegendDrag(event) {
+      const drag = this.multiWaveLegendDrag;
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      const distance = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY);
+      if (!drag.started && distance < 4) return;
+      if (!drag.started) {
+        drag.started = true;
+        drag.item.classList.add('is-dragging');
+        document.body.classList.add('scope-multi-wave-legend-dragging');
+        this.draw();
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      const candidates = Array.from(drag.legend.querySelectorAll(
+        '[data-scope-multi-wave-legend-item]'
+      )).filter((item) => item !== drag.item);
+      const before = candidates.find((item) => {
+        const rect = item.getBoundingClientRect();
+        return event.clientY < rect.top + rect.height / 2;
+      });
+      if (before) drag.legend.insertBefore(drag.item, before);
+      else drag.legend.appendChild(drag.item);
+      const legendRect = drag.legend.getBoundingClientRect();
+      if (event.clientY < legendRect.top + 14) drag.legend.scrollTop -= 8;
+      else if (event.clientY > legendRect.bottom - 14) drag.legend.scrollTop += 8;
+    }
+
+    finishMultiWaveLegendDrag(event, canceled) {
+      const drag = this.multiWaveLegendDrag;
+      if (!drag || (event && drag.pointerId !== event.pointerId)) return;
+      this.multiWaveLegendDrag = null;
+      if (event) {
+        try { drag.item.releasePointerCapture(event.pointerId); } catch (_error) {}
+      }
+      drag.item.classList.remove('is-dragging');
+      document.body.classList.remove('scope-multi-wave-legend-dragging');
+      if (!drag.started) {
+        if (!drag.item.matches(':hover')) {
+          drag.item.classList.remove('is-hovered');
+          if (this.multiWaveLegendHover
+              && this.multiWaveLegendHover.rowId === drag.rowId
+              && this.multiWaveLegendHover.sourceName === drag.sourceName) {
+            this.multiWaveLegendHover = null;
+            this.draw();
+          }
+        }
+        return;
+      }
+      if (event) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      const now = global.performance && typeof global.performance.now === 'function'
+        ? global.performance.now()
+        : Date.now();
+      this.suppressMultiWaveLegendClickUntil = now + 350;
+      this.suppressSignalRowClickUntil = now + 350;
+      this.multiWaveLegendHover = null;
+      if (canceled) {
+        const scrollTop = this.signalScroll.scrollTop;
+        this.renderSignalRows();
+        this.signalScroll.scrollTop = scrollTop;
+        this.plotViewport.scrollTop = scrollTop;
+        this.draw();
+        return;
+      }
+      const order = Array.from(drag.legend.querySelectorAll(
+        '[data-scope-multi-wave-legend-item]'
+      )).map((item) => String(item.dataset.scopeMultiWaveName || ''));
+      this.applyMultiWaveLegendOrder(drag.rowIndex, order);
     }
 
     signalRowDropLocation(clientY) {
@@ -3291,7 +3609,7 @@
         const collapsed = this.isRowCollapsed(row.index);
         const analogMode = this.modes[row.index] === 'analog';
         const multiWave = this.isMultiWaveRow(row.index);
-        const multiWaveSources = row.multiWave && Array.isArray(row.multiWave.sources)
+        const rawMultiWaveSources = row.multiWave && Array.isArray(row.multiWave.sources)
           ? row.multiWave.sources
           : this.multiWaveDefinition(row.index).map((name) => {
             const source = this.meta.rows.find((candidate) => (
@@ -3299,6 +3617,8 @@
             ));
             return source ? { name, rowIndex: source.index } : { name, rowIndex: -1 };
           });
+        const multiWaveSources = this.orderedMultiWaveEntries(row.index, rawMultiWaveSources);
+        const hiddenMultiWaveSources = new Set(this.multiWaveHiddenDefinition(row.index));
         const waveColor = this.rowWaveColor(row.index);
         if (collapsed) {
           if (!this.isCollapsedRunStart(row.index)) return '';
@@ -3353,11 +3673,19 @@
                     const color = source.rowIndex >= 0
                       ? this.rowWaveColor(source.rowIndex)
                       : COLORS[sourceIndex % COLORS.length];
-                    return `<span title="${escapeHtml(source.name)}">
+                    const visible = !hiddenMultiWaveSources.has(String(source.name || ''));
+                    return `<button type="button"
+                        class="scope-multi-wave-legend-item${visible ? '' : ' is-hidden'}"
+                        data-scope-multi-wave-legend-item="${sourceIndex}"
+                        data-scope-multi-wave-row="${row.index}"
+                        data-scope-multi-wave-name="${escapeHtml(source.name)}"
+                        aria-pressed="${visible}"
+                        aria-label="${escapeHtml(source.name)}，当前${visible ? '显示' : '隐藏'}，单击${visible ? '隐藏' : '显示'}"
+                        title="单击${visible ? '隐藏' : '显示'} ${escapeHtml(source.name)}；按住鼠标左键拖动可调整显示层级">
                       <i style="--scope-multi-wave-color:${color}" aria-hidden="true"></i>
-                      ${escapeHtml(source.name)}
-                    </span>`;
-                  }).join('') : '<span>未选择源信号</span>'}
+                      <span>${escapeHtml(source.name)}</span>
+                    </button>`;
+                  }).join('') : '<span class="scope-multi-wave-empty">未选择源信号</span>'}
                 </span>
               ` : ''}
               <em>
@@ -4380,11 +4708,26 @@
       const data = rowResult.data;
       const mode = rowResult.mode;
       if (data.kind === 'multi-analog') {
-        (data.series || []).forEach((series, seriesIndex) => {
+        let highlighted = this.highlightedMultiWaveSource(rowIndex);
+        const layered = this.visibleMultiWaveEntries(rowIndex, data.series).map(
+          (series, layerIndex) => ({ series, layerIndex })
+        ).reverse();
+        if (highlighted) {
+          const highlightedIndex = layered.findIndex(
+            (item) => String(item.series.name || '') === highlighted
+          );
+          if (highlightedIndex >= 0) layered.push(layered.splice(highlightedIndex, 1)[0]);
+          else highlighted = '';
+        }
+        layered.forEach((item, drawIndex) => {
+          const series = item.series;
+          const isHighlighted = highlighted && String(series.name || '') === highlighted;
           const seriesColor = Number.isInteger(series.sourceRowIndex)
             && series.sourceRowIndex >= 0
             ? this.rowWaveColor(series.sourceRowIndex)
-            : COLORS[seriesIndex % COLORS.length];
+            : COLORS[item.layerIndex % COLORS.length];
+          context.save();
+          if (highlighted && !isHighlighted) context.globalAlpha = 0.35;
           this.drawAnalog(
             context,
             series.data,
@@ -4392,8 +4735,13 @@
             yBottom,
             width,
             seriesColor,
-            { drawGuide: seriesIndex === 0, drawUnknowns: false }
+            {
+              drawGuide: drawIndex === 0,
+              drawUnknowns: false,
+              lineWidth: isHighlighted ? 2.75 : 1.25
+            }
           );
+          context.restore();
         });
         return;
       }
@@ -4578,7 +4926,7 @@
       const yFor = (value) => yBottom - 4
         - (value - range.min) / scale * Math.max(1, yBottom - yTop - 8);
       context.strokeStyle = color;
-      context.lineWidth = 1.25;
+      context.lineWidth = Math.max(0.5, Number(settings.lineWidth) || 1.25);
       if (data.kind === 'envelope') {
         context.beginPath();
         data.items.forEach((item) => {
@@ -4613,6 +4961,7 @@
       }
       if (settings.drawGuide !== false) {
         context.strokeStyle = '#cfd3d8';
+        context.lineWidth = 1;
         context.setLineDash([3, 3]);
         context.beginPath();
         context.moveTo(0, (yTop + yBottom) / 2);
@@ -5360,12 +5709,28 @@
         if (multiWave && Array.isArray(multiWave.sources)) {
           const range = this.meta.rows[rowIndex].range || { min: -1, max: 1 };
           const scale = Math.max(1e-12, Number(range.max) - Number(range.min));
-          multiWave.sources.forEach((source, sourceIndex) => {
+          let highlighted = this.highlightedMultiWaveSource(rowIndex);
+          const layered = this.visibleMultiWaveEntries(rowIndex, multiWave.sources).map(
+            (source, layerIndex) => ({ source, layerIndex })
+          ).reverse();
+          if (highlighted) {
+            const highlightedIndex = layered.findIndex(
+              (item) => String(item.source.name || '') === highlighted
+            );
+            if (highlightedIndex >= 0) layered.push(layered.splice(highlightedIndex, 1)[0]);
+            else highlighted = '';
+          }
+          layered.forEach((item) => {
+            const source = item.source;
             const sourceRow = this.simplified.model.rows[source.rowIndex];
             if (!sourceRow) return;
+            const isHighlighted = highlighted && String(source.name || '') === highlighted;
+            context.save();
+            if (highlighted && !isHighlighted) context.globalAlpha = 0.35;
             context.strokeStyle = source.rowIndex >= 0
               ? this.rowWaveColor(source.rowIndex)
-              : COLORS[sourceIndex % COLORS.length];
+              : COLORS[item.layerIndex % COLORS.length];
+            context.lineWidth = isHighlighted ? 2.25 : 1;
             context.beginPath();
             let started = false;
             sourceRow.values.forEach((value, pointIndex) => {
@@ -5386,6 +5751,7 @@
               started = true;
             });
             context.stroke();
+            context.restore();
           });
         } else if (row.mode === 'digital') {
           let previousY = null;

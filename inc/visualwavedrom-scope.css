@@ -616,32 +616,104 @@ body.scope-row-dragging * {
   font-weight: 700;
 }
 
+.scope-signal-row-multi-wave .scope-signal-name {
+  min-height: 0;
+  align-self: stretch;
+  overflow: hidden;
+}
+
 .scope-multi-wave-legend {
   min-width: 0;
+  min-height: 16px;
   display: flex;
-  align-items: center;
-  gap: 7px;
-  overflow-x: auto;
-  overflow-y: hidden;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 1px;
+  overflow-x: hidden;
+  overflow-y: auto;
   color: #545b63;
   font-size: 9px;
-  line-height: 13px;
-  scrollbar-width: none;
-  white-space: nowrap;
+  line-height: 14px;
+  scrollbar-color: #b8c0c9 transparent;
+  scrollbar-width: thin;
+  overscroll-behavior: contain;
+  touch-action: none;
 }
 
 .scope-multi-wave-legend::-webkit-scrollbar {
-  display: none;
+  width: 5px;
 }
 
-.scope-multi-wave-legend > span {
+.scope-multi-wave-legend::-webkit-scrollbar-thumb {
+  border-radius: 2px;
+  background: #b8c0c9;
+}
+
+.scope-multi-wave-legend-item {
+  width: 100%;
   min-width: 0;
-  display: inline-flex;
-  flex: 0 1 auto;
+  min-height: 15px;
+  display: flex;
+  flex: 0 0 15px;
   align-items: center;
   gap: 3px;
+  box-sizing: border-box;
+  overflow: hidden;
+  padding: 0 3px;
+  border: 0;
+  border-radius: 2px;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  line-height: 14px;
+  text-align: left;
+  cursor: grab;
+  user-select: none;
+}
+
+.scope-multi-wave-legend-item > span {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scope-multi-wave-legend-item:hover,
+.scope-multi-wave-legend-item.is-hovered {
+  color: #174f86;
+  background: #e8f2fc;
+  font-weight: 700;
+}
+
+.scope-multi-wave-legend-item:focus-visible {
+  outline: 2px solid #2f73bf;
+  outline-offset: -2px;
+}
+
+.scope-multi-wave-legend-item.is-hidden {
+  color: #7b8188;
+  opacity: 0.48;
+}
+
+.scope-multi-wave-legend-item.is-hidden > span {
+  text-decoration: line-through;
+}
+
+.scope-multi-wave-legend-item.is-dragging {
+  position: relative;
+  z-index: 2;
+  color: #174f86;
+  background: #dcecfb;
+  box-shadow: inset 0 0 0 1px #2f73bf;
+  cursor: grabbing;
+  opacity: 0.92;
+}
+
+body.scope-multi-wave-legend-dragging,
+body.scope-multi-wave-legend-dragging * {
+  cursor: grabbing !important;
+  user-select: none !important;
 }
 
 .scope-multi-wave-legend i,
