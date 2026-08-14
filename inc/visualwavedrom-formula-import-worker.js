@@ -2,7 +2,7 @@
 'use strict';
 
 if (!global.VisualWaveDromFormula && typeof global.importScripts === 'function') {
-  global.importScripts('visualwavedrom-formula.js?v=20260814-formula-performance-v1');
+  global.importScripts('visualwavedrom-formula.js?v=20260814-derived-pipeline-v1');
 }
 
 function analysisSummary(analysis) {
@@ -18,7 +18,7 @@ function analysisSummary(analysis) {
   };
 }
 
-global.addEventListener('message', (event) => {
+global.addEventListener('message', async (event) => {
   const request = event.data || {};
   const requestId = request.requestId;
   if (request.type !== 'build-formula-updates') return;
@@ -47,14 +47,20 @@ global.addEventListener('message', (event) => {
         progress: Object.assign({ phase: 'formula', stage }, details || {})
       });
     };
-    const built = engine.buildFormulaUpdates(
+    const build = typeof engine.buildFormulaUpdatesAsync === 'function'
+      ? engine.buildFormulaUpdatesAsync.bind(engine)
+      : engine.buildFormulaUpdates.bind(engine);
+    const built = await build(
       request.documentValue,
       request.importedUpdates,
       definitions,
       {
+        parallel: true,
+        workerUrl: 'visualwavedrom-formula-eval-worker.js?v=20260814-derived-pipeline-v1',
         onFormulaStart: sendProgress('evaluating'),
         onFormulaComplete: sendProgress('evaluated'),
-        onFormulaPackageStart: sendProgress('packaging')
+        onFormulaPackageStart: sendProgress('packaging'),
+        onLayerStart: sendProgress('layer')
       }
     );
     global.postMessage({
@@ -65,7 +71,11 @@ global.addEventListener('message', (event) => {
         analysis: analysisSummary(built.analysis),
         totalColumns: built.totalColumns,
         allUnknown: built.allUnknown,
-        sourceKinds: built.sourceKinds
+        sourceKinds: built.sourceKinds,
+        cacheStats: built.cacheStats,
+        layers: built.layers,
+        parallelWorkerCount: built.parallelWorkerCount,
+        evaluationDurationMs: built.evaluationDurationMs
       }
     });
   } catch (error) {

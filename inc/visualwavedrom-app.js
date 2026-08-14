@@ -322,6 +322,12 @@ if (!window.VWDCodeEditorPairs) {
     const importWaveDataBtn = document.getElementById('btn-import-wave-data');
     const saveWaveLibraryBtn = document.getElementById('btn-save-wave-library');
     const saveWaveLibraryLabel = document.getElementById('save-wave-library-label');
+    const waveLibrarySaveModal = document.getElementById('wave-library-save-modal');
+    const waveLibrarySaveDialog = waveLibrarySaveModal
+      ? waveLibrarySaveModal.querySelector('.wave-library-save-dialog')
+      : null;
+    const waveLibrarySaveTitle = document.getElementById('wave-library-save-title');
+    const waveLibrarySaveMessage = document.getElementById('wave-library-save-message');
     const waveLibraryImportInput = document.getElementById('wave-library-import-input');
     const vimModeBtn = document.getElementById('btn-vim-mode');
     const vimHelpBtn = document.getElementById('btn-vim-help');
@@ -1045,6 +1051,10 @@ ${lines.join('\n')}`;
     let waveLibraryStructureRevision = 0;
     let waveLibraryServerSaveInFlight = false;
     let waveLibraryServerSaveQueued = false;
+    const waveLibraryServerSaveWaiters = [];
+    let waveLibrarySaveOperation = null;
+    let waveLibrarySaveModalCloseTimer = null;
+    let waveLibrarySaveReturnFocus = null;
     let applyingWaveLibraryBundle = false;
     let pendingWaveCopyDocumentName = '';
     let pendingWaveCopyButton = null;
@@ -9638,16 +9648,20 @@ ${lines.join('\n')}`;
       if (inlineEditActive || app.classList.contains('reading-mode')) return;
       const editLabel = isTextEditModeActive();
       if (editLabel) {
+        const previousIndex = selectedEdgeIndex;
         if (event) {
           event.preventDefault();
           event.stopPropagation();
         }
-        if (selectedEdgeIndex !== index) {
-          setStatus(false, '请先选择需要编辑标签的连接线');
-          return;
-        }
+        if (selectedEdgeIndex !== index) selectEdge(index);
         scrollEditorToEdge(editor.value, edgeStr);
         const anchor = event && (event.currentTarget || event.target);
+        vwdDebugLog('connection-label', {
+          phase: 'waveform-label-click',
+          edgeIndex: index,
+          previousSelectedEdgeIndex: previousIndex,
+          autoSelected: previousIndex !== index
+        });
         startSelectedEdgeLabelInlineEdit(anchor, index);
         return;
       }
@@ -12791,6 +12805,103 @@ ${lines.join('\n')}`;
       statusText.textContent = message;
     }
 
+    function showWaveLibrarySaveModal() {
+      if (waveLibrarySaveModalCloseTimer !== null) {
+        clearTimeout(waveLibrarySaveModalCloseTimer);
+        waveLibrarySaveModalCloseTimer = null;
+      }
+      if (saveWaveLibraryBtn) {
+        saveWaveLibraryBtn.disabled = true;
+        saveWaveLibraryBtn.setAttribute('aria-busy', 'true');
+      }
+      if (!waveLibrarySaveModal) return;
+      if (waveLibrarySaveModal.hidden) waveLibrarySaveReturnFocus = document.activeElement;
+      waveLibrarySaveModal.dataset.state = 'saving';
+      waveLibrarySaveModal.hidden = false;
+      if (waveLibrarySaveDialog) waveLibrarySaveDialog.setAttribute('aria-busy', 'true');
+      if (waveLibrarySaveTitle) waveLibrarySaveTitle.textContent = '正在保存波形库';
+      if (waveLibrarySaveMessage) {
+        waveLibrarySaveMessage.textContent = '正在写入波形和目录数据，请稍候…';
+      }
+      requestAnimationFrame(() => {
+        if (waveLibrarySaveDialog && !waveLibrarySaveModal.hidden) {
+          try { waveLibrarySaveDialog.focus({ preventScroll: true }); } catch (_e) { waveLibrarySaveDialog.focus(); }
+        }
+      });
+    }
+
+    function finishWaveLibrarySaveModal(ok) {
+      if (saveWaveLibraryBtn) {
+        saveWaveLibraryBtn.disabled = false;
+        saveWaveLibraryBtn.removeAttribute('aria-busy');
+      }
+      if (!waveLibrarySaveModal) return;
+      waveLibrarySaveModal.dataset.state = ok ? 'success' : 'error';
+      if (waveLibrarySaveDialog) waveLibrarySaveDialog.setAttribute('aria-busy', 'false');
+      if (waveLibrarySaveTitle) waveLibrarySaveTitle.textContent = ok ? '保存完成' : '保存失败';
+      if (waveLibrarySaveMessage) {
+        waveLibrarySaveMessage.textContent = ok
+          ? ('波形库已保存：' + (currentWaveLibraryFile || '浏览器 SQLite'))
+          : '波形库未能保存，请查看页面底部状态后重试。';
+      }
+      waveLibrarySaveModalCloseTimer = setTimeout(() => {
+        waveLibrarySaveModalCloseTimer = null;
+        waveLibrarySaveModal.hidden = true;
+        if (waveLibrarySaveReturnFocus && waveLibrarySaveReturnFocus.isConnected
+            && typeof waveLibrarySaveReturnFocus.focus === 'function') {
+          try { waveLibrarySaveReturnFocus.focus({ preventScroll: true }); } catch (_e) { waveLibrarySaveReturnFocus.focus(); }
+        }
+        waveLibrarySaveReturnFocus = null;
+      }, ok ? 650 : 1600);
+    }
+
+    function getWaveLibraryWriteLockName() {
+      return 'visualwavedrom-wave-library-save:'
+        + String(currentWaveLibraryId || currentWaveLibraryFile || 'browser-default');
+    }
+
+    async function withWaveLibraryWriteLock(operation) {
+      if (!navigator.locks || typeof navigator.locks.request !== 'function') {
+        return operation();
+      }
+      const lockName = getWaveLibraryWriteLockName();
+      const waitStartedAt = Date.now();
+      let acquired = false;
+      const waitingTimer = setTimeout(() => {
+        if (acquired || !waveLibrarySaveModal || waveLibrarySaveModal.hidden
+            || waveLibrarySaveModal.dataset.state !== 'saving') return;
+        if (waveLibrarySaveMessage) {
+          waveLibrarySaveMessage.textContent = '另一个窗口正在保存此波形库，当前窗口正在等待…';
+        }
+      }, 120);
+      try {
+        return await navigator.locks.request(lockName, { mode: 'exclusive' }, async () => {
+          acquired = true;
+          clearTimeout(waitingTimer);
+          if (waveLibrarySaveModal && !waveLibrarySaveModal.hidden
+              && waveLibrarySaveModal.dataset.state === 'saving' && waveLibrarySaveMessage) {
+            waveLibrarySaveMessage.textContent = '正在写入波形和目录数据，请稍候…';
+          }
+          vwdDebugLog('persistence', {
+            phase: 'cross-window-save-lock-acquired',
+            lockName,
+            waitedMs: Date.now() - waitStartedAt
+          });
+          return operation();
+        });
+      } catch (error) {
+        if (acquired) throw error;
+        vwdDebugLog('persistence', {
+          phase: 'cross-window-save-lock-unavailable',
+          lockName,
+          message: error && error.message ? error.message : String(error)
+        });
+        return operation();
+      } finally {
+        clearTimeout(waitingTimer);
+      }
+    }
+
     function normalizeSavedTag(raw) {
       if (!raw || typeof raw.name !== 'string') return null;
       const content = typeof raw.content === 'string' ? raw.content : null;
@@ -13472,23 +13583,119 @@ ${lines.join('\n')}`;
       return true;
     }
 
-    function openWaveDocumentInSingleWindow(documentName) {
-      const url = getWaveDocumentSingleViewUrl(documentName);
-      if (!url) {
-        setStatus(false, '无法生成单图地址');
-        return false;
+    async function prepareWaveDocumentForSingleWindow(documentName) {
+      if (waveLibrarySaveOperation) {
+        const activeSaveSucceeded = await waveLibrarySaveOperation;
+        if (!activeSaveSucceeded) throw new Error('当前波形库保存失败');
       }
-      const opened = window.open(url, '_blank');
+      flushPersistEditorJson();
+      if (documentName === editingWaveDocumentName && !saveCurrentWaveDocumentBeforeSwitch()) {
+        throw new Error('当前波形图自动保存失败');
+      }
+      const loaded = await ensureWaveDocumentLoaded(documentName);
+      if (!loaded) throw new Error('波形图不存在或尚未载入');
+      flushPersistSavedTags();
+
+      if (waveLibraryServerMode) {
+        if (!currentWaveLibraryFile) throw new Error('当前没有可用的波形库');
+        clearTimeout(waveLibrarySaveTimer);
+        waveLibrarySaveTimer = null;
+        const pendingMarker = markWaveLibraryServerSavePending();
+        const saved = await flushScheduledWaveLibraryServerSave(pendingMarker);
+        if (!saved) throw new Error('波形库保存失败');
+        const response = await fetch('/api/wave-library?summary=1&file='
+          + encodeURIComponent(currentWaveLibraryFile));
+        const summary = await response.json().catch(() => ({}));
+        if (!response.ok || !summary.libraryId) {
+          throw new Error(summary.error || '无法确认波形库身份');
+        }
+        const documentExists = Array.isArray(summary.documents)
+          && summary.documents.some((document) => document && document.name === documentName);
+        if (!documentExists) throw new Error('保存后的波形库中未找到这张图');
+        currentWaveLibraryId = String(summary.libraryId);
+        updateWaveLibraryFileStatus();
+      } else {
+        clearTimeout(browserWaveLibrarySaveTimer);
+        browserWaveLibrarySaveTimer = null;
+        const saved = await flushBrowserWaveLibrarySave({ force: true });
+        if (!saved) throw new Error('浏览器 SQLite 保存失败');
+        if (!browserWaveLibraryStore || !browserWaveLibraryStore.readDocument(documentName)) {
+          throw new Error('保存后的波形库中未找到这张图');
+        }
+      }
+      vwdDebugLog('wave-library', {
+        phase: 'open-single-window-ready',
+        documentName,
+        libraryId: currentWaveLibraryId,
+        file: currentWaveLibraryFile
+      });
+      return true;
+    }
+
+    function showSingleWindowLoadingPage(opened, documentName) {
+      try {
+        const title = getSavedTagTitle(getSavedTagByName(documentName)
+          || { name: documentName, content: '{}' });
+        const loadingDocument = opened.document;
+        loadingDocument.title = '正在打开 ' + title;
+        loadingDocument.documentElement.lang = 'zh-CN';
+        loadingDocument.body.replaceChildren();
+        Object.assign(loadingDocument.body.style, {
+          margin: '0',
+          minHeight: '100vh',
+          display: 'grid',
+          placeItems: 'center',
+          background: '#11161c',
+          color: '#eef2f5',
+          fontFamily: 'system-ui, sans-serif'
+        });
+        const message = loadingDocument.createElement('div');
+        message.textContent = '正在保存并打开波形图…';
+        message.setAttribute('role', 'status');
+        message.style.fontSize = '15px';
+        message.style.letterSpacing = '0';
+        loadingDocument.body.appendChild(message);
+      } catch (_e) { /* the browser may protect the temporary page */ }
+    }
+
+    async function openWaveDocumentInSingleWindow(documentName) {
+      const opened = window.open('about:blank', '_blank');
       if (!opened) {
         setStatus(false, '浏览器阻止了新窗口，请允许此页面打开弹出式窗口');
-        vwdDebugLog('wave-library', { phase: 'open-single-window-blocked', documentName, url });
+        vwdDebugLog('wave-library', { phase: 'open-single-window-blocked', documentName });
         return false;
       }
-      try { opened.opener = null; } catch (_e) { /* cross-window browser policy */ }
-      const tag = getSavedTagByName(documentName);
-      setStatus(true, '已单独打开波形图：' + getSavedTagTitle(tag || { name: documentName, content: '{}' }));
-      vwdDebugLog('wave-library', { phase: 'open-single-window', documentName, url });
-      return true;
+      showSingleWindowLoadingPage(opened, documentName);
+      setStatus(true, '正在保存并打开波形图…');
+      try {
+        await prepareWaveDocumentForSingleWindow(documentName);
+        const url = getWaveDocumentSingleViewUrl(documentName);
+        if (!url) throw new Error('无法生成单图地址');
+        if (opened.closed) throw new Error('单图窗口已关闭');
+        opened.location.replace(url);
+        try { opened.opener = null; } catch (_e) { /* cross-window browser policy */ }
+        const tag = getSavedTagByName(documentName);
+        setStatus(true, '已单独打开波形图：'
+          + getSavedTagTitle(tag || { name: documentName, content: '{}' }));
+        vwdDebugLog('wave-library', {
+          phase: 'open-single-window',
+          documentName,
+          libraryId: currentWaveLibraryId,
+          url
+        });
+        return true;
+      } catch (error) {
+        try { if (!opened.closed) opened.close(); } catch (_e) { /* already closed */ }
+        const message = error && error.message ? error.message : String(error);
+        setStatus(false, '单独打开失败：' + message);
+        vwdDebugLog('wave-library', {
+          phase: 'open-single-window-failed',
+          documentName,
+          libraryId: currentWaveLibraryId,
+          message
+        });
+        return false;
+      }
     }
 
     function singleWaveSyncSignature(document) {
@@ -13514,6 +13721,11 @@ ${lines.join('\n')}`;
 
     async function saveSingleWaveDocumentToServer(options) {
       const opts = options || {};
+      if (!opts.lockHeld && !opts.keepalive) {
+        return withWaveLibraryWriteLock(() => saveSingleWaveDocumentToServer(
+          Object.assign({}, opts, { lockHeld: true })
+        ));
+      }
       const name = requestedWaveDocumentName || editingWaveDocumentName;
       const stored = getSavedTagByName(name);
       if (!stored || stored.deferred || !currentWaveLibraryId) return false;
@@ -13674,18 +13886,41 @@ ${lines.join('\n')}`;
       return true;
     }
 
-    async function flushScheduledWaveLibraryServerSave(pendingMarker) {
+    function waitForWaveLibraryServerSaveCompletion() {
+      if (!waveLibraryServerSaveInFlight) return Promise.resolve(true);
+      return new Promise((resolve) => waveLibraryServerSaveWaiters.push(resolve));
+    }
+
+    function settleWaveLibraryServerSaveWaiters(result) {
+      const waiters = waveLibraryServerSaveWaiters.splice(0);
+      waiters.forEach((resolve) => resolve(!!result));
+    }
+
+    async function flushScheduledWaveLibraryServerSave(pendingMarker, options) {
+      const opts = options || {};
+      if (!opts.lockHeld) {
+        return withWaveLibraryWriteLock(() => flushScheduledWaveLibraryServerSave(
+          pendingMarker,
+          { lockHeld: true }
+        ));
+      }
       if (waveLibraryServerSaveInFlight) {
         waveLibraryServerSaveQueued = true;
-        return false;
+        const completed = await waitForWaveLibraryServerSaveCompletion();
+        if (!completed) return false;
+        if (singleWaveViewActive || waveLibraryStructureDirty
+            || dirtyWaveDocumentNames.size > 0 || deletedWaveDocumentNames.size > 0) {
+          return flushScheduledWaveLibraryServerSave(pendingMarker, { lockHeld: true });
+        }
+        clearPendingWaveLibrarySave(pendingMarker);
+        return true;
       }
       waveLibraryServerSaveInFlight = true;
       let saveSucceeded = true;
       try {
         if (singleWaveViewActive) {
-          return await saveSingleWaveDocumentToServer({ pendingMarker });
-        }
-        if (!currentWaveLibraryId) {
+          saveSucceeded = await saveSingleWaveDocumentToServer({ pendingMarker, lockHeld: true });
+        } else if (!currentWaveLibraryId) {
           const structureRevision = waveLibraryStructureRevision;
           const documentSignatures = new Map(savedTags.map((tag) => [tag.name, singleWaveSyncSignature(tag)]));
           const response = await fetch('/api/wave-library?file=' + encodeURIComponent(currentWaveLibraryFile), {
@@ -13693,7 +13928,12 @@ ${lines.join('\n')}`;
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(getWaveLibraryBundle())
           });
-          if (!response.ok) throw new Error('library save failed');
+          const result = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(result.error || 'library save failed');
+          if (result.libraryId) {
+            currentWaveLibraryId = String(result.libraryId);
+            updateWaveLibraryFileStatus();
+          }
           if (structureRevision === waveLibraryStructureRevision) waveLibraryStructureDirty = false;
           documentSignatures.forEach((signature, name) => {
             const current = getSavedTagByName(name);
@@ -13719,6 +13959,7 @@ ${lines.join('\n')}`;
         }
         return saveSucceeded;
       } catch (error) {
+        saveSucceeded = false;
         setStatus(false, '波形库自动保存失败');
         vwdDebugLog('persistence', {
           phase: 'server-save-failed',
@@ -13727,6 +13968,7 @@ ${lines.join('\n')}`;
         return false;
       } finally {
         waveLibraryServerSaveInFlight = false;
+        settleWaveLibraryServerSaveWaiters(saveSucceeded);
         if (waveLibraryServerSaveQueued) {
           waveLibraryServerSaveQueued = false;
           scheduleWaveLibraryServerSave();
@@ -13788,6 +14030,11 @@ ${lines.join('\n')}`;
       const opts = options || {};
       if (waveLibraryServerMode || !browserWaveLibraryReady || !browserWaveLibraryStore
           || applyingWaveLibraryBundle) return false;
+      if (!opts.lockHeld) {
+        return withWaveLibraryWriteLock(() => flushBrowserWaveLibrarySave(
+          Object.assign({}, opts, { lockHeld: true })
+        ));
+      }
       const hasChanges = waveLibraryStructureDirty || dirtyWaveDocumentNames.size > 0
         || deletedWaveDocumentNames.size > 0;
       if (!hasChanges && !opts.force) return true;
@@ -13915,7 +14162,8 @@ ${lines.join('\n')}`;
 
     async function downloadWaveLibraryBundle() {
       const store = await ensureBrowserWaveLibraryStore();
-      await flushBrowserWaveLibrarySave({ force: true });
+      const saved = await flushBrowserWaveLibrarySave({ force: true });
+      if (!saved) throw new Error('browser SQLite save failed');
       const bytes = store.exportBytes();
       const blob = new Blob([bytes], { type: 'application/vnd.sqlite3' });
       const url = URL.createObjectURL(blob);
@@ -14497,6 +14745,13 @@ ${lines.join('\n')}`;
               return String(value);
             })
             : [],
+          changePoints: update.changePoints && formulaEngine
+              && typeof formulaEngine.normalizeChangePoints === 'function'
+            ? formulaEngine.normalizeChangePoints(update.changePoints)
+            : null,
+          derivedCache: update.derivedCache && typeof update.derivedCache === 'object'
+            ? JSON.parse(JSON.stringify(update.derivedCache))
+            : null,
           sampleStep: Number(update.sampleStep) > 0 ? Number(update.sampleStep) : 0
         });
       });
@@ -14511,18 +14766,26 @@ ${lines.join('\n')}`;
         const signalScope = Object.assign({}, item.target.signal.scope || {});
         if (item.sampleKind) {
           signalScope.mode = item.sampleKind;
-          if (item.values.length) {
+          if (item.changePoints && item.sampleKind !== 'analog') {
+            signalScope.changePoints = item.changePoints;
+            signalScope.sampleStep = item.changePoints.sampleStep || item.sampleStep || 0.5;
+            delete signalScope.values;
+            delete signalScope.samples;
+          } else if (item.values.length) {
             signalScope.values = item.values;
             signalScope.sampleStep = item.sampleStep || 1;
             delete signalScope.samples;
+            delete signalScope.changePoints;
           } else {
             delete signalScope.values;
             if (item.samples.length) {
               signalScope.samples = item.samples;
               signalScope.sampleStep = item.sampleStep || 1;
+              delete signalScope.changePoints;
             } else {
               delete signalScope.samples;
               delete signalScope.sampleStep;
+              delete signalScope.changePoints;
             }
           }
         }
@@ -14534,8 +14797,11 @@ ${lines.join('\n')}`;
               cycle0: String(item.formula.cycle0 || ''),
               cycle05: String(item.formula.cycle05 || '')
             };
+            if (item.derivedCache) signalScope.derivedCache = item.derivedCache;
+            else delete signalScope.derivedCache;
           } else {
             delete signalScope.formula;
+            delete signalScope.derivedCache;
           }
         }
         if (replaceScopeMultiWaves) {
@@ -14544,8 +14810,10 @@ ${lines.join('\n')}`;
             signalScope.multiWave = item.multiWave.slice();
             delete signalScope.values;
             delete signalScope.samples;
+            delete signalScope.changePoints;
             delete signalScope.sampleStep;
             delete signalScope.formula;
+            delete signalScope.derivedCache;
           } else {
             delete signalScope.multiWave;
           }
@@ -14592,16 +14860,18 @@ ${lines.join('\n')}`;
     }
 
     const FORMULA_IMPORT_WORKER_URL = 'inc/visualwavedrom-formula-import-worker.js'
-      + '?v=20260814-formula-progress-v2';
+      + '?v=20260814-derived-pipeline-v1';
     let formulaImportRequestSequence = 0;
 
     function buildFormulaUpdatesOffThread(documentValue, importedUpdates, definitions, onProgress) {
       const formulaEngine = window.VisualWaveDromFormula;
-      const runFallback = () => Promise.resolve(formulaEngine.buildFormulaUpdates(
-        documentValue,
-        importedUpdates,
-        definitions,
-        {
+      const runFallback = () => {
+        const build = typeof formulaEngine.buildFormulaUpdatesAsync === 'function'
+          ? formulaEngine.buildFormulaUpdatesAsync.bind(formulaEngine)
+          : formulaEngine.buildFormulaUpdates.bind(formulaEngine);
+        return Promise.resolve(build(documentValue, importedUpdates, definitions, {
+          parallel: true,
+          workerUrl: 'inc/visualwavedrom-formula-eval-worker.js?v=20260814-derived-pipeline-v1',
           onFormulaStart: (progress) => {
             if (typeof onProgress === 'function') {
               onProgress(Object.assign({ phase: 'formula', stage: 'evaluating' }, progress));
@@ -14611,9 +14881,14 @@ ${lines.join('\n')}`;
             if (typeof onProgress === 'function') {
               onProgress(Object.assign({ phase: 'formula', stage: 'packaging' }, progress));
             }
+          },
+          onLayerStart: (progress) => {
+            if (typeof onProgress === 'function') {
+              onProgress(Object.assign({ phase: 'formula', stage: 'layer' }, progress));
+            }
           }
-        }
-      ));
+        }));
+      };
       if (typeof window.Worker !== 'function') return runFallback();
       return new Promise((resolve, reject) => {
         let worker;
@@ -14705,6 +14980,10 @@ ${lines.join('\n')}`;
         totalColumns: built.totalColumns,
         allUnknown: Array.isArray(built.allUnknown) ? built.allUnknown : [],
         sourceKinds: built.sourceKinds || {},
+        cacheStats: built.cacheStats || null,
+        layers: built.layers || [],
+        parallelWorkerCount: Number(built.parallelWorkerCount || 0),
+        evaluationDurationMs: Number(built.evaluationDurationMs || 0),
         errors: invalid.map((item) => ({ name: item.name, error: item.error }))
       });
       return Object.assign({}, payload, {
@@ -14712,6 +14991,8 @@ ${lines.join('\n')}`;
         formulaResult: {
           requestedCount: definitions.length,
           validCount: built.updates.length,
+          cacheStats: built.cacheStats || null,
+          parallelWorkerCount: Number(built.parallelWorkerCount || 0),
           invalid: invalid.map((item) => ({ name: item.name, error: item.error }))
         }
       });
@@ -17675,8 +17956,16 @@ ${lines.join('\n')}`;
       singleOpenButton.className = 'wave-document-open-single';
       singleOpenButton.title = '在新窗口中单独打开并编辑此波形图';
       singleOpenButton.textContent = '单独打开';
-      singleOpenButton.addEventListener('click', () => {
-        openWaveDocumentInSingleWindow(documentName);
+      singleOpenButton.addEventListener('click', async () => {
+        if (singleOpenButton.disabled) return;
+        singleOpenButton.disabled = true;
+        singleOpenButton.setAttribute('aria-busy', 'true');
+        try {
+          await openWaveDocumentInSingleWindow(documentName);
+        } finally {
+          singleOpenButton.disabled = false;
+          singleOpenButton.removeAttribute('aria-busy');
+        }
       });
       const deleteButton = document.createElement('button');
       deleteButton.type = 'button';
@@ -19497,7 +19786,7 @@ ${lines.join('\n')}`;
       return true;
     }
 
-    async function saveCurrentWaveLibrary() {
+    async function performCurrentWaveLibrarySave() {
       if (!waveLibraryServerMode) {
         try {
           flushPersistEditorJson();
@@ -19522,6 +19811,7 @@ ${lines.join('\n')}`;
         return false;
       }
       try {
+        flushPersistEditorJson();
         if (!saveCurrentWaveDocumentBeforeSwitch()) throw new Error('current document save failed');
         const pendingMarker = markWaveLibraryServerSavePending();
         const saved = await flushScheduledWaveLibraryServerSave(pendingMarker);
@@ -19531,6 +19821,46 @@ ${lines.join('\n')}`;
       } catch (_e) {
         setStatus(false, '波形库保存失败');
         return false;
+      }
+    }
+
+    async function saveCurrentWaveLibrary() {
+      if (waveLibrarySaveOperation) {
+        showWaveLibrarySaveModal();
+        return waveLibrarySaveOperation;
+      }
+      showWaveLibrarySaveModal();
+      const startedAt = Date.now();
+      const operation = (async () => {
+        let saved = false;
+        try {
+          saved = await performCurrentWaveLibrarySave();
+        } catch (error) {
+          setStatus(false, '波形库保存失败');
+          vwdDebugLog('persistence', {
+            phase: 'explicit-save-unhandled-error',
+            message: error && error.message ? error.message : String(error)
+          });
+        }
+        const remainingDisplayTime = 260 - (Date.now() - startedAt);
+        if (remainingDisplayTime > 0) {
+          await new Promise((resolve) => setTimeout(resolve, remainingDisplayTime));
+        }
+        finishWaveLibrarySaveModal(saved);
+        vwdDebugLog('persistence', {
+          phase: 'explicit-save-finished',
+          saved,
+          elapsedMs: Date.now() - startedAt,
+          libraryId: currentWaveLibraryId,
+          file: currentWaveLibraryFile
+        });
+        return saved;
+      })();
+      waveLibrarySaveOperation = operation;
+      try {
+        return await operation;
+      } finally {
+        if (waveLibrarySaveOperation === operation) waveLibrarySaveOperation = null;
       }
     }
 

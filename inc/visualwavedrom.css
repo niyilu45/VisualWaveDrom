@@ -1674,6 +1674,71 @@
       gap: 12px;
     }
 
+    .wave-library-save-dialog {
+      width: min(100%, 380px);
+    }
+
+    .wave-library-save-body {
+      align-items: stretch;
+      gap: 14px;
+      padding-block: 18px 20px;
+    }
+
+    .wave-library-save-body p {
+      margin: 0;
+      color: var(--text-muted);
+      font-size: 0.82rem;
+      line-height: 1.55;
+      text-align: center;
+      overflow-wrap: anywhere;
+    }
+
+    .wave-library-save-progress {
+      position: relative;
+      width: 100%;
+      height: 4px;
+      overflow: hidden;
+      border-radius: 2px;
+      background: var(--surface-2);
+    }
+
+    .wave-library-save-progress span {
+      position: absolute;
+      inset-block: 0;
+      left: -38%;
+      width: 38%;
+      border-radius: inherit;
+      background: var(--accent);
+      animation: wave-library-save-progress 1.05s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+    }
+
+    .wave-library-save-overlay[data-state="success"] .wave-library-save-progress span {
+      left: 0;
+      width: 100%;
+      background: var(--success, #22c55e);
+      animation: none;
+    }
+
+    .wave-library-save-overlay[data-state="error"] .wave-library-save-progress span {
+      left: 0;
+      width: 100%;
+      background: var(--danger, #ef4444);
+      animation: none;
+    }
+
+    @keyframes wave-library-save-progress {
+      from { transform: translateX(0); }
+      to { transform: translateX(365%); }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .wave-library-save-progress span {
+        left: 0;
+        width: 65%;
+        animation: none;
+      }
+    }
+
     .wave-copy-dialog {
       width: min(100%, 430px);
     }
@@ -3640,9 +3705,13 @@
 
     .app.text-edit-mode .wave-edge-interactive,
     .app.text-edit-mode .wave-edge-interactive *,
-    .app.text-edit-mode .wave-edge-hit-target,
-    .app.text-edit-mode .wave-edge-label-text {
+    .app.text-edit-mode .wave-edge-hit-target {
       pointer-events: none !important;
+    }
+
+    .app.text-edit-mode .wave-edge-label-text {
+      cursor: text;
+      pointer-events: all !important;
     }
 
     .app.text-edit-mode .wave-edge-interactive.wave-edge-label-editable,

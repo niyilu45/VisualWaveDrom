@@ -8,7 +8,7 @@
   <script src="inc/wavedrom.min.js?v=20260712"></script>
   <link rel="stylesheet" href="inc/codemirror.css?v=5.65.21">
   <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260811-wave-hover-v1">
-  <link rel="stylesheet" href="inc/visualwavedrom-scope.css?v=20260814-multi-wave-v1">
+  <link rel="stylesheet" href="inc/visualwavedrom-scope.css?v=20260814-scope-scroll-v1">
 </head>
 <body>
   <div class="app" id="app">
@@ -515,6 +515,18 @@
     </div>
   </div>
 
+  <div class="modal-overlay wave-library-save-overlay" id="wave-library-save-modal" hidden>
+    <div class="modal-dialog wave-library-save-dialog" role="dialog" aria-modal="true"
+      aria-labelledby="wave-library-save-title" aria-describedby="wave-library-save-message"
+      aria-busy="true" tabindex="-1">
+      <div class="modal-header" id="wave-library-save-title">正在保存波形库</div>
+      <div class="modal-body wave-library-save-body">
+        <div class="wave-library-save-progress" aria-hidden="true"><span></span></div>
+        <p id="wave-library-save-message" role="status" aria-live="polite">正在写入波形和目录数据，请稍候…</p>
+      </div>
+    </div>
+  </div>
+
   <!-- Load tag confirm modal -->
   <div class="modal-overlay" id="tag-load-modal" hidden>
     <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="tag-load-modal-title">
@@ -769,10 +781,10 @@
     <script src="inc/visualwavedrom-vim.js?v=20260724-vim-insert-delete-v1"></script>
     <script src="inc/visualwavedrom-bigdata.js?v=20260731-bigdata-fix-v1"></script>
     <script src="inc/visualwavedrom-json-bigdata.js?v=20260731-bigdata-fix-v1"></script>
-    <script src="inc/visualwavedrom-formula.js?v=20260814-formula-performance-v1"></script>
-    <script src="inc/visualwavedrom-scope-worker.js?v=20260814-multi-wave-v1"></script>
-    <script src="inc/visualwavedrom-scope.js?v=20260814-multi-wave-v1"></script>
+    <script src="inc/visualwavedrom-formula.js?v=20260814-derived-pipeline-v1"></script>
+    <script src="inc/visualwavedrom-scope-worker.js?v=20260814-derived-pipeline-v1"></script>
+    <script src="inc/visualwavedrom-scope.js?v=20260814-derived-pipeline-v1"></script>
     <script src="inc/visualwavedrom-import-collection.js?v=20260814-multi-wave-v3"></script>
-    <script src="inc/visualwavedrom-app.js?v=20260814-multi-wave-v2"></script>
+    <script src="inc/visualwavedrom-app.js?v=20260814-derived-pipeline-v1"></script>
 </body>
 </html>

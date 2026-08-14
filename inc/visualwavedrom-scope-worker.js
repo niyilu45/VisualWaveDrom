@@ -4,7 +4,7 @@
 if (typeof document === 'undefined' && typeof global.importScripts === 'function'
     && !global.VisualWaveDromFormula) {
   try {
-    global.importScripts('visualwavedrom-formula.js?v=20260814-formula-performance-v1');
+    global.importScripts('visualwavedrom-formula.js?v=20260814-derived-pipeline-v1');
   } catch (_error) { /* surfaced when a formula is configured */ }
 }
 
@@ -142,6 +142,19 @@ function getScopeValues(source, row, rowIndex) {
   return values;
 }
 
+function getScopeChangePoints(source, row, rowIndex) {
+  if (!FormulaEngine || typeof FormulaEngine.normalizeChangePoints !== 'function') return null;
+  const signal = row.source || {};
+  const localScope = signal.scope && typeof signal.scope === 'object' ? signal.scope : null;
+  const globalScope = getScopeSignalConfig(source, row, rowIndex);
+  const candidate = localScope && localScope.changePoints
+    ? localScope.changePoints
+    : (signal.changePoints || (globalScope && globalScope.changePoints));
+  if (!candidate) return null;
+  const normalized = FormulaEngine.normalizeChangePoints(candidate);
+  return normalized.totalSamples > 0 ? normalized : null;
+}
+
 function normalizeSampleStep(value, fallback) {
   const requested = finiteNumber(value);
   if (requested == null || requested <= 0) return fallback || 1;
@@ -162,7 +175,12 @@ function sampleColumn(row, sampleIndex) {
 }
 
 function sampledColumnCount(row) {
-  return row && row.samples ? row.samples.length * rowSampleStep(row) : 0;
+  if (!row) return 0;
+  if (row.samples) return row.samples.length * rowSampleStep(row);
+  if (row.changePoints) {
+    return Number(row.changePoints.totalSamples || 0) * rowSampleStep(row);
+  }
+  return 0;
 }
 
 function normalizeAnalogFormat(candidate, fallbackType) {
@@ -738,6 +756,33 @@ function segmentsFromScopeValues(values, sampleStep) {
   return { segments, transitions };
 }
 
+function segmentsFromChangePoints(value) {
+  const changePoints = FormulaEngine.normalizeChangePoints(value);
+  const step = normalizeSampleStep(changePoints.sampleStep, 0.5);
+  const segments = [];
+  const transitions = [];
+  for (let point = 0; point < changePoints.indices.length; point += 1) {
+    const start = changePoints.indices[point] * step;
+    const endIndex = point + 1 < changePoints.indices.length
+      ? changePoints.indices[point + 1]
+      : changePoints.totalSamples;
+    const end = Math.max(start + step, endIndex * step);
+    const display = scopeValueDisplay(changePoints.values[point]);
+    transitions.push(start);
+    pushSegment(segments, {
+      start,
+      end,
+      kind: display.kind,
+      state: display.state,
+      value: display.value
+    });
+  }
+  if (!segments.length) {
+    segments.push({ start: 0, end: 1, kind: 'digital', state: 'x', value: 'x' });
+  }
+  return { segments, transitions };
+}
+
 function numericSamplesFromScopeValues(values, format) {
   if (!Array.isArray(values)) return null;
   const samples = new Float64Array(values.length);
@@ -810,10 +855,10 @@ function analogRange(samples) {
 
 const BASE_ROW_CACHE_FIELDS = [
   'mode', 'detectedMode', 'wave', 'segments', 'transitions', 'clockEdges',
-  'clockRanges', 'gaps', 'samples', 'scopeValues', 'sampleStep',
+  'clockRanges', 'gaps', 'samples', 'scopeValues', 'changePoints', 'sampleStep',
   'initialTransition', 'analogLevels', 'range', 'busFormat', 'valueTable',
   'analogFormat', 'rowHeight', 'unit', 'sampleTransitionCache',
-  'analogCache', 'conditionTransitionCache'
+  'analogCache', 'conditionTransitionCache', 'sourceVersion'
 ];
 
 function cacheBaseRow(row) {
@@ -846,6 +891,9 @@ function baseRowColumnCount(row) {
     row.wave ? row.wave.length : 0,
     row.samples ? row.samples.length * row.sampleStep : 0,
     row.scopeValues ? row.scopeValues.length * row.sampleStep : 0,
+    row.changePoints
+      ? Number(row.changePoints.totalSamples || 0) * row.sampleStep
+      : 0,
     1
   );
 }
@@ -943,7 +991,7 @@ function createFormulaReusePlan(rows, analysis, totalColumns, previousSession) {
 
 const FORMULA_DERIVED_ROW_FIELDS = [
   'segments', 'transitions', 'clockEdges', 'clockRanges', 'gaps', 'samples',
-  'sampleStep', 'initialTransition', 'analogLevels', 'range',
+  'scopeValues', 'changePoints', 'sampleStep', 'initialTransition', 'analogLevels', 'range',
   'sampleTransitionCache', 'analogCache', 'conditionTransitionCache'
 ];
 
@@ -1020,7 +1068,7 @@ function configureMultiWaveRows(rows, transient, totalColumns) {
   });
 }
 
-function createSession(content, transientState, previousSession) {
+async function createSession(content, transientState, previousSession) {
   const originalContent = String(content || '{}');
   const reusableSession = previousSession
     && previousSession.originalContent === originalContent ? previousSession : null;
@@ -1094,15 +1142,18 @@ function createSession(content, transientState, previousSession) {
     }
     let parsedWave = parseWaveSegments(row.source);
     const scopeValues = getScopeValues(source, row, sourceIndex);
+    const changePoints = getScopeChangePoints(source, row, sourceIndex);
     const localScope = row.source.scope && typeof row.source.scope === 'object'
       ? row.source.scope
       : null;
     const sampleStep = normalizeSampleStep(
-      localScope && localScope.sampleStep,
+      changePoints ? changePoints.sampleStep : (localScope && localScope.sampleStep),
       1
     );
-    if (scopeValues) {
-      const valueSegments = segmentsFromScopeValues(scopeValues, sampleStep);
+    if (scopeValues || changePoints) {
+      const valueSegments = changePoints
+        ? segmentsFromChangePoints(changePoints)
+        : segmentsFromScopeValues(scopeValues, sampleStep);
       parsedWave = Object.assign({}, parsedWave, valueSegments, {
         clockEdges: [],
         clockRanges: [],
@@ -1125,6 +1176,7 @@ function createSession(content, transientState, previousSession) {
       parsedWave.wave.length,
       analogSamples ? analogSamples.length * sampleStep : 0,
       scopeValues ? scopeValues.length * sampleStep : 0,
+      changePoints ? changePoints.totalSamples * sampleStep : 0,
       1
     );
     totalColumns = Math.max(totalColumns, rowColumns);
@@ -1147,6 +1199,7 @@ function createSession(content, transientState, previousSession) {
       gaps: parsedWave.gaps,
       samples: analogSamples,
       scopeValues,
+      changePoints,
       sampleStep,
       initialTransition: !parsedWave.wave.length
         || parsedWave.transitions.some((column) => Math.abs(column) < 1e-9),
@@ -1160,6 +1213,7 @@ function createSession(content, transientState, previousSession) {
       valueTable: getValueTable(source, row, sourceIndex, parsedWave.valueTable),
       analogFormat,
       analogCache: new Map(),
+      sourceVersion: '',
       rowHeight: normalizeRowHeight(localScope && localScope.rowHeight),
       unit: String(
         (localScope && localScope.unit)
@@ -1183,7 +1237,138 @@ function createSession(content, transientState, previousSession) {
     formulaDefinitions.push({ id: row.rowId, name: row.name, formula });
   });
   let formulaAnalysis = null;
+  let formulaEvaluation = null;
   if (formulaDefinitions.length) {
+    if (!FormulaEngine) throw new Error('Scope formula engine is unavailable');
+    const signalNames = rows.map((row) => row.name);
+    formulaAnalysis = FormulaEngine.analyzeDefinitions(formulaDefinitions, signalNames);
+    const sourceRows = new Map();
+    const sourceVersions = Object.create(null);
+    rows.forEach((row) => {
+      if (sourceRows.has(row.name)) return;
+      sourceRows.set(row.name, row);
+    });
+    const halfCount = Math.max(2, Math.ceil(totalColumns) * 2);
+    const requiredSources = new Set();
+    formulaAnalysis.items.forEach((item) => {
+      if (!item.valid) return;
+      const formulaDependencies = new Set(item.dependencies || []);
+      item.references.forEach((name) => {
+        if (!formulaDependencies.has(name)) requiredSources.add(name);
+      });
+    });
+    const sourceVectors = Object.create(null);
+    requiredSources.forEach((name) => {
+      const sourceRow = sourceRows.get(name);
+      if (!sourceRow) return;
+      if (!sourceRow.sourceVersion) {
+        sourceRow.sourceVersion = FormulaEngine
+          && typeof FormulaEngine.sourceVersionForSignal === 'function'
+          ? FormulaEngine.sourceVersionForSignal(sourceRow.source)
+          : String(sourceRow.name || '');
+        const cachedBase = baseRowsById.get(String(sourceRow.rowId));
+        if (cachedBase) cachedBase.sourceVersion = sourceRow.sourceVersion;
+      }
+      sourceVersions[name] = String(sourceRow.sourceVersion || '');
+      const values = new Array(halfCount);
+      for (let halfIndex = 0; halfIndex < halfCount; halfIndex += 1) {
+        const value = sourceValueAtHalfIndex(sourceRow, halfIndex);
+        values[halfIndex] = FormulaEngine.isUnknown(value) ? 'x' : value;
+      }
+      sourceVectors[name] = values;
+    });
+    const cacheEntries = Object.create(null);
+    rows.forEach((row) => {
+      const localScope = row.source && row.source.scope
+        && typeof row.source.scope === 'object' ? row.source.scope : null;
+      if (!localScope || !localScope.derivedCache) return;
+      const restored = FormulaEngine.restoreDerivedCacheEntry(localScope.derivedCache, {
+        name: row.name,
+        values: row.scopeValues,
+        changePoints: row.changePoints,
+        knownCount: Number(localScope.derivedCache.knownCount || 0)
+      });
+      if (restored) cacheEntries[row.name] = restored;
+    });
+    const evaluationOptions = {
+      analysis: formulaAnalysis,
+      sources: sourceVectors,
+      sourceVersions,
+      cacheEntries,
+      totalColumns,
+      sampleStep: 0.5,
+      parallel: true,
+      workerUrl: 'visualwavedrom-formula-eval-worker.js?v=20260814-derived-pipeline-v1'
+    };
+    formulaEvaluation = typeof FormulaEngine.evaluateDefinitionsLayeredAsync === 'function'
+      ? await FormulaEngine.evaluateDefinitionsLayeredAsync(
+        formulaDefinitions,
+        signalNames,
+        evaluationOptions
+      )
+      : FormulaEngine.evaluateDerivedDefinitions(
+        formulaDefinitions,
+        signalNames,
+        evaluationOptions
+      );
+    const analysisById = new Map(formulaAnalysis.items.map((item) => [item.id, item]));
+    rows.forEach((row) => {
+      const item = analysisById.get(row.rowId);
+      if (!item) return;
+      const entry = formulaEvaluation.entries && formulaEvaluation.entries[row.name];
+      const knownCount = Number(formulaEvaluation.knownCounts[row.name] || 0);
+      row.formula = {
+        enabled: true,
+        valid: item.valid,
+        error: item.error,
+        references: item.references,
+        dependencies: item.dependencies,
+        libraries: item.libraries,
+        cycle0: item.formula.cycle0,
+        cycle05: item.formula.cycle05,
+        preview: entry && Array.isArray(entry.values)
+          ? entry.values.slice(0, 12)
+          : (entry && entry.changePoints ? entry.changePoints.values.slice(0, 12) : []),
+        evaluationMode: entry ? entry.evaluationMode : 'none',
+        valueSource: entry && entry.cacheHit ? 'derived-cache' : 'computed',
+        computedKnownCount: knownCount,
+        cachedKnownCount: entry && entry.cacheHit ? knownCount : 0,
+        outputKnownCount: knownCount,
+        cacheVersion: entry ? entry.version : '',
+        dependencyVersions: entry ? entry.dependencyVersions : {}
+      };
+      if (!item.valid || !entry) return;
+      row.sampleStep = Number(entry.sampleStep || 0.5);
+      let generatedSegments;
+      if (row.mode === 'analog') {
+        const values = Array.isArray(entry.values)
+          ? entry.values
+          : FormulaEngine.expandChangePoints(entry.changePoints, halfCount);
+        row.scopeValues = values;
+        row.changePoints = null;
+        generatedSegments = segmentsFromScopeValues(values, row.sampleStep);
+        row.samples = numericSamplesFromScopeValues(values, row.analogFormat);
+      } else {
+        row.scopeValues = null;
+        row.changePoints = entry.changePoints;
+        generatedSegments = segmentsFromChangePoints(entry.changePoints);
+        row.samples = null;
+      }
+      row.segments = generatedSegments.segments;
+      row.transitions = generatedSegments.transitions;
+      row.clockEdges = [];
+      row.clockRanges = [];
+      row.gaps = [];
+      row.analogLevels = row.samples ? buildAnalogLevels(row.samples) : [];
+      row.range = row.samples ? analogRange(row.samples) : null;
+      row.sampleTransitionCache = new Map();
+      row.conditionTransitionCache = new Map();
+      if (row.transitions && row.transitions.length) {
+        row.sampleTransitionCache.set(row.samples ? 'numeric' : 'digital', row.transitions);
+      }
+    });
+  }
+  if (false && formulaDefinitions.length) {
     if (!FormulaEngine) throw new Error('示波器公式模块未加载');
     const signalNames = rows.map((row) => row.name);
     formulaAnalysis = FormulaEngine.analyzeDefinitions(formulaDefinitions, signalNames);
@@ -1216,6 +1401,7 @@ function createSession(content, transientState, previousSession) {
       reuseOutputs: reusePlan.reuseOutputs,
       reuseKnownCounts: reusePlan.reuseKnownCounts,
       recomputeNames: reusePlan.recomputeNames,
+      sourceIsConsumerIndependent: true,
       resolveSource: (name, halfIndex) => {
         const sourceRow = sourceRows.get(name);
         return sourceRow ? sourceValueAtHalfIndex(sourceRow, halfIndex) : FormulaEngine.UNKNOWN;
@@ -1228,6 +1414,8 @@ function createSession(content, transientState, previousSession) {
       }
     });
     const reusedNames = new Set(evaluated.reusedNames || []);
+    const vectorizedNames = new Set(evaluated.vectorizedNames || []);
+    const scalarNames = new Set(evaluated.scalarNames || []);
     const analysisById = new Map(formulaAnalysis.items.map((item) => [item.id, item]));
     rows.forEach((row) => {
       const item = analysisById.get(row.rowId);
@@ -1241,7 +1429,10 @@ function createSession(content, transientState, previousSession) {
         libraries: item.libraries,
         cycle0: item.formula.cycle0,
         cycle05: item.formula.cycle05,
-        preview: []
+        preview: [],
+        evaluationMode: reusedNames.has(row.name)
+          ? 'reused'
+          : (vectorizedNames.has(row.name) ? 'vector' : (scalarNames.has(row.name) ? 'scalar' : 'none'))
       };
       const computedValues = evaluated.outputs[row.name];
       if (!item.valid || !Array.isArray(computedValues)) return;
@@ -1300,6 +1491,12 @@ function createSession(content, transientState, previousSession) {
     originalContent,
     transient,
     formulaAnalysis,
+    formulaStats: formulaEvaluation ? {
+      cacheStats: formulaEvaluation.cacheStats || null,
+      layers: formulaEvaluation.layers || [],
+      parallelWorkerCount: Number(formulaEvaluation.parallelWorkerCount || 0),
+      evaluationDurationMs: Number(formulaEvaluation.evaluationDurationMs || 0)
+    } : null,
     baseRowsById,
     rows,
     totalColumns,
@@ -1321,6 +1518,14 @@ function sourceValueAtHalfIndex(row, halfIndex) {
     return index >= 0 && index < row.scopeValues.length
       ? row.scopeValues[index]
       : (FormulaEngine ? FormulaEngine.UNKNOWN : null);
+  }
+  if (row.changePoints && FormulaEngine
+      && typeof FormulaEngine.changePointValueAt === 'function') {
+    const sampleIndex = Math.floor((column + 1e-9) / rowSampleStep(row));
+    const value = FormulaEngine.changePointValueAt(row.changePoints, sampleIndex);
+    return value == null || String(value).toLowerCase() === 'x'
+      ? FormulaEngine.UNKNOWN
+      : value;
   }
   if (row.samples && row.samples.length) {
     const index = sampleIndexForColumn(row, column);
@@ -3174,6 +3379,7 @@ function prepareResponse() {
     totalColumns: activeSession.totalColumns,
     samplePeriod: activeSession.samplePeriod,
     timeUnit: activeSession.timeUnit,
+    formulaStats: activeSession.formulaStats || null,
     rows: activeSession.rows.map((row) => ({
       index: row.index,
       rowId: row.rowId,
@@ -3195,24 +3401,26 @@ function prepareResponse() {
       cursorStep: rowCursorStep(row),
       sampleCount: row.multiWave
         ? Number(row.multiWaveSampleCount || 0)
-        : (Array.isArray(row.scopeValues)
+        : (row.changePoints
+          ? Number(row.changePoints.totalSamples || 0)
+          : (Array.isArray(row.scopeValues)
         ? row.scopeValues.length
-        : (row.samples ? row.samples.length : row.wave.length))
+        : (row.samples ? row.samples.length : row.wave.length)))
     }))
   };
 }
 
-function handleRequest(message) {
+async function handleRequest(message) {
   const request = message || {};
   const requestId = request.requestId;
   try {
     let result;
     if (request.type === 'prepare') {
-      activeSession = createSession(request.content, request.transient);
+      activeSession = await createSession(request.content, request.transient);
       result = prepareResponse();
     } else if (request.type === 'formulas') {
       if (!activeSession) throw new Error('Scope session has not been prepared');
-      activeSession = createSession(
+      activeSession = await createSession(
         activeSession.originalContent,
         request.transient,
         activeSession
@@ -3251,7 +3459,7 @@ function handleRequest(message) {
 
 if (typeof document === 'undefined' && global && typeof global.postMessage === 'function') {
   global.addEventListener('message', (event) => {
-    global.postMessage(handleRequest(event.data || {}));
+    void handleRequest(event.data || {}).then((response) => global.postMessage(response));
   });
 } else if (global) {
   global.VisualWaveDromScopeWorkerCore = {

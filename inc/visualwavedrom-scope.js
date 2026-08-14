@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260814-multi-wave-v1';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260814-derived-pipeline-v1';
   const FormulaEngine = global.VisualWaveDromFormula || null;
   const DEFAULT_ROW_HEIGHT = 42;
   const DEFAULT_MULTI_WAVE_ROW_HEIGHT = 68;
@@ -506,9 +506,10 @@
       }
       return new Promise((resolve, reject) => {
         setTimeout(() => {
-          const response = core.handleRequest(request);
-          if (response.ok) resolve(response.result);
-          else reject(new Error(response.error || 'Scope worker failed'));
+          Promise.resolve(core.handleRequest(request)).then((response) => {
+            if (response.ok) resolve(response.result);
+            else reject(new Error(response.error || 'Scope worker failed'));
+          }, reject);
         }, 0);
       });
     }
@@ -572,7 +573,12 @@
       this.signalRowDragAutoScrollFrame = 0;
       this.suppressSignalRowClickUntil = 0;
       this.windowRequestSequence = 0;
+      this.windowSessionRevision = 0;
+      this.windowBuildKey = '';
+      this.windowBuildPromise = null;
       this.lastSynchronizedScrollTop = Number.NaN;
+      this.verticalScrollFrame = 0;
+      this.pendingVerticalScrollOptions = null;
       this.buildSequence = 0;
       this.drag = null;
       this.overviewDrag = null;
@@ -654,6 +660,7 @@
         content: this.document.content,
         transient: clone(this.transientFormulaState)
       });
+      this.resetWindowCache();
       this.adoptPreparedFormulaDefinitions();
       this.adoptPreparedMultiWaveDefinitions();
       this.logFormulaDiagnostics('prepare');
@@ -1462,7 +1469,7 @@
         this.closeDisplayPopover();
         this.closeStylePopover();
         this.closeRowMovePopover();
-        this.syncVerticalScroll();
+        this.scheduleVerticalScrollSync();
       }, { passive: true });
       this.signalScroll.addEventListener('wheel', (event) => {
         if (event.ctrlKey || event.metaKey || event.shiftKey) return;
@@ -2063,12 +2070,17 @@
         references: Array.isArray(row.formula.references)
           ? row.formula.references.slice() : [],
         valueSource: String(row.formula.valueSource || ''),
+        cacheVersion: String(row.formula.cacheVersion || ''),
         computedKnownCount: Number(row.formula.computedKnownCount || 0),
         cachedKnownCount: Number(row.formula.cachedKnownCount || 0),
         preview: Array.isArray(row.formula.preview) ? row.formula.preview.slice(0, 6) : []
       }));
       if (!formulas.length) return;
-      this.log('scope-formula', { phase: phase || 'diagnostics', formulas });
+      this.log('scope-formula', {
+        phase: phase || 'diagnostics',
+        formulas,
+        pipeline: this.meta.formulaStats || null
+      });
     }
 
     scopeFormulaDefinitions(overrides) {
@@ -3134,6 +3146,7 @@
         });
         if (sequence !== this.formulaRefreshSequence) return;
         this.meta = nextMeta;
+        this.resetWindowCache();
         this.logFormulaDiagnostics('refresh');
         this.modes = {};
         this.busFormats = {};
@@ -3877,24 +3890,50 @@
       this.plotCanvas.style.transform = 'translateY(' + this.plotViewport.scrollTop + 'px)';
     }
 
+    resetWindowCache() {
+      this.windowSessionRevision += 1;
+      this.windowRequestSequence += 1;
+      this.windowBuildKey = '';
+      this.windowBuildPromise = null;
+      this.windowData = null;
+      this.rowStart = 0;
+      this.rowEnd = 0;
+    }
+
+    scheduleVerticalScrollSync(options) {
+      this.pendingVerticalScrollOptions = Object.assign(
+        {},
+        this.pendingVerticalScrollOptions || {},
+        options || {}
+      );
+      if (this.verticalScrollFrame) return;
+      this.verticalScrollFrame = global.requestAnimationFrame(() => {
+        this.verticalScrollFrame = 0;
+        const settings = this.pendingVerticalScrollOptions || {};
+        this.pendingVerticalScrollOptions = null;
+        this.syncVerticalScroll(settings);
+      });
+    }
+
     syncVerticalScroll(options) {
       if (!this.plotViewport || !this.signalScroll) return;
       const settings = options || {};
       const scrollTop = Math.max(0, this.plotViewport.scrollTop);
       const changed = !Number.isFinite(this.lastSynchronizedScrollTop)
         || Math.abs(scrollTop - this.lastSynchronizedScrollTop) > 0.01;
-      this.signalScroll.scrollTop = scrollTop;
+      if (Math.abs(this.signalScroll.scrollTop - scrollTop) > 0.01) {
+        this.signalScroll.scrollTop = scrollTop;
+      }
       this.positionPlotCanvas();
       if (!changed && !settings.force) return;
       this.lastSynchronizedScrollTop = scrollTop;
       if (settings.redraw !== false) this.draw({ plotOnly: true });
-      if (settings.requestWindow !== false) this.scheduleWindowRequest();
     }
 
     setVerticalScrollTop(scrollTop, options) {
       if (!this.plotViewport) return;
       this.plotViewport.scrollTop = Math.max(0, Number(scrollTop) || 0);
-      this.syncVerticalScroll(options);
+      this.scheduleVerticalScrollSync(options);
     }
 
     visibleRows() {
@@ -3981,30 +4020,153 @@
       });
     }
 
+    windowRequestConfig() {
+      return {
+        start: this.viewStart,
+        end: this.viewEnd,
+        width: Math.max(1, Math.floor(this.plotViewport.clientWidth)),
+        rowCount: this.meta.rows.length,
+        modes: Object.assign({}, this.modes),
+        busFormats: clone(this.busFormats),
+        analogFormats: clone(this.analogFormats)
+      };
+    }
+
+    windowRequestKey(config) {
+      return JSON.stringify([
+        this.windowSessionRevision,
+        Math.round(config.start * 10000000) / 10000000,
+        Math.round(config.end * 10000000) / 10000000,
+        config.width,
+        config.rowCount,
+        config.modes,
+        config.busFormats,
+        config.analogFormats
+      ]);
+    }
+
+    windowPayload(config, rowStart, rowEnd) {
+      return {
+        start: config.start,
+        end: config.end,
+        width: config.width,
+        rowStart,
+        rowEnd,
+        modes: config.modes,
+        busFormats: config.busFormats,
+        analogFormats: config.analogFormats
+      };
+    }
+
+    mergeWindowResult(cache, result) {
+      (Array.isArray(result && result.rows) ? result.rows : []).forEach((row) => {
+        if (!row || row.index < 0 || row.index >= cache.rows.length) return;
+        if (!cache.rows[row.index]) cache.computedRowCount += 1;
+        cache.rows[row.index] = row;
+      });
+    }
+
+    missingWindowRowRange(cache, start, end, maximumRows) {
+      const safeStart = clamp(Math.floor(Number(start) || 0), 0, cache.rows.length);
+      const safeEnd = clamp(Math.ceil(Number(end) || 0), safeStart, cache.rows.length);
+      const limit = Math.max(1, Math.floor(Number(maximumRows) || 1));
+      for (let index = safeStart; index < safeEnd; index += 1) {
+        if (cache.rows[index]) continue;
+        let rangeEnd = index + 1;
+        while (rangeEnd < safeEnd
+            && rangeEnd - index < limit
+            && !cache.rows[rangeEnd]) {
+          rangeEnd += 1;
+        }
+        return { start: index, end: rangeEnd };
+      }
+      return null;
+    }
+
+    async buildWindowRows(config, key, sequence) {
+      const initialVisible = this.visibleRows();
+      const cache = {
+        start: config.start,
+        end: config.end,
+        width: config.width,
+        rowStart: 0,
+        rowEnd: config.rowCount,
+        rows: new Array(config.rowCount),
+        computedRowCount: 0,
+        complete: config.rowCount === 0,
+        viewportKey: key
+      };
+      this.windowData = cache;
+      this.rowStart = 0;
+      this.rowEnd = config.rowCount;
+      this.draw({ plotOnly: true });
+      if (!config.rowCount) return;
+
+      const initialResult = await this.worker.call(
+        'window',
+        this.windowPayload(config, initialVisible.start, initialVisible.end)
+      );
+      if (sequence !== this.windowRequestSequence || key !== this.windowBuildKey) return;
+      this.mergeWindowResult(cache, initialResult);
+      this.draw({ plotOnly: true });
+      this.log('scope-window', {
+        phase: 'visible-ready',
+        rowStart: initialVisible.start,
+        rowEnd: initialVisible.end,
+        totalRows: config.rowCount
+      });
+
+      const visibleCount = Math.max(1, initialVisible.end - initialVisible.start);
+      const chunkSize = clamp(visibleCount, 2, 8);
+      while (sequence === this.windowRequestSequence && key === this.windowBuildKey) {
+        const currentVisible = this.visibleRows();
+        let range = this.missingWindowRowRange(
+          cache,
+          currentVisible.start,
+          currentVisible.end,
+          chunkSize
+        );
+        if (!range) range = this.missingWindowRowRange(cache, 0, config.rowCount, chunkSize);
+        if (!range) break;
+        const result = await this.worker.call(
+          'window',
+          this.windowPayload(config, range.start, range.end)
+        );
+        if (sequence !== this.windowRequestSequence || key !== this.windowBuildKey) return;
+        this.mergeWindowResult(cache, result);
+        const latestVisible = this.visibleRows();
+        if (range.start < latestVisible.end && range.end > latestVisible.start) {
+          this.draw({ plotOnly: true });
+        }
+      }
+      if (sequence !== this.windowRequestSequence || key !== this.windowBuildKey) return;
+      cache.complete = cache.computedRowCount >= config.rowCount;
+      this.log('scope-window', {
+        phase: 'all-rows-ready',
+        computedRows: cache.computedRowCount,
+        totalRows: config.rowCount
+      });
+    }
+
     async requestWindow() {
       if (!this.meta || !this.plotViewport.clientWidth) return;
-      const visible = this.visibleRows();
+      const config = this.windowRequestConfig();
+      const key = this.windowRequestKey(config);
+      if (this.windowData && this.windowData.viewportKey === key && this.windowData.complete) return;
+      if (this.windowBuildKey === key && this.windowBuildPromise) return this.windowBuildPromise;
+
       const sequence = ++this.windowRequestSequence;
+      this.windowBuildKey = key;
+      const promise = this.buildWindowRows(config, key, sequence);
+      this.windowBuildPromise = promise;
       try {
-        const result = await this.worker.call('window', {
-          start: this.viewStart,
-          end: this.viewEnd,
-          width: this.plotViewport.clientWidth,
-          rowStart: visible.start,
-          rowEnd: visible.end,
-          modes: this.modes,
-          busFormats: this.busFormats,
-          analogFormats: this.analogFormats
-        });
-        if (sequence !== this.windowRequestSequence) return;
-        this.rowStart = result.rowStart;
-        this.rowEnd = result.rowEnd;
-        this.windowData = result;
-        this.draw();
+        await promise;
       } catch (error) {
         if (sequence !== this.windowRequestSequence) return;
         this.setStatus(error.message || String(error), true);
         this.log('scope-view', { phase: 'window-error', message: error.message || String(error) });
+      } finally {
+        if (this.windowBuildPromise === promise) this.windowBuildPromise = null;
       }
     }
 
@@ -4243,11 +4405,12 @@
         mergedDisplayBuckets(data.items).forEach((bucket) => {
           const x1 = this.xForColumn(bucket.start, width);
           const x2 = this.xForColumn(bucket.end, width);
+          const bucketWidth = Math.max(0, x2 - x1);
           if (bucket.bus) {
             context.fillStyle = 'rgba(0, 151, 167, 0.12)';
-            context.fillRect(x1, yTop + 3, Math.max(1, x2 - x1), yBottom - yTop - 6);
+            context.fillRect(x1, yTop + 3, Math.max(1, bucketWidth), yBottom - yTop - 6);
             context.strokeStyle = color;
-            context.strokeRect(x1, yTop + 3, Math.max(1, x2 - x1), yBottom - yTop - 6);
+            context.strokeRect(x1, yTop + 3, Math.max(1, bucketWidth), yBottom - yTop - 6);
             if (bucket.binary) {
               const highY = yTop + 5;
               const lowY = yBottom - 5;
@@ -4285,6 +4448,18 @@
           }
           if (bucket.unknown) {
             this.drawUnknownDigitalSegment(context, x1, x2, yTop, yBottom, 1, true);
+          }
+          const busLabel = String(bucket.value == null ? '' : bucket.value);
+          if (bucket.bus && !bucket.unknown && busLabel && busLabel !== '*' && bucketWidth > 38) {
+            context.fillStyle = '#165d68';
+            context.font = '11px "Segoe UI", sans-serif';
+            context.textAlign = 'center';
+            context.textBaseline = 'middle';
+            context.fillText(
+              compactBusLabel(busLabel, bucketWidth),
+              (x1 + x2) / 2,
+              (yTop + yBottom) / 2
+            );
           }
           if (!bucket.bus) {
             const highY = yTop + 5;
@@ -5028,8 +5203,15 @@
       const height = resized.height;
       this.drawGrid(context, width, height);
       const scrollTop = this.plotViewport.scrollTop;
-      if (this.windowData) {
-        this.windowData.rows.forEach((rowResult) => {
+      const visible = this.visibleRows();
+      const visibleWindowRows = this.windowData
+        ? this.windowData.rows.slice(
+          Math.max(0, visible.start - this.windowData.rowStart),
+          Math.max(0, visible.end - this.windowData.rowStart)
+        )
+        : [];
+      if (visibleWindowRows.length) {
+        visibleWindowRows.forEach((rowResult) => {
           const rowIndex = rowResult.index;
           const rowHeight = this.rowHeight(rowIndex);
           if (rowHeight <= 0) return;
@@ -5040,8 +5222,8 @@
         });
       }
       this.drawGridLines(context, width, height);
-      if (this.windowData) {
-        this.windowData.rows.forEach((rowResult) => {
+      if (visibleWindowRows.length) {
+        visibleWindowRows.forEach((rowResult) => {
           const rowIndex = rowResult.index;
           const rowHeight = this.rowHeight(rowIndex);
           if (rowHeight <= 0) return;
@@ -6819,6 +7001,7 @@
         content: saved.content,
         transient: clone(this.transientFormulaState)
       });
+      this.resetWindowCache();
       this.adoptPreparedFormulaDefinitions();
       this.adoptPreparedMultiWaveDefinitions();
       this.logFormulaDiagnostics('reload');

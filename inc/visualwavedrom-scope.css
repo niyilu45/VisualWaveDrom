@@ -354,6 +354,9 @@ body.scope-wave-view > #vim-help-modal {
 }
 
 .scope-signal-row {
+  contain: layout paint style;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 42px;
   position: relative;
   display: grid;
   grid-template-columns: 16px 12px minmax(0, 1fr) 68px;
