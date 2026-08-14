@@ -141,6 +141,7 @@
     let presetNavigationHighlightLine = null;
     let presetNavigationHighlightTimer = 0;
     let formulaDiagnostics = new Map();
+    let multiWaveDiagnostics = new Map();
     const variableValues = new Map();
     const singlePreviewStates = new Map();
 
@@ -486,6 +487,16 @@
           label: entry.message || '公式有误，本项将跳过'
         };
       }
+      if (entry.status === 'multi-wave-ready') {
+        return { state: 'matched', symbol: '✓', label: '多波形配置有效，可以导入' };
+      }
+      if (entry.status === 'multi-wave-error') {
+        return {
+          state: 'duplicate',
+          symbol: '×',
+          label: entry.message || '多波形配置有误，本项将跳过'
+        };
+      }
       if (entry.importError) {
         return {
           state: 'duplicate',
@@ -536,6 +547,19 @@
           outputNames: diagnostic.name ? [diagnostic.name] : [],
           matches: [],
           status: diagnostic.valid ? 'formula-ready' : 'formula-error',
+          message: diagnostic.error || ''
+        }));
+      });
+      multiWaveDiagnostics.forEach((diagnostic, entryIndex) => {
+        const existing = indexed.get(entryIndex) || {};
+        indexed.set(entryIndex, Object.assign({}, existing, {
+          index: entryIndex,
+          name: diagnostic.name,
+          importMode: 'multi-wave',
+          multiWave: diagnostic.sources,
+          outputNames: diagnostic.name ? [diagnostic.name] : [],
+          matches: [],
+          status: diagnostic.valid ? 'multi-wave-ready' : 'multi-wave-error',
           message: diagnostic.error || ''
         }));
       });
@@ -1231,6 +1255,26 @@
       return normalized;
     }
 
+    function normalizeMultiWaveConfig(value, fieldPath) {
+      if (!Array.isArray(value)) {
+        throw validationError(fieldPath + ' 必须是信号名列表', fieldPath);
+      }
+      const seen = new Set();
+      return value.map((name, index) => {
+        if (typeof name !== 'string' || !name.trim()) {
+          throw validationError(
+            fieldPath + '[' + index + '] 必须是非空信号名',
+            fieldPath + '[' + index + ']'
+          );
+        }
+        return name.trim();
+      }).filter((name) => {
+        if (seen.has(name)) return false;
+        seen.add(name);
+        return true;
+      });
+    }
+
     function normalizePresetPath(entry, index) {
       const path = 'paths[' + index + ']';
       if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
@@ -1272,11 +1316,34 @@
           formulaValue,
           hasUsrFormula ? path + '.usrGen.formula' : path + '.formula'
         );
+      const hasUsrMultiWave = !!rawUsrGen
+        && typeof rawUsrGen === 'object'
+        && !Array.isArray(rawUsrGen)
+        && Object.prototype.hasOwnProperty.call(rawUsrGen, 'multiWave');
+      const multiWaveValue = hasUsrMultiWave ? rawUsrGen.multiWave : entry.multiWave;
+      const multiWave = multiWaveValue === undefined
+        ? null
+        : normalizeMultiWaveConfig(
+          multiWaveValue,
+          hasUsrMultiWave ? path + '.usrGen.multiWave' : path + '.multiWave'
+        );
+      if (formula && multiWave) {
+        throw validationError(
+          path + ' 不能同时配置 formula 和 multiWave',
+          path + '.usrGen'
+        );
+      }
       if (formula) {
         if (!usrGen.name) {
           throw validationError(path + '.usrGen.name 必须是非空信号名', path + '.usrGen.name');
         }
         return { usrGen: { name: usrGen.name, formula }, autoGen };
+      }
+      if (multiWave) {
+        if (!usrGen.name) {
+          throw validationError(path + '.usrGen.name 必须是非空信号名', path + '.usrGen.name');
+        }
+        return { usrGen: { name: usrGen.name, multiWave }, autoGen };
       }
       if (!usrGen.folder) usrGen.folder = '.';
       if (!usrGen.grepKeys) {
@@ -1294,10 +1361,16 @@
         : null;
     }
 
+    function presetPathMultiWave(entry) {
+      return entry && entry.usrGen && Array.isArray(entry.usrGen.multiWave)
+        ? entry.usrGen.multiWave
+        : null;
+    }
+
     function presetForCollectionService(preset) {
       const copy = JSON.parse(JSON.stringify(preset || EMPTY_PRESET));
       copy.paths = (Array.isArray(copy.paths) ? copy.paths : []).map((entry, index) => {
-        if (!presetPathFormula(entry)) return entry;
+        if (!presetPathFormula(entry) && !presetPathMultiWave(entry)) return entry;
         const name = String(entry && entry.usrGen && entry.usrGen.name || '').trim()
           || ('formula_' + (index + 1));
         return {
@@ -1323,7 +1396,7 @@
       if (!source || !Array.isArray(source.paths)) return generated;
       generated.paths = Array.isArray(generated.paths) ? generated.paths : [];
       source.paths.forEach((entry, index) => {
-        if (!presetPathFormula(entry)) return;
+        if (!presetPathFormula(entry) && !presetPathMultiWave(entry)) return;
         generated.paths[index] = JSON.parse(JSON.stringify(entry));
       });
       return generated;
@@ -1359,7 +1432,7 @@
       const referencedNames = [];
       const referencedNameSet = new Set();
       paths.forEach((entry) => {
-        if (presetPathFormula(entry)) return;
+        if (presetPathFormula(entry) || presetPathMultiWave(entry)) return;
         ['folder', 'grepKeys', 'name'].forEach((field) => {
           extractTemplateVariables(entry.usrGen[field]).forEach((name) => {
             if (referencedNameSet.has(name)) return;
@@ -1445,14 +1518,14 @@
       }
       const entries = Array.isArray(payload && payload.entries) ? payload.entries : [];
       entries.forEach((entry) => {
-        if (entry && entry.importMode === 'formula') return;
+        if (entry && (entry.importMode === 'formula' || entry.importMode === 'multi-wave')) return;
         collectionEntryOutputNames(entry).forEach((name) => {
           const normalized = String(name || '').trim();
           if (normalized) names.add(normalized);
         });
       });
       (preset && Array.isArray(preset.paths) ? preset.paths : []).forEach((entry) => {
-        if (!entry || presetPathFormula(entry)) return;
+        if (!entry || presetPathFormula(entry) || presetPathMultiWave(entry)) return;
         const config = entry.usrGen || {};
         const name = String(config.name || '').trim();
         if (name) names.add(name);
@@ -1472,6 +1545,7 @@
 
     function refreshFormulaDiagnostics(preset, payload) {
       formulaDiagnostics = new Map();
+      multiWaveDiagnostics = new Map();
       const formulaEngine = window.VisualWaveDromFormula;
       const definitions = [];
       (preset && Array.isArray(preset.paths) ? preset.paths : []).forEach((entry, index) => {
@@ -1528,9 +1602,36 @@
       return formulaDiagnostics;
     }
 
+    function refreshMultiWaveDiagnostics(preset, payload) {
+      multiWaveDiagnostics = new Map();
+      const knownNames = new Set(formulaSignalNames(preset, payload));
+      formulaDiagnostics.forEach((diagnostic) => {
+        if (diagnostic.valid && diagnostic.name) knownNames.add(String(diagnostic.name));
+      });
+      (preset && Array.isArray(preset.paths) ? preset.paths : []).forEach((entry, index) => {
+        const sources = presetPathMultiWave(entry);
+        if (!entry || !sources) return;
+        const name = String(entry.usrGen && entry.usrGen.name || '').trim();
+        const missing = sources.filter((sourceName) => !knownNames.has(sourceName));
+        const errors = [];
+        if (!sources.length) errors.push('multiWave 至少需要一个源信号');
+        if (sources.includes(name)) errors.push('multiWave 不能引用自身');
+        if (missing.length) errors.push('找不到源信号：' + missing.join('、'));
+        multiWaveDiagnostics.set(index, {
+          index,
+          name,
+          sources: sources.slice(),
+          valid: errors.length === 0,
+          error: errors.join('；')
+        });
+      });
+      return multiWaveDiagnostics;
+    }
+
     function decorateFormulaSearchResult(payload, preset) {
       if (!payload || typeof payload !== 'object') return payload;
       refreshFormulaDiagnostics(preset, payload);
+      refreshMultiWaveDiagnostics(preset, payload);
       const indexed = new Map();
       (Array.isArray(payload.entries) ? payload.entries : []).forEach((entry, fallbackIndex) => {
         const parsedIndex = Number(entry && entry.index);
@@ -1549,11 +1650,27 @@
           message: diagnostic.error || ''
         }));
       });
+      multiWaveDiagnostics.forEach((diagnostic, index) => {
+        const existing = indexed.get(index) || {};
+        indexed.set(index, Object.assign({}, existing, {
+          index,
+          name: diagnostic.name,
+          importMode: 'multi-wave',
+          multiWave: diagnostic.sources,
+          outputNames: diagnostic.name ? [diagnostic.name] : [],
+          matches: [],
+          status: diagnostic.valid ? 'multi-wave-ready' : 'multi-wave-error',
+          message: diagnostic.error || ''
+        }));
+      });
       payload.entries = Array.from(indexed.values()).sort((left, right) =>
         Number(left.index) - Number(right.index));
       payload.formulaCount = Array.from(formulaDiagnostics.values())
         .filter((item) => item.valid).length;
       payload.formulaErrorCount = formulaDiagnostics.size - payload.formulaCount;
+      payload.multiWaveCount = Array.from(multiWaveDiagnostics.values())
+        .filter((item) => item.valid).length;
+      payload.multiWaveErrorCount = multiWaveDiagnostics.size - payload.multiWaveCount;
       return payload;
     }
 
@@ -1567,6 +1684,7 @@
         const nextVariables = nextPreset.vars.join('\u0000');
         parsedPreset = nextPreset;
         refreshFormulaDiagnostics(nextPreset, searchResult);
+        refreshMultiWaveDiagnostics(nextPreset, searchResult);
         presetState.textContent = '从预设模板自动识别 ' + nextPreset.vars.length + ' 个变量，'
           + nextPreset.paths.length + ' 条搜索规则';
         if (previousVariables !== nextVariables || !variablesHost.childElementCount) {
@@ -1581,6 +1699,7 @@
       } catch (error) {
         parsedPreset = null;
         formulaDiagnostics = new Map();
+        multiWaveDiagnostics = new Map();
         renderPresetNavigation(null, editorText);
         presetState.textContent = '预设 JSON 有错误';
         const location = renderJsonErrorMarker(error, editorText);
@@ -1601,6 +1720,7 @@
       const normalized = validatePresetShape(merged);
       parsedPreset = normalized;
       refreshFormulaDiagnostics(normalized, searchResult);
+      refreshMultiWaveDiagnostics(normalized, searchResult);
       setPresetEditorValue(JSON.stringify(normalized, null, 2), { keepHistory: true });
       presetState.textContent = '从预设模板自动识别 ' + normalized.vars.length + ' 个变量，'
         + normalized.paths.length + ' 条搜索规则；autoGen 已更新';
@@ -1935,11 +2055,12 @@
         : [];
       const active = entries.filter((entry) =>
         entry.status === 'formula-ready'
+          || entry.status === 'multi-wave-ready'
           || (Array.isArray(entry.matches) && entry.matches.length > 0));
       const errors = [];
       const owners = new Map();
       active.forEach((entry) => {
-        if (entry.status === 'formula-ready') return;
+        if (entry.status === 'formula-ready' || entry.status === 'multi-wave-ready') return;
         if (entry.importError) {
           errors.push(String(entry.importError));
           return;
@@ -1983,6 +2104,17 @@
           id: String(item.index),
           name: item.name,
           formula: item.formula
+        }));
+    }
+
+    function validMultiWaveDefinitions() {
+      return Array.from(multiWaveDiagnostics.values())
+        .filter((item) => item.valid)
+        .sort((left, right) => left.index - right.index)
+        .map((item) => ({
+          id: String(item.index),
+          name: item.name,
+          multiWave: item.sources.slice()
         }));
     }
 
@@ -2171,19 +2303,25 @@
         const formulaError = entry.status === 'formula-error'
           ? String(entry.message || '公式有误')
           : '';
-        const displayedError = importError || formulaError;
+        const multiWaveError = entry.status === 'multi-wave-error'
+          ? String(entry.message || '多波形配置有误')
+          : '';
+        const displayedError = importError || formulaError || multiWaveError;
         const row = document.createElement('div');
         row.dataset.entryIndex = String(entry.index);
         row.className = 'wave-collection-result '
           + (displayedError
             ? 'is-error'
             : (entry.status === 'matched' || entry.status === 'formula-ready'
+                || entry.status === 'multi-wave-ready'
             ? 'is-ready'
             : (entry.status === 'multiple' ? 'is-warning' : 'is-error')));
         const name = document.createElement('div');
         name.className = 'wave-collection-result-name';
         if (entry.importMode === 'formula') {
           name.textContent = String(entry.name || '未命名信号') + '（公式）';
+        } else if (entry.importMode === 'multi-wave') {
+          name.textContent = String(entry.name || 'multiWave') + '（多波形）';
         } else if (entry.importMode === 'table') {
           const importableColumns = (entry.columns || [])
             .filter((column) => String(column.source || '') !== String(entry.indexColumn || ''));
@@ -2209,6 +2347,10 @@
             libraries.length ? ('依赖库：' + libraries.join('、')) : ''
           ].filter(Boolean).join('；');
           path.title = displayedError || path.textContent;
+        } else if (entry.importMode === 'multi-wave') {
+          const sources = Array.isArray(entry.multiWave) ? entry.multiWave : [];
+          path.textContent = displayedError || ('叠加信号：' + sources.join('、'));
+          path.title = displayedError || path.textContent;
         } else if (matches.length === 1) {
           path.textContent = matches[0].path;
           path.title = '正则：' + String(entry.resolvedPattern || '');
@@ -2229,6 +2371,8 @@
         if (importError) state.textContent = '序号设置错误';
         else if (entry.status === 'formula-ready') state.textContent = '公式有效';
         else if (entry.status === 'formula-error') state.textContent = '公式错误，跳过';
+        else if (entry.status === 'multi-wave-ready') state.textContent = '多波形有效';
+        else if (entry.status === 'multi-wave-error') state.textContent = '多波形错误，跳过';
         else if (entry.status === 'matched') state.textContent = '已匹配';
         else if (entry.status === 'multiple') state.textContent = matches.length + ' 个匹配，取第 1 个';
         else if (entry.status === 'duplicate-name') state.textContent = 'name重复';
@@ -2743,20 +2887,22 @@
       const multipleCount = entries.filter((entry) => entry.status === 'multiple').length;
       const skippedCount = entries.filter((entry) =>
         entry.status === 'missing' || entry.status === 'folder-missing'
-          || entry.status === 'formula-error').length;
+          || entry.status === 'formula-error' || entry.status === 'multi-wave-error').length;
       const formulaCount = entries.filter((entry) => entry.status === 'formula-ready').length;
+      const multiWaveCount = entries.filter((entry) => entry.status === 'multi-wave-ready').length;
       const fileCount = entries.filter((entry) =>
-        entry.importMode !== 'formula'
+        entry.importMode !== 'formula' && entry.importMode !== 'multi-wave'
           && Array.isArray(entry.matches) && entry.matches.length > 0).length;
       const selection = collectionSelectionStatus();
       payload.ready = selection.valid;
       resultSummary.textContent = selection.valid
-        ? ('已选择 ' + fileCount + ' 个文件、' + formulaCount + ' 个公式，可以导入'
+        ? ('已选择 ' + fileCount + ' 个文件、' + formulaCount + ' 个公式、'
+          + multiWaveCount + ' 个多波形，可以导入'
           + (skippedCount ? '；跳过 ' + skippedCount + ' 条无效或未匹配规则' : '')
           + (multipleCount ? '；' + multipleCount + ' 条规则默认取第一个' : ''))
         : (selection.count > 0
           ? (selection.errors[0] || '请检查导入配置')
-          : '没有找到可导入的文件或有效公式');
+          : '没有找到可导入的文件、有效公式或多波形');
       updateButtons();
     }
 
@@ -3261,15 +3407,17 @@
           : 0;
         const selection = collectionSelectionStatus();
         const validFormulaCount = Number(payload.formulaCount || 0);
+        const validMultiWaveCount = Number(payload.multiWaveCount || 0);
         setHint(selection.valid
           ? ('搜索完成：' + searchDetails + '。确认结果后点击“确定导入”'
             + (skippedCount ? '；' + skippedCount + ' 条未匹配规则将被跳过' : '')
             + (multipleCount ? '；多匹配规则已默认选择第一个文件' : '')
-            + (validFormulaCount ? '；' + validFormulaCount + ' 个公式有效' : ''))
+            + (validFormulaCount ? '；' + validFormulaCount + ' 个公式有效' : '')
+            + (validMultiWaveCount ? '；' + validMultiWaveCount + ' 个多波形有效' : ''))
           : ('搜索完成：' + searchDetails
             + (selection.count > 0
               ? '。请修改重复信号名'
-              : '。没有找到可导入文件或有效公式')), !selection.valid);
+              : '。没有找到可导入文件、有效公式或多波形')), !selection.valid);
         debug({
           phase: 'search-complete',
           ready: !!payload.ready,
@@ -3330,12 +3478,13 @@
         : '';
       setBusy(true, 'import');
       const fileCount = (searchResult.entries || []).filter((entry) =>
-        entry.importMode !== 'formula'
+        entry.importMode !== 'formula' && entry.importMode !== 'multi-wave'
           && Array.isArray(entry.matches) && entry.matches.length > 0).length;
       const formulas = validFormulaDefinitions();
+      const multiWaves = validMultiWaveDefinitions();
       const progressToken = createImportProgressToken();
       startProgress('正在核对并解析 ' + fileCount + ' 个文件、'
-        + formulas.length + ' 个公式…');
+        + formulas.length + ' 个公式、' + multiWaves.length + ' 个多波形…');
       startImportProgressPolling(progressToken, fileCount);
       const startedAt = progressStartedAt;
       debug({
@@ -3344,6 +3493,7 @@
         variables,
         fileCount,
         formulaCount: formulas.length,
+        multiWaveCount: multiWaves.length,
         hasSearchToken: !!searchResult.searchToken
       });
       try {
@@ -3360,6 +3510,7 @@
             updates: [],
             skippedCount: 0,
             formulaCount: formulas.length,
+            multiWaveCount: multiWaves.length,
             progress: {
               phase: 'complete',
               totalFiles: 0,
@@ -3371,6 +3522,17 @@
             }
           };
         payload.formulas = formulas;
+        payload.multiWaves = multiWaves;
+        payload.updates = (Array.isArray(payload.updates) ? payload.updates : []).concat(
+          multiWaves.map((definition) => ({
+            signal: definition.name,
+            wave: '',
+            data: [],
+            sampleKind: 'analog',
+            createIfMissing: true,
+            multiWave: definition.multiWave.slice()
+          }))
+        );
         stopImportProgressPolling();
         applyImportProgress(payload.progress);
         if (typeof settings.getContextToken === 'function'
@@ -3404,6 +3566,7 @@
           (result.changed ? '已批量导入 ' : '批量导入内容未变化：')
             + completedFiles + ' 个文件，' + result.count + ' 个信号行'
             + (formulas.length ? '（含 ' + formulas.length + ' 个公式）' : '')
+            + (multiWaves.length ? '（含 ' + multiWaves.length + ' 个多波形）' : '')
             + (result.createdCount ? '，新增 ' + result.createdCount + ' 行' : '')
             + '，耗时 ' + elapsedSeconds + ' 秒'
         );

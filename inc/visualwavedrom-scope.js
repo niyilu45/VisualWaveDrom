@@ -1,9 +1,10 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260814-cursor-half-cycle-v1';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260814-multi-wave-v1';
   const FormulaEngine = global.VisualWaveDromFormula || null;
   const DEFAULT_ROW_HEIGHT = 42;
+  const DEFAULT_MULTI_WAVE_ROW_HEIGHT = 68;
   const COLLAPSED_ROW_HEIGHT = 18;
   const MIN_ANALOG_ROW_HEIGHT = 28;
   const MAX_ANALOG_ROW_HEIGHT = 480;
@@ -78,6 +79,19 @@
     return Object.prototype.hasOwnProperty.call(object || {}, key);
   }
 
+  function normalizeMultiWaveDefinition(value) {
+    const candidate = Array.isArray(value)
+      ? value
+      : (value && Array.isArray(value.signals) ? value.signals : []);
+    const seen = new Set();
+    return candidate.map((name) => String(name == null ? '' : name).trim())
+      .filter((name) => {
+        if (!name || seen.has(name)) return false;
+        seen.add(name);
+        return true;
+      });
+  }
+
   function mergedDisplayBuckets(items) {
     const result = [];
     (Array.isArray(items) ? items : []).forEach((bucket) => {
@@ -131,6 +145,13 @@
           ? '' : source.signalNames[rowId]);
       });
     }
+    const multiWaves = {};
+    if (source.multiWaves && typeof source.multiWaves === 'object'
+        && !Array.isArray(source.multiWaves)) {
+      Object.keys(source.multiWaves).forEach((rowId) => {
+        multiWaves[String(rowId)] = normalizeMultiWaveDefinition(source.multiWaves[rowId]);
+      });
+    }
     const seenIds = new Set();
     const extraSignals = (Array.isArray(source.extraSignals) ? source.extraSignals : [])
       .map((entry, index) => {
@@ -153,6 +174,7 @@
       version: 1,
       extraSignals,
       formulas,
+      multiWaves,
       signalNames,
       rowOrder: uniqueRowIds(source.rowOrder),
       hiddenRows: uniqueRowIds(source.hiddenRows)
@@ -201,6 +223,10 @@
       replacements.set(rowId, sourceRowId);
       removedIds.add(rowId);
       delete state.formulas[rowId];
+      if (own(state.multiWaves, rowId)) {
+        state.multiWaves[sourceRowId] = state.multiWaves[rowId].slice();
+        delete state.multiWaves[rowId];
+      }
       delete state.signalNames[rowId];
       if (!own(state.signalNames, sourceRowId)) state.signalNames[sourceRowId] = name;
       return false;
@@ -563,6 +589,7 @@
         version: 1,
         extraSignals: [],
         formulas: {},
+        multiWaves: {},
         signalNames: {},
         rowOrder: [],
         hiddenRows: []
@@ -628,6 +655,7 @@
         transient: clone(this.transientFormulaState)
       });
       this.adoptPreparedFormulaDefinitions();
+      this.adoptPreparedMultiWaveDefinitions();
       this.logFormulaDiagnostics('prepare');
       this.signalNames = this.meta.rows.map((row) => String(
         row.sourceName == null ? row.name || '' : row.sourceName
@@ -713,6 +741,8 @@
           <div class="scope-toolbar-group" aria-label="视图控制">
             <button type="button" class="scope-command-btn" id="scope-add-signal"
                 title="新增一个仅在当前网页会话保留的空波形" disabled>新增波形</button>
+            <button type="button" class="scope-command-btn" id="scope-add-multi-wave"
+                title="新增一个叠加显示多个现有信号的模拟波形" disabled>新增多波形</button>
             <button type="button" class="scope-command-btn" id="scope-delete-signal"
                 title="删除当前选中的波形，可通过撤销恢复" disabled>删除波形</button>
             <button type="button" class="scope-command-btn" id="scope-move-signal"
@@ -939,6 +969,23 @@
               </label>
             </div>
           </div>
+          <div class="scope-multi-wave-settings" id="scope-multi-wave-settings" hidden>
+            <span class="scope-display-field-label">叠加信号</span>
+            <div class="scope-multi-wave-source-list" id="scope-multi-wave-source-list"
+                role="group" aria-label="选择需要叠加显示的现有信号"></div>
+            <div class="scope-multi-wave-feedback" id="scope-multi-wave-feedback"
+                aria-live="polite"></div>
+            <details class="scope-formula-json scope-multi-wave-json">
+              <summary>multiWave JSON 预览</summary>
+              <pre id="scope-multi-wave-json-preview"></pre>
+            </details>
+            <div class="scope-multi-wave-actions">
+              <button type="button" class="scope-command-btn scope-primary"
+                  id="scope-multi-wave-apply">应用</button>
+              <button type="button" class="scope-command-btn"
+                  id="scope-multi-wave-copy-json">复制 JSON</button>
+            </div>
+          </div>
           <div class="scope-formula-settings" id="scope-formula-settings" hidden>
             <div class="scope-formula-dependencies">
               <span class="scope-display-field-label">依赖库</span>
@@ -1052,6 +1099,7 @@
       this.outputTitleInput = root.querySelector('#scope-output-title');
       this.connectionButton = root.querySelector('#scope-connections');
       this.addSignalButton = root.querySelector('#scope-add-signal');
+      this.addMultiWaveButton = root.querySelector('#scope-add-multi-wave');
       this.deleteSignalButton = root.querySelector('#scope-delete-signal');
       this.moveSignalButton = root.querySelector('#scope-move-signal');
       this.rowMovePopover = root.querySelector('#scope-row-move-popover');
@@ -1096,6 +1144,12 @@
       this.signalAnalogTypeSelect = root.querySelector('#scope-signal-analog-type');
       this.signalAnalogWidthInput = root.querySelector('#scope-signal-analog-width');
       this.signalAnalogFractionInput = root.querySelector('#scope-signal-analog-fraction');
+      this.multiWaveSettings = root.querySelector('#scope-multi-wave-settings');
+      this.multiWaveSourceList = root.querySelector('#scope-multi-wave-source-list');
+      this.multiWaveFeedback = root.querySelector('#scope-multi-wave-feedback');
+      this.multiWaveJsonPreview = root.querySelector('#scope-multi-wave-json-preview');
+      this.multiWaveApplyButton = root.querySelector('#scope-multi-wave-apply');
+      this.multiWaveCopyButton = root.querySelector('#scope-multi-wave-copy-json');
       this.styleSignalEl = root.querySelector('#scope-style-signal');
       this.stylePopover = root.querySelector('#scope-style-popover');
       this.stylePopoverTitle = root.querySelector('#scope-style-popover-title');
@@ -1136,6 +1190,9 @@
       this.expandAllRowsButton.addEventListener('click', () => this.expandAllRows());
       this.addSignalButton.addEventListener('click', () => {
         void this.addTransientSignal();
+      });
+      this.addMultiWaveButton.addEventListener('click', () => {
+        void this.addTransientMultiWaveSignal();
       });
       this.deleteSignalButton.addEventListener('click', () => {
         void this.deleteActiveSignal();
@@ -1184,6 +1241,15 @@
       });
       this.formulaToggleButton.addEventListener('click', () => {
         void this.toggleSignalFormula();
+      });
+      this.multiWaveApplyButton.addEventListener('click', () => {
+        void this.applyMultiWaveSelection();
+      });
+      this.multiWaveCopyButton.addEventListener('click', () => {
+        void this.copyCurrentMultiWaveJson();
+      });
+      this.multiWaveSourceList.addEventListener('change', () => {
+        this.updateMultiWaveDraftPreview();
       });
       const handleFormulaInput = () => {
         this.updateFormulaDraftFromInputs();
@@ -1844,6 +1910,22 @@
         );
         if (extra) extra.name = nextName;
       }
+      let multiWaveReferencesChanged = false;
+      Object.keys(this.transientFormulaState.multiWaves).forEach((multiRowId) => {
+        const currentSources = normalizeMultiWaveDefinition(
+          this.transientFormulaState.multiWaves[multiRowId]
+        );
+        const nextSources = normalizeMultiWaveDefinition(currentSources.map((sourceName) => (
+          sourceName === previousName ? nextName : sourceName
+        )));
+        if (currentSources.length !== nextSources.length
+            || nextSources.some((sourceName, sourceIndex) => (
+              sourceName !== currentSources[sourceIndex]
+            ))) {
+          this.transientFormulaState.multiWaves[multiRowId] = nextSources;
+          multiWaveReferencesChanged = true;
+        }
+      });
       if (this.simplified && this.simplified.model.rows[index]) {
         this.simplified.model.rows[index].name = nextName;
       }
@@ -1873,7 +1955,8 @@
       this.scheduleBuild();
       if (row.transient) this.persistTransientFormulaState();
       else this.markDraftDirty('presentation');
-      if (Object.keys(this.transientFormulaState.formulas).length) {
+      if (Object.keys(this.transientFormulaState.formulas).length
+          || multiWaveReferencesChanged) {
         this.scheduleFormulaRefresh();
       }
       this.setStatus('信号名已修改为：' + displayName);
@@ -1936,6 +2019,38 @@
       });
       if (changed) this.persistTransientFormulaState();
       return changed;
+    }
+
+    adoptPreparedMultiWaveDefinitions() {
+      if (!this.meta || !Array.isArray(this.meta.rows)) return false;
+      let changed = false;
+      this.meta.rows.forEach((row) => {
+        const rowId = String(row.rowId || ('source:' + row.index));
+        if (!row.multiWave || own(this.transientFormulaState.multiWaves, rowId)) return;
+        this.transientFormulaState.multiWaves[rowId] = normalizeMultiWaveDefinition(
+          row.multiWave.signals
+        );
+        changed = true;
+      });
+      if (changed) this.persistTransientFormulaState();
+      return changed;
+    }
+
+    multiWaveDefinition(rowIndex) {
+      const row = this.meta && this.meta.rows[Math.max(0, Math.floor(Number(rowIndex) || 0))];
+      if (!row) return [];
+      const rowId = String(row.rowId || ('source:' + row.index));
+      if (own(this.transientFormulaState.multiWaves, rowId)) {
+        return normalizeMultiWaveDefinition(this.transientFormulaState.multiWaves[rowId]);
+      }
+      return normalizeMultiWaveDefinition(row.multiWave && row.multiWave.signals);
+    }
+
+    isMultiWaveRow(rowIndex) {
+      const row = this.meta && this.meta.rows[Math.max(0, Math.floor(Number(rowIndex) || 0))];
+      if (!row) return false;
+      const rowId = String(row.rowId || ('source:' + row.index));
+      return own(this.transientFormulaState.multiWaves, rowId) || !!row.multiWave;
     }
 
     logFormulaDiagnostics(phase) {
@@ -2102,10 +2217,154 @@
       return JSON.stringify(this.formulaJsonPayload(row, formula), null, 2);
     }
 
+    availableMultiWaveSourceRows(rowIndex) {
+      return this.meta.rows.filter((row) => (
+        row.index !== rowIndex && !this.isMultiWaveRow(row.index)
+      ));
+    }
+
+    selectedMultiWaveSources() {
+      if (!this.multiWaveSourceList) return [];
+      return Array.from(this.multiWaveSourceList.querySelectorAll(
+        'input[data-scope-multi-wave-source]:checked'
+      )).map((input) => String(input.value || '').trim()).filter(Boolean);
+    }
+
+    multiWaveJsonPayload(row, sources) {
+      const name = String(this.signalNames[row.index] == null
+        ? row.name || ''
+        : this.signalNames[row.index]);
+      return {
+        usrGen: {
+          name,
+          multiWave: normalizeMultiWaveDefinition(sources)
+        },
+        autoGen: {}
+      };
+    }
+
+    updateMultiWaveDraftPreview() {
+      if (!this.meta || this.displayControlRow == null || this.multiWaveSettings.hidden) return;
+      const row = this.meta.rows[this.displayControlRow];
+      if (!row) return;
+      const sources = this.selectedMultiWaveSources();
+      this.multiWaveFeedback.textContent = sources.length >= 2
+        ? ('已选择 ' + sources.length + ' 个信号；应用后将在同一纵轴内叠加显示')
+        : (sources.length === 1
+          ? '当前只选择了 1 个信号；仍可显示，但不能形成多波形对比'
+          : '尚未选择源信号');
+      this.multiWaveFeedback.classList.toggle('is-warning', sources.length < 2);
+      this.multiWaveJsonPreview.textContent = JSON.stringify(
+        this.multiWaveJsonPayload(row, sources),
+        null,
+        2
+      );
+      const current = this.multiWaveDefinition(row.index);
+      this.multiWaveApplyButton.disabled = current.length === sources.length
+        && current.every((name, index) => name === sources[index]);
+    }
+
+    updateMultiWaveControls() {
+      if (!this.meta || this.displayControlRow == null) return;
+      const row = this.meta.rows[this.displayControlRow];
+      if (!row || !this.isMultiWaveRow(row.index)) {
+        this.multiWaveSettings.hidden = true;
+        return;
+      }
+      const selected = new Set(this.multiWaveDefinition(row.index));
+      const sourceRows = this.availableMultiWaveSourceRows(row.index);
+      this.multiWaveSourceList.innerHTML = sourceRows.length
+        ? sourceRows.map((sourceRow) => {
+          const name = this.signalDisplayName(sourceRow.index);
+          const color = this.rowWaveColor(sourceRow.index);
+          return `
+            <label class="scope-multi-wave-source">
+              <input type="checkbox" data-scope-multi-wave-source="${sourceRow.index}"
+                  value="${escapeHtml(name)}"${selected.has(name) ? ' checked' : ''}>
+              <i style="--scope-multi-wave-color:${color}" aria-hidden="true"></i>
+              <span>${escapeHtml(name)}</span>
+            </label>
+          `;
+        }).join('')
+        : '<span class="scope-multi-wave-empty">当前没有可叠加的普通信号</span>';
+      this.multiWaveSettings.hidden = false;
+      this.updateMultiWaveDraftPreview();
+    }
+
+    async applyMultiWaveSelection() {
+      if (!this.meta || this.displayControlRow == null) return;
+      const row = this.meta.rows[this.displayControlRow];
+      if (!row || !this.isMultiWaveRow(row.index)) return;
+      const rowId = this.rowId(row.index);
+      const sources = this.selectedMultiWaveSources();
+      const current = this.multiWaveDefinition(row.index);
+      if (current.length === sources.length
+          && current.every((name, index) => name === sources[index])) return;
+      const applied = await this.commitRowOperation(() => {
+        this.transientFormulaState.multiWaves[rowId] = sources;
+        delete this.transientFormulaState.formulas[rowId];
+        this.formulaDrafts.delete(rowId);
+      }, {
+        focusRowId: rowId,
+        status: sources.length
+          ? ('已将 ' + sources.length + ' 个信号叠加到 ' + this.signalDisplayName(row.index))
+          : ('已清空 ' + this.signalDisplayName(row.index) + ' 的叠加信号'),
+        log: { phase: 'multi-wave-sources', rowId, sources }
+      });
+      if (!applied) return;
+      const nextIndex = this.meta.rows.findIndex((entry) => String(entry.rowId) === rowId);
+      const anchor = nextIndex >= 0 && this.signalList.querySelector(
+        '[data-scope-display-row="' + nextIndex + '"]'
+      );
+      if (anchor) this.openDisplayPopover(nextIndex, anchor);
+    }
+
+    async copyCurrentMultiWaveJson() {
+      if (!this.meta || this.displayControlRow == null) return;
+      const row = this.meta.rows[this.displayControlRow];
+      if (!row || !this.isMultiWaveRow(row.index)) return;
+      const text = JSON.stringify(
+        this.multiWaveJsonPayload(row, this.selectedMultiWaveSources()),
+        null,
+        2
+      );
+      try {
+        let copied = false;
+        if (navigator.clipboard && global.isSecureContext) {
+          await navigator.clipboard.writeText(text);
+          copied = true;
+        }
+        if (!copied) {
+          const textarea = document.createElement('textarea');
+          textarea.value = text;
+          textarea.setAttribute('readonly', '');
+          textarea.style.position = 'fixed';
+          textarea.style.opacity = '0';
+          document.body.appendChild(textarea);
+          textarea.select();
+          copied = document.execCommand('copy');
+          textarea.remove();
+        }
+        if (!copied) throw new Error('浏览器未允许复制');
+        this.setStatus('multiWave JSON 已复制到剪贴板');
+      } catch (error) {
+        this.setStatus('复制失败：' + (error.message || String(error)), true);
+      }
+    }
+
     updateFormulaControls() {
       if (!this.meta || this.displayControlRow == null) return;
       const row = this.meta.rows[this.displayControlRow];
       if (!row) return;
+      const multiWave = this.isMultiWaveRow(row.index);
+      this.formulaToggleButton.disabled = multiWave;
+      if (multiWave) {
+        this.formulaToggleButton.classList.remove('active');
+        this.formulaToggleButton.setAttribute('aria-pressed', 'false');
+        this.formulaSettings.hidden = true;
+        this.displayPopover.classList.remove('formula-active');
+        return;
+      }
       const rowId = String(row.rowId || ('source:' + row.index));
       const formula = this.transientFormulaState.formulas[rowId] || null;
       const active = !!formula;
@@ -2247,6 +2506,10 @@
     async toggleSignalFormula() {
       if (!this.meta || this.displayControlRow == null || !FormulaEngine) {
         this.setStatus('公式模块不可用', true);
+        return;
+      }
+      if (this.isMultiWaveRow(this.displayControlRow)) {
+        this.setStatus('多波形行不能启用公式', true);
         return;
       }
       const rowId = this.rowId(this.displayControlRow);
@@ -2432,6 +2695,48 @@
       });
     }
 
+    async addTransientMultiWaveSignal() {
+      if (!this.meta) return;
+      const names = new Set(this.meta.rows.map((row) => String(
+        this.signalNames[row.index] == null ? row.name : this.signalNames[row.index]
+      )).filter(Boolean));
+      let suffix = 1;
+      let name = 'multiWave';
+      while (names.has(name)) {
+        suffix += 1;
+        name = 'multiWave' + suffix;
+      }
+      const availableRows = this.meta.rows.filter((row) => !this.isMultiWaveRow(row.index));
+      const active = availableRows.find((row) => row.index === this.activeCursorRow);
+      const orderedSources = active
+        ? [active].concat(availableRows.filter((row) => row !== active))
+        : availableRows;
+      const sources = orderedSources.slice(0, 2).map((row) => this.signalDisplayName(row.index));
+      const id = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 9);
+      const rowId = 'extra:' + id;
+      const order = this.visibleRowIds();
+      const insertIndex = order.length
+        ? clamp(this.activeCursorRow + 1, 0, order.length)
+        : 0;
+      const created = await this.commitRowOperation(() => {
+        this.transientFormulaState.extraSignals.push({ id, name });
+        this.transientFormulaState.signalNames[rowId] = name;
+        this.transientFormulaState.multiWaves[rowId] = sources;
+        order.splice(insertIndex, 0, rowId);
+        this.transientFormulaState.rowOrder = order;
+      }, {
+        focusRowId: rowId,
+        status: '已新增组合模拟波形：' + name,
+        log: { phase: 'add-multi-wave', rowId, name, sources, insertIndex }
+      });
+      if (!created) return;
+      const rowIndex = this.meta.rows.findIndex((row) => String(row.rowId) === rowId);
+      const anchor = rowIndex >= 0 && this.signalList.querySelector(
+        '[data-scope-display-row="' + rowIndex + '"]'
+      );
+      if (anchor) this.openDisplayPopover(rowIndex, anchor);
+    }
+
     async deleteActiveSignal() {
       const row = this.meta && this.meta.rows[this.activeCursorRow];
       if (!row) return;
@@ -2447,6 +2752,7 @@
             (entry) => String(entry.id) !== extraId
           );
           delete this.transientFormulaState.formulas[rowId];
+          delete this.transientFormulaState.multiWaves[rowId];
           delete this.transientFormulaState.signalNames[rowId];
           this.formulaDrafts.delete(rowId);
         } else if (this.transientFormulaState.hiddenRows.indexOf(rowId) < 0) {
@@ -2971,6 +3277,15 @@
         const rowHeight = this.rowHeight(row.index);
         const collapsed = this.isRowCollapsed(row.index);
         const analogMode = this.modes[row.index] === 'analog';
+        const multiWave = this.isMultiWaveRow(row.index);
+        const multiWaveSources = row.multiWave && Array.isArray(row.multiWave.sources)
+          ? row.multiWave.sources
+          : this.multiWaveDefinition(row.index).map((name) => {
+            const source = this.meta.rows.find((candidate) => (
+              candidate.index !== row.index && this.signalDisplayName(candidate.index) === name
+            ));
+            return source ? { name, rowIndex: source.index } : { name, rowIndex: -1 };
+          });
         const waveColor = this.rowWaveColor(row.index);
         if (collapsed) {
           if (!this.isCollapsedRunStart(row.index)) return '';
@@ -2999,7 +3314,7 @@
           `;
         }
         return `
-          <div class="scope-signal-row${row.index === this.activeCursorRow ? ' active' : ''}${analogMode ? ' scope-signal-row-analog' : ''}"
+          <div class="scope-signal-row${row.index === this.activeCursorRow ? ' active' : ''}${analogMode ? ' scope-signal-row-analog' : ''}${multiWave ? ' scope-signal-row-multi-wave' : ''}"
               data-row-index="${row.index}" data-scope-signal-row="${row.index}"
               tabindex="0" aria-label="选择信号 ${escapeHtml(row.name)}"
               style="height:${rowHeight}px">
@@ -3019,6 +3334,19 @@
                   data-scope-name-row="${row.index}"
                   title="点击修改信号名：${escapeHtml(row.name)}"
                   aria-label="修改信号名 ${escapeHtml(row.name)}">${escapeHtml(row.name)}</button>
+              ${multiWave ? `
+                <span class="scope-multi-wave-legend" aria-label="多波形线条图例">
+                  ${multiWaveSources.length ? multiWaveSources.map((source, sourceIndex) => {
+                    const color = source.rowIndex >= 0
+                      ? this.rowWaveColor(source.rowIndex)
+                      : COLORS[sourceIndex % COLORS.length];
+                    return `<span title="${escapeHtml(source.name)}">
+                      <i style="--scope-multi-wave-color:${color}" aria-hidden="true"></i>
+                      ${escapeHtml(source.name)}
+                    </span>`;
+                  }).join('') : '<span>未选择源信号</span>'}
+                </span>
+              ` : ''}
               <em>
                 <span>${escapeHtml(String(row.sampleCount || 0))} 点${row.unit ? ` · ${escapeHtml(row.unit)}` : ''}</span>
                 <b data-scope-cursor-value-row="${row.index}">${escapeHtml(this.activeCursor || '游标')}：--</b>
@@ -3029,8 +3357,8 @@
                 aria-label="${escapeHtml(row.name)} 显示设置"
                 aria-haspopup="dialog" aria-expanded="false"
                 aria-controls="scope-display-popover">
-              <span>${DISPLAY_MODE_LABELS[this.modes[row.index]] || DISPLAY_MODE_LABELS.bus}${
-                this.transientFormulaState.formulas[String(row.rowId || ('source:' + row.index))]
+              <span>${multiWave ? '多波形' : (DISPLAY_MODE_LABELS[this.modes[row.index]] || DISPLAY_MODE_LABELS.bus)}${
+                !multiWave && this.transientFormulaState.formulas[String(row.rowId || ('source:' + row.index))]
                   ? ' · fx'
                   : ''
               }</span>
@@ -3091,8 +3419,9 @@
       if (left + popoverRect.width > viewportWidth - margin) {
         left = anchorRect.left - popoverRect.width - 8;
       }
-      const formulaActive = this.displayPopover.classList.contains('formula-active');
-      const top = formulaActive
+      const expanded = this.displayPopover.classList.contains('formula-active')
+        || this.displayPopover.classList.contains('multi-wave-active');
+      const top = expanded
         ? margin
         : clamp(
           anchorRect.top,
@@ -3116,13 +3445,16 @@
         return;
       }
       const mode = this.modes[row.index] || 'bus';
+      const multiWave = this.isMultiWaveRow(row.index);
       this.displayPopoverTitle.textContent = row.name;
       this.displayModeOptions.querySelectorAll('[data-scope-display-mode]').forEach((button) => {
-        const active = button.dataset.scopeDisplayMode === mode;
+        const active = button.dataset.scopeDisplayMode === (multiWave ? 'analog' : mode);
         button.classList.toggle('active', active);
         button.setAttribute('aria-pressed', String(active));
+        button.disabled = multiWave && button.dataset.scopeDisplayMode !== 'analog';
       });
-      const busMode = mode === 'bus';
+      this.displayPopover.classList.toggle('multi-wave-active', multiWave);
+      const busMode = !multiWave && mode === 'bus';
       this.signalBusSettings.hidden = !busMode;
       const busFormat = normalizeBusFormat(this.busFormats[row.index]);
       this.busFormats[row.index] = busFormat;
@@ -3134,7 +3466,7 @@
         button.setAttribute('aria-pressed', String(active));
       });
       const analogMode = mode === 'analog';
-      this.signalAnalogSettings.hidden = !analogMode;
+      this.signalAnalogSettings.hidden = !analogMode || multiWave;
       const format = normalizeAnalogFormat(
         this.analogFormats[row.index],
         row.detectedMode === 'analog' ? 'float' : 'unsigned'
@@ -3147,6 +3479,7 @@
       this.signalAnalogFractionInput.disabled = !fixedPoint;
       this.signalAnalogFractionInput.max = String(Math.max(0, format.bitWidth - 1));
       this.updateFormulaControls();
+      this.updateMultiWaveControls();
       this.positionDisplayPopover();
     }
 
@@ -3171,6 +3504,11 @@
       const row = this.meta && this.meta.rows[index];
       const nextMode = String(requestedMode || '');
       if (!row || !Object.prototype.hasOwnProperty.call(DISPLAY_MODE_LABELS, nextMode)) return;
+      if (this.isMultiWaveRow(index) && nextMode !== 'analog') {
+        this.setStatus('多波形行只支持模拟波形显示', true);
+        this.updateDisplayPopover();
+        return;
+      }
       if (this.modes[index] === nextMode) {
         this.updateDisplayPopover();
         return;
@@ -3226,6 +3564,7 @@
     applySignalAnalogFormat() {
       if (!this.meta || this.displayControlRow == null) return;
       const row = this.meta.rows[this.displayControlRow];
+      if (row && this.isMultiWaveRow(row.index)) return;
       if (!row || this.modes[row.index] !== 'analog') return;
       const previous = normalizeAnalogFormat(
         this.analogFormats[row.index],
@@ -3878,6 +4217,24 @@
     drawSegments(context, rowResult, rowIndex, yTop, yBottom, width, color) {
       const data = rowResult.data;
       const mode = rowResult.mode;
+      if (data.kind === 'multi-analog') {
+        (data.series || []).forEach((series, seriesIndex) => {
+          const seriesColor = Number.isInteger(series.sourceRowIndex)
+            && series.sourceRowIndex >= 0
+            ? this.rowWaveColor(series.sourceRowIndex)
+            : COLORS[seriesIndex % COLORS.length];
+          this.drawAnalog(
+            context,
+            series.data,
+            yTop,
+            yBottom,
+            width,
+            seriesColor,
+            { drawGuide: seriesIndex === 0, drawUnknowns: false }
+          );
+        });
+        return;
+      }
       if (data.kind === 'points' || data.kind === 'envelope') {
         this.drawAnalog(context, data, yTop, yBottom, width, color);
         return;
@@ -4039,7 +4396,8 @@
       }
     }
 
-    drawAnalog(context, data, yTop, yBottom, width, color) {
+    drawAnalog(context, data, yTop, yBottom, width, color, options) {
+      const settings = options || {};
       const range = data.range || { min: -1, max: 1 };
       const scale = Math.max(1e-12, range.max - range.min);
       const yFor = (value) => yBottom - 4
@@ -4078,24 +4436,28 @@
         });
         context.stroke();
       }
-      context.strokeStyle = '#cfd3d8';
-      context.setLineDash([3, 3]);
-      context.beginPath();
-      context.moveTo(0, (yTop + yBottom) / 2);
-      context.lineTo(width, (yTop + yBottom) / 2);
-      context.stroke();
-      context.setLineDash([]);
-      (data.unknowns || []).forEach((range) => {
-        this.drawUnknownDigitalSegment(
-          context,
-          this.xForColumn(range[0], width),
-          this.xForColumn(range[1], width),
-          yTop,
-          yBottom,
-          1,
-          true
-        );
-      });
+      if (settings.drawGuide !== false) {
+        context.strokeStyle = '#cfd3d8';
+        context.setLineDash([3, 3]);
+        context.beginPath();
+        context.moveTo(0, (yTop + yBottom) / 2);
+        context.lineTo(width, (yTop + yBottom) / 2);
+        context.stroke();
+        context.setLineDash([]);
+      }
+      if (settings.drawUnknowns !== false) {
+        (data.unknowns || []).forEach((range) => {
+          this.drawUnknownDigitalSegment(
+            context,
+            this.xForColumn(range[0], width),
+            this.xForColumn(range[1], width),
+            yTop,
+            yBottom,
+            1,
+            true
+          );
+        });
+      }
     }
 
     drawSimplifiedRow(context, rowIndex, yTop, yBottom, width, color, drawMarker) {
@@ -4700,7 +5062,17 @@
           context.lineTo(width, rowTop + rowHeight - 0.5);
           context.stroke();
           const simplifiedRow = this.simplified && this.simplified.model.rows[rowIndex];
-          if (this.showOriginal && !simplifiedRow) {
+          if (this.isMultiWaveRow(rowIndex)) {
+            this.drawSegments(
+              context,
+              rowResult,
+              rowIndex,
+              rowTop + 3,
+              rowTop + rowHeight - 3,
+              width,
+              color
+            );
+          } else if (this.showOriginal && !simplifiedRow) {
             this.drawSegments(
               context,
               rowResult,
@@ -4802,7 +5174,38 @@
         this.drawOverviewRowBackground(context, rowIndex, yTop, yBottom, width);
         context.strokeStyle = color;
         context.lineWidth = 1;
-        if (row.mode === 'digital') {
+        const multiWave = this.meta.rows[rowIndex] && this.meta.rows[rowIndex].multiWave;
+        if (multiWave && Array.isArray(multiWave.sources)) {
+          const range = this.meta.rows[rowIndex].range || { min: -1, max: 1 };
+          const scale = Math.max(1e-12, Number(range.max) - Number(range.min));
+          multiWave.sources.forEach((source, sourceIndex) => {
+            const sourceRow = this.simplified.model.rows[source.rowIndex];
+            if (!sourceRow) return;
+            context.strokeStyle = source.rowIndex >= 0
+              ? this.rowWaveColor(source.rowIndex)
+              : COLORS[sourceIndex % COLORS.length];
+            context.beginPath();
+            let started = false;
+            sourceRow.values.forEach((value, pointIndex) => {
+              const number = finiteScopeNumber(value);
+              if (number == null) {
+                started = false;
+                return;
+              }
+              const column = this.simplified.model.columns[pointIndex];
+              const x = column / Math.max(1, this.meta.totalColumns) * width;
+              const y = yBottom - clamp(
+                (number - Number(range.min)) / scale,
+                0,
+                1
+              ) * (yBottom - yTop);
+              if (!started) context.moveTo(x, y);
+              else context.lineTo(x, y);
+              started = true;
+            });
+            context.stroke();
+          });
+        } else if (row.mode === 'digital') {
           let previousY = null;
           row.values.forEach((value, pointIndex) => {
             const column = this.simplified.model.columns[pointIndex];
@@ -5169,7 +5572,8 @@
       this.updatePointEditor();
       const rowHeight = this.rowHeight(rowIndex);
       const rowLocalY = absoluteY - this.rowTop(rowIndex);
-      const selectPoint = this.simplified && (!this.showOriginal || rowLocalY >= rowHeight / 2)
+      const selectPoint = this.simplified && !this.isMultiWaveRow(rowIndex)
+        && (!this.showOriginal || rowLocalY >= rowHeight / 2)
         ? { rowIndex, column }
         : null;
       this.drag = {
@@ -5639,12 +6043,14 @@
     }
 
     updateRowOperationControls() {
-      if (!this.addSignalButton || !this.deleteSignalButton || !this.moveSignalButton) return;
+      if (!this.addSignalButton || !this.addMultiWaveButton
+          || !this.deleteSignalButton || !this.moveSignalButton) return;
       const rowCount = this.meta && Array.isArray(this.meta.rows) ? this.meta.rows.length : 0;
       const ready = !!this.simplified;
       const busy = this.rowOperationInFlight || this.historyRestoreInFlight
         || this.formulaRefreshInFlight;
       this.addSignalButton.disabled = busy || !ready;
+      this.addMultiWaveButton.disabled = busy || !ready;
       this.deleteSignalButton.disabled = busy || !ready || rowCount === 0;
       this.moveSignalButton.disabled = busy || !ready || rowCount < 2;
       this.deleteSignalButton.title = rowCount
@@ -5980,6 +6386,7 @@
     }
 
     selectNearestPoint(rowIndex, column) {
+      if (this.isMultiWaveRow(rowIndex)) return;
       const columns = this.simplified.model.columns;
       if (!columns.length) return;
       let low = 0;
@@ -6413,6 +6820,7 @@
         transient: clone(this.transientFormulaState)
       });
       this.adoptPreparedFormulaDefinitions();
+      this.adoptPreparedMultiWaveDefinitions();
       this.logFormulaDiagnostics('reload');
       this.signalNames = this.meta.rows.map((row) => String(
         this.transientFormulaState.signalNames[row.rowId] == null

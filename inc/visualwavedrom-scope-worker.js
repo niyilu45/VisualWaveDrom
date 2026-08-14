@@ -12,6 +12,7 @@ const FormulaEngine = global.VisualWaveDromFormula || null;
 
 let activeSession = null;
 const DEFAULT_ROW_HEIGHT = 42;
+const DEFAULT_MULTI_WAVE_ROW_HEIGHT = 68;
 const MIN_ANALOG_ROW_HEIGHT = 28;
 const MAX_ANALOG_ROW_HEIGHT = 480;
 
@@ -35,6 +36,19 @@ function cloneJson(value) {
 
 function own(object, key) {
   return Object.prototype.hasOwnProperty.call(object || {}, key);
+}
+
+function normalizeMultiWaveDefinition(value) {
+  const candidate = Array.isArray(value)
+    ? value
+    : (value && Array.isArray(value.signals) ? value.signals : []);
+  const seen = new Set();
+  return candidate.map((name) => String(name == null ? '' : name).trim())
+    .filter((name) => {
+      if (!name || seen.has(name)) return false;
+      seen.add(name);
+      return true;
+    });
 }
 
 function flattenSignals(signals, rows, path, groups) {
@@ -938,6 +952,74 @@ function restoreFormulaDerivedRow(row, cachedRow, values) {
   row.scopeValues = values;
 }
 
+function configureMultiWaveRows(rows, transient, totalColumns) {
+  const definitions = new Map();
+  rows.forEach((row) => {
+    const sourceScope = row.source && row.source.scope
+      && typeof row.source.scope === 'object' ? row.source.scope : null;
+    const raw = transient.multiWaves && own(transient.multiWaves, row.rowId)
+      ? transient.multiWaves[row.rowId]
+      : (sourceScope && sourceScope.multiWave);
+    if (raw == null) return;
+    definitions.set(String(row.rowId), normalizeMultiWaveDefinition(raw));
+  });
+  if (!definitions.size) return;
+
+  const sourceRowsByName = new Map();
+  rows.forEach((row) => {
+    if (definitions.has(String(row.rowId)) || sourceRowsByName.has(row.name)) return;
+    sourceRowsByName.set(row.name, row);
+  });
+
+  rows.forEach((row) => {
+    const signals = definitions.get(String(row.rowId));
+    if (!signals) return;
+    const sources = [];
+    let min = Number.POSITIVE_INFINITY;
+    let max = Number.NEGATIVE_INFINITY;
+    let sampleStep = 1;
+    let sampleCount = 0;
+    const units = new Set();
+    signals.forEach((name) => {
+      const sourceRow = sourceRowsByName.get(name);
+      if (!sourceRow) {
+        sources.push({ name, rowId: '', rowIndex: -1 });
+        return;
+      }
+      const analogRow = analogRowForFormat(
+        sourceRow,
+        sourceRow.analogFormat,
+        totalColumns
+      );
+      const range = analogRow.range || { min: -1, max: 1 };
+      min = Math.min(min, finiteNumber(range.min) == null ? min : range.min);
+      max = Math.max(max, finiteNumber(range.max) == null ? max : range.max);
+      sampleStep = Math.min(sampleStep, rowSampleStep(analogRow));
+      sampleCount = Math.max(sampleCount, analogRow.samples ? analogRow.samples.length : 0);
+      if (sourceRow.unit) units.add(String(sourceRow.unit));
+      sources.push({
+        name: sourceRow.name,
+        rowId: String(sourceRow.rowId),
+        rowIndex: sourceRow.index
+      });
+    });
+    row.multiWave = { signals: signals.slice(), sources };
+    row.mode = 'analog';
+    row.detectedMode = 'analog';
+    row.sampleStep = sampleStep;
+    row.multiWaveSampleCount = sampleCount;
+    row.range = Number.isFinite(min) && Number.isFinite(max)
+      ? analogRange(new Float64Array([min, max]))
+      : { min: -1, max: 1 };
+    row.analogFormat = normalizeAnalogFormat(row.analogFormat, 'float');
+    row.rowHeight = Math.max(
+      DEFAULT_MULTI_WAVE_ROW_HEIGHT,
+      normalizeRowHeight(row.rowHeight)
+    );
+    row.unit = units.size === 1 ? Array.from(units)[0] : '';
+  });
+}
+
 function createSession(content, transientState, previousSession) {
   const originalContent = String(content || '{}');
   const reusableSession = previousSession
@@ -955,17 +1037,27 @@ function createSession(content, transientState, previousSession) {
   (Array.isArray(transient.extraSignals) ? transient.extraSignals : []).forEach((extra, index) => {
     if (!extra || typeof extra !== 'object') return;
     const id = String(extra.id || ('extra-' + index));
+    const rowId = id.indexOf('extra:') === 0 ? id : ('extra:' + id);
+    const multiWave = transient.multiWaves && own(transient.multiWaves, rowId)
+      ? normalizeMultiWaveDefinition(transient.multiWaves[rowId])
+      : [];
+    const scope = { numericType: 'float', bitWidth: 32, fractionalBits: 0 };
+    if (multiWave.length || (transient.multiWaves && own(transient.multiWaves, rowId))) {
+      scope.mode = 'analog';
+      scope.multiWave = multiWave;
+      scope.rowHeight = DEFAULT_MULTI_WAVE_ROW_HEIGHT;
+    }
     flat.push({
       source: {
         name: String(extra.name || ''),
         wave: '',
-        scope: { numericType: 'float', bitWidth: 32, fractionalBits: 0 }
+        scope
       },
       path: null,
       groups: [],
       name: String(extra.name || ''),
       transient: true,
-      rowId: id.indexOf('extra:') === 0 ? id : ('extra:' + id),
+      rowId,
       sourceIndex: -1
     });
   });
@@ -1198,6 +1290,7 @@ function createSession(content, transientState, previousSession) {
       }
     });
   }
+  configureMultiWaveRows(rows, transient, totalColumns);
   totalColumns = Math.max(1, Math.ceil(totalColumns));
   const scope = source.scope && typeof source.scope === 'object' ? source.scope : {};
   const samplePeriod = finiteNumber(scope.samplePeriod) || 1;
@@ -1773,7 +1866,34 @@ function createWindow(payload) {
   const rows = [];
   for (let index = rowStart; index < rowEnd; index += 1) {
     const row = activeSession.rows[index];
-    const mode = payload.modes && payload.modes[index] || row.mode;
+    const mode = row.multiWave
+      ? 'analog'
+      : (payload.modes && payload.modes[index] || row.mode);
+    if (row.multiWave) {
+      const series = row.multiWave.sources.map((source) => {
+        const sourceRow = activeSession.rows[source.rowIndex];
+        if (!sourceRow) return null;
+        const analogRow = analogRowForFormat(
+          sourceRow,
+          payload.analogFormats && payload.analogFormats[source.rowIndex],
+          total
+        );
+        const data = analogWindow(analogRow, start, end, width, total);
+        data.range = row.range;
+        return {
+          name: source.name,
+          rowId: source.rowId,
+          sourceRowIndex: source.rowIndex,
+          data
+        };
+      }).filter(Boolean);
+      rows.push({
+        index,
+        mode: 'analog',
+        data: { kind: 'multi-analog', range: row.range, series }
+      });
+      continue;
+    }
     const analogRow = mode === 'analog'
       ? analogRowForFormat(
         row,
@@ -2097,6 +2217,19 @@ function chooseColumns(
 }
 
 function stateAtColumn(row, column, mode, analogFormat) {
+  if (row.multiWave && activeSession) {
+    return row.multiWave.sources.map((source) => {
+      const sourceRow = activeSession.rows[source.rowIndex];
+      if (!sourceRow) return source.name + '=x';
+      const value = stateAtColumn(
+        sourceRow,
+        column,
+        'analog',
+        sourceRow.analogFormat
+      );
+      return source.name + '=' + (value == null ? 'x' : String(value));
+    }).join(' · ');
+  }
   if (mode === 'analog') {
     if (Array.isArray(row.scopeValues) && row.scopeValues.length) {
       const index = Math.floor((Math.max(0, column) + 1e-9) / rowSampleStep(row));
@@ -2175,6 +2308,17 @@ function sampleTransitionKey(value, mode) {
 }
 
 function transitionColumnsForMode(row, mode) {
+  if (row.multiWave && activeSession) {
+    if (Array.isArray(row.multiWaveTransitions)) return row.multiWaveTransitions;
+    const columns = [];
+    row.multiWave.sources.forEach((source) => {
+      const sourceRow = activeSession.rows[source.rowIndex];
+      if (!sourceRow) return;
+      transitionColumnsForMode(sourceRow, 'analog').forEach((column) => columns.push(column));
+    });
+    row.multiWaveTransitions = Array.from(new Set(columns)).sort((left, right) => left - right);
+    return row.multiWaveTransitions;
+  }
   if (!row.samples || !row.samples.length) return row.transitions || [];
   const cacheKey = mode === 'digital' ? 'digital' : 'numeric';
   if (row.sampleTransitionCache && row.sampleTransitionCache.has(cacheKey)) {
@@ -3046,11 +3190,14 @@ function prepareResponse() {
       rowHeight: row.rowHeight,
       style: normalizeRowStyle(row.source.scope, activeSession.totalColumns),
       formula: row.formula || null,
+      multiWave: row.multiWave || null,
       sampleStep: rowSampleStep(row),
       cursorStep: rowCursorStep(row),
-      sampleCount: Array.isArray(row.scopeValues)
+      sampleCount: row.multiWave
+        ? Number(row.multiWaveSampleCount || 0)
+        : (Array.isArray(row.scopeValues)
         ? row.scopeValues.length
-        : (row.samples ? row.samples.length : row.wave.length)
+        : (row.samples ? row.samples.length : row.wave.length))
     }))
   };
 }

@@ -14202,6 +14202,9 @@ ${lines.join('\n')}`;
             formulaCount: message.state && message.state.formulas
               ? Object.keys(message.state.formulas).length
               : 0,
+            multiWaveCount: message.state && message.state.multiWaves
+              ? Object.keys(message.state.multiWaves).length
+              : 0,
             extraSignalCount: message.state && Array.isArray(message.state.extraSignals)
               ? message.state.extraSignals.length
               : 0
@@ -14380,11 +14383,25 @@ ${lines.join('\n')}`;
       };
     }
 
+    function normalizeImportedMultiWaveDefinition(value) {
+      const source = Array.isArray(value)
+        ? value
+        : (value && Array.isArray(value.signals) ? value.signals : []);
+      const seen = new Set();
+      return source.map((name) => String(name == null ? '' : name).trim())
+        .filter((name) => {
+          if (!name || seen.has(name)) return false;
+          seen.add(name);
+          return true;
+        });
+    }
+
     function applyImportedWaveRows(payload, importOptions) {
       const updates = payload && Array.isArray(payload.updates) ? payload.updates : [];
       if (!updates.length) throw new Error('导入方案没有返回任何信号行');
       const allowCreateMissing = !!(importOptions && importOptions.createMissing);
       const replaceScopeFormulas = !!(importOptions && importOptions.replaceScopeFormulas);
+      const replaceScopeMultiWaves = !!(importOptions && importOptions.replaceScopeMultiWaves);
       const previewOnly = !!(importOptions && importOptions.previewOnly);
       const formulaEngine = window.VisualWaveDromFormula;
 
@@ -14443,6 +14460,11 @@ ${lines.join('\n')}`;
           }
           formula = formulaEngine.normalizeDefinition(update.formula);
         }
+        const hasMultiWave = replaceScopeMultiWaves
+          && Object.prototype.hasOwnProperty.call(update, 'multiWave');
+        const multiWave = hasMultiWave
+          ? normalizeImportedMultiWaveDefinition(update.multiWave)
+          : null;
         const valueTable = {};
         if (update.tbl && typeof update.tbl === 'object' && !Array.isArray(update.tbl)) {
           Object.keys(update.tbl).forEach((key) => {
@@ -14455,8 +14477,11 @@ ${lines.join('\n')}`;
           update,
           wave: update.wave,
           data: update.data.map((value) => String(value == null ? '' : value)),
-          sampleKind: rawSampleKind === 'analog' ? 'analog' : (rawSampleKind ? 'bus' : ''),
+          sampleKind: multiWave
+            ? 'analog'
+            : (rawSampleKind === 'analog' ? 'analog' : (rawSampleKind ? 'bus' : '')),
           formula,
+          multiWave,
           tbl: valueTable,
           samples: Array.isArray(update.samples)
             ? update.samples.map((value) => {
@@ -14511,6 +14536,18 @@ ${lines.join('\n')}`;
             };
           } else {
             delete signalScope.formula;
+          }
+        }
+        if (replaceScopeMultiWaves) {
+          if (item.multiWave) {
+            signalScope.mode = 'analog';
+            signalScope.multiWave = item.multiWave.slice();
+            delete signalScope.values;
+            delete signalScope.samples;
+            delete signalScope.sampleStep;
+            delete signalScope.formula;
+          } else {
+            delete signalScope.multiWave;
           }
         }
         if (Object.keys(signalScope).length) item.target.signal.scope = signalScope;
@@ -14655,7 +14692,7 @@ ${lines.join('\n')}`;
           merged.push(update);
         }
       });
-      if (!merged.length) {
+      if (!merged.length && !(payload.multiWaves && payload.multiWaves.length)) {
         throw new Error(invalid.length
           ? ('没有可导入的有效公式：' + invalid[0].error)
           : '导入方案没有返回任何信号行');
@@ -14678,6 +14715,36 @@ ${lines.join('\n')}`;
           invalid: invalid.map((item) => ({ name: item.name, error: item.error }))
         }
       });
+    }
+
+    function importedPayloadWithMultiWaves(payload) {
+      const definitions = payload && Array.isArray(payload.multiWaves)
+        ? payload.multiWaves
+        : [];
+      if (!definitions.length) return payload;
+      const merged = [];
+      const positions = new Map();
+      const updates = Array.isArray(payload.updates) ? payload.updates : [];
+      const multiWaveUpdates = definitions.map((definition) => ({
+        signal: String(definition && definition.name || '').trim(),
+        wave: '',
+        data: [],
+        sampleKind: 'analog',
+        createIfMissing: true,
+        multiWave: normalizeImportedMultiWaveDefinition(
+          definition && (definition.multiWave || definition.signals)
+        )
+      })).filter((update) => update.signal && update.multiWave.length);
+      updates.concat(multiWaveUpdates).forEach((update) => {
+        const name = String(update && update.signal || '').trim();
+        if (!name) return;
+        if (positions.has(name)) merged[positions.get(name)] = update;
+        else {
+          positions.set(name, merged.length);
+          merged.push(update);
+        }
+      });
+      return Object.assign({}, payload, { updates: merged });
     }
 
     function reconcileScopeTransientStateAfterCollectionImport(payload) {
@@ -14708,6 +14775,8 @@ ${lines.join('\n')}`;
       state.extraSignals = Array.isArray(state.extraSignals) ? state.extraSignals : [];
       state.formulas = state.formulas && typeof state.formulas === 'object'
         && !Array.isArray(state.formulas) ? state.formulas : {};
+      state.multiWaves = state.multiWaves && typeof state.multiWaves === 'object'
+        && !Array.isArray(state.multiWaves) ? state.multiWaves : {};
       state.signalNames = state.signalNames && typeof state.signalNames === 'object'
         && !Array.isArray(state.signalNames) ? state.signalNames : {};
       state.rowOrder = Array.isArray(state.rowOrder) ? state.rowOrder.map(String) : [];
@@ -14730,6 +14799,7 @@ ${lines.join('\n')}`;
         replacements.set(rowId, sourceRowId);
         removedExtraRowIds.add(rowId);
         delete state.formulas[rowId];
+        delete state.multiWaves[rowId];
         delete state.signalNames[rowId];
         return false;
       });
@@ -14754,8 +14824,15 @@ ${lines.join('\n')}`;
           state.formulas[sourceRowId] = formulaEngine
             ? formulaEngine.normalizeDefinition(update.formula)
             : JSON.parse(JSON.stringify(update.formula));
+          delete state.multiWaves[sourceRowId];
         } else {
           delete state.formulas[sourceRowId];
+        }
+        if (Object.prototype.hasOwnProperty.call(update, 'multiWave') && update.multiWave != null) {
+          state.multiWaves[sourceRowId] = normalizeImportedMultiWaveDefinition(update.multiWave);
+          delete state.formulas[sourceRowId];
+        } else {
+          delete state.multiWaves[sourceRowId];
         }
       });
 
@@ -14765,7 +14842,8 @@ ${lines.join('\n')}`;
         documentName,
         importedNames: Array.from(importedNames),
         removedExtraCount: removedExtraRowIds.size,
-        formulaCount: Object.keys(state.formulas).length
+        formulaCount: Object.keys(state.formulas).length,
+        multiWaveCount: Object.keys(state.multiWaves).length
       });
       return state;
     }
@@ -19940,12 +20018,14 @@ ${lines.join('\n')}`;
               onProgress: importOptions && importOptions.onProgress
             });
           }
+          resolvedPayload = importedPayloadWithMultiWaves(resolvedPayload);
           if (importOptions && typeof importOptions.onProgress === 'function') {
             importOptions.onProgress({ phase: 'applying', stage: 'writing' });
           }
           const result = applyImportedWaveRows(resolvedPayload, {
             createMissing: true,
-            replaceScopeFormulas: true
+            replaceScopeFormulas: true,
+            replaceScopeMultiWaves: true
           });
           const scopeTransientState = reconcileScopeTransientStateAfterCollectionImport(
             resolvedPayload
