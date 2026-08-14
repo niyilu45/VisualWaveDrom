@@ -137,6 +137,7 @@ if (!window.VWDCodeEditorPairs) {
     const BIG_WAVE_SCROLL_THROTTLE_MS = 32;
     const JSON_WRAP_DISABLE_COLUMN_THRESHOLD = 200;
     const JSON_LARGE_TEXT_THRESHOLD = 250000;
+    const EDITOR_LOCAL_STORAGE_MAX_LENGTH = 500000;
     const JSON_EDITOR_SYNC_DEBOUNCE_MS = 360;
     const JSON_EDITOR_RENDER_DEBOUNCE_MS = 700;
     const JSON_EDITOR_NORMAL_RENDER_DEBOUNCE_MS = 300;
@@ -3799,23 +3800,40 @@ ${lines.join('\n')}`;
       }
     }
 
-    function saveEditorJsonToStorage(text) {
+    function saveEditorJsonToStorage(text, knownValid) {
+      const source = String(text == null ? '' : text);
+      if (source.length > EDITOR_LOCAL_STORAGE_MAX_LENGTH) {
+        try {
+          localStorage.removeItem(EDITOR_JSON_KEY);
+          localStorage.removeItem(EDITOR_JSON_VALID_KEY);
+        } catch (_error) { /* quota / private mode */ }
+        return knownValid === true ? true : null;
+      }
+      const valid = knownValid === true || isValidJsonText(source);
       try {
-        localStorage.setItem(EDITOR_JSON_KEY, text);
-        if (isValidJsonText(text)) {
-          localStorage.setItem(EDITOR_JSON_VALID_KEY, text);
+        localStorage.setItem(EDITOR_JSON_KEY, source);
+        if (valid) {
+          localStorage.setItem(EDITOR_JSON_VALID_KEY, source);
         }
       } catch (e) { /* quota / private mode */ }
+      return valid;
     }
 
-    function flushPersistEditorJson() {
+    function flushPersistEditorJson(options) {
+      const opts = options || {};
       clearTimeout(persistTimer);
       persistTimer = null;
       flushCodeMirrorToTextarea('persist-editor-json');
       if (jsonDocumentViewMode === 'window') commitJsonWindowEdits('persist-editor-json');
-      saveEditorJsonToStorage(editor.value);
+      const text = editor.value;
+      const storageValidity = opts.skipStorage
+        ? null
+        : saveEditorJsonToStorage(text, opts.knownValid === true);
+      const valid = opts.knownValid === true
+        || storageValidity === true
+        || (storageValidity == null && isValidJsonText(text));
       const current = editingWaveDocumentName && getSavedTagByName(editingWaveDocumentName);
-      if (current && current.content !== editor.value && isValidJsonText(editor.value)) {
+      if (current && current.content !== text && valid) {
         upsertSavedTag(editingWaveDocumentName, getCurrentStateSnapshot(), {
           skipListRefresh: true,
           skipSort: true
@@ -13082,9 +13100,20 @@ ${lines.join('\n')}`;
         return;
       }
       try {
-        if (waveLibraryServerMode && savedTags.some((tag) => tag.deferred)) {
-          const loadedDocuments = savedTags.filter((tag) => !tag.deferred);
-          localStorage.setItem(WAVE_DOCUMENTS_LOADED_CACHE_KEY, JSON.stringify(loadedDocuments));
+        const hasDeferredDocuments = waveLibraryServerMode
+          && savedTags.some((tag) => tag.deferred);
+        const hasOversizedLoadedDocument = waveLibraryServerMode
+          && savedTags.some((tag) => !tag.deferred
+            && String(tag.content || '').length > EDITOR_LOCAL_STORAGE_MAX_LENGTH);
+        if (hasDeferredDocuments || hasOversizedLoadedDocument) {
+          const loadedDocuments = savedTags.filter((tag) => !tag.deferred
+            && String(tag.content || '').length <= EDITOR_LOCAL_STORAGE_MAX_LENGTH);
+          if (hasOversizedLoadedDocument) localStorage.removeItem(WAVE_DOCUMENTS_KEY);
+          if (loadedDocuments.length) {
+            localStorage.setItem(WAVE_DOCUMENTS_LOADED_CACHE_KEY, JSON.stringify(loadedDocuments));
+          } else {
+            localStorage.removeItem(WAVE_DOCUMENTS_LOADED_CACHE_KEY);
+          }
         } else {
           localStorage.setItem(WAVE_DOCUMENTS_KEY, JSON.stringify(savedTags));
           localStorage.removeItem(WAVE_DOCUMENTS_LOADED_CACHE_KEY);
@@ -13326,11 +13355,6 @@ ${lines.join('\n')}`;
     }
 
     async function openWaveDocumentInScopeWindow(documentName) {
-      if (documentName === editingWaveDocumentName && !saveCurrentWaveDocumentBeforeSwitch()) {
-        setStatus(false, '当前波形图自动保存失败');
-        return false;
-      }
-      flushPersistSavedTags();
       const scopeToken = 'scope-' + Date.now().toString(36)
         + '-' + Math.random().toString(36).slice(2, 9);
       const url = getWaveDocumentScopeViewUrl(documentName, scopeToken);
@@ -13350,29 +13374,53 @@ ${lines.join('\n')}`;
         vwdDebugLog('scope-view', { phase: 'open-blocked', documentName, url });
         return false;
       }
-      const savePromise = (async () => {
-        let stored = getSavedTagByName(documentName);
-        if (stored && stored.deferred) stored = await ensureWaveDocumentLoaded(documentName);
-        if (!stored) throw new Error('波形图尚未载入');
-        if (waveLibraryServerMode) await flushScheduledWaveLibraryServerSave();
-        else await flushBrowserWaveLibrarySave({ force: true });
-        stored = getSavedTagByName(documentName);
-        return getWaveDocumentServerSnapshot(stored, documentName === editingWaveDocumentName);
-      })();
-      scopeWindowOpenStates.set(scopeToken, { documentName, promise: savePromise });
+      const openedAt = Date.now();
+      let sourcePromise = null;
+      const getSourcePromise = () => {
+        if (sourcePromise) return sourcePromise;
+        sourcePromise = (async () => {
+          vwdDebugLog('scope-view', {
+            phase: 'source-prepare-start',
+            documentName,
+            elapsedMs: Date.now() - openedAt
+          });
+          if (documentName === editingWaveDocumentName
+              && !saveCurrentWaveDocumentBeforeSwitch()) {
+            throw new Error('当前波形图自动保存失败');
+          }
+          let stored = getSavedTagByName(documentName);
+          if (stored && stored.deferred) stored = await ensureWaveDocumentLoaded(documentName);
+          if (!stored) throw new Error('波形图尚未载入');
+          const snapshot = getWaveDocumentServerSnapshot(
+            stored,
+            documentName === editingWaveDocumentName
+          );
+          if (!snapshot) throw new Error('无法生成示波器数据快照');
+          vwdDebugLog('scope-view', {
+            phase: 'source-prepare-complete',
+            documentName,
+            contentLength: typeof snapshot.content === 'string' ? snapshot.content.length : 0,
+            elapsedMs: Date.now() - openedAt
+          });
+          return snapshot;
+        })();
+        sourcePromise.catch((error) => {
+          setStatus(false, '打开示波器失败：' + (error && error.message ? error.message : String(error)));
+          vwdDebugLog('scope-view', {
+            phase: 'source-save-error',
+            documentName,
+            message: error && error.message ? error.message : String(error)
+          });
+        });
+        return sourcePromise;
+      };
+      scopeWindowOpenStates.set(scopeToken, { documentName, getSourcePromise });
       if (!scopeWindowRefs.has(documentName)) scopeWindowRefs.set(documentName, new Set());
       scopeWindowRefs.get(documentName).add(opened);
       setTimeout(() => scopeWindowOpenStates.delete(scopeToken), 60000);
-      savePromise.catch((error) => {
-        setStatus(false, '打开示波器失败：' + (error && error.message ? error.message : String(error)));
-        vwdDebugLog('scope-view', {
-          phase: 'source-save-error',
-          documentName,
-          message: error && error.message ? error.message : String(error)
-        });
-      });
       const tag = getSavedTagByName(documentName);
-      setStatus(true, '已打开示波器：' + getSavedTagTitle(tag || { name: documentName, content: '{}' }));
+      const title = tag && tag.titleCache ? tag.titleCache : documentName;
+      setStatus(true, '已打开示波器：' + title);
       vwdDebugLog('scope-view', { phase: 'open-window', documentName, scopeToken, url });
       return true;
     }
@@ -14413,7 +14461,11 @@ ${lines.join('\n')}`;
         if (message.type === 'visualwavedrom-scope-source-request') {
           const state = scopeWindowOpenStates.get(String(message.scopeToken || ''));
           if (!state || state.documentName !== String(message.waveId || '') || !event.source) return;
-          state.promise.then((documentSnapshot) => {
+          const sourcePromise = typeof state.getSourcePromise === 'function'
+            ? state.getSourcePromise()
+            : state.promise;
+          if (!sourcePromise) return;
+          sourcePromise.then((documentSnapshot) => {
             event.source.postMessage({
               type: 'visualwavedrom-scope-source-response',
               scopeToken: message.scopeToken,
@@ -14797,6 +14849,14 @@ ${lines.join('\n')}`;
               cycle0: String(item.formula.cycle0 || ''),
               cycle05: String(item.formula.cycle05 || '')
             };
+            if (
+              item.sampleKind === 'analog'
+              && !signalScope.type
+              && !signalScope.numericType
+              && !signalScope.dataType
+            ) {
+              signalScope.numericType = 'float';
+            }
             if (item.derivedCache) signalScope.derivedCache = item.derivedCache;
             else delete signalScope.derivedCache;
           } else {
@@ -14830,7 +14890,8 @@ ${lines.join('\n')}`;
           createdCount,
           extendedColumns,
           text: newText,
-          formatPromise: Promise.resolve(true)
+          formatPromise: Promise.resolve(true),
+          documentValue: parsed
         };
       }
       if (newText === editor.value) {
@@ -14839,7 +14900,8 @@ ${lines.join('\n')}`;
           count: prepared.length,
           createdCount,
           extendedColumns,
-          formatPromise: Promise.resolve(true)
+          formatPromise: Promise.resolve(true),
+          documentValue: parsed
         };
       }
       const selectionStart = editor.selectionStart;
@@ -14855,7 +14917,8 @@ ${lines.join('\n')}`;
         count: prepared.length,
         createdCount,
         extendedColumns,
-        formatPromise: Promise.resolve(true)
+        formatPromise: Promise.resolve(true),
+        documentValue: parsed
       };
     }
 
@@ -15028,17 +15091,21 @@ ${lines.join('\n')}`;
       return Object.assign({}, payload, { updates: merged });
     }
 
-    function reconcileScopeTransientStateAfterCollectionImport(payload) {
+    function reconcileScopeTransientStateAfterCollectionImport(payload, preparedSource) {
       const documentName = editingWaveDocumentName;
       if (!documentName) return null;
       const updates = payload && Array.isArray(payload.updates) ? payload.updates : [];
       if (!updates.length) return null;
 
-      let source;
-      try {
-        source = JSON.parse(editor.value);
-      } catch (_error) {
-        return null;
+      let source = preparedSource && typeof preparedSource === 'object'
+        ? preparedSource
+        : null;
+      if (!source) {
+        try {
+          source = JSON.parse(editor.value);
+        } catch (_error) {
+          return null;
+        }
       }
       const sourceRows = flattenSignals(source && source.signal);
       const sourceRowIds = new Map();
@@ -15166,7 +15233,7 @@ ${lines.join('\n')}`;
       const formatSucceeded = await result.formatPromise;
       if (!formatSucceeded) throw new Error('导入后的 JSON 格式化失败');
 
-      flushPersistEditorJson();
+      flushPersistEditorJson({ knownValid: true });
       flushPersistSavedTags();
 
       if (waveLibraryServerMode) {
@@ -20331,6 +20398,20 @@ ${lines.join('\n')}`;
           if (codeMirrorEditor) codeMirrorEditor.refresh();
         },
         applyImport: async (payload, importOptions) => {
+          const applyStartedAt = Date.now();
+          const reportApplyStage = async (stage, yieldBeforeWork) => {
+            if (importOptions && typeof importOptions.onProgress === 'function') {
+              importOptions.onProgress({ phase: 'applying', stage });
+            }
+            vwdDebugLog('collection-import', {
+              phase: 'client-apply-stage',
+              stage,
+              elapsedMs: Date.now() - applyStartedAt
+            });
+            if (yieldBeforeWork) {
+              await new Promise((resolve) => setTimeout(resolve, 0));
+            }
+          };
           const definitions = payload && Array.isArray(payload.formulas) ? payload.formulas : [];
           let resolvedPayload = payload;
           if (definitions.length) {
@@ -20349,22 +20430,26 @@ ${lines.join('\n')}`;
             });
           }
           resolvedPayload = importedPayloadWithMultiWaves(resolvedPayload);
-          if (importOptions && typeof importOptions.onProgress === 'function') {
-            importOptions.onProgress({ phase: 'applying', stage: 'writing' });
-          }
+          await reportApplyStage('writing', true);
           const result = applyImportedWaveRows(resolvedPayload, {
             createMissing: true,
             replaceScopeFormulas: true,
             replaceScopeMultiWaves: true
           });
+          await reportApplyStage('reconciling', true);
           const scopeTransientState = reconcileScopeTransientStateAfterCollectionImport(
-            resolvedPayload
+            resolvedPayload,
+            result.documentValue
           );
+          delete result.documentValue;
+          await reportApplyStage('saving', true);
           await persistImportedWaveRows(result);
+          await reportApplyStage('notifying', true);
           notifyOpenScopeWindowsAfterCollectionImport(
             editingWaveDocumentName,
             scopeTransientState
           );
+          await reportApplyStage('finalizing', false);
           result.formulaResult = resolvedPayload.formulaResult || null;
           return result;
         }

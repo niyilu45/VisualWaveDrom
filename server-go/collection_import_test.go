@@ -1474,6 +1474,54 @@ func TestCollectionSingleFilePreviewReturnsTotalAndRequestedLines(t *testing.T) 
 	}
 }
 
+func TestCollectionSingleFileQuickPreviewSkipsFullIndex(t *testing.T) {
+	root := t.TempDir()
+	sourcePath := filepath.Join(root, "signal.txt")
+	if err := os.WriteFile(sourcePath, []byte("zero\none\ntwo\nthree\nfour\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	preset, err := normalizeCollectionPreset(collectionPresetValue(
+		[]any{},
+		map[string]any{
+			"folder": ".", "grepKeys": `^signal\.txt$`,
+			"hasSeq": false, "name": "signal",
+		},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := searchCollectionFiles(
+		root, root, preset, map[string]string{}, runTestCollectionRegexSearch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance := &service{
+		config:                 config{rootDir: root},
+		collectionSearchCache:  make(map[string]collectionSearchCacheEntry),
+		collectionPreviewCache: make(map[string]collectionSinglePreviewIndex),
+	}
+	result = instance.rememberCollectionSearch(result)
+	preview, err := instance.previewCollectionSingleFile(
+		root, result.Preset, map[string]string{}, result.SearchToken, 0, 1, 3, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if boolValue(preview["totalLinesKnown"], true) ||
+		intValue(preview["displayedCount"], 0) != 3 ||
+		!boolValue(preview["hasMore"], false) {
+		t.Fatalf("unexpected quick preview metadata: %#v", preview)
+	}
+	lines, ok := preview["lines"].([]collectionSinglePreviewLine)
+	if !ok || len(lines) != 3 || lines[0].Number != 1 || lines[0].Text != "zero" ||
+		lines[2].Number != 3 || lines[2].Text != "two" {
+		t.Fatalf("unexpected quick preview lines: %#v", preview["lines"])
+	}
+	if len(instance.collectionPreviewCache) != 0 {
+		t.Fatalf("quick preview unexpectedly built a full-file index: %#v",
+			instance.collectionPreviewCache)
+	}
+}
+
 func TestCollectionImportProgressTracksCompletedFiles(t *testing.T) {
 	instance := &service{
 		collectionImportJobs: make(map[string]collectionImportProgress),

@@ -127,6 +127,7 @@
     let importProgressState = null;
     let importProgressPollTimer = 0;
     let importProgressPollStopped = true;
+    let importProgressPollGeneration = 0;
     let importProgressPollErrorLogged = false;
     let presetCodeEditor = null;
     let presetResizeObserver = null;
@@ -140,6 +141,7 @@
     let presetNavigationRanges = [];
     let presetNavigationHighlightLine = null;
     let presetNavigationHighlightTimer = 0;
+    let modalBackdropPress = null;
     let formulaDiagnostics = new Map();
     let multiWaveDiagnostics = new Map();
     const variableValues = new Map();
@@ -190,17 +192,27 @@
 
     function applyFormulaProgress(progress) {
       if (!progress || typeof progress !== 'object') return;
+      const phase = String(progress.phase || 'formula');
       importProgressState = Object.assign({}, importProgressState || {}, {
-        phase: String(progress.phase || 'formula'),
-        formulaStage: String(progress.stage || 'evaluating'),
-        formulaIndex: Math.max(0, Number(progress.index || 0)),
-        totalFormulas: Math.max(0, Number(progress.total || 0)),
-        currentFormula: String(progress.name || '')
+        phase,
+        done: false
       });
+      if (phase === 'formula') {
+        Object.assign(importProgressState, {
+          formulaStage: String(progress.stage || 'evaluating'),
+          formulaIndex: Math.max(0, Number(progress.index || 0)),
+          totalFormulas: Math.max(0, Number(progress.total || 0)),
+          currentFormula: String(progress.name || '')
+        });
+      } else if (phase === 'applying') {
+        importProgressState.applyStage = String(progress.stage || 'writing');
+      }
       renderProgress();
       debug({
-        phase: 'import-formula-progress',
-        stage: importProgressState.formulaStage,
+        phase: phase === 'formula' ? 'import-formula-progress' : 'import-client-progress',
+        stage: phase === 'formula'
+          ? importProgressState.formulaStage
+          : importProgressState.applyStage,
         index: importProgressState.formulaIndex,
         total: importProgressState.totalFormulas,
         name: importProgressState.currentFormula
@@ -229,7 +241,14 @@
         if (totalFormulas > 0) message += ' ' + formulaIndex + '/' + totalFormulas;
         if (state.currentFormula) message += '：' + state.currentFormula;
       } else if (state.phase === 'applying') {
-        message += '，正在写入并保存当前波形图';
+        const applyMessages = {
+          writing: '正在写入当前波形图',
+          reconciling: '正在整理示波器数据',
+          saving: '正在保存 SQLite 波形库',
+          notifying: '正在同步已打开的波形窗口',
+          finalizing: '正在完成导入'
+        };
+        message += '，' + (applyMessages[state.applyStage] || '正在写入并保存当前波形图');
       }
       message += '，已等待 ' + seconds + ' 秒';
       setHint(message, false);
@@ -239,6 +258,15 @@
         confirmButton.textContent = totalFormulas > 0
           ? ('计算公式 ' + formulaIndex + '/' + totalFormulas)
           : '正在计算公式';
+      } else if (busy && state.phase === 'applying') {
+        const applyButtons = {
+          writing: '正在写入波形…',
+          reconciling: '正在整理数据…',
+          saving: '正在保存波形库…',
+          notifying: '正在同步窗口…',
+          finalizing: '正在完成导入…'
+        };
+        confirmButton.textContent = applyButtons[state.applyStage] || '正在写入波形…';
       } else if (busy && total > 0) {
         confirmButton.textContent = '导入中 ' + completed + '/' + total;
       }
@@ -256,12 +284,14 @@
 
     function stopImportProgressPolling() {
       importProgressPollStopped = true;
+      importProgressPollGeneration += 1;
       window.clearTimeout(importProgressPollTimer);
       importProgressPollTimer = 0;
     }
 
     function startImportProgressPolling(progressToken, totalFiles) {
       stopImportProgressPolling();
+      const pollGeneration = importProgressPollGeneration;
       importProgressPollStopped = false;
       importProgressPollErrorLogged = false;
       importProgressState = {
@@ -276,9 +306,15 @@
       renderProgress();
 
       const poll = async () => {
-        if (importProgressPollStopped) return;
+        const isCurrentPoll = () => !importProgressPollStopped
+          && pollGeneration === importProgressPollGeneration;
+        if (!isCurrentPoll()) return;
         try {
           const payload = await post('import-progress', { progressToken });
+          if (!isCurrentPoll()) {
+            debug({ phase: 'import-progress-stale-response-ignored', progressToken });
+            return;
+          }
           importProgressPollErrorLogged = false;
           applyImportProgress(payload.progress);
           if (payload.progress && payload.progress.done) return;
@@ -291,7 +327,7 @@
             });
           }
         }
-        if (!importProgressPollStopped) {
+        if (isCurrentPoll()) {
           importProgressPollTimer = window.setTimeout(poll, 400);
         }
       };
@@ -1954,7 +1990,8 @@
           searchToken: searchResult.searchToken || '',
           index: entry.index,
           startLine: 1,
-          lineCount: 64
+          lineCount: 64,
+          quick: true
         });
         const validationError = entry.hasSeq
           ? sequencePreviewError(payload.lines, entry.delimiter)
@@ -3544,10 +3581,12 @@
         }
         if (importProgressState) {
           importProgressState.phase = formulas.length ? 'formula' : 'applying';
+          importProgressState.done = false;
           importProgressState.formulaIndex = 0;
           importProgressState.totalFormulas = formulas.length;
           importProgressState.currentFormula = '';
           importProgressState.formulaStage = 'evaluating';
+          importProgressState.applyStage = formulas.length ? '' : 'writing';
         }
         updateProgress(formulas.length
           ? '文件解析完成，正在计算公式…'
@@ -3719,8 +3758,44 @@
       event.preventDefault();
       void loadPreset(presetPathInput.value);
     });
+    modal.addEventListener('pointerdown', (event) => {
+      modalBackdropPress = event.button === 0 && event.target === modal
+        ? {
+            pointerId: event.pointerId,
+            clientX: event.clientX,
+            clientY: event.clientY
+          }
+        : null;
+    });
+    modal.addEventListener('pointercancel', () => {
+      modalBackdropPress = null;
+    });
+    document.addEventListener('pointerup', (event) => {
+      if (!modalBackdropPress) return;
+      if (event.pointerId !== modalBackdropPress.pointerId || event.target !== modal) {
+        modalBackdropPress = null;
+      }
+    }, true);
+    window.addEventListener('blur', () => {
+      modalBackdropPress = null;
+    });
     modal.addEventListener('click', (event) => {
-      if (event.target === modal) close();
+      if (event.target !== modal) return;
+      const press = modalBackdropPress;
+      modalBackdropPress = null;
+      const distance = press
+        ? Math.hypot(event.clientX - press.clientX, event.clientY - press.clientY)
+        : Number.POSITIVE_INFINITY;
+      if (!press || distance > 6) {
+        debug({
+          phase: 'modal-backdrop-close-blocked',
+          reason: press ? 'pointer-dragged' : 'pointer-started-inside-dialog',
+          distance: Number.isFinite(distance) ? Math.round(distance) : null
+        });
+        return;
+      }
+      debug({ phase: 'modal-backdrop-close', distance: Math.round(distance) });
+      close();
     });
     modal.addEventListener('keydown', (event) => {
       if (event.target && event.target.closest

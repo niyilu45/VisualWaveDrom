@@ -286,7 +286,13 @@ function getAnalogFormat(source, row, rowIndex, hasSamples) {
   const signal = row.source || {};
   const localScope = signal.scope && typeof signal.scope === 'object' ? signal.scope : null;
   const globalScope = getScopeSignalConfig(source, row, rowIndex);
-  return normalizeAnalogFormat(localScope || globalScope, hasSamples ? 'float' : 'unsigned');
+  const scopeConfig = localScope || globalScope;
+  const hasFormula = !!(
+    scopeConfig
+    && scopeConfig.formula
+    && typeof scopeConfig.formula === 'object'
+  );
+  return normalizeAnalogFormat(scopeConfig, hasSamples || hasFormula ? 'float' : 'unsigned');
 }
 
 function getBusFormat(source, row, rowIndex) {

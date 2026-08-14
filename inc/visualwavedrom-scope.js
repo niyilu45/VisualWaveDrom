@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260814-derived-pipeline-v1';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260815-formula-analog-v1';
   const FormulaEngine = global.VisualWaveDromFormula || null;
   const DEFAULT_ROW_HEIGHT = 42;
   const DEFAULT_MULTI_WAVE_ROW_HEIGHT = 68;
@@ -10,6 +10,7 @@
   const MAX_ANALOG_ROW_HEIGHT = 480;
   const FULL_RESOLUTION_TARGET_LIMIT = 2000;
   const LARGE_WAVE_TARGET_POINTS = 1000;
+  const AUTO_SIMPLIFY_COLUMN_LIMIT = FULL_RESOLUTION_TARGET_LIMIT;
   const AXIS_HEIGHT = 38;
   const OVERVIEW_HEIGHT = 76;
   const MAX_HISTORY = 100;
@@ -592,6 +593,7 @@
       this.windowSessionRevision = 0;
       this.windowBuildKey = '';
       this.windowBuildPromise = null;
+      this.windowBackgroundPromise = null;
       this.lastSynchronizedScrollTop = Number.NaN;
       this.verticalScrollFrame = 0;
       this.pendingVerticalScrollOptions = null;
@@ -637,7 +639,8 @@
         void this.refreshFormulaSession({ preservePopover: true, persist: true });
       }, 260);
       this.scheduleFormulaSimplify = debounce(() => {
-        if (!this.formulaRefreshInFlight && this.meta) {
+        if (!this.formulaRefreshInFlight && this.meta
+            && (this.simplified || this.meta.totalColumns <= AUTO_SIMPLIFY_COLUMN_LIMIT)) {
           void this.runSimplify(false, { background: true });
         }
       }, 900);
@@ -715,7 +718,6 @@
       this.updateMeasurements();
       this.updateLayout();
       await this.requestWindow();
-      await this.runSimplify(false);
       await this.updateCursorReadout();
       this.updateDraftState();
       this.setStatus('示波器数据已就绪');
@@ -725,6 +727,7 @@
         rows: this.meta.rows.length,
         totalColumns: this.meta.totalColumns
       });
+      this.scheduleInitialSimplify();
     }
 
     buildShell() {
@@ -3864,7 +3867,7 @@
       this.plotViewport.scrollTop = scrollTop;
       this.signalScroll.scrollTop = scrollTop;
       this.scheduleWindowRequest();
-      void this.runSimplify(false);
+      if (this.simplified) void this.runSimplify(false, { background: true });
       const nextAnchor = this.signalList.querySelector(
         '[data-scope-display-row="' + index + '"]'
       );
@@ -3928,7 +3931,7 @@
       this.cursorNavigationSequence += 1;
       this.scheduleWindowRequest();
       void this.updateCursorReadout();
-      void this.runSimplify(false);
+      if (this.simplified) void this.runSimplify(false, { background: true });
       const typeLabel = this.signalAnalogTypeSelect.options[
         this.signalAnalogTypeSelect.selectedIndex
       ].text;
@@ -4223,6 +4226,7 @@
       this.windowRequestSequence += 1;
       this.windowBuildKey = '';
       this.windowBuildPromise = null;
+      this.windowBackgroundPromise = null;
       this.windowData = null;
       this.rowStart = 0;
       this.rowEnd = 0;
@@ -4411,6 +4415,41 @@
       return null;
     }
 
+    async fillRemainingWindowRows(config, key, sequence, cache, initialVisible) {
+      const visibleCount = Math.max(1, initialVisible.end - initialVisible.start);
+      const chunkSize = clamp(visibleCount, 2, 8);
+      while (sequence === this.windowRequestSequence && key === this.windowBuildKey) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        if (sequence !== this.windowRequestSequence || key !== this.windowBuildKey) return;
+        const currentVisible = this.visibleRows();
+        let range = this.missingWindowRowRange(
+          cache,
+          currentVisible.start,
+          currentVisible.end,
+          chunkSize
+        );
+        if (!range) range = this.missingWindowRowRange(cache, 0, config.rowCount, chunkSize);
+        if (!range) break;
+        const result = await this.worker.call(
+          'window',
+          this.windowPayload(config, range.start, range.end)
+        );
+        if (sequence !== this.windowRequestSequence || key !== this.windowBuildKey) return;
+        this.mergeWindowResult(cache, result);
+        const latestVisible = this.visibleRows();
+        if (range.start < latestVisible.end && range.end > latestVisible.start) {
+          this.draw({ plotOnly: true });
+        }
+      }
+      if (sequence !== this.windowRequestSequence || key !== this.windowBuildKey) return;
+      cache.complete = cache.computedRowCount >= config.rowCount;
+      this.log('scope-window', {
+        phase: 'all-rows-ready',
+        computedRows: cache.computedRowCount,
+        totalRows: config.rowCount
+      });
+    }
+
     async buildWindowRows(config, key, sequence) {
       const initialVisible = this.visibleRows();
       const cache = {
@@ -4443,36 +4482,20 @@
         rowEnd: initialVisible.end,
         totalRows: config.rowCount
       });
-
-      const visibleCount = Math.max(1, initialVisible.end - initialVisible.start);
-      const chunkSize = clamp(visibleCount, 2, 8);
-      while (sequence === this.windowRequestSequence && key === this.windowBuildKey) {
-        const currentVisible = this.visibleRows();
-        let range = this.missingWindowRowRange(
-          cache,
-          currentVisible.start,
-          currentVisible.end,
-          chunkSize
-        );
-        if (!range) range = this.missingWindowRowRange(cache, 0, config.rowCount, chunkSize);
-        if (!range) break;
-        const result = await this.worker.call(
-          'window',
-          this.windowPayload(config, range.start, range.end)
-        );
+      const backgroundPromise = this.fillRemainingWindowRows(
+        config, key, sequence, cache, initialVisible
+      );
+      this.windowBackgroundPromise = backgroundPromise;
+      backgroundPromise.catch((error) => {
         if (sequence !== this.windowRequestSequence || key !== this.windowBuildKey) return;
-        this.mergeWindowResult(cache, result);
-        const latestVisible = this.visibleRows();
-        if (range.start < latestVisible.end && range.end > latestVisible.start) {
-          this.draw({ plotOnly: true });
+        this.log('scope-window', {
+          phase: 'background-error',
+          message: error && error.message ? error.message : String(error)
+        });
+      }).finally(() => {
+        if (this.windowBackgroundPromise === backgroundPromise) {
+          this.windowBackgroundPromise = null;
         }
-      }
-      if (sequence !== this.windowRequestSequence || key !== this.windowBuildKey) return;
-      cache.complete = cache.computedRowCount >= config.rowCount;
-      this.log('scope-window', {
-        phase: 'all-rows-ready',
-        computedRows: cache.computedRowCount,
-        totalRows: config.rowCount
       });
     }
 
@@ -4481,6 +4504,9 @@
       const config = this.windowRequestConfig();
       const key = this.windowRequestKey(config);
       if (this.windowData && this.windowData.viewportKey === key && this.windowData.complete) return;
+      if (this.windowData && this.windowData.viewportKey === key && this.windowBackgroundPromise) {
+        return;
+      }
       if (this.windowBuildKey === key && this.windowBuildPromise) return this.windowBuildPromise;
 
       const sequence = ++this.windowRequestSequence;
@@ -6915,6 +6941,26 @@
       }
     }
 
+    scheduleInitialSimplify() {
+      if (!this.meta || this.meta.totalColumns > AUTO_SIMPLIFY_COLUMN_LIMIT) {
+        this.log('scope-simplify', {
+          phase: 'initial-skipped',
+          totalColumns: this.meta ? this.meta.totalColumns : 0,
+          limit: AUTO_SIMPLIFY_COLUMN_LIMIT
+        });
+        return;
+      }
+      const run = () => {
+        if (!this.meta || this.simplified || this.formulaRefreshInFlight) return;
+        void this.runSimplify(false, { background: true });
+      };
+      if (typeof global.requestIdleCallback === 'function') {
+        global.requestIdleCallback(run, { timeout: 1200 });
+      } else {
+        global.setTimeout(run, 80);
+      }
+    }
+
     updateMetrics(metrics) {
       if (!metrics) {
         this.metricsEl.textContent = '';
@@ -7427,8 +7473,8 @@
       this.updateMeasurements();
       this.updateLayout();
       await this.requestWindow();
-      await this.runSimplify(false);
       await this.updateCursorReadout();
+      this.scheduleInitialSimplify();
     }
 
     async applyImportedSource(saved, transientState) {

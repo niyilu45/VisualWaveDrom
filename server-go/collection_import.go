@@ -1699,6 +1699,35 @@ func readCollectionSinglePreviewLine(
 	return text, true, truncated, nil
 }
 
+func readCollectionSinglePreviewHead(
+	sourcePath string,
+	lineCount int,
+) ([]collectionSinglePreviewLine, bool, error) {
+	file, err := os.Open(sourcePath)
+	if err != nil {
+		return nil, false, err
+	}
+	defer file.Close()
+	reader := bufio.NewReaderSize(file, 64*1024)
+	lines := make([]collectionSinglePreviewLine, 0, lineCount)
+	for lineNumber := 1; lineNumber <= lineCount+1; lineNumber++ {
+		text, found, truncated, readErr := readCollectionSinglePreviewLine(reader)
+		if readErr != nil {
+			return nil, false, readErr
+		}
+		if !found {
+			return lines, false, nil
+		}
+		if lineNumber > lineCount {
+			return lines, true, nil
+		}
+		lines = append(lines, collectionSinglePreviewLine{
+			Number: lineNumber, Text: text, Truncated: truncated,
+		})
+	}
+	return lines, false, nil
+}
+
 func readCollectionSinglePreviewRange(
 	indexed collectionSinglePreviewIndex,
 	startLine int,
@@ -3119,6 +3148,7 @@ func (s *service) previewCollectionSingleFile(
 	ruleIndex int,
 	startLine int,
 	lineCount int,
+	quickMode ...bool,
 ) (map[string]any, error) {
 	if ruleIndex < 0 || ruleIndex >= len(preset.Paths) {
 		return nil, errors.New("单文件预览规则序号无效")
@@ -3154,6 +3184,31 @@ func (s *service) previewCollectionSingleFile(
 		return nil, errors.New("只有单波形文件支持文本范围预览")
 	}
 	match := selected.Matches[0]
+	quick := len(quickMode) > 0 && quickMode[0] && startLine == 1
+	if quick {
+		lines, hasMore, readErr := readCollectionSinglePreviewHead(match.Path, lineCount)
+		if readErr != nil {
+			return nil, fmt.Errorf("读取文件快速预览失败：%w", readErr)
+		}
+		sequenceColumnHidden := preset.Paths[ruleIndex].HasSeq
+		if sequenceColumnHidden {
+			delimiter := preset.Paths[ruleIndex].Delimiter
+			if strings.TrimSpace(delimiter) == "" {
+				delimiter = selected.Delimiter
+			}
+			lines = collectionSinglePreviewWithoutSequenceColumn(
+				lines, delimiter, match.FileName)
+		}
+		return map[string]any{
+			"ok": true, "index": ruleIndex,
+			"path": match.Path, "relativePath": match.RelativePath,
+			"totalLines": 0, "totalLinesKnown": false, "startLine": startLine,
+			"lineCount": lineCount, "displayedCount": len(lines),
+			"hasMore":              hasMore,
+			"sequenceColumnHidden": sequenceColumnHidden,
+			"lines":                lines,
+		}, nil
+	}
 	indexed, err := s.collectionSinglePreviewIndex(match)
 	if err != nil {
 		return nil, fmt.Errorf("读取文件行索引失败：%w", err)
@@ -3351,6 +3406,7 @@ func (s *service) handleImportCollection(writer http.ResponseWriter, request *ht
 				intValue(payload["index"], -1),
 				intValue(payload["startLine"], 1),
 				intValue(payload["lineCount"], collectionSinglePreviewLines),
+				boolValue(payload["quick"], false),
 			)
 			if previewErr != nil {
 				sendJSON(writer, 400, map[string]any{"error": previewErr.Error()})
