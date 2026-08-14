@@ -14554,7 +14554,79 @@ ${lines.join('\n')}`;
       };
     }
 
-    function importedPayloadWithFormulas(payload, options) {
+    const FORMULA_IMPORT_WORKER_URL = 'inc/visualwavedrom-formula-import-worker.js'
+      + '?v=20260814-formula-progress-v2';
+    let formulaImportRequestSequence = 0;
+
+    function buildFormulaUpdatesOffThread(documentValue, importedUpdates, definitions, onProgress) {
+      const formulaEngine = window.VisualWaveDromFormula;
+      const runFallback = () => Promise.resolve(formulaEngine.buildFormulaUpdates(
+        documentValue,
+        importedUpdates,
+        definitions,
+        {
+          onFormulaStart: (progress) => {
+            if (typeof onProgress === 'function') {
+              onProgress(Object.assign({ phase: 'formula', stage: 'evaluating' }, progress));
+            }
+          },
+          onFormulaPackageStart: (progress) => {
+            if (typeof onProgress === 'function') {
+              onProgress(Object.assign({ phase: 'formula', stage: 'packaging' }, progress));
+            }
+          }
+        }
+      ));
+      if (typeof window.Worker !== 'function') return runFallback();
+      return new Promise((resolve, reject) => {
+        let worker;
+        let settled = false;
+        try {
+          worker = new Worker(FORMULA_IMPORT_WORKER_URL);
+        } catch (_error) {
+          void runFallback().then(resolve, reject);
+          return;
+        }
+        const requestId = ++formulaImportRequestSequence;
+        const finish = () => {
+          if (worker) worker.terminate();
+          worker = null;
+        };
+        const fallback = () => {
+          if (settled) return;
+          settled = true;
+          finish();
+          void runFallback().then(resolve, reject);
+        };
+        worker.addEventListener('message', (event) => {
+          const message = event.data || {};
+          if (message.requestId !== requestId) return;
+          if (message.type === 'progress') {
+            if (typeof onProgress === 'function') onProgress(message.progress || {});
+            return;
+          }
+          if (settled) return;
+          settled = true;
+          finish();
+          if (message.type === 'complete') resolve(message.result);
+          else reject(new Error(message.error || '公式计算失败'));
+        });
+        worker.addEventListener('error', fallback);
+        try {
+          worker.postMessage({
+            type: 'build-formula-updates',
+            requestId,
+            documentValue,
+            importedUpdates,
+            definitions
+          });
+        } catch (_error) {
+          fallback();
+        }
+      });
+    }
+
+    async function importedPayloadWithFormulas(payload, options) {
       const definitions = payload && Array.isArray(payload.formulas) ? payload.formulas : [];
       if (!definitions.length) return payload;
       const formulaEngine = window.VisualWaveDromFormula;
@@ -14564,10 +14636,11 @@ ${lines.join('\n')}`;
       const sourceUpdates = Array.isArray(opts.formulaSourceUpdates)
         ? opts.formulaSourceUpdates
         : importedUpdates;
-      const built = formulaEngine.buildFormulaUpdates(
+      const built = await buildFormulaUpdatesOffThread(
         typeof opts.documentValue === 'string' ? opts.documentValue : editor.value,
         sourceUpdates,
-        definitions
+        definitions,
+        opts.onProgress
       );
       const invalid = built.analysis.items.filter((item) => !item.valid);
       const merged = [];
@@ -19849,7 +19922,7 @@ ${lines.join('\n')}`;
         refreshEditors: () => {
           if (codeMirrorEditor) codeMirrorEditor.refresh();
         },
-        applyImport: async (payload) => {
+        applyImport: async (payload, importOptions) => {
           const definitions = payload && Array.isArray(payload.formulas) ? payload.formulas : [];
           let resolvedPayload = payload;
           if (definitions.length) {
@@ -19861,10 +19934,14 @@ ${lines.join('\n')}`;
                 previewOnly: true
               })
               : { text: editor.value };
-            resolvedPayload = importedPayloadWithFormulas(payload, {
+            resolvedPayload = await importedPayloadWithFormulas(payload, {
               documentValue: importedPreview.text,
-              formulaSourceUpdates: []
+              formulaSourceUpdates: [],
+              onProgress: importOptions && importOptions.onProgress
             });
+          }
+          if (importOptions && typeof importOptions.onProgress === 'function') {
+            importOptions.onProgress({ phase: 'applying', stage: 'writing' });
           }
           const result = applyImportedWaveRows(resolvedPayload, {
             createMissing: true,

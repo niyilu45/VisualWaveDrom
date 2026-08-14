@@ -384,6 +384,32 @@ body.scope-wave-view > #vim-help-modal {
   outline-offset: -2px;
 }
 
+.scope-signal-row.scope-row-drag-source,
+.scope-signal-row:nth-child(even).scope-row-drag-source {
+  background: #edf4fb;
+  opacity: 0.58;
+}
+
+.scope-signal-row.scope-row-drop-before::before,
+.scope-signal-row.scope-row-drop-after::after {
+  position: absolute;
+  z-index: 6;
+  right: 5px;
+  left: 5px;
+  height: 2px;
+  background: #2368ad;
+  content: "";
+  pointer-events: none;
+}
+
+.scope-signal-row.scope-row-drop-before::before {
+  top: -1px;
+}
+
+.scope-signal-row.scope-row-drop-after::after {
+  bottom: -1px;
+}
+
 .scope-row-collapse-button {
   width: 16px;
   height: 24px;
@@ -504,6 +530,18 @@ body.scope-row-resizing * {
   display: flex;
   flex-direction: column;
   gap: 1px;
+}
+
+.scope-signal-name[data-scope-row-drag],
+.scope-signal-name[data-scope-row-drag] .scope-signal-name-button {
+  cursor: grab;
+  user-select: none;
+}
+
+body.scope-row-dragging,
+body.scope-row-dragging * {
+  cursor: grabbing !important;
+  user-select: none !important;
 }
 
 .scope-signal-name small,

@@ -993,6 +993,12 @@
       };
     const outputs = Object.create(null);
     const outputKnownCounts = Object.create(null);
+    const reuseOutputs = settings.reuseOutputs || null;
+    const reuseKnownCounts = settings.reuseKnownCounts || null;
+    const recomputeNames = settings.recomputeNames == null
+      ? null
+      : new Set(Array.from(settings.recomputeNames).map((name) => String(name || '')));
+    const reusedNames = [];
     const ordered = [];
     const visiting = new Set();
     const visited = new Set();
@@ -1005,8 +1011,35 @@
       ordered.push(item);
     }
     analysis.items.forEach(order);
-    ordered.forEach((item) => {
-      if (!item.valid) return;
+    const executable = ordered.filter((item) => item.valid);
+    const notify = (callback, details) => {
+      if (typeof callback !== 'function') return;
+      try { callback(details); } catch (_error) { /* progress must not stop evaluation */ }
+    };
+    executable.forEach((item, formulaIndex) => {
+      const progress = {
+        name: item.name,
+        index: formulaIndex + 1,
+        total: executable.length
+      };
+      notify(settings.onFormulaStart, progress);
+      const reusable = recomputeNames && !recomputeNames.has(item.name)
+        && reuseOutputs && Array.isArray(reuseOutputs[item.name])
+        && reuseOutputs[item.name].length === halfCount;
+      if (reusable) {
+        const values = reuseOutputs[item.name];
+        outputs[item.name] = values;
+        outputKnownCounts[item.name] = reuseKnownCounts
+          && Number.isFinite(Number(reuseKnownCounts[item.name]))
+          ? Number(reuseKnownCounts[item.name])
+          : values.reduce((count, value) => (
+            !isUnknown(value) && value != null && value !== ''
+              && String(value).toLowerCase() !== 'x' ? count + 1 : count
+          ), 0);
+        reusedNames.push(item.name);
+        notify(settings.onFormulaComplete, Object.assign({ reused: true }, progress));
+        return;
+      }
       const values = new Array(halfCount);
       for (let halfIndex = 0; halfIndex < halfCount; halfIndex += 1) {
         const compiled = halfIndex % 2 === 0 ? item.effective0 : item.effective05;
@@ -1051,8 +1084,18 @@
         !isUnknown(value) && value != null && value !== ''
           && String(value).toLowerCase() !== 'x' ? count + 1 : count
       ), 0);
+      notify(settings.onFormulaComplete, Object.assign({
+        reused: false,
+        knownCount: outputKnownCounts[item.name]
+      }, progress));
     });
-    return { analysis, outputs, totalColumns };
+    return {
+      analysis,
+      outputs,
+      totalColumns,
+      knownCounts: outputKnownCounts,
+      reusedNames
+    };
   }
 
   function flattenDocumentSignals(signals, result) {
@@ -1167,7 +1210,8 @@
     return Math.max(1, String(signal && signal.wave || '').length);
   }
 
-  function sourcesFromDocument(documentValue, updates) {
+  function sourcesFromDocument(documentValue, updates, options) {
+    const settings = options || {};
     const source = typeof documentValue === 'string' ? JSON.parse(documentValue) : (documentValue || {});
     const signals = flattenDocumentSignals(source.signal, []);
     let totalColumns = 1;
@@ -1183,30 +1227,60 @@
     });
     const sources = Object.create(null);
     const sourceKinds = Object.create(null);
+    const descriptors = Object.create(null);
     const names = [];
+    const knownNames = new Set();
     signals.forEach((signal) => {
       const name = String(signal && signal.name || '').trim();
-      if (!name || own(sources, name)) return;
+      if (!name || knownNames.has(name)) return;
+      knownNames.add(name);
       names.push(name);
-      sources[name] = waveValues(signal, totalColumns);
       sourceKinds[name] = signalSourceKind(signal);
+      descriptors[name] = { kind: 'signal', value: signal };
     });
     (Array.isArray(updates) ? updates : []).forEach((update) => {
       const name = String(update && update.signal || '').trim();
       if (!name) return;
-      if (!names.includes(name)) names.push(name);
-      if (Array.isArray(update.values) && update.values.length) {
-        sources[name] = repeatedSamples(update.values, update.sampleStep || 1, totalColumns);
-        sourceKinds[name] = 'values';
-      } else if (hasUsableSamples(update.samples)) {
-        sources[name] = repeatedSamples(update.samples, update.sampleStep || 1, totalColumns);
-        sourceKinds[name] = 'samples';
-      } else {
-        sources[name] = waveValues(update, totalColumns);
-        sourceKinds[name] = 'wave';
+      if (!knownNames.has(name)) {
+        knownNames.add(name);
+        names.push(name);
       }
+      const kind = Array.isArray(update.values) && update.values.length
+        ? 'values'
+        : (hasUsableSamples(update.samples) ? 'samples' : 'wave');
+      sourceKinds[name] = kind;
+      descriptors[name] = { kind: 'update', value: update, sourceKind: kind };
     });
-    return { source, signals, sources, sourceKinds, names, totalColumns };
+    const materialize = (requiredNames) => {
+      const required = requiredNames == null
+        ? null
+        : new Set(Array.from(requiredNames).map((name) => String(name || '')));
+      names.forEach((name) => {
+        if (required && !required.has(name)) return;
+        const descriptor = descriptors[name];
+        if (!descriptor) return;
+        if (descriptor.kind === 'signal') {
+          sources[name] = waveValues(descriptor.value, totalColumns);
+        } else if (descriptor.sourceKind === 'values') {
+          sources[name] = repeatedSamples(
+            descriptor.value.values,
+            descriptor.value.sampleStep || 1,
+            totalColumns
+          );
+        } else if (descriptor.sourceKind === 'samples') {
+          sources[name] = repeatedSamples(
+            descriptor.value.samples,
+            descriptor.value.sampleStep || 1,
+            totalColumns
+          );
+        } else {
+          sources[name] = waveValues(descriptor.value, totalColumns);
+        }
+      });
+      return sources;
+    };
+    if (!settings.deferSources) materialize(null);
+    return { source, signals, sources, sourceKinds, names, totalColumns, materialize };
   }
 
   function waveFromHalfValues(values, totalColumns) {
@@ -1229,24 +1303,58 @@
     return { wave, data };
   }
 
-  function buildFormulaUpdates(documentValue, importedUpdates, definitions) {
-    const sourceData = sourcesFromDocument(documentValue, importedUpdates);
+  function buildFormulaUpdates(documentValue, importedUpdates, definitions, options) {
+    const settings = options || {};
+    const sourceData = sourcesFromDocument(documentValue, importedUpdates, { deferSources: true });
     const analysis = analyzeDefinitions(definitions, sourceData.names);
+    const requiredSourceNames = new Set();
+    analysis.items.forEach((item) => {
+      if (!item.valid) return;
+      item.references.forEach((name) => requiredSourceNames.add(name));
+    });
+    sourceData.materialize(requiredSourceNames);
     const evaluated = evaluateDefinitions(definitions, sourceData.names, {
       analysis,
       sources: sourceData.sources,
-      totalColumns: sourceData.totalColumns
+      totalColumns: sourceData.totalColumns,
+      onFormulaStart: settings.onFormulaStart,
+      onFormulaComplete: settings.onFormulaComplete
     });
     const updates = [];
     const allUnknown = [];
+    const validItems = analysis.items.filter((item) => (
+      item.valid && own(evaluated.outputs, item.name)
+    ));
+    let packageIndex = 0;
     analysis.items.forEach((item) => {
       if (!item.valid || !own(evaluated.outputs, item.name)) return;
+      packageIndex += 1;
+      if (typeof settings.onFormulaPackageStart === 'function') {
+        try {
+          settings.onFormulaPackageStart({
+            name: item.name,
+            index: packageIndex,
+            total: validItems.length
+          });
+        } catch (_error) { /* progress must not stop packaging */ }
+      }
       const values = evaluated.outputs[item.name];
       const built = waveFromHalfValues(values, sourceData.totalColumns);
-      const known = values.filter((value) => String(value).toLowerCase() !== 'x');
-      if (!known.length) allUnknown.push(item.name);
-      const numeric = known.length > 0 && known.every((value) => Number.isFinite(Number(value)));
-      const binary = numeric && known.every((value) => Number(value) === 0 || Number(value) === 1);
+      const knownCount = Number(evaluated.knownCounts[item.name] || 0);
+      if (!knownCount) allUnknown.push(item.name);
+      let numeric = knownCount > 0;
+      let binary = numeric;
+      for (let index = 0; index < values.length && (numeric || binary); index += 1) {
+        const value = values[index];
+        if (String(value).toLowerCase() === 'x') continue;
+        const number = Number(value);
+        if (!Number.isFinite(number)) {
+          numeric = false;
+          binary = false;
+          break;
+        }
+        if (number !== 0 && number !== 1) binary = false;
+      }
       updates.push({
         signal: item.name,
         wave: built.wave,

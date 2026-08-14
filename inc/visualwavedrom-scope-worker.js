@@ -4,7 +4,7 @@
 if (typeof document === 'undefined' && typeof global.importScripts === 'function'
     && !global.VisualWaveDromFormula) {
   try {
-    global.importScripts('visualwavedrom-formula.js?v=20260812-preset-formula-v3');
+    global.importScripts('visualwavedrom-formula.js?v=20260814-formula-performance-v1');
   } catch (_error) { /* surfaced when a formula is configured */ }
 }
 
@@ -136,6 +136,11 @@ function normalizeSampleStep(value, fallback) {
 
 function rowSampleStep(row) {
   return normalizeSampleStep(row && row.sampleStep, 1);
+}
+
+function rowCursorStep(row) {
+  if (rowSampleStep(row) <= 0.5 + 1e-9) return 0.5;
+  return row && Array.isArray(row.clockRanges) && row.clockRanges.length ? 0.5 : 1;
 }
 
 function sampleColumn(row, sampleIndex) {
@@ -374,6 +379,14 @@ function floatFromBits(rawValue, bitWidth) {
 
 function parseAnalogValue(value, analogFormat) {
   const format = normalizeAnalogFormat(analogFormat);
+  return parseAnalogValueNormalized(value, format);
+}
+
+function parseAnalogValueNormalized(value, format) {
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) return Number.NaN;
+    if (format.type === 'float') return value;
+  }
   const token = String(value == null ? '' : value).trim().replace(/_/g, '');
   if (!token || /^(x|z)$/i.test(token)) return Number.NaN;
   if (format.type === 'float') {
@@ -716,7 +729,7 @@ function numericSamplesFromScopeValues(values, format) {
   const samples = new Float64Array(values.length);
   let finiteCount = 0;
   values.forEach((value, index) => {
-    const parsed = parseAnalogValue(value, format);
+    const parsed = parseAnalogValueNormalized(value, format);
     samples[index] = parsed;
     if (Number.isFinite(parsed)) finiteCount += 1;
   });
@@ -781,9 +794,158 @@ function analogRange(samples) {
   return { min, max };
 }
 
-function createSession(content, transientState) {
+const BASE_ROW_CACHE_FIELDS = [
+  'mode', 'detectedMode', 'wave', 'segments', 'transitions', 'clockEdges',
+  'clockRanges', 'gaps', 'samples', 'scopeValues', 'sampleStep',
+  'initialTransition', 'analogLevels', 'range', 'busFormat', 'valueTable',
+  'analogFormat', 'rowHeight', 'unit', 'sampleTransitionCache',
+  'analogCache', 'conditionTransitionCache'
+];
+
+function cacheBaseRow(row) {
+  const cached = { sourceName: row.sourceName };
+  BASE_ROW_CACHE_FIELDS.forEach((field) => { cached[field] = row[field]; });
+  return cached;
+}
+
+function restoreCachedBaseRow(flatRow, rowIndex, configuredName, cached) {
+  const rowId = flatRow.rowId || ('source:' + rowIndex);
+  const restored = {
+    index: rowIndex,
+    rowId,
+    transient: !!flatRow.transient,
+    source: flatRow.source,
+    path: flatRow.path,
+    groups: flatRow.groups,
+    sourceName: flatRow.name,
+    name: configuredName || ('signal_' + (rowIndex + 1)),
+    sampleTransitionCache: new Map(),
+    analogCache: new Map(),
+    conditionTransitionCache: new Map()
+  };
+  BASE_ROW_CACHE_FIELDS.forEach((field) => { restored[field] = cached[field]; });
+  return restored;
+}
+
+function baseRowColumnCount(row) {
+  return Math.max(
+    row.wave ? row.wave.length : 0,
+    row.samples ? row.samples.length * row.sampleStep : 0,
+    row.scopeValues ? row.scopeValues.length * row.sampleStep : 0,
+    1
+  );
+}
+
+function formulaValuesForLength(values, halfCount) {
+  if (!Array.isArray(values)) return null;
+  if (values.length === halfCount) return values;
+  const normalized = new Array(halfCount).fill('x');
+  const limit = Math.min(values.length, halfCount);
+  for (let index = 0; index < limit; index += 1) normalized[index] = values[index];
+  return normalized;
+}
+
+function createFormulaReusePlan(rows, analysis, totalColumns, previousSession) {
+  const halfCount = Math.max(2, Math.ceil(totalColumns) * 2);
+  const rowsById = new Map(rows.map((row) => [String(row.rowId), row]));
+  const previousRowsById = new Map(
+    previousSession && Array.isArray(previousSession.rows)
+      ? previousSession.rows.map((row) => [String(row.rowId), row])
+      : []
+  );
+  const reuseOutputs = Object.create(null);
+  const reuseKnownCounts = Object.create(null);
+  const reusePreviousRows = new Map();
+  const sourceCacheNames = new Set();
+  const recomputeNames = new Set();
+
+  analysis.items.forEach((item) => {
+    if (!item.valid) return;
+    const row = rowsById.get(String(item.id));
+    if (!row) {
+      recomputeNames.add(item.name);
+      return;
+    }
+    const formulaKey = normalizedFormulaKey(item.formula);
+    let cachedValues = null;
+    let cachedKnownCount = 0;
+    const previousRow = previousRowsById.get(String(item.id));
+    if (previousRow && previousRow.name === row.name && previousRow.formula
+        && previousRow.formula.valid
+        && normalizedFormulaKey(previousRow.formula) === formulaKey
+        && Array.isArray(previousRow.scopeValues)) {
+      cachedValues = formulaValuesForLength(previousRow.scopeValues, halfCount);
+      cachedKnownCount = Number(previousRow.formula.outputKnownCount);
+      if (!Number.isFinite(cachedKnownCount)) {
+        cachedKnownCount = formulaKnownValueCount(previousRow.scopeValues);
+      }
+      reusePreviousRows.set(String(item.id), previousRow);
+    }
+
+    if (!cachedValues) {
+      const sourceScope = row.source && row.source.scope
+        && typeof row.source.scope === 'object' ? row.source.scope : null;
+      const sourceFormula = sourceScope && sourceScope.formula;
+      const sourceKnownCount = formulaKnownValueCount(row.scopeValues);
+      if (sourceFormula && normalizedFormulaKey(sourceFormula) === formulaKey
+          && sourceKnownCount > 0) {
+        cachedValues = formulaValuesForLength(row.scopeValues, halfCount);
+        cachedKnownCount = sourceKnownCount;
+        sourceCacheNames.add(item.name);
+      }
+    }
+
+    if (cachedValues) {
+      reuseOutputs[item.name] = cachedValues;
+      reuseKnownCounts[item.name] = cachedKnownCount;
+    } else {
+      recomputeNames.add(item.name);
+    }
+  });
+
+  let changed = true;
+  while (changed) {
+    changed = false;
+    analysis.items.forEach((item) => {
+      if (!item.valid || recomputeNames.has(item.name)) return;
+      if (!item.dependencies.some((name) => recomputeNames.has(name))) return;
+      recomputeNames.add(item.name);
+      delete reuseOutputs[item.name];
+      delete reuseKnownCounts[item.name];
+      reusePreviousRows.delete(String(item.id));
+      sourceCacheNames.delete(item.name);
+      changed = true;
+    });
+  }
+
+  return {
+    reuseOutputs,
+    reuseKnownCounts,
+    reusePreviousRows,
+    sourceCacheNames,
+    recomputeNames
+  };
+}
+
+const FORMULA_DERIVED_ROW_FIELDS = [
+  'segments', 'transitions', 'clockEdges', 'clockRanges', 'gaps', 'samples',
+  'sampleStep', 'initialTransition', 'analogLevels', 'range',
+  'sampleTransitionCache', 'analogCache', 'conditionTransitionCache'
+];
+
+function restoreFormulaDerivedRow(row, cachedRow, values) {
+  FORMULA_DERIVED_ROW_FIELDS.forEach((field) => { row[field] = cachedRow[field]; });
+  row.scopeValues = values;
+}
+
+function createSession(content, transientState, previousSession) {
   const originalContent = String(content || '{}');
-  const source = JSON.parse(originalContent);
+  const reusableSession = previousSession
+    && previousSession.originalContent === originalContent ? previousSession : null;
+  const source = reusableSession ? reusableSession.source : JSON.parse(originalContent);
+  const previousBaseRows = reusableSession && reusableSession.baseRowsById instanceof Map
+    ? reusableSession.baseRowsById
+    : new Map();
   const transient = transientState && typeof transientState === 'object' ? transientState : {};
   const flat = flattenSignals(source.signal, []);
   flat.forEach((row, sourceIndex) => {
@@ -832,6 +994,12 @@ function createSession(content, transientState) {
     const configuredName = transient.signalNames && own(transient.signalNames, rowId)
       ? String(transient.signalNames[rowId] == null ? '' : transient.signalNames[rowId])
       : row.name;
+    const cachedBase = previousBaseRows.get(String(rowId));
+    if (cachedBase && cachedBase.sourceName === row.name) {
+      const restored = restoreCachedBaseRow(row, rowIndex, configuredName, cachedBase);
+      totalColumns = Math.max(totalColumns, baseRowColumnCount(restored));
+      return restored;
+    }
     let parsedWave = parseWaveSegments(row.source);
     const scopeValues = getScopeValues(source, row, sourceIndex);
     const localScope = row.source.scope && typeof row.source.scope === 'object'
@@ -890,7 +1058,10 @@ function createSession(content, transientState) {
       sampleStep,
       initialTransition: !parsedWave.wave.length
         || parsedWave.transitions.some((column) => Math.abs(column) < 1e-9),
-      sampleTransitionCache: new Map(),
+      sampleTransitionCache: analogSamples && scopeValues
+        ? new Map([['numeric', parsedWave.transitions]])
+        : new Map(),
+      conditionTransitionCache: new Map(),
       analogLevels: analogSamples ? buildAnalogLevels(analogSamples) : [],
       range: analogSamples ? analogRange(analogSamples) : null,
       busFormat: getBusFormat(source, row, sourceIndex),
@@ -905,6 +1076,8 @@ function createSession(content, transientState) {
       )
     };
   });
+  const baseRowsById = new Map(previousBaseRows);
+  rows.forEach((row) => baseRowsById.set(String(row.rowId), cacheBaseRow(row)));
 
   const formulaDefinitions = [];
   rows.forEach((row) => {
@@ -939,9 +1112,18 @@ function createSession(content, transientState) {
       if (formulaKnownValueCount(row.scopeValues) < 1) return;
       if (!cachedFormulaRows.has(row.name)) cachedFormulaRows.set(row.name, row);
     });
+    const reusePlan = createFormulaReusePlan(
+      rows,
+      formulaAnalysis,
+      totalColumns,
+      reusableSession
+    );
     const evaluated = FormulaEngine.evaluateDefinitions(formulaDefinitions, signalNames, {
       analysis: formulaAnalysis,
       totalColumns,
+      reuseOutputs: reusePlan.reuseOutputs,
+      reuseKnownCounts: reusePlan.reuseKnownCounts,
+      recomputeNames: reusePlan.recomputeNames,
       resolveSource: (name, halfIndex) => {
         const sourceRow = sourceRows.get(name);
         return sourceRow ? sourceValueAtHalfIndex(sourceRow, halfIndex) : FormulaEngine.UNKNOWN;
@@ -953,6 +1135,7 @@ function createSession(content, transientState) {
           : FormulaEngine.UNKNOWN;
       }
     });
+    const reusedNames = new Set(evaluated.reusedNames || []);
     const analysisById = new Map(formulaAnalysis.items.map((item) => [item.id, item]));
     rows.forEach((row) => {
       const item = analysisById.get(row.rowId);
@@ -970,15 +1153,30 @@ function createSession(content, transientState) {
       };
       const computedValues = evaluated.outputs[row.name];
       if (!item.valid || !Array.isArray(computedValues)) return;
+      const previousFormulaRow = reusePlan.reusePreviousRows.get(String(row.rowId));
+      if (reusedNames.has(row.name) && previousFormulaRow) {
+        restoreFormulaDerivedRow(row, previousFormulaRow, computedValues);
+        row.formula.valueSource = 'session-cache';
+        row.formula.computedKnownCount = Number(evaluated.knownCounts[row.name] || 0);
+        row.formula.cachedKnownCount = row.formula.computedKnownCount;
+        row.formula.outputKnownCount = row.formula.computedKnownCount;
+        row.formula.preview = computedValues.slice(0, 12);
+        return;
+      }
       const cachedValues = Array.isArray(row.scopeValues) ? row.scopeValues : null;
-      const computedKnownCount = formulaKnownValueCount(computedValues);
+      const computedKnownCount = Number.isFinite(Number(evaluated.knownCounts[row.name]))
+        ? Number(evaluated.knownCounts[row.name])
+        : formulaKnownValueCount(computedValues);
       const cachedKnownCount = formulaKnownValueCount(cachedValues);
       const canUseCached = cachedFormulaRows.get(row.name) === row;
       const useCached = computedKnownCount < 1 && cachedKnownCount > 0 && canUseCached;
       const values = useCached ? cachedValues.slice() : computedValues;
-      row.formula.valueSource = useCached ? 'import-cache' : 'computed';
+      const reusedImportCache = reusedNames.has(row.name)
+        && reusePlan.sourceCacheNames.has(row.name);
+      row.formula.valueSource = useCached || reusedImportCache ? 'import-cache' : 'computed';
       row.formula.computedKnownCount = computedKnownCount;
       row.formula.cachedKnownCount = cachedKnownCount;
+      row.formula.outputKnownCount = useCached ? cachedKnownCount : computedKnownCount;
       row.formula.preview = values.slice(0, 12);
       row.scopeValues = values;
       row.sampleStep = 0.5;
@@ -994,6 +1192,10 @@ function createSession(content, transientState) {
       row.analogLevels = row.samples ? buildAnalogLevels(row.samples) : [];
       row.range = row.samples ? analogRange(row.samples) : null;
       row.sampleTransitionCache = new Map();
+      row.conditionTransitionCache = new Map();
+      if (row.samples && row.transitions && row.transitions.length) {
+        row.sampleTransitionCache.set('numeric', row.transitions);
+      }
     });
   }
   totalColumns = Math.max(1, Math.ceil(totalColumns));
@@ -1005,6 +1207,7 @@ function createSession(content, transientState) {
     originalContent,
     transient,
     formulaAnalysis,
+    baseRowsById,
     rows,
     totalColumns,
     samplePeriod,
@@ -1614,7 +1817,7 @@ function analogRowForFormat(row, requestedFormat, totalColumns) {
   samples.fill(Number.NaN);
   if (sourceValues) {
     sourceValues.forEach((value, index) => {
-      samples[index] = parseAnalogValue(value, format);
+      samples[index] = parseAnalogValueNormalized(value, format);
     });
   } else {
     const sourceLength = Math.min(samples.length, row.wave.length);
@@ -1626,7 +1829,7 @@ function analogRowForFormat(row, requestedFormat, totalColumns) {
       }
       const segment = row.segments[Math.min(segmentIndex, row.segments.length - 1)];
       if (!segment) continue;
-      samples[column] = parseAnalogValue(
+      samples[column] = parseAnalogValueNormalized(
         segment.kind === 'bus' ? segment.value : segment.state,
         format
       );
@@ -1895,6 +2098,13 @@ function chooseColumns(
 
 function stateAtColumn(row, column, mode, analogFormat) {
   if (mode === 'analog') {
+    if (Array.isArray(row.scopeValues) && row.scopeValues.length) {
+      const index = Math.floor((Math.max(0, column) + 1e-9) / rowSampleStep(row));
+      if (index < 0 || index >= row.scopeValues.length) return null;
+      const format = normalizeAnalogFormat(analogFormat || row.analogFormat, 'unsigned');
+      const directValue = parseAnalogValueNormalized(row.scopeValues[index], format);
+      return Number.isFinite(directValue) ? directValue : null;
+    }
     const analogRow = analogRowForFormat(row, analogFormat, activeSession.totalColumns);
     const index = sampleIndexForColumn(analogRow, column);
     const value = analogRow.samples[index];
@@ -1957,11 +2167,11 @@ function inspectCursor(payload) {
 }
 
 function sampleTransitionKey(value, mode) {
-  if (!Number.isFinite(value)) return 'unknown';
+  if (!Number.isFinite(value)) return null;
   if (mode === 'digital') {
-    return value === 0 || value === 1 ? ('digital:' + value) : 'unknown';
+    return value === 0 || value === 1 ? value : null;
   }
-  return 'value:' + String(value);
+  return value;
 }
 
 function transitionColumnsForMode(row, mode) {
@@ -1982,8 +2192,7 @@ function transitionColumnsForMode(row, mode) {
   return transitions;
 }
 
-function edgeColumn(row, column, direction, mode) {
-  const transitions = transitionColumnsForMode(row, mode);
+function directionalSortedColumn(transitions, column, direction) {
   const epsilon = 1e-7;
   if (direction > 0) {
     let low = 0;
@@ -2003,6 +2212,14 @@ function edgeColumn(row, column, direction, mode) {
     else high = middle;
   }
   return low > 0 ? transitions[low - 1] : null;
+}
+
+function edgeColumn(row, column, direction, mode) {
+  return directionalSortedColumn(
+    transitionColumnsForMode(row, mode),
+    column,
+    direction
+  );
 }
 
 function nearestSortedColumn(columns, column) {
@@ -2049,8 +2266,9 @@ function segmentValueColumn(row, column, direction, mode, target) {
 
 function analogValueColumn(row, column, direction, target, analogFormat) {
   const targetNumber = finiteNumber(target);
+  if (targetNumber == null) return null;
   const analogRow = analogRowForFormat(row, analogFormat, activeSession.totalColumns);
-  if (targetNumber == null || !analogRow.samples || !analogRow.samples.length) return null;
+  if (!analogRow.samples || !analogRow.samples.length) return null;
   const step = direction > 0 ? 1 : -1;
   const currentIndex = clamp(
     Math.floor((finiteNumber(column) || 0) / rowSampleStep(analogRow)),
@@ -2122,24 +2340,19 @@ function snapCursor(payload) {
   const mode = payload.mode || row.mode;
   const candidates = [];
 
-  if (mode === 'analog') {
-    const analogRow = analogRowForFormat(row, payload.analogFormat, activeSession.totalColumns);
-    const sampleIndex = sampleIndexForColumn(analogRow, column);
-    if (sampleIndex >= 0) {
-      candidates.push({
-        column: analogSampleColumn(
-          analogRow, sampleIndex, analogRow.samples.length, activeSession.totalColumns),
-        source: 'sample'
-      });
-    }
-  } else {
+  if (mode !== 'analog') {
     const transition = nearestSortedColumn(transitionColumnsForMode(row, mode), column);
     if (transition != null) candidates.push({ column: transition, source: 'transition' });
   }
 
+  const cursorStep = rowCursorStep(row);
+  const lastGridColumn = Math.max(
+    0,
+    Math.floor((maximum + 1e-9) / cursorStep) * cursorStep
+  );
   candidates.push({
-    column: clamp(Math.round(column), 0, Math.max(0, activeSession.totalColumns - 1)),
-    source: 'column'
+    column: clamp(Math.round(column / cursorStep) * cursorStep, 0, lastGridColumn),
+    source: cursorStep <= 0.5 + 1e-9 ? 'half-cycle' : 'cycle'
   });
   const valid = candidates.filter((candidate) => (
     Number.isFinite(candidate.column)
@@ -2184,7 +2397,55 @@ function conditionAnalogColumn(row, column, direction, testCondition, analogForm
   return null;
 }
 
-function conditionSequenceColumn(row, column, direction, mode, testCondition, analogFormat) {
+function conditionTransitionColumns(row, mode, expression, testCondition, analogFormat) {
+  const format = mode === 'analog'
+    ? normalizeAnalogFormat(analogFormat || row.analogFormat, 'unsigned')
+    : null;
+  const formatKey = format
+    ? (format.type + ':' + format.bitWidth + ':' + format.fractionalBits)
+    : '';
+  const cacheKey = mode + '\u0000' + formatKey + '\u0000' + String(expression || '');
+  const cache = row.conditionTransitionCache || (row.conditionTransitionCache = new Map());
+  if (cache.has(cacheKey)) return cache.get(cacheKey);
+  const transitions = [];
+
+  if (mode === 'analog') {
+    const analogRow = analogRowForFormat(row, format, activeSession.totalColumns);
+    const samples = analogRow.samples || [];
+    let previousMatches = samples.length ? testCondition(samples[0]) : false;
+    for (let index = 1; index < samples.length; index += 1) {
+      const currentMatches = testCondition(samples[index]);
+      if (!previousMatches && currentMatches) {
+        transitions.push(sampleColumn(analogRow, index));
+      }
+      previousMatches = currentMatches;
+    }
+  } else {
+    const segments = row.segments || [];
+    let previousMatches = segments.length
+      ? testCondition(segmentConditionValue(segments[0], mode))
+      : false;
+    for (let index = 1; index < segments.length; index += 1) {
+      const currentMatches = testCondition(segmentConditionValue(segments[index], mode));
+      if (!previousMatches && currentMatches) transitions.push(segments[index].start);
+      previousMatches = currentMatches;
+    }
+  }
+
+  if (cache.size >= 16) cache.delete(cache.keys().next().value);
+  cache.set(cacheKey, transitions);
+  return transitions;
+}
+
+function conditionSequenceColumn(
+  row,
+  column,
+  direction,
+  mode,
+  expression,
+  testCondition,
+  analogFormat
+) {
   const sequence = Array.isArray(testCondition.sequence) ? testCondition.sequence : [];
   if (sequence.length < 2) return null;
   const segments = row.segments || [];
@@ -2198,6 +2459,27 @@ function conditionSequenceColumn(row, column, direction, mode, testCondition, an
   const matchesAt = (startColumn) => sequence.every((test, offset) => (
     test(stateAtColumn(row, startColumn + offset, mode, analogFormat))
   ));
+  if (maxStart <= 1000000) {
+    const format = mode === 'analog'
+      ? normalizeAnalogFormat(analogFormat || row.analogFormat, 'unsigned')
+      : null;
+    const formatKey = format
+      ? (format.type + ':' + format.bitWidth + ':' + format.fractionalBits)
+      : '';
+    const cacheKey = 'sequence\u0000' + mode + '\u0000' + formatKey
+      + '\u0000' + String(expression || '');
+    const cache = row.conditionTransitionCache || (row.conditionTransitionCache = new Map());
+    let matches = cache.get(cacheKey);
+    if (!matches) {
+      matches = [];
+      for (let start = 0; start <= maxStart; start += 1) {
+        if (matchesAt(start)) matches.push(start);
+      }
+      if (cache.size >= 16) cache.delete(cache.keys().next().value);
+      cache.set(cacheKey, matches);
+    }
+    return directionalSortedColumn(matches, column, direction);
+  }
   const epsilon = 1e-7;
   if (direction > 0) {
     const firstStart = Math.max(0, Math.floor(column + epsilon) + 1);
@@ -2222,8 +2504,19 @@ function conditionRisingColumn(row, column, direction, mode, expression, analogF
       column,
       direction,
       mode,
+      expression,
       testCondition,
       analogFormat
+    );
+  }
+  const candidateCount = Array.isArray(row.scopeValues)
+    ? row.scopeValues.length
+    : (row.samples && row.samples.length ? row.samples.length : (row.segments || []).length);
+  if (candidateCount <= 1000000) {
+    return directionalSortedColumn(
+      conditionTransitionColumns(row, mode, expression, testCondition, analogFormat),
+      column,
+      direction
     );
   }
   return mode === 'analog'
@@ -2233,6 +2526,7 @@ function conditionRisingColumn(row, column, direction, mode, expression, analogF
 
 function navigateCursor(payload) {
   if (!activeSession) throw new Error('Scope session has not been prepared');
+  const startedAt = Date.now();
   const rowIndex = clamp(
     Math.floor(finiteNumber(payload.rowIndex) || 0),
     0,
@@ -2271,14 +2565,15 @@ function navigateCursor(payload) {
     );
   }
   if (targetColumn == null) {
-    return { found: false, rowIndex, column };
+    return { found: false, rowIndex, column, lookupMs: Date.now() - startedAt };
   }
   return {
     found: true,
     rowIndex,
     column: targetColumn,
     value: stateAtColumn(row, targetColumn, mode, analogFormat),
-    source: row.samples && row.samples.length ? 'samples' : 'wave'
+    source: row.samples && row.samples.length ? 'samples' : 'wave',
+    lookupMs: Date.now() - startedAt
   };
 }
 
@@ -2752,6 +3047,7 @@ function prepareResponse() {
       style: normalizeRowStyle(row.source.scope, activeSession.totalColumns),
       formula: row.formula || null,
       sampleStep: rowSampleStep(row),
+      cursorStep: rowCursorStep(row),
       sampleCount: Array.isArray(row.scopeValues)
         ? row.scopeValues.length
         : (row.samples ? row.samples.length : row.wave.length)
@@ -2769,7 +3065,11 @@ function handleRequest(message) {
       result = prepareResponse();
     } else if (request.type === 'formulas') {
       if (!activeSession) throw new Error('Scope session has not been prepared');
-      activeSession = createSession(activeSession.originalContent, request.transient);
+      activeSession = createSession(
+        activeSession.originalContent,
+        request.transient,
+        activeSession
+      );
       result = prepareResponse();
     } else if (request.type === 'window') {
       result = createWindow(request);

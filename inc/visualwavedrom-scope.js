@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260812-preset-formula-v3';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260814-cursor-half-cycle-v1';
   const FormulaEngine = global.VisualWaveDromFormula || null;
   const DEFAULT_ROW_HEIGHT = 42;
   const COLLAPSED_ROW_HEIGHT = 18;
@@ -542,7 +542,11 @@
       this.historyRestoreInFlight = false;
       this.rowOperationInFlight = false;
       this.rowMoveDirection = 'up';
+      this.signalRowDrag = null;
+      this.signalRowDragAutoScrollFrame = 0;
+      this.suppressSignalRowClickUntil = 0;
       this.windowRequestSequence = 0;
+      this.lastSynchronizedScrollTop = Number.NaN;
       this.buildSequence = 0;
       this.drag = null;
       this.overviewDrag = null;
@@ -582,6 +586,11 @@
       this.scheduleFormulaRefresh = debounce(() => {
         void this.refreshFormulaSession({ preservePopover: true, persist: true });
       }, 260);
+      this.scheduleFormulaSimplify = debounce(() => {
+        if (!this.formulaRefreshInFlight && this.meta) {
+          void this.runSimplify(false, { background: true });
+        }
+      }, 900);
       this.handleBeforeUnload = (event) => {
         if (!this.hasUnsavedChanges()) return;
         event.preventDefault();
@@ -1287,13 +1296,40 @@
 
       this.signalList.addEventListener('pointerdown', (event) => {
         const handle = event.target.closest('[data-scope-row-resize]');
-        if (!handle) return;
-        this.startRowResize(event, handle);
+        if (handle) {
+          this.startRowResize(event, handle);
+          return;
+        }
+        const dragTarget = event.target.closest('[data-scope-row-drag]');
+        if (dragTarget) this.startSignalRowDrag(event, dragTarget);
       });
-      this.signalList.addEventListener('pointermove', (event) => this.moveRowResize(event));
-      this.signalList.addEventListener('pointerup', (event) => this.finishRowResize(event));
-      this.signalList.addEventListener('pointercancel', (event) => this.finishRowResize(event));
+      this.signalList.addEventListener('pointermove', (event) => {
+        this.moveRowResize(event);
+        this.moveSignalRowDrag(event);
+      });
+      this.signalList.addEventListener('pointerup', (event) => {
+        this.finishRowResize(event);
+        this.finishSignalRowDrag(event, false);
+      });
+      this.signalList.addEventListener('pointercancel', (event) => {
+        this.finishRowResize(event);
+        this.finishSignalRowDrag(event, true);
+      });
+      this.signalList.addEventListener('lostpointercapture', (event) => {
+        if (this.signalRowDrag && this.signalRowDrag.pointerId === event.pointerId) {
+          this.finishSignalRowDrag(event, true);
+        }
+      });
       this.signalList.addEventListener('click', (event) => {
+        const clickTime = global.performance && typeof global.performance.now === 'function'
+          ? global.performance.now()
+          : Date.now();
+        if (clickTime < this.suppressSignalRowClickUntil) {
+          event.preventDefault();
+          event.stopPropagation();
+          this.suppressSignalRowClickUntil = 0;
+          return;
+        }
         const rowToggle = event.target.closest('[data-scope-toggle-row]');
         if (rowToggle) {
           event.preventDefault();
@@ -1360,9 +1396,7 @@
         this.closeDisplayPopover();
         this.closeStylePopover();
         this.closeRowMovePopover();
-        this.signalScroll.scrollTop = this.plotViewport.scrollTop;
-        this.positionPlotCanvas();
-        this.scheduleWindowRequest();
+        this.syncVerticalScroll();
       }, { passive: true });
       this.signalScroll.addEventListener('wheel', (event) => {
         if (event.ctrlKey || event.metaKey || event.shiftKey) return;
@@ -1391,6 +1425,12 @@
       this.outputTitleInput.addEventListener('input', () => this.scheduleBuild());
 
       global.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape' && this.signalRowDrag) {
+          event.preventDefault();
+          this.finishSignalRowDrag(null, true);
+          this.setStatus('已取消波形行拖动');
+          return;
+        }
         if (event.key === 'Escape' && this.formulaVariablePicker
             && !this.formulaVariablePicker.hidden) {
           event.preventDefault();
@@ -1487,6 +1527,9 @@
         if (this.cursorReadoutFrame) global.cancelAnimationFrame(this.cursorReadoutFrame);
         if (this.overviewWindowRequestFrame) {
           global.cancelAnimationFrame(this.overviewWindowRequestFrame);
+        }
+        if (this.signalRowDragAutoScrollFrame) {
+          global.cancelAnimationFrame(this.signalRowDragAutoScrollFrame);
         }
         this.worker.close();
       }, { once: true });
@@ -2210,7 +2253,8 @@
       if (!rowId) return;
       this.closeFormulaVariablePicker(false);
       this.formulaDrafts.delete(rowId);
-      if (this.transientFormulaState.formulas[rowId]) {
+      const wasEnabled = !!this.transientFormulaState.formulas[rowId];
+      if (wasEnabled) {
         delete this.transientFormulaState.formulas[rowId];
         this.setStatus('已取消该信号的临时公式');
       } else {
@@ -2221,7 +2265,12 @@
         };
         this.setStatus('已启用公式，可分别填写 0 cycle 和 0.5 cycle');
       }
-      await this.refreshFormulaSession({ preservePopover: true, persist: true });
+      if (wasEnabled) {
+        await this.refreshFormulaSession({ preservePopover: true, persist: true });
+      } else {
+        this.persistTransientFormulaState();
+        this.updateFormulaControls();
+      }
     }
 
     visibleRowIds() {
@@ -2519,6 +2568,218 @@
       });
     }
 
+    signalRowDropLocation(clientY) {
+      const rowElements = Array.from(
+        this.signalList.querySelectorAll('[data-scope-signal-row]')
+      );
+      if (!rowElements.length) return null;
+      const numericY = Number(clientY);
+      const y = Number.isFinite(numericY) ? numericY : 0;
+      let target = rowElements[rowElements.length - 1];
+      let position = 'after';
+      for (let index = 0; index < rowElements.length; index += 1) {
+        const candidate = rowElements[index];
+        const rect = candidate.getBoundingClientRect();
+        if (y > rect.bottom && index < rowElements.length - 1) continue;
+        target = candidate;
+        position = y < rect.top + rect.height / 2 ? 'before' : 'after';
+        break;
+      }
+      const start = Math.max(0, Number(target.dataset.scopeRowStart
+        || target.dataset.scopeSignalRow) || 0);
+      const end = Math.max(start, Number(target.dataset.scopeRowEnd
+        || target.dataset.scopeSignalRow) || start);
+      return {
+        element: target,
+        position,
+        insertionIndex: position === 'before' ? start : end + 1
+      };
+    }
+
+    clearSignalRowDropIndicator() {
+      this.signalList.querySelectorAll(
+        '.scope-row-drop-before, .scope-row-drop-after'
+      ).forEach((element) => {
+        element.classList.remove('scope-row-drop-before', 'scope-row-drop-after');
+      });
+    }
+
+    updateSignalRowDropTarget(clientY) {
+      const drag = this.signalRowDrag;
+      if (!drag || !drag.active) return;
+      const location = this.signalRowDropLocation(clientY);
+      this.clearSignalRowDropIndicator();
+      if (!location) return;
+      let targetIndex = location.insertionIndex;
+      if (targetIndex > drag.sourceIndex) targetIndex -= 1;
+      targetIndex = clamp(targetIndex, 0, Math.max(0, this.meta.rows.length - 1));
+      drag.targetIndex = targetIndex;
+      if (targetIndex === drag.sourceIndex) return;
+      location.element.classList.add(
+        location.position === 'before' ? 'scope-row-drop-before' : 'scope-row-drop-after'
+      );
+    }
+
+    scheduleSignalRowDragAutoScroll() {
+      if (this.signalRowDragAutoScrollFrame || !this.signalRowDrag
+          || !this.signalRowDrag.active) return;
+      this.signalRowDragAutoScrollFrame = global.requestAnimationFrame(() => {
+        this.signalRowDragAutoScrollFrame = 0;
+        const drag = this.signalRowDrag;
+        if (!drag || !drag.active) return;
+        const rect = this.signalScroll.getBoundingClientRect();
+        const edgeSize = Math.min(44, Math.max(24, rect.height / 5));
+        let delta = 0;
+        if (drag.clientY < rect.top + edgeSize) {
+          delta = -Math.max(4, (rect.top + edgeSize - drag.clientY) / 3);
+        } else if (drag.clientY > rect.bottom - edgeSize) {
+          delta = Math.max(4, (drag.clientY - (rect.bottom - edgeSize)) / 3);
+        }
+        if (!delta) return;
+        const contentHeight = this.rowOffsets[this.rowOffsets.length - 1] || 0;
+        const maximum = Math.max(0, contentHeight - this.plotViewport.clientHeight);
+        const previous = this.plotViewport.scrollTop;
+        const next = clamp(previous + delta, 0, maximum);
+        if (Math.abs(next - previous) < 0.5) return;
+        this.plotViewport.scrollTop = next;
+        this.signalScroll.scrollTop = next;
+        this.positionPlotCanvas();
+        this.scheduleWindowRequest();
+        this.updateSignalRowDropTarget(drag.clientY);
+        this.scheduleSignalRowDragAutoScroll();
+      });
+    }
+
+    startSignalRowDrag(event, dragTarget) {
+      if (!event || event.button !== 0 || event.isPrimary === false
+          || (event.pointerType && event.pointerType !== 'mouse')
+          || !this.meta || !Array.isArray(this.meta.rows) || this.meta.rows.length < 2
+          || this.signalRowDrag || this.rowOperationInFlight
+          || this.historyRestoreInFlight || this.formulaRefreshInFlight
+          || event.target.closest('input, textarea, select')) return;
+      if (this.signalNameEditor) {
+        this.finishSignalNameEdit(true);
+        return;
+      }
+      const rowElement = dragTarget.closest('[data-scope-signal-row]');
+      const sourceIndex = Number(dragTarget.dataset.scopeRowDrag);
+      if (!rowElement || !Number.isInteger(sourceIndex) || !this.meta.rows[sourceIndex]) return;
+      const captureTarget = event.target && typeof event.target.setPointerCapture === 'function'
+        ? event.target
+        : dragTarget;
+      this.signalRowDrag = {
+        pointerId: event.pointerId,
+        captureTarget,
+        rowElement,
+        sourceIndex,
+        targetIndex: sourceIndex,
+        startX: event.clientX,
+        startY: event.clientY,
+        clientY: event.clientY,
+        active: false
+      };
+      try { captureTarget.setPointerCapture(event.pointerId); } catch (_error) {}
+    }
+
+    moveSignalRowDrag(event) {
+      const drag = this.signalRowDrag;
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      drag.clientY = event.clientY;
+      if (!drag.active) {
+        const distance = Math.hypot(
+          event.clientX - drag.startX,
+          event.clientY - drag.startY
+        );
+        if (distance < 5) return;
+        drag.active = true;
+        drag.rowElement.classList.add('scope-row-drag-source');
+        drag.rowElement.setAttribute('aria-grabbed', 'true');
+        document.body.classList.add('scope-row-dragging');
+        this.closeDisplayPopover();
+        this.closeStylePopover();
+        this.closeRowMovePopover();
+        this.setActiveCursorRow(drag.sourceIndex);
+        this.setStatus('正在拖动 ' + this.signalDisplayName(drag.sourceIndex) + '，松开鼠标完成移动');
+        this.log('scope-row', {
+          phase: 'drag-start',
+          rowIndex: drag.sourceIndex,
+          rowId: String(this.meta.rows[drag.sourceIndex].rowId || '')
+        });
+      }
+      event.preventDefault();
+      this.updateSignalRowDropTarget(event.clientY);
+      this.scheduleSignalRowDragAutoScroll();
+    }
+
+    clearSignalRowDragVisuals(drag) {
+      if (this.signalRowDragAutoScrollFrame) {
+        global.cancelAnimationFrame(this.signalRowDragAutoScrollFrame);
+        this.signalRowDragAutoScrollFrame = 0;
+      }
+      this.clearSignalRowDropIndicator();
+      if (drag && drag.rowElement) {
+        drag.rowElement.classList.remove('scope-row-drag-source');
+        drag.rowElement.removeAttribute('aria-grabbed');
+      }
+      document.body.classList.remove('scope-row-dragging');
+    }
+
+    finishSignalRowDrag(event, cancelled) {
+      const drag = this.signalRowDrag;
+      if (!drag || (event && drag.pointerId !== event.pointerId)) return;
+      this.signalRowDrag = null;
+      this.clearSignalRowDragVisuals(drag);
+      try {
+        if (drag.captureTarget && drag.captureTarget.hasPointerCapture(drag.pointerId)) {
+          drag.captureTarget.releasePointerCapture(drag.pointerId);
+        }
+      } catch (_error) {}
+      if (!drag.active) return;
+      const now = global.performance && typeof global.performance.now === 'function'
+        ? global.performance.now()
+        : Date.now();
+      this.suppressSignalRowClickUntil = now + 300;
+      if (cancelled) {
+        this.log('scope-row', { phase: 'drag-cancel', rowIndex: drag.sourceIndex });
+        return;
+      }
+      if (drag.targetIndex === drag.sourceIndex) {
+        this.setStatus('波形行位置未改变');
+        return;
+      }
+      void this.moveSignalRowByDrag(drag.sourceIndex, drag.targetIndex);
+    }
+
+    async moveSignalRowByDrag(sourceIndex, targetIndex) {
+      const row = this.meta && this.meta.rows[sourceIndex];
+      if (!row) return;
+      const order = this.visibleRowIds();
+      const destination = clamp(
+        Math.floor(Number(targetIndex) || 0),
+        0,
+        Math.max(0, order.length - 1)
+      );
+      if (destination === sourceIndex) return;
+      const rowId = String(row.rowId || ('source:' + row.index));
+      const name = this.signalDisplayName(row.index);
+      await this.commitRowOperation(() => {
+        order.splice(sourceIndex, 1);
+        order.splice(destination, 0, rowId);
+        this.transientFormulaState.rowOrder = order;
+      }, {
+        focusRowId: rowId,
+        status: '已将 ' + name + ' 移动到第 ' + (destination + 1) + ' 行，可使用撤销恢复',
+        log: {
+          phase: 'move',
+          method: 'drag',
+          rowId,
+          name,
+          from: sourceIndex,
+          to: destination
+        }
+      });
+    }
+
     async refreshFormulaSession(options) {
       if (!this.meta) return;
       if (this.formulaRefreshInFlight && !(options && options.force)) {
@@ -2601,7 +2862,7 @@
         this.renderSignalRows();
         this.updateLayout();
         await this.requestWindow();
-        await this.runSimplify(false);
+        this.scheduleFormulaSimplify();
         await this.updateCursorReadout();
         if (settings.persist) this.persistTransientFormulaState();
         if (popupRowId) {
@@ -2751,7 +3012,8 @@
                 title="设置 ${escapeHtml(row.name)} 的波形和背景颜色"
                 aria-label="设置 ${escapeHtml(row.name)} 的波形和背景颜色"
                 aria-haspopup="dialog" aria-expanded="false"></button>
-            <span class="scope-signal-name" title="${escapeHtml(row.name)}">
+            <span class="scope-signal-name" data-scope-row-drag="${row.index}"
+                title="${escapeHtml(row.name)}；按住鼠标左键拖动调整行顺序">
               ${group ? `<small>${escapeHtml(group)}</small>` : ''}
               <button type="button" class="scope-signal-name-button"
                   data-scope-name-row="${row.index}"
@@ -3274,6 +3536,26 @@
 
     positionPlotCanvas() {
       this.plotCanvas.style.transform = 'translateY(' + this.plotViewport.scrollTop + 'px)';
+    }
+
+    syncVerticalScroll(options) {
+      if (!this.plotViewport || !this.signalScroll) return;
+      const settings = options || {};
+      const scrollTop = Math.max(0, this.plotViewport.scrollTop);
+      const changed = !Number.isFinite(this.lastSynchronizedScrollTop)
+        || Math.abs(scrollTop - this.lastSynchronizedScrollTop) > 0.01;
+      this.signalScroll.scrollTop = scrollTop;
+      this.positionPlotCanvas();
+      if (!changed && !settings.force) return;
+      this.lastSynchronizedScrollTop = scrollTop;
+      if (settings.redraw !== false) this.draw({ plotOnly: true });
+      if (settings.requestWindow !== false) this.scheduleWindowRequest();
+    }
+
+    setVerticalScrollTop(scrollTop, options) {
+      if (!this.plotViewport) return;
+      this.plotViewport.scrollTop = Math.max(0, Number(scrollTop) || 0);
+      this.syncVerticalScroll(options);
     }
 
     visibleRows() {
@@ -4133,6 +4415,30 @@
       return Number.isFinite(sampleStep) && sampleStep <= 0.5 + 1e-9 ? 0.5 : 1;
     }
 
+    cursorPointStep(rowIndex) {
+      const row = this.meta && Array.isArray(this.meta.rows)
+        ? this.meta.rows[rowIndex]
+        : null;
+      const cursorStep = Number(row && row.cursorStep);
+      if (Number.isFinite(cursorStep) && cursorStep > 0) return cursorStep;
+      return this.connectionPointStep(rowIndex);
+    }
+
+    cursorColumnForRow(column, rowIndex) {
+      const step = this.cursorPointStep(rowIndex);
+      const maximum = Math.max(0, this.meta.totalColumns - 1e-7);
+      const lastGridColumn = Math.max(
+        0,
+        Math.floor((maximum + 1e-9) / step) * step
+      );
+      const numericColumn = Number(column);
+      return clamp(
+        Math.round((Number.isFinite(numericColumn) ? numericColumn : 0) / step) * step,
+        0,
+        lastGridColumn
+      );
+    }
+
     connectionPoint(column, rowIndex) {
       const resolvedRowIndex = clamp(
         Math.floor(Number(rowIndex) || 0),
@@ -4346,9 +4652,10 @@
       context.restore();
     }
 
-    draw() {
+    draw(options) {
       if (!this.meta || !this.plotViewport.clientWidth) return;
-      this.drawAxis();
+      const plotOnly = !!(options && options.plotOnly);
+      if (!plotOnly) this.drawAxis();
       const resized = this.resizeCanvas(
         this.plotCanvas,
         this.plotViewport.clientWidth,
@@ -4472,7 +4779,7 @@
       this.drawColumnSelection(context, width, height);
       this.drawConnections(context, width, height);
       this.drawCursors(context, width, height);
-      this.drawOverview();
+      if (!plotOnly) this.drawOverview();
     }
 
     drawOverview() {
@@ -4747,7 +5054,9 @@
       const unit = deltaMode === 1
         ? 16
         : (deltaMode === 2 ? Math.max(1, this.plotViewport.clientHeight) : 1);
-      this.plotViewport.scrollTop += Number(deltaY || 0) * unit * 0.5;
+      this.setVerticalScrollTop(
+        this.plotViewport.scrollTop + Number(deltaY || 0) * unit * 0.5
+      );
     }
 
     columnIndexForX(x, width) {
@@ -4847,7 +5156,7 @@
         this.updatePointEditor();
         this.updateMeasurements();
         this.setActiveCursorRow(rowIndex);
-        this.setActiveCursorPosition(Math.round(column * 2) / 2, true);
+        this.setActiveCursorPosition(this.cursorColumnForRow(column, rowIndex), true);
         void this.snapActiveCursorPosition(column, rowIndex);
         this.setStatus(this.activeCursor + ' 游标正在移动到点击位置');
         return;
@@ -4906,7 +5215,10 @@
         const column = this.columnForX(x, rect.width);
         if (Math.abs(event.clientX - this.drag.startX) > 2) this.drag.moved = true;
         this.drag.column = column;
-        this.setActiveCursorPosition(Math.round(column * 2) / 2, true);
+        this.setActiveCursorPosition(
+          this.cursorColumnForRow(column, this.drag.rowIndex),
+          true
+        );
         return;
       }
       if (this.drag.kind === 'columns') {
@@ -5269,8 +5581,11 @@
         });
         if (sequence !== this.cursorNavigationSequence) return;
         this.setActiveCursorPosition(result.column);
+        const snapLabel = result.source === 'half-cycle'
+          ? '半周期采样点'
+          : (result.source === 'cycle' ? '周期采样点' : '变化边沿');
         this.setStatus(
-          this.activeCursor + ' 已吸附到 ' + row.name + ' 的边沿 '
+          this.activeCursor + ' 已吸附到 ' + row.name + ' 的' + snapLabel + ' '
           + this.formatTime(result.column)
         );
       } catch (error) {
@@ -5462,6 +5777,13 @@
       const expression = this.cursorJumpInput.value.trim();
       const kind = expression ? 'condition' : 'edge';
       const sequence = ++this.cursorNavigationSequence;
+      const startedAt = global.performance && typeof global.performance.now === 'function'
+        ? global.performance.now()
+        : Date.now();
+      const waitingStatus = global.setTimeout(() => {
+        if (sequence !== this.cursorNavigationSequence) return;
+        this.setStatus('正在查找' + (kind === 'edge' ? '变化边沿' : '条件成立边沿') + '...');
+      }, 120);
       try {
         const result = await this.worker.call('navigate', {
           rowIndex: this.activeCursorRow,
@@ -5472,6 +5794,7 @@
           mode,
           analogFormat: this.analogFormats[this.activeCursorRow]
         });
+        global.clearTimeout(waitingStatus);
         if (sequence !== this.cursorNavigationSequence) return;
         if (!result.found) {
           this.setStatus(
@@ -5482,9 +5805,8 @@
           );
           return;
         }
-        this.setActiveCursorPosition(result.column);
         this.ensureCursorVisible(result.column);
-        this.draw();
+        this.setActiveCursorPosition(result.column, true);
         this.setStatus(
           this.activeCursor + ' 已跳到 ' + row.name + ' 的'
           + (kind === 'edge'
@@ -5502,9 +5824,14 @@
           expression,
           column: result.column,
           value: result.value,
-          source: result.source || ''
+          source: result.source || '',
+          lookupMs: Number(result.lookupMs) || 0,
+          totalMs: Math.round((global.performance && typeof global.performance.now === 'function'
+            ? global.performance.now()
+            : Date.now()) - startedAt)
         });
       } catch (error) {
+        global.clearTimeout(waitingStatus);
         if (sequence !== this.cursorNavigationSequence) return;
         this.setStatus('游标跳转失败：' + (error.message || String(error)), true);
         this.log('scope-cursor', {
@@ -5601,10 +5928,11 @@
       };
     }
 
-    async runSimplify(recordHistory) {
+    async runSimplify(recordHistory, runOptions) {
       if (!this.meta) return;
+      const background = !!(runOptions && runOptions.background);
       if (recordHistory && this.simplified) this.pushHistory();
-      this.setStatus('正在生成简化实例');
+      if (!background) this.setStatus('正在生成简化实例');
       try {
         const options = this.getSimplifyOptions();
         const result = await this.worker.call('simplify', options);
@@ -5620,13 +5948,15 @@
         this.updateRowOperationControls();
         this.draw();
         if (recordHistory) this.markDraftDirty('data');
-        this.setStatus('简化实例已生成，可单击简化波形继续编辑');
+        if (!background) this.setStatus('简化实例已生成，可单击简化波形继续编辑');
         this.log('scope-simplify', Object.assign({
           phase: 'complete',
           method: options.method
         }, result.metrics));
       } catch (error) {
-        this.setStatus('生成简化实例失败：' + (error.message || String(error)), true);
+        if (!background) {
+          this.setStatus('生成简化实例失败：' + (error.message || String(error)), true);
+        }
         this.log('scope-simplify', { phase: 'error', message: error.message || String(error) });
       }
     }

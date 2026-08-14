@@ -187,6 +187,25 @@
       renderProgress();
     }
 
+    function applyFormulaProgress(progress) {
+      if (!progress || typeof progress !== 'object') return;
+      importProgressState = Object.assign({}, importProgressState || {}, {
+        phase: String(progress.phase || 'formula'),
+        formulaStage: String(progress.stage || 'evaluating'),
+        formulaIndex: Math.max(0, Number(progress.index || 0)),
+        totalFormulas: Math.max(0, Number(progress.total || 0)),
+        currentFormula: String(progress.name || '')
+      });
+      renderProgress();
+      debug({
+        phase: 'import-formula-progress',
+        stage: importProgressState.formulaStage,
+        index: importProgressState.formulaIndex,
+        total: importProgressState.totalFormulas,
+        name: importProgressState.currentFormula
+      });
+    }
+
     function renderImportProgress(seconds) {
       const state = importProgressState || {};
       const total = Math.max(0, Number(state.totalFiles || 0));
@@ -194,15 +213,32 @@
         Math.max(0, Number(state.completedFiles || 0)));
       let message = total > 0
         ? ('导入进度：已完成 ' + completed + '/' + total + ' 个文件')
-        : '导入进度：正在准备待导入文件';
+        : (state.phase === 'formula' ? '导入进度：文件阶段已完成' : '导入进度：正在准备待导入文件');
       message += '，已解析 ' + Math.max(0, Number(state.signalCount || 0)) + ' 个信号';
       if (Number(state.failedFiles || 0) > 0) {
         message += '，失败 ' + Number(state.failedFiles) + ' 个文件';
       }
-      if (state.phase === 'applying') message += '，正在写入当前波形图';
+      if (state.phase === 'formula') {
+        const formulaIndex = Math.max(0, Number(state.formulaIndex || 0));
+        const totalFormulas = Math.max(0, Number(state.totalFormulas || 0));
+        const action = state.formulaStage === 'preparing'
+          ? '正在准备公式输入'
+          : (state.formulaStage === 'packaging' ? '正在生成波形数据' : '正在计算公式');
+        message += '，' + action;
+        if (totalFormulas > 0) message += ' ' + formulaIndex + '/' + totalFormulas;
+        if (state.currentFormula) message += '：' + state.currentFormula;
+      } else if (state.phase === 'applying') {
+        message += '，正在写入并保存当前波形图';
+      }
       message += '，已等待 ' + seconds + ' 秒';
       setHint(message, false);
-      if (busy && total > 0) {
+      if (busy && state.phase === 'formula') {
+        const formulaIndex = Math.max(0, Number(state.formulaIndex || 0));
+        const totalFormulas = Math.max(0, Number(state.totalFormulas || 0));
+        confirmButton.textContent = totalFormulas > 0
+          ? ('计算公式 ' + formulaIndex + '/' + totalFormulas)
+          : '正在计算公式';
+      } else if (busy && total > 0) {
         confirmButton.textContent = '导入中 ' + completed + '/' + total;
       }
     }
@@ -3344,9 +3380,19 @@
         if (typeof settings.applyImport !== 'function') {
           throw new Error('批量导入处理函数未初始化');
         }
-        if (importProgressState) importProgressState.phase = 'applying';
-        updateProgress('文件解析完成，正在写入当前波形图…');
-        const result = await settings.applyImport(payload);
+        if (importProgressState) {
+          importProgressState.phase = formulas.length ? 'formula' : 'applying';
+          importProgressState.formulaIndex = 0;
+          importProgressState.totalFormulas = formulas.length;
+          importProgressState.currentFormula = '';
+          importProgressState.formulaStage = 'evaluating';
+        }
+        updateProgress(formulas.length
+          ? '文件解析完成，正在计算公式…'
+          : '文件解析完成，正在写入当前波形图…');
+        const result = await settings.applyImport(payload, {
+          onProgress: applyFormulaProgress
+        });
         const completedFiles = payload.progress
           ? Number(payload.progress.successfulFiles || payload.progress.completedFiles || 0)
           : (Array.isArray(payload.files) ? payload.files.length : fileCount);
