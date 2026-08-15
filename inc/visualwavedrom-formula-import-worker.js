@@ -2,7 +2,7 @@
 'use strict';
 
 if (!global.VisualWaveDromFormula && typeof global.importScripts === 'function') {
-  global.importScripts('visualwavedrom-formula.js?v=20260814-derived-pipeline-v1');
+  global.importScripts('visualwavedrom-formula.js?v=20260815-large-import-v1');
 }
 
 function analysisSummary(analysis) {
@@ -56,7 +56,8 @@ global.addEventListener('message', async (event) => {
       definitions,
       {
         parallel: true,
-        workerUrl: 'visualwavedrom-formula-eval-worker.js?v=20260814-derived-pipeline-v1',
+        totalColumns: request.totalColumns,
+        workerUrl: 'visualwavedrom-formula-eval-worker.js?v=20260815-large-import-v1',
         onFormulaStart: sendProgress('evaluating'),
         onFormulaComplete: sendProgress('evaluated'),
         onFormulaPackageStart: sendProgress('packaging'),

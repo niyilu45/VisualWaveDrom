@@ -2412,17 +2412,35 @@ ${lines.join('\n')}`;
       }
     }
 
+    function serializeWaveDocumentSource(source) {
+      const api = getJsonBigDataApi();
+      const metrics = api && source && typeof source === 'object'
+        ? api.measureSource(source)
+        : null;
+      const compact = !!(metrics
+        && Number(metrics.maxWaveLength) > JSON_WRAP_DISABLE_COLUMN_THRESHOLD);
+      return {
+        text: JSON.stringify(source, null, compact ? 0 : 2),
+        source,
+        metrics,
+        compact
+      };
+    }
+
     function formatEditorJson(options) {
       const opts = options || {};
       flushCodeMirrorToTextarea('format-json');
       if (jsonDocumentViewMode === 'window' && !commitJsonWindowEdits('format-json')) return false;
-      let formatted;
+      let parsed;
+      let serialized;
       try {
-        formatted = JSON.stringify(JSON.parse(editor.value), null, 2);
+        parsed = JSON.parse(editor.value);
+        serialized = serializeWaveDocumentSource(parsed);
       } catch (e) {
         setStatus(false, 'JSON 错误，无法格式化');
         return false;
       }
+      const formatted = serialized.text;
       if (formatted === editor.value) {
         setStatus(true, 'JSON 已对齐');
         return true;
@@ -2432,8 +2450,14 @@ ${lines.join('\n')}`;
       } else if (opts.rebaseUndoSource) {
         rebaseLatestEditorUndoSource(editor.value, formatted, 'auto-format');
       }
-      applyEditorChange(formatted, 0, 0, { skipFocus: !!opts.skipFocus });
-      setStatus(true, 'JSON 已格式化对齐');
+      applyEditorChange(formatted, 0, 0, {
+        skipFocus: !!opts.skipFocus,
+        source: parsed,
+        metrics: serialized.metrics
+      });
+      setStatus(true, serialized.compact
+        ? '大数据 JSON 已紧凑存储，当前窗口保持对齐显示'
+        : 'JSON 已格式化对齐');
       return true;
     }
 
@@ -3886,6 +3910,11 @@ ${lines.join('\n')}`;
       }
       cancelCodeMirrorSync();
       editor.value = text;
+      if (opts.source && typeof opts.source === 'object') {
+        jsonDocumentSourceText = text;
+        jsonDocumentSource = opts.source;
+        jsonDocumentMetrics = opts.metrics || null;
+      }
       if (codeMirrorEditor
           && !(opts.deferLargeRefresh && text.length >= JSON_LARGE_TEXT_THRESHOLD)) {
         refreshJsonDocumentView({
@@ -3960,21 +3989,31 @@ ${lines.join('\n')}`;
 
     function applyEditorChange(newText, selStart, selEnd, options) {
       const opts = options || {};
-      setEditorValue(newText, { deferLargeRefresh: !opts.skipRender });
+      setEditorValue(newText, {
+        deferLargeRefresh: !opts.skipRender,
+        source: opts.source,
+        metrics: opts.metrics
+      });
       setEditorHistoryBaseline(newText);
       setEditorSelection(selStart, selEnd ?? selStart, !opts.skipFocus && keyboardInputScope === 'json');
       updateLineNumbers();
       syncLineNumberScroll();
-      syncColumnNumberButtonFromJson(newText);
+      syncColumnNumberButtonFromJson(newText, opts.source);
+      const preparedAnalysis = opts.source && typeof opts.source === 'object' ? {
+        text: newText,
+        ok: true,
+        source: opts.source,
+        metrics: opts.metrics || null
+      } : null;
       if (opts.skipRender) {
-        syncHscaleInputFromJson(newText);
+        syncHscaleInputFromJson(newText, opts.source);
         renderConnectionEdgeList();
         if (opts.onRenderComplete) opts.onRenderComplete(true);
       } else if (opts.deferRender) {
         renderConnectionEdgeList();
-        scheduleRenderWaveform(newText, opts.onRenderComplete);
+        scheduleRenderWaveform(newText, opts.onRenderComplete, preparedAnalysis);
       } else {
-        scheduleRenderWaveform(newText, opts.onRenderComplete);
+        scheduleRenderWaveform(newText, opts.onRenderComplete, preparedAnalysis);
       }
       if (opts.skipSyncPersist || newText.length >= JSON_LARGE_TEXT_THRESHOLD) {
         debouncedPersistEditorJson();
@@ -12976,7 +13015,9 @@ ${lines.join('\n')}`;
       let source = null;
       let error = null;
       try {
-        source = JSON.parse(content);
+        source = useEditor && jsonDocumentSourceText === content && jsonDocumentSource
+          ? jsonDocumentSource
+          : JSON.parse(content);
       } catch (parseError) {
         error = parseError;
       }
@@ -14882,7 +14923,8 @@ ${lines.join('\n')}`;
         else delete item.target.signal.scope;
       });
 
-      const newText = JSON.stringify(parsed, null, 2);
+      const serialized = serializeWaveDocumentSource(parsed);
+      const newText = serialized.text;
       if (previewOnly) {
         return {
           changed: newText !== editor.value,
@@ -14910,7 +14952,9 @@ ${lines.join('\n')}`;
       pushUndoBeforeChange(newText);
       applyEditorChange(newText, selectionStart, selectionEnd, {
         skipFocus: true,
-        skipSyncPersist: true
+        skipSyncPersist: true,
+        source: parsed,
+        metrics: serialized.metrics
       });
       return {
         changed: true,
@@ -14923,18 +14967,173 @@ ${lines.join('\n')}`;
     }
 
     const FORMULA_IMPORT_WORKER_URL = 'inc/visualwavedrom-formula-import-worker.js'
-      + '?v=20260814-derived-pipeline-v1';
+      + '?v=20260815-large-import-v1';
     let formulaImportRequestSequence = 0;
 
-    function buildFormulaUpdatesOffThread(documentValue, importedUpdates, definitions, onProgress) {
+    function formulaSequenceLength(values, sampleStep) {
+      return values && typeof values.length === 'number' && values.length
+        ? Math.ceil(values.length * (Number(sampleStep) || 1))
+        : 0;
+    }
+
+    function formulaSignalLength(signal) {
+      const scope = signal && signal.scope && typeof signal.scope === 'object'
+        && !Array.isArray(signal.scope) ? signal.scope : {};
+      if (scope.changePoints && typeof scope.changePoints === 'object') {
+        return Math.ceil(
+          Number(scope.changePoints.totalSamples || 0)
+          * (Number(scope.changePoints.sampleStep || scope.sampleStep) || 0.5)
+        );
+      }
+      const valuesLength = formulaSequenceLength(scope.values, scope.sampleStep);
+      if (valuesLength) return valuesLength;
+      const samplesLength = formulaSequenceLength(scope.samples, scope.sampleStep);
+      if (samplesLength) return samplesLength;
+      return String(signal && signal.wave || '').length;
+    }
+
+    function formulaUpdateLength(update) {
+      if (update && update.changePoints && typeof update.changePoints === 'object') {
+        return Math.ceil(
+          Number(update.changePoints.totalSamples || 0)
+          * (Number(update.changePoints.sampleStep || update.sampleStep) || 0.5)
+        );
+      }
+      const valuesLength = formulaSequenceLength(update && update.values, update && update.sampleStep);
+      if (valuesLength) return valuesLength;
+      const samplesLength = formulaSequenceLength(update && update.samples, update && update.sampleStep);
+      if (samplesLength) return samplesLength;
+      return String(update && update.wave || '').length;
+    }
+
+    function formulaTransferSequence(values, transferList) {
+      const sequence = Array.isArray(values) || (typeof ArrayBuffer !== 'undefined'
+        && ArrayBuffer.isView(values)) ? values : null;
+      if (!sequence || !sequence.length) return null;
+      if (sequence.length < 1024) return Array.from(sequence);
+      const numeric = new Float64Array(sequence.length);
+      for (let index = 0; index < sequence.length; index += 1) {
+        const value = sequence[index];
+        if (typeof value !== 'number' || !Number.isFinite(value)) return Array.from(sequence);
+        numeric[index] = value;
+      }
+      transferList.push(numeric.buffer);
+      return numeric;
+    }
+
+    function formulaSourceScope(scope, transferList) {
+      const source = scope && typeof scope === 'object' && !Array.isArray(scope) ? scope : {};
+      const compact = {};
+      ['mode', 'sampleStep', 'numericType', 'type', 'dataType'].forEach((key) => {
+        if (Object.prototype.hasOwnProperty.call(source, key)) compact[key] = source[key];
+      });
+      if (source.tbl && typeof source.tbl === 'object') compact.tbl = source.tbl;
+      if (source.changePoints && typeof source.changePoints === 'object') {
+        compact.changePoints = source.changePoints;
+      } else {
+        const values = formulaTransferSequence(source.values, transferList);
+        const samples = values ? null : formulaTransferSequence(source.samples, transferList);
+        if (values) compact.values = values;
+        else if (samples) compact.samples = samples;
+      }
+      return compact;
+    }
+
+    function formulaSourceSignal(signal, transferList) {
+      const compact = { name: String(signal && signal.name || '') };
+      const scope = formulaSourceScope(signal && signal.scope, transferList);
+      if (Object.keys(scope).some((key) => key === 'values' || key === 'samples'
+          || key === 'changePoints')) {
+        compact.scope = scope;
+      } else {
+        compact.wave = String(signal && signal.wave || '');
+        compact.data = Array.isArray(signal && signal.data) ? signal.data : [];
+        if (Object.keys(scope).length) compact.scope = scope;
+      }
+      return compact;
+    }
+
+    function formulaSourceUpdate(update, transferList) {
+      const compact = {
+        signal: String(update && update.signal || ''),
+        sampleStep: Number(update && update.sampleStep) || 1,
+        sampleKind: String(update && update.sampleKind || '')
+      };
+      if (update && update.tbl && typeof update.tbl === 'object') compact.tbl = update.tbl;
+      if (update && update.changePoints && typeof update.changePoints === 'object') {
+        compact.changePoints = update.changePoints;
+      } else {
+        const values = formulaTransferSequence(update && update.values, transferList);
+        const samples = values ? null : formulaTransferSequence(update && update.samples, transferList);
+        if (values) compact.values = values;
+        else if (samples) compact.samples = samples;
+        else {
+          compact.wave = String(update && update.wave || '');
+          compact.data = Array.isArray(update && update.data) ? update.data : [];
+        }
+      }
+      return compact;
+    }
+
+    function prepareFormulaWorkerInput(documentValue, importedUpdates, definitions) {
       const formulaEngine = window.VisualWaveDromFormula;
-      const runFallback = () => {
+      const source = typeof documentValue === 'string'
+        ? JSON.parse(documentValue)
+        : (documentValue || {});
+      const sourceSignals = flattenSignals(source && source.signal);
+      const updates = Array.isArray(importedUpdates) ? importedUpdates : [];
+      const signalNames = sourceSignals.map((signal) => String(signal && signal.name || '').trim())
+        .concat(updates.map((update) => String(update && update.signal || '').trim()))
+        .filter(Boolean);
+      const analysis = formulaEngine.analyzeDefinitions(definitions, signalNames);
+      const requiredNames = new Set();
+      analysis.items.forEach((item) => {
+        const dependencies = new Set(item.dependencies || []);
+        (item.references || []).forEach((name) => {
+          if (!dependencies.has(name)) requiredNames.add(name);
+        });
+      });
+      let totalColumns = 1;
+      sourceSignals.forEach((signal) => {
+        totalColumns = Math.max(totalColumns, formulaSignalLength(signal));
+      });
+      updates.forEach((update) => {
+        totalColumns = Math.max(totalColumns, formulaUpdateLength(update));
+      });
+      const transferList = [];
+      const projectedUpdates = updates.filter((update) => (
+        requiredNames.has(String(update && update.signal || '').trim())
+      )).map((update) => formulaSourceUpdate(update, transferList));
+      const projectedUpdateNames = new Set(projectedUpdates.map((update) => update.signal));
+      const projectedSignals = sourceSignals.filter((signal) => {
+        const name = String(signal && signal.name || '').trim();
+        return requiredNames.has(name) && !projectedUpdateNames.has(name);
+      }).map((signal) => formulaSourceSignal(signal, transferList));
+      return {
+        documentValue: { signal: projectedSignals },
+        importedUpdates: projectedUpdates,
+        totalColumns,
+        transferList,
+        sourceCount: projectedSignals.length + projectedUpdates.length,
+        transferredBytes: transferList.reduce((total, buffer) => total + buffer.byteLength, 0)
+      };
+    }
+
+    function buildFormulaUpdatesOffThread(workerInput, definitions, onProgress, fallbackFactory) {
+      const formulaEngine = window.VisualWaveDromFormula;
+      const runFallback = (input) => {
+        const sourceInput = input || workerInput;
         const build = typeof formulaEngine.buildFormulaUpdatesAsync === 'function'
           ? formulaEngine.buildFormulaUpdatesAsync.bind(formulaEngine)
           : formulaEngine.buildFormulaUpdates.bind(formulaEngine);
-        return Promise.resolve(build(documentValue, importedUpdates, definitions, {
+        return Promise.resolve(build(
+          sourceInput.documentValue,
+          sourceInput.importedUpdates,
+          definitions,
+          {
           parallel: true,
-          workerUrl: 'inc/visualwavedrom-formula-eval-worker.js?v=20260814-derived-pipeline-v1',
+          totalColumns: sourceInput.totalColumns,
+          workerUrl: 'inc/visualwavedrom-formula-eval-worker.js?v=20260815-large-import-v1',
           onFormulaStart: (progress) => {
             if (typeof onProgress === 'function') {
               onProgress(Object.assign({ phase: 'formula', stage: 'evaluating' }, progress));
@@ -14971,7 +15170,10 @@ ${lines.join('\n')}`;
           if (settled) return;
           settled = true;
           finish();
-          void runFallback().then(resolve, reject);
+          const fallbackInput = typeof fallbackFactory === 'function'
+            ? fallbackFactory()
+            : workerInput;
+          void runFallback(fallbackInput).then(resolve, reject);
         };
         worker.addEventListener('message', (event) => {
           const message = event.data || {};
@@ -14991,10 +15193,11 @@ ${lines.join('\n')}`;
           worker.postMessage({
             type: 'build-formula-updates',
             requestId,
-            documentValue,
-            importedUpdates,
+            documentValue: workerInput.documentValue,
+            importedUpdates: workerInput.importedUpdates,
+            totalColumns: workerInput.totalColumns,
             definitions
-          });
+          }, workerInput.transferList || []);
         } catch (_error) {
           fallback();
         }
@@ -15011,11 +15214,21 @@ ${lines.join('\n')}`;
       const sourceUpdates = Array.isArray(opts.formulaSourceUpdates)
         ? opts.formulaSourceUpdates
         : importedUpdates;
-      const built = await buildFormulaUpdatesOffThread(
-        typeof opts.documentValue === 'string' ? opts.documentValue : editor.value,
+      const documentValue = typeof opts.documentValue === 'string'
+        || (opts.documentValue && typeof opts.documentValue === 'object')
+        ? opts.documentValue
+        : editor.value;
+      const createWorkerInput = () => prepareFormulaWorkerInput(
+        documentValue,
         sourceUpdates,
+        definitions
+      );
+      const workerInput = createWorkerInput();
+      const built = await buildFormulaUpdatesOffThread(
+        workerInput,
         definitions,
-        opts.onProgress
+        opts.onProgress,
+        createWorkerInput
       );
       const invalid = built.analysis.items.filter((item) => !item.valid);
       const merged = [];
@@ -15047,6 +15260,8 @@ ${lines.join('\n')}`;
         layers: built.layers || [],
         parallelWorkerCount: Number(built.parallelWorkerCount || 0),
         evaluationDurationMs: Number(built.evaluationDurationMs || 0),
+        formulaSourceCount: workerInput.sourceCount,
+        formulaTransferBytes: workerInput.transferredBytes,
         errors: invalid.map((item) => ({ name: item.name, error: item.error }))
       });
       return Object.assign({}, payload, {
@@ -20416,16 +20631,11 @@ ${lines.join('\n')}`;
           let resolvedPayload = payload;
           if (definitions.length) {
             const importedUpdates = Array.isArray(payload.updates) ? payload.updates : [];
-            const importedPreview = importedUpdates.length
-              ? applyImportedWaveRows(payload, {
-                createMissing: true,
-                replaceScopeFormulas: true,
-                previewOnly: true
-              })
-              : { text: editor.value };
             resolvedPayload = await importedPayloadWithFormulas(payload, {
-              documentValue: importedPreview.text,
-              formulaSourceUpdates: [],
+              documentValue: jsonDocumentSourceText === editor.value && jsonDocumentSource
+                ? jsonDocumentSource
+                : editor.value,
+              formulaSourceUpdates: importedUpdates,
               onProgress: importOptions && importOptions.onProgress
             });
           }

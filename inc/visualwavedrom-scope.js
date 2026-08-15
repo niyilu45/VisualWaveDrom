@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260815-overview-zoom-v1';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260815-interactive-cancel-v1';
   const FormulaEngine = global.VisualWaveDromFormula || null;
   const DEFAULT_ROW_HEIGHT = 42;
   const DEFAULT_MULTI_WAVE_ROW_HEIGHT = 68;
@@ -478,6 +478,8 @@
       this.sequence = 0;
       this.pending = new Map();
       this.worker = null;
+      this.windowGeneration = 0;
+      this.windowCancelTimer = 0;
       this.fallback = global.VisualWaveDromScopeWorkerCore || null;
       try {
         this.worker = new Worker(WORKER_URL);
@@ -528,7 +530,43 @@
       });
     }
 
+    callWindow(payload, options) {
+      const priority = options && options.priority === 'background'
+        ? 'background'
+        : 'interactive';
+      const generation = priority === 'interactive'
+        ? ++this.windowGeneration
+        : this.windowGeneration;
+      return this.call('window', Object.assign({}, payload || {}, {
+        windowGeneration: generation,
+        windowPriority: priority
+      }));
+    }
+
+    cancelWindowWork() {
+      this.windowGeneration += 1;
+      if (this.windowCancelTimer) return this.windowGeneration;
+      this.windowCancelTimer = global.setTimeout(() => {
+        this.windowCancelTimer = 0;
+        const request = {
+          type: 'cancel-window',
+          windowGeneration: this.windowGeneration
+        };
+        if (this.worker) {
+          this.worker.postMessage(request);
+          return;
+        }
+        const core = this.fallback || global.VisualWaveDromScopeWorkerCore;
+        if (core && typeof core.handleRequest === 'function') {
+          void core.handleRequest(request);
+        }
+      }, 0);
+      return this.windowGeneration;
+    }
+
     close() {
+      if (this.windowCancelTimer) global.clearTimeout(this.windowCancelTimer);
+      this.windowCancelTimer = 0;
       if (this.worker) this.worker.terminate();
       this.pending.forEach((item) => item.reject(new Error('Scope window closed')));
       this.pending.clear();
@@ -595,6 +633,7 @@
       this.windowBuildKey = '';
       this.windowBuildPromise = null;
       this.windowBackgroundPromise = null;
+      this.visibleWindowRequestSequence = 0;
       this.overviewData = null;
       this.overviewDataCacheKey = '';
       this.overviewDataRequestSequence = 0;
@@ -602,6 +641,12 @@
       this.lastSynchronizedScrollTop = Number.NaN;
       this.verticalScrollFrame = 0;
       this.pendingVerticalScrollOptions = null;
+      this.drawFrame = 0;
+      this.pendingDrawOptions = null;
+      this.plotBaseCanvas = null;
+      this.plotBaseCacheKey = '';
+      this.plotBaseRevision = 0;
+      this.backgroundWindowPausedUntil = 0;
       this.buildSequence = 0;
       this.drag = null;
       this.overviewDrag = null;
@@ -1614,6 +1659,7 @@
       global.addEventListener('pagehide', () => {
         if (this.transientStatusTimer) global.clearTimeout(this.transientStatusTimer);
         if (this.cursorReadoutFrame) global.cancelAnimationFrame(this.cursorReadoutFrame);
+        if (this.drawFrame) global.cancelAnimationFrame(this.drawFrame);
         if (this.overviewWindowRequestFrame) {
           global.cancelAnimationFrame(this.overviewWindowRequestFrame);
         }
@@ -4104,8 +4150,10 @@
     }
 
     resetWindowCache() {
+      if (this.worker) this.worker.cancelWindowWork();
       this.windowSessionRevision += 1;
       this.windowRequestSequence += 1;
+      this.visibleWindowRequestSequence += 1;
       this.windowBuildKey = '';
       this.windowBuildPromise = null;
       this.windowBackgroundPromise = null;
@@ -4116,6 +4164,29 @@
       this.windowData = null;
       this.rowStart = 0;
       this.rowEnd = 0;
+    }
+
+    pauseBackgroundWindowWork(duration) {
+      const now = global.performance && typeof global.performance.now === 'function'
+        ? global.performance.now()
+        : Date.now();
+      this.backgroundWindowPausedUntil = Math.max(
+        this.backgroundWindowPausedUntil,
+        now + Math.max(40, Number(duration) || 140)
+      );
+      if (this.worker) this.worker.cancelWindowWork();
+    }
+
+    async waitForBackgroundWindowWork(sequence, key) {
+      while (sequence === this.windowRequestSequence && key === this.windowBuildKey) {
+        const now = global.performance && typeof global.performance.now === 'function'
+          ? global.performance.now()
+          : Date.now();
+        const remaining = this.backgroundWindowPausedUntil - now;
+        if (remaining <= 0) return true;
+        await new Promise((resolve) => global.setTimeout(resolve, Math.min(32, remaining)));
+      }
+      return false;
     }
 
     scheduleVerticalScrollSync(options) {
@@ -4145,7 +4216,12 @@
       this.positionPlotCanvas();
       if (!changed && !settings.force) return;
       this.lastSynchronizedScrollTop = scrollTop;
-      if (settings.redraw !== false) this.draw({ plotOnly: true });
+      if (settings.redraw !== false) {
+        this.plotBaseRevision += 1;
+        this.drawNow({ plotOnly: true });
+      }
+      this.pauseBackgroundWindowWork(100);
+      this.scheduleWindowRequest();
     }
 
     setVerticalScrollTop(scrollTop, options) {
@@ -4295,12 +4371,16 @@
       }
       const sequence = ++this.overviewDataRequestSequence;
       this.overviewDataCacheKey = key;
-      const promise = this.worker.call('window', config);
+      const promise = this.worker.callWindow(config, { priority: 'background' });
       this.overviewDataRequestPromise = promise;
       try {
         const result = await promise;
         if (sequence !== this.overviewDataRequestSequence
             || key !== this.overviewDataCacheKey) return;
+        if (result && result.cancelled) {
+          this.overviewDataCacheKey = '';
+          return;
+        }
         this.overviewData = Object.assign({}, result, { requestKey: key });
         this.drawOverview();
         this.log('scope-overview', {
@@ -4375,8 +4455,12 @@
 
     async fillRemainingWindowRows(config, key, sequence, cache, initialVisible) {
       const visibleCount = Math.max(1, initialVisible.end - initialVisible.start);
-      const chunkSize = clamp(visibleCount, 2, 8);
+      const chunkSize = this.meta && this.meta.totalColumns >= 50000
+        ? 2
+        : clamp(visibleCount, 2, 8);
       while (sequence === this.windowRequestSequence && key === this.windowBuildKey) {
+        const canContinue = await this.waitForBackgroundWindowWork(sequence, key);
+        if (!canContinue) return;
         await new Promise((resolve) => setTimeout(resolve, 0));
         if (sequence !== this.windowRequestSequence || key !== this.windowBuildKey) return;
         const currentVisible = this.visibleRows();
@@ -4388,11 +4472,12 @@
         );
         if (!range) range = this.missingWindowRowRange(cache, 0, config.rowCount, chunkSize);
         if (!range) break;
-        const result = await this.worker.call(
-          'window',
-          this.windowPayload(config, range.start, range.end)
+        const result = await this.worker.callWindow(
+          this.windowPayload(config, range.start, range.end),
+          { priority: 'background' }
         );
         if (sequence !== this.windowRequestSequence || key !== this.windowBuildKey) return;
+        if (result && result.cancelled) continue;
         this.mergeWindowResult(cache, result);
         const latestVisible = this.visibleRows();
         if (range.start < latestVisible.end && range.end > latestVisible.start) {
@@ -4429,16 +4514,18 @@
         return;
       }
 
-      const initialResult = await this.worker.call(
-        'window',
-        this.windowPayload(config, initialVisible.start, initialVisible.end)
+      const initialResult = await this.worker.callWindow(
+        this.windowPayload(config, initialVisible.start, initialVisible.end),
+        { priority: 'interactive' }
       );
       if (sequence !== this.windowRequestSequence || key !== this.windowBuildKey) return;
+      if (initialResult && initialResult.cancelled) return;
       this.mergeWindowResult(cache, initialResult);
       this.windowData = cache;
       this.rowStart = 0;
       this.rowEnd = config.rowCount;
       this.draw({ plotOnly: true });
+      this.scheduleOverviewDataRequest();
       this.log('scope-window', {
         phase: 'visible-ready',
         rowStart: initialVisible.start,
@@ -4466,8 +4553,27 @@
       if (!this.meta || !this.plotViewport.clientWidth) return;
       const config = this.windowRequestConfig();
       const key = this.windowRequestKey(config);
-      if (this.windowData && this.windowData.viewportKey === key && this.windowData.complete) return;
-      if (this.windowData && this.windowData.viewportKey === key && this.windowBackgroundPromise) {
+      if (this.windowData && this.windowData.viewportKey === key) {
+        if (this.windowData.complete) return;
+        const visible = this.visibleRows();
+        const missing = this.missingWindowRowRange(
+          this.windowData,
+          visible.start,
+          visible.end,
+          Math.max(1, visible.end - visible.start)
+        );
+        if (!missing) return;
+        const visibleSequence = ++this.visibleWindowRequestSequence;
+        const result = await this.worker.callWindow(
+          this.windowPayload(config, missing.start, missing.end),
+          { priority: 'interactive' }
+        );
+        if (visibleSequence !== this.visibleWindowRequestSequence
+            || key !== this.windowBuildKey
+            || !result
+            || result.cancelled) return;
+        this.mergeWindowResult(this.windowData, result);
+        this.draw({ plotOnly: true });
         return;
       }
       if (this.windowBuildKey === key && this.windowBuildPromise) return this.windowBuildPromise;
@@ -5278,6 +5384,22 @@
       context.restore();
     }
 
+    drawSelectedPointOverlay(context, width, height) {
+      if (!this.selectedPoint) return;
+      const rowIndex = Number(this.selectedPoint.rowIndex);
+      if (!Number.isInteger(rowIndex) || this.isRowCollapsed(rowIndex)) return;
+      const rowHeight = this.rowHeight(rowIndex);
+      const rowTop = this.rowTop(rowIndex) - this.plotViewport.scrollTop;
+      if (rowHeight <= 0 || rowTop >= height || rowTop + rowHeight <= 0) return;
+      this.drawSelectedPointMarker(
+        context,
+        rowIndex,
+        rowTop + 3,
+        rowTop + rowHeight - 3,
+        width
+      );
+    }
+
     connectionPointStep(rowIndex) {
       const row = this.meta && Array.isArray(this.meta.rows)
         ? this.meta.rows[rowIndex]
@@ -5529,7 +5651,32 @@
 
     draw(options) {
       if (!this.meta || !this.plotViewport.clientWidth) return;
-      const plotOnly = !!(options && options.plotOnly);
+      const requested = {
+        plotOnly: !!(options && options.plotOnly),
+        overlayOnly: !!(options && options.overlayOnly)
+      };
+      if (!requested.overlayOnly) this.plotBaseRevision += 1;
+      if (!this.pendingDrawOptions) {
+        this.pendingDrawOptions = requested;
+      } else {
+        this.pendingDrawOptions.plotOnly = this.pendingDrawOptions.plotOnly
+          && requested.plotOnly;
+        this.pendingDrawOptions.overlayOnly = this.pendingDrawOptions.overlayOnly
+          && requested.overlayOnly;
+      }
+      if (this.drawFrame) return;
+      this.drawFrame = global.requestAnimationFrame(() => {
+        this.drawFrame = 0;
+        const pending = this.pendingDrawOptions || {};
+        this.pendingDrawOptions = null;
+        this.drawNow(pending);
+      });
+    }
+
+    drawNow(options) {
+      if (!this.meta || !this.plotViewport.clientWidth) return;
+      const overlayOnly = !!(options && options.overlayOnly);
+      const plotOnly = overlayOnly || !!(options && options.plotOnly);
       if (!plotOnly) this.drawAxis();
       const hasStaleViewportFrame = this.windowData
         && (Math.abs(Number(this.windowData.start) - this.viewStart) > 1e-7
@@ -5547,9 +5694,44 @@
       const context = resized.context;
       const width = resized.width;
       const height = resized.height;
-      this.drawGrid(context, width, height);
       const scrollTop = this.plotViewport.scrollTop;
       const visible = this.visibleRows();
+      const plotBaseKey = [
+        this.plotBaseRevision,
+        this.windowSessionRevision,
+        this.windowData && this.windowData.viewportKey || '',
+        this.windowData && this.windowData.computedRowCount || 0,
+        width,
+        height,
+        Math.round(scrollTop * 100) / 100,
+        visible.start,
+        visible.end
+      ].join('|');
+      const canReusePlotBase = overlayOnly
+        && this.plotBaseCanvas
+        && this.plotBaseCacheKey === plotBaseKey
+        && this.plotBaseCanvas.width === this.plotCanvas.width
+        && this.plotBaseCanvas.height === this.plotCanvas.height;
+      if (canReusePlotBase) {
+        context.clearRect(0, 0, width, height);
+        context.drawImage(
+          this.plotBaseCanvas,
+          0,
+          0,
+          this.plotBaseCanvas.width,
+          this.plotBaseCanvas.height,
+          0,
+          0,
+          width,
+          height
+        );
+        this.drawSelectedPointOverlay(context, width, height);
+        this.drawColumnSelection(context, width, height);
+        this.drawConnections(context, width, height);
+        this.drawCursors(context, width, height);
+        return;
+      }
+      this.drawGrid(context, width, height);
       const visibleWindowRows = this.windowData
         ? this.windowData.rows.slice(
           Math.max(0, visible.start - this.windowData.rowStart),
@@ -5656,13 +5838,6 @@
                 width,
                 color
               );
-              this.drawSelectedPointMarker(
-                context,
-                rowIndex,
-                rowTop + 3,
-                rowTop + rowHeight - 3,
-                width
-              );
             } else {
               this.drawSimplifiedRow(
                 context,
@@ -5676,6 +5851,19 @@
           }
         });
       }
+      if (!this.plotBaseCanvas) this.plotBaseCanvas = document.createElement('canvas');
+      if (this.plotBaseCanvas.width !== this.plotCanvas.width) {
+        this.plotBaseCanvas.width = this.plotCanvas.width;
+      }
+      if (this.plotBaseCanvas.height !== this.plotCanvas.height) {
+        this.plotBaseCanvas.height = this.plotCanvas.height;
+      }
+      const plotBaseContext = this.plotBaseCanvas.getContext('2d');
+      plotBaseContext.setTransform(1, 0, 0, 1, 0, 0);
+      plotBaseContext.clearRect(0, 0, this.plotBaseCanvas.width, this.plotBaseCanvas.height);
+      plotBaseContext.drawImage(this.plotCanvas, 0, 0);
+      this.plotBaseCacheKey = plotBaseKey;
+      this.drawSelectedPointOverlay(context, width, height);
       this.drawColumnSelection(context, width, height);
       this.drawConnections(context, width, height);
       this.drawCursors(context, width, height);
@@ -5921,6 +6109,7 @@
     }
 
     fit() {
+      this.pauseBackgroundWindowWork(160);
       this.viewStart = 0;
       this.viewEnd = this.meta.totalColumns;
       this.scheduleWindowRequest();
@@ -5943,6 +6132,7 @@
         start = clamp(center - minimumSpan / 2, 0, Math.max(0, total - minimumSpan));
         end = start + minimumSpan;
       }
+      this.pauseBackgroundWindowWork(160);
       this.viewStart = start;
       this.viewEnd = end;
       this.scheduleWindowRequest();
@@ -5969,6 +6159,7 @@
         this.showTransientStatus('请选中一段波形', true, 1000);
         return false;
       }
+      this.pauseBackgroundWindowWork(160);
       this.viewStart = nextStart;
       this.viewEnd = nextEnd;
       this.scheduleWindowRequest();
@@ -5994,6 +6185,7 @@
     }
 
     zoom(factor, anchorColumn) {
+      this.pauseBackgroundWindowWork(180);
       const span = this.viewEnd - this.viewStart;
       const minimum = Math.min(1, this.meta.totalColumns);
       const nextSpan = clamp(span * factor, minimum, this.meta.totalColumns);
@@ -6032,6 +6224,7 @@
     }
 
     pan(deltaColumns) {
+      this.pauseBackgroundWindowWork(140);
       const span = this.viewEnd - this.viewStart;
       const start = clamp(
         this.viewStart + deltaColumns,
@@ -6126,8 +6319,9 @@
       }
       const hitCursor = this.cursorAtPoint(x, y, rect.width);
       if (hitCursor) {
+        const wasActive = this.activeCursor === hitCursor.name;
         const cursorRowIndex = hitCursor.inView ? rowIndex : this.activeCursorRow;
-        this.setActiveCursor(hitCursor.name);
+        if (!wasActive) this.setActiveCursor(hitCursor.name);
         if (hitCursor.inView) this.setActiveCursorRow(cursorRowIndex);
         this.drag = {
           kind: 'cursor',
@@ -6136,6 +6330,8 @@
           rowIndex: cursorRowIndex,
           column: hitCursor.column,
           cursorName: hitCursor.name,
+          hitPart: hitCursor.hitPart,
+          wasActive,
           pinned: !hitCursor.inView,
           moved: false
         };
@@ -6178,7 +6374,7 @@
         this.updateCursorControls();
         this.updateMeasurements();
         void this.updateCursorReadout();
-        this.draw();
+        this.draw({ overlayOnly: true });
         this.setStatus('已选择连接线：' + hitConnection.label + '，按 Del 删除');
         this.log('scope-connection', {
           phase: 'select',
@@ -6220,7 +6416,7 @@
         moved: false,
         selectPoint
       };
-      this.draw();
+      this.draw({ overlayOnly: true });
       this.plotCanvas.setPointerCapture(event.pointerId);
     }
 
@@ -6240,7 +6436,7 @@
           if (this.isRowCollapsed(next.rowIndex)) {
             if (this.connectionHover) {
               this.connectionHover = null;
-              this.draw();
+              this.draw({ overlayOnly: true });
             }
             return;
           }
@@ -6248,7 +6444,7 @@
               || next.column !== this.connectionHover.column
               || next.rowIndex !== this.connectionHover.rowIndex) {
             this.connectionHover = next;
-            this.draw();
+            this.draw({ overlayOnly: true });
           }
         }
         return;
@@ -6297,6 +6493,7 @@
         0,
         Math.max(0, this.meta.totalColumns - span)
       );
+      this.pauseBackgroundWindowWork(140);
       this.viewStart = start;
       this.viewEnd = start + span;
       this.scheduleWindowRequest();
@@ -6312,6 +6509,8 @@
       if (drag.kind === 'cursor') {
         if (drag.moved) {
           void this.snapActiveCursorPosition(drag.column, drag.rowIndex);
+        } else if (drag.hitPart === 'marker' && drag.wasActive) {
+          this.setActiveCursor('');
         } else if (drag.pinned) {
           this.setActiveCursor(drag.cursorName, true);
         } else {
@@ -6322,7 +6521,7 @@
       }
       if (drag.kind === 'selection-cursor') {
         void this.updateCursorReadout();
-        this.draw();
+        this.draw({ overlayOnly: true });
         return;
       }
       if (drag.kind !== 'columns') return;
@@ -6388,6 +6587,7 @@
         Math.max(0, totalColumns - span)
       );
       if (Math.abs(start - this.viewStart) < 1e-9) return false;
+      this.pauseBackgroundWindowWork(160);
       this.viewStart = start;
       this.viewEnd = start + span;
       this.scheduleOverviewWindowRequest();
@@ -6483,7 +6683,7 @@
       this.connectionButton.setAttribute('aria-pressed', String(this.connectionMode));
       this.connectionButton.textContent = this.connectionMode ? '退出连接线' : '连接线';
       this.plotCanvas.classList.toggle('connection-mode', this.connectionMode);
-      this.draw();
+      this.draw({ overlayOnly: true });
       this.log('scope-connection', {
         phase: 'mode',
         enabled: this.connectionMode
@@ -6499,7 +6699,7 @@
         this.selectedConnectionId = '';
         this.connectionDraftStart = point;
         this.connectionHover = point;
-        this.draw();
+        this.draw({ overlayOnly: true });
         this.setStatus(
           '连接线起点：第 ' + (point.rowIndex + 1) + ' 行，cycle ' + point.column
           + '；请选择终点'
@@ -6528,7 +6728,7 @@
       this.selectedConnectionId = id;
       this.connectionDraftStart = null;
       this.connectionHover = null;
-      this.draw();
+      this.draw({ overlayOnly: true });
       this.setStatus(
         '已添加连接线：' + connection.label
         + '；可继续选择起点，按 Del 删除当前连接线'
@@ -6553,7 +6753,7 @@
       this.pushHistory();
       const removed = this.connections.splice(index, 1)[0];
       this.selectedConnectionId = '';
-      this.draw();
+      this.draw({ overlayOnly: true });
       this.setStatus('已删除连接线：' + removed.label);
       this.log('scope-connection', {
         phase: 'delete',
@@ -6628,7 +6828,7 @@
       this.updateMeasurements();
       if (realtimeReadout) this.scheduleCursorReadout();
       else void this.updateCursorReadout();
-      this.draw();
+      this.draw({ overlayOnly: true });
     }
 
     cursorRenderStates(width) {
@@ -6678,6 +6878,10 @@
       if (!candidates.length) return null;
       if (candidates.length > 1
           && Math.abs(candidates[0].hitDistance - candidates[1].hitDistance) < 1) {
+        const activeMarker = candidates.find((cursor) => (
+          cursor.hitPart === 'marker' && cursor.name === this.activeCursor
+        ));
+        if (activeMarker) return activeMarker;
         const alternate = this.activeCursor === 'A' ? 'B' : 'A';
         return candidates.find((cursor) => cursor.name === alternate) || candidates[0];
       }
@@ -6698,10 +6902,8 @@
       this.updateMeasurements();
       void this.updateCursorReadout();
       const column = next === 'A' ? this.cursorA : (next === 'B' ? this.cursorB : null);
-      if (next && centerView) {
-        this.centerViewOnColumn(column);
-      }
-      this.draw();
+      const viewChanged = !!(next && centerView && this.centerViewOnColumn(column));
+      this.draw(viewChanged ? undefined : { overlayOnly: true });
       if (!next) {
         this.setStatus('已取消游标选择；可继续选择波形数据');
         return;
@@ -6724,7 +6926,7 @@
       this.updateMeasurements();
       if (realtimeReadout) this.scheduleCursorReadout();
       else void this.updateCursorReadout();
-      this.draw();
+      this.draw({ overlayOnly: true });
     }
 
     async snapActiveCursorPosition(column, rowIndex) {
@@ -6932,6 +7134,7 @@
         Math.max(0, totalColumns - span)
       );
       if (Math.abs(start - this.viewStart) < 1e-9) return false;
+      this.pauseBackgroundWindowWork(160);
       this.viewStart = start;
       this.viewEnd = start + span;
       this.scheduleWindowRequest();

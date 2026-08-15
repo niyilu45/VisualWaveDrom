@@ -657,6 +657,7 @@ def _complete_scalar_signal(parsed_signal, points, options):
 
     wave_parts = []
     data_values = []
+    include_data_values = True
     previous_wave_state = None
 
     def append_wave_state(wave_symbol, data_label=""):
@@ -675,7 +676,7 @@ def _complete_scalar_signal(parsed_signal, points, options):
             return
 
         wave_parts.append(wave_symbol)
-        if wave_symbol in DATA_SYMBOLS:
+        if wave_symbol in DATA_SYMBOLS and include_data_values:
             data_values.append(data_label)
         previous_wave_state = wave_state
 
@@ -693,6 +694,17 @@ def _complete_scalar_signal(parsed_signal, points, options):
             all_numeric = False
             numeric_values = []
             break
+
+    compact_numeric_threshold = _positive_int(
+        opts.get("compactNumericThreshold"),
+        "compactNumericThreshold",
+        2000
+    )
+    include_data_values = not (
+        all_numeric
+        and bool(opts.get("compactNumericData"))
+        and len(points) >= max(1, compact_numeric_threshold)
+    )
 
     samples = []
     cursor = 0

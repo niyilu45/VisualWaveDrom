@@ -5,6 +5,7 @@
   const DERIVED_CACHE_PROTOCOL = 1;
   const DEFAULT_FORMULA_CHUNK_SIZE = 32768;
   const DEFAULT_PARALLEL_THRESHOLD = 16384;
+  const COMPACT_DATA_LABEL_THRESHOLD = 2000;
   const MAX_DERIVED_CACHE_SAMPLES = 2000000;
   const derivedResultCache = new Map();
   let derivedResultCacheSamples = 0;
@@ -36,6 +37,10 @@
 
   function own(object, key) {
     return Object.prototype.hasOwnProperty.call(object || {}, key);
+  }
+
+  function isSampleSequence(value) {
+    return Array.isArray(value) || (typeof ArrayBuffer !== 'undefined' && ArrayBuffer.isView(value));
   }
 
   function stableHash(value) {
@@ -1734,10 +1739,10 @@
     return stableHash({
       wave: String(source.wave || ''),
       data: Array.isArray(source.data) ? source.data : [],
-      samples: Array.isArray(scope.samples)
-        ? scope.samples : (Array.isArray(source.samples) ? source.samples : []),
-      values: Array.isArray(scope.values)
-        ? scope.values : (Array.isArray(source.values) ? source.values : []),
+      samples: isSampleSequence(scope.samples)
+        ? scope.samples : (isSampleSequence(source.samples) ? source.samples : []),
+      values: isSampleSequence(scope.values)
+        ? scope.values : (isSampleSequence(source.values) ? source.values : []),
       changePoints: scope.changePoints || source.changePoints || null,
       sampleStep: Number(scope.sampleStep || source.sampleStep || 1),
       mode: String(scope.mode || ''),
@@ -1750,8 +1755,8 @@
     return stableHash({
       wave: String(source.wave || ''),
       data: Array.isArray(source.data) ? source.data : [],
-      samples: Array.isArray(source.samples) ? source.samples : [],
-      values: Array.isArray(source.values) ? source.values : [],
+      samples: isSampleSequence(source.samples) ? source.samples : [],
+      values: isSampleSequence(source.values) ? source.values : [],
       changePoints: source.changePoints || null,
       sampleStep: Number(source.sampleStep || 1),
       mode: String(source.sampleKind || source.mode || ''),
@@ -2304,7 +2309,7 @@
     const result = new Array(halfCount).fill('x');
     const halfStep = Math.max(1, Math.round((Number(step) || 1) * 2));
     let previous = 'x';
-    (Array.isArray(values) ? values : []).forEach((raw, index) => {
+    (isSampleSequence(values) ? values : []).forEach((raw, index) => {
       const continuation = typeof raw === 'string' && raw.trim() === '.';
       const value = continuation ? previous : (raw == null || raw === '' ? 'x' : raw);
       previous = value;
@@ -2324,7 +2329,7 @@
   }
 
   function hasUsableSamples(values) {
-    if (!Array.isArray(values) || !values.length) return false;
+    if (!isSampleSequence(values) || !values.length) return false;
     let hasPrevious = false;
     return values.some((raw) => {
       if (typeof raw === 'string' && raw.trim() === '.') return hasPrevious;
@@ -2339,7 +2344,7 @@
   function signalSourceKind(signal) {
     const localScope = signal && signal.scope && typeof signal.scope === 'object' ? signal.scope : {};
     if (localScope.changePoints && typeof localScope.changePoints === 'object') return 'change-points';
-    if (Array.isArray(localScope.values) && localScope.values.length) return 'values';
+    if (isSampleSequence(localScope.values) && localScope.values.length) return 'values';
     if (hasUsableSamples(localScope.samples)) return 'samples';
     return 'wave';
   }
@@ -2349,7 +2354,7 @@
     if (localScope.changePoints && typeof localScope.changePoints === 'object') {
       return repeatedChangePointSamples(localScope.changePoints, totalColumns);
     }
-    if (Array.isArray(localScope.values) && localScope.values.length) {
+    if (isSampleSequence(localScope.values) && localScope.values.length) {
       return repeatedSamples(localScope.values, localScope.sampleStep || 1, totalColumns);
     }
     if (hasUsableSamples(localScope.samples)) {
@@ -2402,7 +2407,7 @@
       const changePoints = normalizeChangePoints(localScope.changePoints);
       return Math.ceil(changePoints.totalSamples * changePoints.sampleStep);
     }
-    if (Array.isArray(localScope.values) && localScope.values.length) {
+    if (isSampleSequence(localScope.values) && localScope.values.length) {
       return Math.ceil(localScope.values.length * (Number(localScope.sampleStep) || 1));
     }
     if (hasUsableSamples(localScope.samples)) {
@@ -2415,10 +2420,10 @@
     const settings = options || {};
     const source = typeof documentValue === 'string' ? JSON.parse(documentValue) : (documentValue || {});
     const signals = flattenDocumentSignals(source.signal, []);
-    let totalColumns = 1;
+    let totalColumns = Math.max(1, Math.ceil(Number(settings.minimumTotalColumns) || 1));
     signals.forEach((signal) => { totalColumns = Math.max(totalColumns, valueLengthFromSignal(signal)); });
     (Array.isArray(updates) ? updates : []).forEach((update) => {
-      if (Array.isArray(update.values) && update.values.length) {
+      if (isSampleSequence(update.values) && update.values.length) {
         totalColumns = Math.max(totalColumns, Math.ceil(update.values.length * (Number(update.sampleStep) || 1)));
       } else if (update.changePoints) {
         const changePoints = normalizeChangePoints(update.changePoints);
@@ -2451,7 +2456,7 @@
       if (localScope && localScope.derivedCache) {
         const restored = restoreDerivedCacheEntry(localScope.derivedCache, {
           name,
-          values: Array.isArray(localScope.values) ? localScope.values : null,
+          values: isSampleSequence(localScope.values) ? localScope.values : null,
           changePoints: localScope.changePoints || null,
           knownCount: Number(localScope.derivedCache.knownCount || 0)
         });
@@ -2465,7 +2470,7 @@
         knownNames.add(name);
         names.push(name);
       }
-      const kind = Array.isArray(update.values) && update.values.length
+      const kind = isSampleSequence(update.values) && update.values.length
         ? 'values'
         : (update.changePoints
           ? 'change-points'
@@ -2536,7 +2541,7 @@
     };
   }
 
-  function waveFromHalfValues(values, totalColumns) {
+  function waveFromHalfValues(values, totalColumns, includeData) {
     let wave = '';
     const data = [];
     let previous = null;
@@ -2549,17 +2554,19 @@
         wave += text.toLowerCase();
       } else {
         wave += '=';
-        data.push(text);
+        if (includeData !== false) data.push(text);
       }
       previous = value;
     }
     return { wave, data };
   }
 
-  function prepareFormulaBuild(documentValue, importedUpdates, definitions) {
+  function prepareFormulaBuild(documentValue, importedUpdates, definitions, options) {
+    const settings = options || {};
     const sourceData = sourcesFromDocument(documentValue, importedUpdates, {
       deferSources: true,
-      deferVersions: true
+      deferVersions: true,
+      minimumTotalColumns: settings.totalColumns
     });
     const analysis = analyzeDefinitions(definitions, sourceData.names);
     const requiredSourceNames = new Set();
@@ -2597,10 +2604,18 @@
       }
       const values = evaluated.outputs[item.name];
       const entry = evaluated.entries && evaluated.entries[item.name];
-      const built = waveFromHalfValues(values, sourceData.totalColumns);
       const knownCount = Number(evaluated.knownCounts[item.name] || 0);
       if (!knownCount) allUnknown.push(item.name);
       const sampleKind = entry ? entry.sampleKind : 'bus';
+      const compactThreshold = Math.max(
+        1,
+        Math.floor(Number(settings.compactDataThreshold) || COMPACT_DATA_LABEL_THRESHOLD)
+      );
+      const built = waveFromHalfValues(
+        values,
+        sourceData.totalColumns,
+        sourceData.totalColumns < compactThreshold
+      );
       const update = {
         signal: item.name,
         wave: built.wave,
@@ -2630,7 +2645,7 @@
 
   function buildFormulaUpdates(documentValue, importedUpdates, definitions, options) {
     const settings = options || {};
-    const prepared = prepareFormulaBuild(documentValue, importedUpdates, definitions);
+    const prepared = prepareFormulaBuild(documentValue, importedUpdates, definitions, settings);
     const evaluated = evaluateDerivedDefinitions(definitions, prepared.sourceData.names, {
       analysis: prepared.analysis,
       sources: prepared.sourceData.sources,
@@ -2653,7 +2668,7 @@
 
   async function buildFormulaUpdatesAsync(documentValue, importedUpdates, definitions, options) {
     const settings = options || {};
-    const prepared = prepareFormulaBuild(documentValue, importedUpdates, definitions);
+    const prepared = prepareFormulaBuild(documentValue, importedUpdates, definitions, settings);
     const evaluated = await evaluateDefinitionsLayeredAsync(
       definitions,
       prepared.sourceData.names,

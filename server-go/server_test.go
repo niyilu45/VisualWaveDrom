@@ -208,6 +208,43 @@ func TestPresetValueTableAddsLabelsWithoutChangingSamples(t *testing.T) {
 	}
 }
 
+func TestLargeNumericImportCanOmitDuplicatedDataLabels(t *testing.T) {
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := newImportManager(filepath.Dir(workingDirectory))
+	python := manager.pythonRuntime()
+	if !python.Available {
+		t.Skip("Python runtime is not available")
+	}
+	sourcePath := filepath.Join(t.TempDir(), "numeric.txt")
+	if err = os.WriteFile(sourcePath, []byte("10\n11\n12\n13\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := manager.runParser(importMapping{
+		Parser:      "parse_single_column",
+		SourcePath:  sourcePath,
+		DisplayPath: "numeric.txt",
+		Options: map[string]any{
+			"hasIndex":                false,
+			"compactNumericData":      true,
+			"compactNumericThreshold": 4,
+		},
+	}, python)
+	if err != nil {
+		t.Fatal(err)
+	}
+	labels, ok := result["data"].([]string)
+	if !ok || len(labels) != 0 {
+		t.Fatalf("compact numeric labels = %#v, expected an empty array", result["data"])
+	}
+	samples, ok := result["samples"].([]any)
+	if !ok || len(samples) != 4 {
+		t.Fatalf("compact numeric samples = %#v, expected four values", result["samples"])
+	}
+}
+
 func TestIndexedImportAllowsGapsAndKeepsUnknownEnds(t *testing.T) {
 	workingDirectory, err := os.Getwd()
 	if err != nil {
@@ -227,7 +264,7 @@ func TestIndexedImportAllowsGapsAndKeepsUnknownEnds(t *testing.T) {
 		SourcePath:  sourcePath,
 		DisplayPath: "monotonic-gaps.txt",
 		Options: map[string]any{
-			"hasIndex":    true,
+			"hasIndex":     true,
 			"targetLength": 12,
 		},
 	}, python)

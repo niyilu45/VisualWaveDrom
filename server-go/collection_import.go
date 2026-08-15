@@ -26,30 +26,31 @@ import (
 )
 
 const (
-	collectionPresetMaxBytes     = 1024 * 1024
-	collectionMaxVariables       = 64
-	collectionMaxPaths           = 128
-	collectionMaxVisitedFiles    = 100000
-	collectionMaxMatchesPerPath  = 100
-	collectionMaxTotalColumns    = 20 * 1000 * 1000
-	collectionSearchCacheLimit   = 32
-	collectionParserWorkers      = 4
-	collectionSearchCacheTTL     = 10 * time.Minute
-	collectionPresetInnerType    = "VisualWaveDrom.BatchWaveImportPreset"
-	collectionPresetScanLimit    = 100000
-	collectionPresetResultLimit  = 2000
-	collectionPreviewRowLimit    = 5
-	collectionPreviewColumnLimit = 32
-	collectionPreviewCellLimit   = 120
-	collectionMaxFilterLength    = 512
-	collectionSinglePreviewLines = 5
-	collectionSinglePreviewMax   = 200
-	collectionSinglePreviewRunes = 2000
-	collectionSingleIndexStride  = 256
-	collectionSingleIndexLimit   = 32
-	collectionSingleIndexTTL     = 10 * time.Minute
-	collectionImportProgressTTL  = 10 * time.Minute
-	collectionImportProgressMax  = 32
+	collectionPresetMaxBytes          = 1024 * 1024
+	collectionMaxVariables            = 64
+	collectionMaxPaths                = 128
+	collectionMaxVisitedFiles         = 100000
+	collectionMaxMatchesPerPath       = 100
+	collectionMaxTotalColumns         = 20 * 1000 * 1000
+	collectionSearchCacheLimit        = 32
+	collectionParserWorkers           = 8
+	collectionCompactNumericThreshold = 2000
+	collectionSearchCacheTTL          = 10 * time.Minute
+	collectionPresetInnerType         = "VisualWaveDrom.BatchWaveImportPreset"
+	collectionPresetScanLimit         = 100000
+	collectionPresetResultLimit       = 2000
+	collectionPreviewRowLimit         = 5
+	collectionPreviewColumnLimit      = 32
+	collectionPreviewCellLimit        = 120
+	collectionMaxFilterLength         = 512
+	collectionSinglePreviewLines      = 5
+	collectionSinglePreviewMax        = 200
+	collectionSinglePreviewRunes      = 2000
+	collectionSingleIndexStride       = 256
+	collectionSingleIndexLimit        = 32
+	collectionSingleIndexTTL          = 10 * time.Minute
+	collectionImportProgressTTL       = 10 * time.Minute
+	collectionImportProgressMax       = 32
 )
 
 var collectionVariableNamePattern = regexp.MustCompile(`^[\p{L}_][\p{L}\p{N}_.-]*$`)
@@ -2752,11 +2753,12 @@ func (s *service) parseCollectionEntry(
 		result, err = s.imports.runTableLocalFileWithOptions(
 			sourcePath,
 			tableImportOptions{
-				HeaderRow:   preparedRule.HeaderRow,
-				IndexColumn: preparedRule.IndexColumn,
-				Delimiter:   preparedRule.Delimiter,
-				Columns:     preparedRule.Columns,
-				Tbl:         preparedRule.Tbl,
+				HeaderRow:          preparedRule.HeaderRow,
+				IndexColumn:        preparedRule.IndexColumn,
+				Delimiter:          preparedRule.Delimiter,
+				Columns:            preparedRule.Columns,
+				Tbl:                preparedRule.Tbl,
+				CompactNumericData: true,
 			},
 		)
 		parser = "parse_table_data"
@@ -2784,7 +2786,11 @@ func (s *service) parseCollectionEntry(
 			preparedEntry.Name,
 			sourcePath,
 			preparedRule.HasSeq,
-			map[string]any{"tbl": preparedRule.Tbl},
+			map[string]any{
+				"tbl":                     preparedRule.Tbl,
+				"compactNumericData":      true,
+				"compactNumericThreshold": collectionCompactNumericThreshold,
+			},
 		)
 	}
 	if err != nil {

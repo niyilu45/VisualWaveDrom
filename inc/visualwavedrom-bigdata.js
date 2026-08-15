@@ -78,6 +78,75 @@
     return data.trim().split(/\s+/);
   }
 
+  function isSampleSequence(value) {
+    return Array.isArray(value) || (typeof ArrayBuffer !== 'undefined' && ArrayBuffer.isView(value));
+  }
+
+  function sequenceValueAt(values, index) {
+    if (!isSampleSequence(values) || index < 0 || index >= values.length) return undefined;
+    let value = values[index];
+    if (typeof value !== 'string' || value.trim() !== '.') return value;
+    for (let previous = index - 1; previous >= 0; previous -= 1) {
+      value = values[previous];
+      if (typeof value !== 'string' || value.trim() !== '.') return value;
+    }
+    return undefined;
+  }
+
+  function changePointValueAt(changePoints, index) {
+    if (!changePoints || !Array.isArray(changePoints.indices)
+        || !Array.isArray(changePoints.values)) return undefined;
+    let low = 0;
+    let high = Math.min(changePoints.indices.length, changePoints.values.length);
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (Number(changePoints.indices[middle]) <= index) low = middle + 1;
+      else high = middle;
+    }
+    return low > 0 ? changePoints.values[low - 1] : 'x';
+  }
+
+  function scopeValueAtColumn(signal, column) {
+    const scope = signal && signal.scope && typeof signal.scope === 'object'
+      && !Array.isArray(signal.scope) ? signal.scope : null;
+    if (!scope) return undefined;
+    const step = Number(scope.sampleStep) > 0 ? Number(scope.sampleStep) : 1;
+    const sampleIndex = Math.max(0, Math.floor(Number(column) / step + 1e-9));
+    if (isSampleSequence(scope.values)) return sequenceValueAt(scope.values, sampleIndex);
+    if (isSampleSequence(scope.samples)) return sequenceValueAt(scope.samples, sampleIndex);
+    if (scope.changePoints && typeof scope.changePoints === 'object') {
+      return changePointValueAt(scope.changePoints, sampleIndex);
+    }
+    return undefined;
+  }
+
+  function scopeDataLabel(signal, column) {
+    const value = scopeValueAtColumn(signal, column);
+    if (value === undefined) return null;
+    let text = value == null || value === '' || (typeof value === 'number' && !Number.isFinite(value))
+      ? 'x'
+      : String(value);
+    const scope = signal && signal.scope && typeof signal.scope === 'object' ? signal.scope : null;
+    const table = scope && scope.tbl && typeof scope.tbl === 'object' && !Array.isArray(scope.tbl)
+      ? scope.tbl : null;
+    if (table && Object.prototype.hasOwnProperty.call(table, text)) {
+      text += ':' + String(table[text]);
+    }
+    return text;
+  }
+
+  function dataLabelsFromScope(signal, renderedWave, start) {
+    const labels = [];
+    let found = false;
+    for (let localColumn = 0; localColumn < renderedWave.length; localColumn += 1) {
+      if (!DATA_TOKEN_RE.test(renderedWave[localColumn])) continue;
+      const label = scopeDataLabel(signal, start + localColumn);
+      labels.push(label == null ? '' : label);
+      if (label != null) found = true;
+    }
+    return found ? labels : null;
+  }
+
   function findContinuationSource(wave, column) {
     const value = String(wave || '');
     for (let index = Math.min(column, value.length - 1); index >= 0; index -= 1) {
@@ -144,6 +213,9 @@
       copy.data = waveSlice.dataIndices.map(function (dataIndex) {
         return dataValues[dataIndex] === undefined ? '' : dataValues[dataIndex];
       });
+    } else {
+      const generatedData = dataLabelsFromScope(signal, waveSlice.wave, start);
+      if (generatedData) copy.data = generatedData;
     }
 
     if (isRenderedSignalRow(signal)) {

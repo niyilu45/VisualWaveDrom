@@ -1200,11 +1200,12 @@ func (m *importManager) runSourceFile(
 }
 
 type tableImportOptions struct {
-	HeaderRow   int
-	IndexColumn string
-	Delimiter   string
-	Columns     []collectionColumnConfig
-	Tbl         map[string]string
+	HeaderRow          int
+	IndexColumn        string
+	Delimiter          string
+	Columns            []collectionColumnConfig
+	Tbl                map[string]string
+	CompactNumericData bool
 }
 
 func (m *importManager) runTableSourceFileWithOptions(
@@ -1242,6 +1243,10 @@ func (m *importManager) runTableSourceFileWithOptions(
 			"hasIndex":   false,
 			"maxColumns": importMaxWaveColumns,
 		},
+	}
+	if tableOptions.CompactNumericData {
+		mapping.Options["compactNumericData"] = true
+		mapping.Options["compactNumericThreshold"] = collectionCompactNumericThreshold
 	}
 	if strings.TrimSpace(tableOptions.IndexColumn) != "" {
 		mapping.Options["indexColumn"] = strings.TrimSpace(tableOptions.IndexColumn)

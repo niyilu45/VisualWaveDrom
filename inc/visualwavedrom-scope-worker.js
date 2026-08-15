@@ -4,13 +4,14 @@
 if (typeof document === 'undefined' && typeof global.importScripts === 'function'
     && !global.VisualWaveDromFormula) {
   try {
-    global.importScripts('visualwavedrom-formula.js?v=20260814-derived-pipeline-v1');
+    global.importScripts('visualwavedrom-formula.js?v=20260815-large-import-v1');
   } catch (_error) { /* surfaced when a formula is configured */ }
 }
 
 const FormulaEngine = global.VisualWaveDromFormula || null;
 
 let activeSession = null;
+let latestWindowGeneration = 0;
 const DEFAULT_ROW_HEIGHT = 42;
 const DEFAULT_MULTI_WAVE_ROW_HEIGHT = 68;
 const MIN_ANALOG_ROW_HEIGHT = 28;
@@ -1304,7 +1305,7 @@ async function createSession(content, transientState, previousSession) {
       totalColumns,
       sampleStep: 0.5,
       parallel: true,
-      workerUrl: 'visualwavedrom-formula-eval-worker.js?v=20260814-derived-pipeline-v1'
+      workerUrl: 'visualwavedrom-formula-eval-worker.js?v=20260815-large-import-v1'
     };
     formulaEvaluation = typeof FormulaEngine.evaluateDefinitionsLayeredAsync === 'function'
       ? await FormulaEngine.evaluateDefinitionsLayeredAsync(
@@ -2062,8 +2063,10 @@ function analogWindow(row, start, end, width, totalColumns) {
   };
 }
 
-function createWindow(payload) {
+async function createWindow(payload) {
   if (!activeSession) throw new Error('Scope session has not been prepared');
+  const generation = Math.max(0, Math.floor(finiteNumber(payload.windowGeneration) || 0));
+  latestWindowGeneration = Math.max(latestWindowGeneration, generation);
   const total = activeSession.totalColumns;
   const start = clamp(finiteNumber(payload.start) || 0, 0, Math.max(0, total - 1));
   const end = clamp(finiteNumber(payload.end) || total, start + 1e-6, total);
@@ -2086,7 +2089,21 @@ function createWindow(payload) {
     (_value, index) => rowStart + index
   );
   const rows = [];
-  rowIndices.forEach((index) => {
+  for (let rowOffset = 0; rowOffset < rowIndices.length; rowOffset += 1) {
+    if (generation < latestWindowGeneration) {
+      return {
+        cancelled: true,
+        generation,
+        latestGeneration: latestWindowGeneration,
+        start,
+        end,
+        width,
+        rowStart,
+        rowEnd,
+        rows: []
+      };
+    }
+    const index = rowIndices[rowOffset];
     const row = activeSession.rows[index];
     const mode = row.multiWave
       ? 'analog'
@@ -2114,29 +2131,32 @@ function createWindow(payload) {
         mode: 'analog',
         data: { kind: 'multi-analog', range: row.range, series }
       });
-      return;
+    } else {
+      const analogRow = mode === 'analog'
+        ? analogRowForFormat(
+          row,
+          payload.analogFormats && payload.analogFormats[index],
+          total
+        )
+        : row;
+      const data = mode === 'analog' && analogRow.samples
+        ? analogWindow(analogRow, start, end, width, total)
+        : rowSegmentsInWindow(
+          row,
+          start,
+          end,
+          width,
+          mode,
+          total,
+          payload.busFormats && payload.busFormats[index] || row.busFormat
+        );
+      rows.push({ index, mode, data });
     }
-    const analogRow = mode === 'analog'
-      ? analogRowForFormat(
-        row,
-        payload.analogFormats && payload.analogFormats[index],
-        total
-      )
-      : row;
-    const data = mode === 'analog' && analogRow.samples
-      ? analogWindow(analogRow, start, end, width, total)
-      : rowSegmentsInWindow(
-        row,
-        start,
-        end,
-        width,
-        mode,
-        total,
-        payload.busFormats && payload.busFormats[index] || row.busFormat
-      );
-    rows.push({ index, mode, data });
-  });
-  return { start, end, width, rowStart, rowEnd, rows };
+    if ((rowOffset + 1) % 2 === 0 && rowOffset + 1 < rowIndices.length) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  }
+  return { cancelled: false, generation, start, end, width, rowStart, rowEnd, rows };
 }
 
 function segmentAt(row, column) {
@@ -3432,7 +3452,13 @@ async function handleRequest(message) {
   const requestId = request.requestId;
   try {
     let result;
-    if (request.type === 'prepare') {
+    if (request.type === 'cancel-window') {
+      latestWindowGeneration = Math.max(
+        latestWindowGeneration,
+        Math.max(0, Math.floor(finiteNumber(request.windowGeneration) || 0))
+      );
+      result = { cancelled: true, latestGeneration: latestWindowGeneration };
+    } else if (request.type === 'prepare') {
       activeSession = await createSession(request.content, request.transient);
       result = prepareResponse();
     } else if (request.type === 'formulas') {
@@ -3444,7 +3470,11 @@ async function handleRequest(message) {
       );
       result = prepareResponse();
     } else if (request.type === 'window') {
-      result = createWindow(request);
+      latestWindowGeneration = Math.max(
+        latestWindowGeneration,
+        Math.max(0, Math.floor(finiteNumber(request.windowGeneration) || 0))
+      );
+      result = await createWindow(request);
     } else if (request.type === 'inspect') {
       result = inspectCursor(request);
     } else if (request.type === 'snap') {
