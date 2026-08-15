@@ -584,7 +584,6 @@
       this.redoStack = [];
       this.historyRestoreInFlight = false;
       this.rowOperationInFlight = false;
-      this.rowMoveDirection = 'up';
       this.signalRowDrag = null;
       this.signalRowDragAutoScrollFrame = 0;
       this.suppressSignalRowClickUntil = 0;
@@ -781,9 +780,6 @@
                 title="新增一个叠加显示多个现有信号的模拟波形" disabled>新增多波形</button>
             <button type="button" class="scope-command-btn" id="scope-delete-signal"
                 title="删除当前选中的波形，可通过撤销恢复" disabled>删除波形</button>
-            <button type="button" class="scope-command-btn" id="scope-move-signal"
-                title="移动当前选中的波形行" aria-haspopup="dialog"
-                aria-expanded="false" aria-controls="scope-row-move-popover" disabled>行移动</button>
             <button type="button" class="scope-command-btn" id="scope-connections"
                 aria-pressed="false">连接线</button>
           </div>
@@ -844,28 +840,6 @@
             <button type="button" class="scope-command-btn" id="scope-open-normal">普通编辑</button>
           </div>
         </header>
-        <div class="scope-row-move-popover" id="scope-row-move-popover"
-            role="dialog" aria-labelledby="scope-row-move-title" hidden>
-          <div class="scope-style-popover-header">
-            <strong id="scope-row-move-title">移动波形行</strong>
-            <button type="button" class="scope-icon-btn scope-small-icon"
-                id="scope-row-move-close" title="关闭" aria-label="关闭行移动设置">×</button>
-          </div>
-          <div class="scope-row-move-body">
-            <div class="scope-row-move-directions" role="group" aria-label="移动方向">
-              <button type="button" data-scope-row-direction="up" class="active"
-                  aria-pressed="true">上移</button>
-              <button type="button" data-scope-row-direction="down"
-                  aria-pressed="false">下移</button>
-            </div>
-            <label class="scope-row-move-count">
-              <span>移动行数</span>
-              <input type="number" id="scope-row-move-count" min="1" step="1" value="1">
-            </label>
-            <button type="button" class="scope-command-btn scope-primary"
-                id="scope-row-move-apply">应用移动</button>
-          </div>
-        </div>
         <main class="scope-workspace">
           <aside class="scope-signal-column">
             <div class="scope-signal-heading">
@@ -1140,13 +1114,6 @@
       this.addSignalButton = root.querySelector('#scope-add-signal');
       this.addMultiWaveButton = root.querySelector('#scope-add-multi-wave');
       this.deleteSignalButton = root.querySelector('#scope-delete-signal');
-      this.moveSignalButton = root.querySelector('#scope-move-signal');
-      this.rowMovePopover = root.querySelector('#scope-row-move-popover');
-      this.rowMoveTitle = root.querySelector('#scope-row-move-title');
-      this.rowMoveCloseButton = root.querySelector('#scope-row-move-close');
-      this.rowMoveDirectionOptions = root.querySelector('.scope-row-move-directions');
-      this.rowMoveCountInput = root.querySelector('#scope-row-move-count');
-      this.rowMoveApplyButton = root.querySelector('#scope-row-move-apply');
       this.cursorAButton = root.querySelector('#scope-cursor-a');
       this.cursorBButton = root.querySelector('#scope-cursor-b');
       this.cursorSignalEl = root.querySelector('#scope-cursor-signal');
@@ -1238,26 +1205,6 @@
       });
       this.deleteSignalButton.addEventListener('click', () => {
         void this.deleteActiveSignal();
-      });
-      this.moveSignalButton.addEventListener('click', () => this.toggleRowMovePopover());
-      this.rowMoveCloseButton.addEventListener('click', () => this.closeRowMovePopover(true));
-      this.rowMoveDirectionOptions.addEventListener('click', (event) => {
-        const button = event.target.closest('[data-scope-row-direction]');
-        if (!button) return;
-        this.setRowMoveDirection(button.dataset.scopeRowDirection);
-      });
-      this.rowMoveApplyButton.addEventListener('click', () => {
-        void this.applyRowMove();
-      });
-      this.rowMoveCountInput.addEventListener('keydown', (event) => {
-        event.stopPropagation();
-        if (event.key === 'Enter') {
-          event.preventDefault();
-          void this.applyRowMove();
-        } else if (event.key === 'Escape') {
-          event.preventDefault();
-          this.closeRowMovePopover(true);
-        }
       });
       this.connectionButton.addEventListener('click', () => this.toggleConnectionMode());
       this.cursorAButton.addEventListener('click', () => this.toggleActiveCursor('A'));
@@ -1538,7 +1485,6 @@
       this.plotViewport.addEventListener('scroll', () => {
         this.closeDisplayPopover();
         this.closeStylePopover();
-        this.closeRowMovePopover();
         this.scheduleVerticalScrollSync();
       }, { passive: true });
       this.signalScroll.addEventListener('wheel', (event) => {
@@ -1641,11 +1587,6 @@
       });
 
       this.root.addEventListener('pointerdown', (event) => {
-        if (this.rowMovePopover && !this.rowMovePopover.hidden
-            && !this.rowMovePopover.contains(event.target)
-            && event.target !== this.moveSignalButton) {
-          this.closeRowMovePopover();
-        }
         if (this.formulaVariablePicker && !this.formulaVariablePicker.hidden
             && !this.formulaVariablePicker.contains(event.target)
             && event.target !== this.formulaInsertVariableButton) {
@@ -1816,6 +1757,7 @@
       if (collapse) {
         if (this.columnSelection && this.columnSelection.rowIndex === index) {
           this.columnSelection = null;
+          this.updateCursorControls();
         }
         if (this.selectedPoint && this.selectedPoint.rowIndex === index) {
           this.selectedPoint = null;
@@ -2793,11 +2735,11 @@
       const settings = options || {};
       this.closeDisplayPopover();
       this.closeStylePopover();
-      this.closeRowMovePopover();
       if (this.connectionMode) this.setConnectionMode(false);
       this.selectedPoint = null;
       this.columnSelection = null;
       this.updatePointEditor();
+      this.updateCursorControls();
       this.rowOperationInFlight = true;
       this.updateHistoryButtons();
       this.updateRowOperationControls();
@@ -2944,115 +2886,6 @@
         focusRowId,
         status: '已删除波形：' + name + '；可使用撤销恢复',
         log: { phase: 'delete', rowId, name, transient: !!row.transient }
-      });
-    }
-
-    setRowMoveDirection(direction) {
-      this.rowMoveDirection = direction === 'down' ? 'down' : 'up';
-      this.rowMoveDirectionOptions.querySelectorAll('[data-scope-row-direction]').forEach((button) => {
-        const active = button.dataset.scopeRowDirection === this.rowMoveDirection;
-        button.classList.toggle('active', active);
-        button.setAttribute('aria-pressed', String(active));
-      });
-    }
-
-    toggleRowMovePopover() {
-      if (!this.rowMovePopover.hidden) {
-        this.closeRowMovePopover(true);
-        return;
-      }
-      const row = this.meta && this.meta.rows[this.activeCursorRow];
-      if (!row || this.meta.rows.length < 2) return;
-      this.closeDisplayPopover();
-      this.closeStylePopover();
-      this.rowMoveTitle.textContent = '移动 ' + this.signalDisplayName(row.index);
-      this.rowMoveCountInput.value = '1';
-      this.setRowMoveDirection('up');
-      this.rowMovePopover.hidden = false;
-      this.rowMovePopover.style.visibility = 'hidden';
-      this.moveSignalButton.classList.add('active');
-      this.moveSignalButton.setAttribute('aria-expanded', 'true');
-      this.positionRowMovePopover();
-      try { this.rowMoveCountInput.focus({ preventScroll: true }); }
-      catch (_error) { this.rowMoveCountInput.focus(); }
-      this.rowMoveCountInput.select();
-    }
-
-    positionRowMovePopover() {
-      if (!this.rowMovePopover || this.rowMovePopover.hidden || !this.moveSignalButton) return;
-      const anchorRect = this.moveSignalButton.getBoundingClientRect();
-      const popoverRect = this.rowMovePopover.getBoundingClientRect();
-      const margin = 8;
-      const viewportWidth = Math.max(1, document.documentElement.clientWidth);
-      const viewportHeight = Math.max(1, document.documentElement.clientHeight);
-      let top = anchorRect.bottom + 7;
-      if (top + popoverRect.height > viewportHeight - margin) {
-        top = anchorRect.top - popoverRect.height - 7;
-      }
-      this.rowMovePopover.style.left = clamp(
-        anchorRect.left,
-        margin,
-        Math.max(margin, viewportWidth - popoverRect.width - margin)
-      ) + 'px';
-      this.rowMovePopover.style.top = clamp(
-        top,
-        margin,
-        Math.max(margin, viewportHeight - popoverRect.height - margin)
-      ) + 'px';
-      this.rowMovePopover.style.visibility = '';
-    }
-
-    closeRowMovePopover(restoreFocus) {
-      if (!this.rowMovePopover || this.rowMovePopover.hidden) return;
-      this.rowMovePopover.hidden = true;
-      this.rowMovePopover.style.visibility = '';
-      this.moveSignalButton.classList.remove('active');
-      this.moveSignalButton.setAttribute('aria-expanded', 'false');
-      if (restoreFocus) {
-        try { this.moveSignalButton.focus({ preventScroll: true }); }
-        catch (_error) { this.moveSignalButton.focus(); }
-      }
-    }
-
-    async applyRowMove() {
-      const row = this.meta && this.meta.rows[this.activeCursorRow];
-      if (!row || this.meta.rows.length < 2) return;
-      const requested = Math.floor(Number(this.rowMoveCountInput.value));
-      if (!Number.isFinite(requested) || requested < 1) {
-        this.setStatus('移动行数必须是大于等于 1 的整数', true);
-        this.rowMoveCountInput.focus();
-        this.rowMoveCountInput.select();
-        return;
-      }
-      const order = this.visibleRowIds();
-      const sourceIndex = row.index;
-      const targetIndex = this.rowMoveDirection === 'down'
-        ? Math.min(order.length - 1, sourceIndex + requested)
-        : Math.max(0, sourceIndex - requested);
-      if (targetIndex === sourceIndex) {
-        this.setStatus(this.rowMoveDirection === 'down'
-          ? '当前波形已经位于最下方'
-          : '当前波形已经位于最上方');
-        this.closeRowMovePopover(true);
-        return;
-      }
-      const rowId = String(row.rowId || ('source:' + row.index));
-      const name = this.signalDisplayName(row.index);
-      await this.commitRowOperation(() => {
-        order.splice(sourceIndex, 1);
-        order.splice(targetIndex, 0, rowId);
-        this.transientFormulaState.rowOrder = order;
-      }, {
-        focusRowId: rowId,
-        status: '已将 ' + name + (this.rowMoveDirection === 'down' ? ' 下移 ' : ' 上移 ')
-          + Math.abs(targetIndex - sourceIndex) + ' 行',
-        log: {
-          phase: 'move',
-          rowId,
-          name,
-          from: sourceIndex,
-          to: targetIndex
-        }
       });
     }
 
@@ -3382,7 +3215,6 @@
         document.body.classList.add('scope-row-dragging');
         this.closeDisplayPopover();
         this.closeStylePopover();
-        this.closeRowMovePopover();
         this.setActiveCursorRow(drag.sourceIndex);
         this.setStatus('正在拖动 ' + this.signalDisplayName(drag.sourceIndex) + '，松开鼠标完成移动');
         this.log('scope-row', {
@@ -5360,33 +5192,29 @@
     }
 
     drawCursors(context, width, height) {
-      const cursors = [
-        { name: 'A', column: this.cursorA, color: '#1f68d5' },
-        { name: 'B', column: this.cursorB, color: '#d93025' }
-      ].sort((left, right) => {
+      const cursors = this.cursorRenderStates(width).sort((left, right) => {
         if (left.name === this.activeCursor) return 1;
         if (right.name === this.activeCursor) return -1;
         return 0;
       });
       cursors.forEach((cursor) => {
-        if (cursor.column == null || cursor.column < this.viewStart || cursor.column > this.viewEnd) return;
-        const x = this.xForColumn(cursor.column, width);
         const active = cursor.name === this.activeCursor;
-        context.strokeStyle = cursor.color;
-        context.lineWidth = active ? 2.5 : 1.35;
-        context.beginPath();
-        context.moveTo(x, 0);
-        context.lineTo(x, height);
-        context.stroke();
-        const labelX = clamp(x, 10, Math.max(10, width - 10));
+        if (cursor.inView) {
+          context.strokeStyle = cursor.color;
+          context.lineWidth = active ? 2.5 : 1.35;
+          context.beginPath();
+          context.moveTo(cursor.lineX, 0);
+          context.lineTo(cursor.lineX, height);
+          context.stroke();
+        }
         const labelHeight = active ? 20 : 17;
         context.fillStyle = cursor.color;
-        context.fillRect(labelX - 10, 0, 20, labelHeight);
+        context.fillRect(cursor.markerX - 10, 0, 20, labelHeight);
         context.fillStyle = '#ffffff';
         context.font = 'bold 11px "Segoe UI", sans-serif';
         context.textAlign = 'center';
         context.textBaseline = 'middle';
-        context.fillText(cursor.name, labelX, labelHeight / 2);
+        context.fillText(cursor.name, cursor.markerX, labelHeight / 2);
       });
     }
 
@@ -5650,16 +5478,8 @@
       if (this.isRowCollapsed(selection.rowIndex)) return;
       const singleColumn = selection.end - selection.start === 1;
       if (singleColumn) {
-        let markerColumn = selection.start + 0.5;
-        if (this.selectedPoint
-            && this.selectedPoint.rowIndex === selection.rowIndex
-            && this.simplified
-            && this.simplified.model) {
-          const pointColumn = Number(
-            this.simplified.model.columns[this.selectedPoint.pointIndex]
-          );
-          if (Number.isFinite(pointColumn)) markerColumn = pointColumn;
-        }
+        const markerColumn = this.selectionCursorColumn();
+        if (markerColumn == null) return;
         if (markerColumn < this.viewStart || markerColumn > this.viewEnd) return;
         const x = clamp(this.xForColumn(markerColumn, width), 0, width);
         context.save();
@@ -5670,6 +5490,18 @@
         context.moveTo(x, 0);
         context.lineTo(x, height);
         context.stroke();
+        if (!this.activeCursor) {
+          const labelX = clamp(x, 10, Math.max(10, width - 10));
+          const labelHeight = 17;
+          context.setLineDash([]);
+          context.fillStyle = '#2f73bf';
+          context.fillRect(labelX - 10, 0, 20, labelHeight);
+          context.fillStyle = '#ffffff';
+          context.font = 'bold 11px "Segoe UI", sans-serif';
+          context.textAlign = 'center';
+          context.textBaseline = 'middle';
+          context.fillText('C', labelX, labelHeight / 2);
+        }
         context.restore();
         return;
       }
@@ -6151,6 +5983,8 @@
     selectionZoomAnchor() {
       const selection = this.columnSelection;
       if (!selection || !Number.isFinite(Number(selection.start))) return null;
+      const cursorColumn = this.selectionCursorColumn();
+      if (cursorColumn != null) return cursorColumn;
       const firstColumn = clamp(
         Math.floor(Number(selection.start)),
         0,
@@ -6247,13 +6081,19 @@
     updateColumnSelection(rowIndex, anchorColumn, currentColumn) {
       const start = Math.min(anchorColumn, currentColumn);
       const end = Math.max(anchorColumn, currentColumn) + 1;
-      this.columnSelection = { rowIndex, start, end };
+      this.columnSelection = {
+        rowIndex,
+        start,
+        end,
+        cursorColumn: end - start === 1 ? start + 0.5 : null
+      };
       if (this.styleColumnsInput) {
         const first = start + 1;
         const last = end;
         this.styleColumnsInput.value = first === last ? String(first) : first + '-' + last;
       }
       this.updateColumnBackgroundAvailability();
+      this.updateCursorJumpAvailability();
       this.updateMeasurements();
       this.scheduleCursorReadout();
     }
@@ -6284,16 +6124,36 @@
         this.plotCanvas.setPointerCapture(event.pointerId);
         return;
       }
-      const hitCursor = this.cursorAtX(x, rect.width);
+      const hitCursor = this.cursorAtPoint(x, y, rect.width);
       if (hitCursor) {
-        this.setActiveCursor(hitCursor);
-        this.setActiveCursorRow(rowIndex);
+        const cursorRowIndex = hitCursor.inView ? rowIndex : this.activeCursorRow;
+        this.setActiveCursor(hitCursor.name);
+        if (hitCursor.inView) this.setActiveCursorRow(cursorRowIndex);
         this.drag = {
           kind: 'cursor',
           pointerId: event.pointerId,
           startX: event.clientX,
-          rowIndex,
-          column,
+          rowIndex: cursorRowIndex,
+          column: hitCursor.column,
+          cursorName: hitCursor.name,
+          pinned: !hitCursor.inView,
+          moved: false
+        };
+        this.plotCanvas.classList.remove('cursor-hover');
+        this.plotCanvas.classList.add('dragging-cursor');
+        this.plotCanvas.setPointerCapture(event.pointerId);
+        return;
+      }
+      if (this.selectionCursorMarkerAtPoint(x, y, rect.width)) {
+        const selection = this.columnSelection;
+        this.selectedPoint = null;
+        this.updatePointEditor();
+        this.setActiveCursorRow(selection.rowIndex);
+        this.drag = {
+          kind: 'selection-cursor',
+          pointerId: event.pointerId,
+          startX: event.clientX,
+          rowIndex: selection.rowIndex,
           moved: false
         };
         this.plotCanvas.classList.remove('cursor-hover');
@@ -6315,6 +6175,7 @@
         this.columnSelection = null;
         this.selectedPoint = null;
         this.updatePointEditor();
+        this.updateCursorControls();
         this.updateMeasurements();
         void this.updateCursorReadout();
         this.draw();
@@ -6367,7 +6228,12 @@
       const rect = this.plotCanvas.getBoundingClientRect();
       const x = event.clientX - rect.left;
       if (!this.drag) {
-        this.plotCanvas.classList.toggle('cursor-hover', !!this.cursorAtX(x, rect.width));
+        const y = event.clientY - rect.top;
+        this.plotCanvas.classList.toggle(
+          'cursor-hover',
+          !!this.cursorAtPoint(x, y, rect.width)
+            || this.selectionCursorMarkerAtPoint(x, y, rect.width)
+        );
         if (this.connectionMode && this.connectionDraftStart) {
           const y = event.clientY - rect.top;
           const next = this.connectionPointForPosition(x, y, rect.width);
@@ -6391,12 +6257,23 @@
       event.preventDefault();
       if (this.drag.kind === 'cursor') {
         const column = this.columnForX(x, rect.width);
-        if (Math.abs(event.clientX - this.drag.startX) > 2) this.drag.moved = true;
+        const movement = Math.abs(event.clientX - this.drag.startX);
+        if (this.drag.pinned && !this.drag.moved && movement <= 2) return;
+        if (movement > 2) this.drag.moved = true;
         this.drag.column = column;
         this.setActiveCursorPosition(
           this.cursorColumnForRow(column, this.drag.rowIndex),
           true
         );
+        return;
+      }
+      if (this.drag.kind === 'selection-cursor') {
+        const column = this.cursorColumnForRow(
+          this.columnForX(x, rect.width),
+          this.drag.rowIndex
+        );
+        if (Math.abs(event.clientX - this.drag.startX) > 2) this.drag.moved = true;
+        this.setSelectionCursorPosition(column, this.drag.rowIndex, true);
         return;
       }
       if (this.drag.kind === 'columns') {
@@ -6435,10 +6312,17 @@
       if (drag.kind === 'cursor') {
         if (drag.moved) {
           void this.snapActiveCursorPosition(drag.column, drag.rowIndex);
+        } else if (drag.pinned) {
+          this.setActiveCursor(drag.cursorName, true);
         } else {
           void this.updateCursorReadout();
           this.draw();
         }
+        return;
+      }
+      if (drag.kind === 'selection-cursor') {
+        void this.updateCursorReadout();
+        this.draw();
         return;
       }
       if (drag.kind !== 'columns') return;
@@ -6588,6 +6472,7 @@
         this.selectedPoint = null;
         this.selectedConnectionId = '';
         this.updatePointEditor();
+        this.updateCursorControls();
         this.updateMeasurements();
         void this.updateCursorReadout();
       } else {
@@ -6683,20 +6568,121 @@
       return null;
     }
 
-    cursorAtX(x, width) {
-      const candidates = [
-        { name: 'A', x: this.xForColumn(this.cursorA, width) },
-        { name: 'B', x: this.xForColumn(this.cursorB, width) }
-      ].filter((cursor) => (
-        Number.isFinite(cursor.x) && Math.abs(cursor.x - x) <= CURSOR_HIT_RADIUS
-      ));
-      if (!candidates.length) return '';
-      if (candidates.length > 1
-          && Math.abs(candidates[0].x - candidates[1].x) < 1) {
-        return this.activeCursor === 'A' ? 'B' : 'A';
+    selectionCursorColumn() {
+      const selection = this.columnSelection;
+      if (!selection || selection.end - selection.start !== 1) return null;
+      let column = Number(selection.cursorColumn);
+      if (!Number.isFinite(column)) column = Number(selection.start) + 0.5;
+      if (this.selectedPoint
+          && this.selectedPoint.rowIndex === selection.rowIndex
+          && this.simplified
+          && this.simplified.model) {
+        const pointColumn = Number(
+          this.simplified.model.columns[this.selectedPoint.pointIndex]
+        );
+        if (Number.isFinite(pointColumn)) column = pointColumn;
       }
-      candidates.sort((left, right) => Math.abs(left.x - x) - Math.abs(right.x - x));
-      return candidates[0].name;
+      if (!Number.isFinite(column)) return null;
+      return clamp(column, 0, Math.max(0, this.meta.totalColumns - 1e-7));
+    }
+
+    selectionCursorMarkerAtPoint(x, y, width) {
+      if (this.activeCursor || y < 0 || y > 21) return false;
+      const column = this.selectionCursorColumn();
+      if (column == null || column < this.viewStart || column > this.viewEnd) return false;
+      const markerX = clamp(
+        this.xForColumn(column, width),
+        10,
+        Math.max(10, width - 10)
+      );
+      return Math.abs(markerX - x) <= 12;
+    }
+
+    setSelectionCursorPosition(column, rowIndex, realtimeReadout) {
+      if (this.activeCursor || !this.meta || !this.meta.rows.length) return;
+      this.cursorNavigationSequence += 1;
+      const index = clamp(
+        Math.floor(Number(rowIndex) || 0),
+        0,
+        this.meta.rows.length - 1
+      );
+      const value = this.cursorColumnForRow(column, index);
+      const start = clamp(
+        Math.floor(value),
+        0,
+        Math.max(0, this.meta.totalColumns - 1)
+      );
+      this.columnSelection = {
+        rowIndex: index,
+        start,
+        end: Math.min(this.meta.totalColumns, start + 1),
+        cursorColumn: value
+      };
+      if (this.selectedPoint) {
+        this.selectedPoint = null;
+        this.updatePointEditor();
+      }
+      if (this.styleColumnsInput) this.styleColumnsInput.value = String(start + 1);
+      this.updateColumnBackgroundAvailability();
+      this.updateCursorJumpAvailability();
+      this.updateMeasurements();
+      if (realtimeReadout) this.scheduleCursorReadout();
+      else void this.updateCursorReadout();
+      this.draw();
+    }
+
+    cursorRenderStates(width) {
+      const markerInset = Math.min(10, Math.max(0, width / 2));
+      const markerMaximum = Math.max(markerInset, width - markerInset);
+      let leftSlot = 0;
+      let rightSlot = 0;
+      return [
+        { name: 'A', column: this.cursorA, color: '#1f68d5' },
+        { name: 'B', column: this.cursorB, color: '#d93025' }
+      ].filter((cursor) => Number.isFinite(Number(cursor.column))).map((cursor) => {
+        const column = Number(cursor.column);
+        const inView = column >= this.viewStart && column <= this.viewEnd;
+        const side = inView ? '' : (column < this.viewStart ? 'left' : 'right');
+        const lineX = this.xForColumn(column, width);
+        let markerX = clamp(lineX, markerInset, markerMaximum);
+        if (side === 'left') {
+          markerX = clamp(markerInset + leftSlot * 22, markerInset, markerMaximum);
+          leftSlot += 1;
+        } else if (side === 'right') {
+          markerX = clamp(markerMaximum - rightSlot * 22, markerInset, markerMaximum);
+          rightSlot += 1;
+        }
+        return Object.assign(cursor, {
+          column,
+          inView,
+          side,
+          lineX,
+          markerX
+        });
+      });
+    }
+
+    cursorAtPoint(x, y, width) {
+      const onMarkerRow = y >= 0 && y <= 22;
+      const candidates = this.cursorRenderStates(width).map((cursor) => {
+        const markerDistance = Math.abs(cursor.markerX - x);
+        const lineDistance = Math.abs(cursor.lineX - x);
+        if (onMarkerRow && markerDistance <= 12) {
+          return Object.assign({}, cursor, { hitDistance: markerDistance, hitPart: 'marker' });
+        }
+        if (cursor.inView && lineDistance <= CURSOR_HIT_RADIUS) {
+          return Object.assign({}, cursor, { hitDistance: lineDistance, hitPart: 'line' });
+        }
+        return null;
+      }).filter(Boolean);
+      if (!candidates.length) return null;
+      if (candidates.length > 1
+          && Math.abs(candidates[0].hitDistance - candidates[1].hitDistance) < 1) {
+        const alternate = this.activeCursor === 'A' ? 'B' : 'A';
+        return candidates.find((cursor) => cursor.name === alternate) || candidates[0];
+      }
+      candidates.sort((left, right) => left.hitDistance - right.hitDistance);
+      return candidates[0];
     }
 
     toggleActiveCursor(name) {
@@ -6784,7 +6770,6 @@
         0,
         Math.max(0, this.meta.rows.length - 1)
       );
-      if (next !== this.activeCursorRow) this.closeRowMovePopover();
       this.cursorNavigationSequence += 1;
       this.activeCursorRow = next;
       this.signalList.querySelectorAll('[data-scope-signal-row]').forEach((row) => {
@@ -6805,10 +6790,7 @@
       this.cursorBButton.classList.toggle('active', activeB);
       this.cursorAButton.setAttribute('aria-pressed', String(activeA));
       this.cursorBButton.setAttribute('aria-pressed', String(activeB));
-      const hasActiveCursor = activeA || activeB;
-      this.cursorPrevButton.disabled = !hasActiveCursor;
-      this.cursorNextButton.disabled = !hasActiveCursor;
-      this.cursorJumpInput.disabled = !hasActiveCursor;
+      this.updateCursorJumpAvailability();
       const row = this.meta && this.meta.rows[this.activeCursorRow];
       this.cursorSignalEl.textContent = row ? row.name : '';
       this.cursorSignalEl.title = row ? row.name : '';
@@ -6816,24 +6798,31 @@
       this.updateRowOperationControls();
     }
 
+    updateCursorJumpAvailability() {
+      if (!this.cursorPrevButton || !this.cursorNextButton || !this.cursorJumpInput) return;
+      const activeA = this.activeCursor === 'A';
+      const activeB = this.activeCursor === 'B';
+      const hasActiveCursor = activeA || activeB;
+      const hasSelectionCursor = !hasActiveCursor && this.selectionCursorColumn() != null;
+      const hasNavigationCursor = hasActiveCursor || hasSelectionCursor;
+      this.cursorPrevButton.disabled = !hasNavigationCursor;
+      this.cursorNextButton.disabled = !hasNavigationCursor;
+      this.cursorJumpInput.disabled = !hasNavigationCursor;
+    }
+
     updateRowOperationControls() {
       if (!this.addSignalButton || !this.addMultiWaveButton
-          || !this.deleteSignalButton || !this.moveSignalButton) return;
+          || !this.deleteSignalButton) return;
       const rowCount = this.meta && Array.isArray(this.meta.rows) ? this.meta.rows.length : 0;
-      const ready = !!this.simplified;
+      const ready = !!this.meta;
       const busy = this.rowOperationInFlight || this.historyRestoreInFlight
         || this.formulaRefreshInFlight;
       this.addSignalButton.disabled = busy || !ready;
       this.addMultiWaveButton.disabled = busy || !ready;
       this.deleteSignalButton.disabled = busy || !ready || rowCount === 0;
-      this.moveSignalButton.disabled = busy || !ready || rowCount < 2;
       this.deleteSignalButton.title = rowCount
         ? '删除当前选中的波形，可通过撤销恢复'
         : '当前没有可删除的波形';
-      this.moveSignalButton.title = rowCount < 2
-        ? '至少需要两行波形才能移动'
-        : '移动当前选中的波形行';
-      if (this.moveSignalButton.disabled) this.closeRowMovePopover();
     }
 
     formatCursorValue(value) {
@@ -6855,6 +6844,14 @@
       }
       const selection = this.columnSelection;
       if (!selection || !Number.isFinite(Number(selection.start))) return null;
+      const selectionCursorColumn = this.selectionCursorColumn();
+      if (selectionCursorColumn != null) {
+        return {
+          column: selectionCursorColumn,
+          label: 'C',
+          title: 'C'
+        };
+      }
       const column = clamp(
         Math.floor(Number(selection.start)),
         0,
@@ -6948,8 +6945,14 @@
 
     async navigateActiveCursor(direction) {
       if (!this.meta.rows.length) return;
-      if (!this.activeCursor) {
-        this.setStatus('请先选择 A 或 B 游标', true);
+      const selectionCursorColumn = this.selectionCursorColumn();
+      const navigationCursor = this.activeCursor
+        || (selectionCursorColumn == null ? '' : 'C');
+      const navigationColumn = this.activeCursor
+        ? this.activeCursorColumn()
+        : selectionCursorColumn;
+      if (!navigationCursor || navigationColumn == null) {
+        this.setStatus('请先选择 A、B 游标或 C 位置', true);
         return;
       }
       const row = this.meta.rows[this.activeCursorRow];
@@ -6967,7 +6970,7 @@
       try {
         const result = await this.worker.call('navigate', {
           rowIndex: this.activeCursorRow,
-          column: this.activeCursorColumn(),
+          column: navigationColumn,
           direction,
           kind,
           condition: expression,
@@ -6986,9 +6989,13 @@
           return;
         }
         this.ensureCursorVisible(result.column);
-        this.setActiveCursorPosition(result.column, true);
+        if (navigationCursor === 'C') {
+          this.setSelectionCursorPosition(result.column, this.activeCursorRow, true);
+        } else {
+          this.setActiveCursorPosition(result.column, true);
+        }
         this.setStatus(
-          this.activeCursor + ' 已跳到 ' + row.name + ' 的'
+          navigationCursor + ' 已跳到 ' + row.name + ' 的'
           + (kind === 'edge'
             ? '变化边沿'
             : (/^(?:value\s*)?(?:==|!=|>=|<=|>|<|=)/i.test(expression)
@@ -6997,7 +7004,7 @@
         );
         this.log('scope-cursor', {
           phase: 'navigate',
-          cursor: this.activeCursor,
+          cursor: navigationCursor,
           rowIndex: this.activeCursorRow,
           direction: direction < 0 ? -1 : 1,
           kind,
@@ -7025,7 +7032,10 @@
 
     currentMeasurementColumn() {
       if (this.columnSelection && Number.isFinite(Number(this.columnSelection.start))) {
-        return Number(this.columnSelection.start);
+        const cursorColumn = this.selectionCursorColumn();
+        return cursorColumn == null
+          ? Number(this.columnSelection.start)
+          : cursorColumn;
       }
       if (this.selectedPoint && this.simplified && this.simplified.model) {
         const pointIndex = this.selectedPoint.pointIndex;
@@ -7256,9 +7266,8 @@
     }
 
     snapshot(options) {
-      if (!this.simplified) return null;
       const snapshot = {
-        simplified: clone(this.simplified),
+        simplified: this.simplified ? clone(this.simplified) : null,
         outputContent: this.outputContent,
         modes: Object.assign({}, this.modes),
         busFormats: clone(this.busFormats),
@@ -7308,7 +7317,7 @@
         });
         if (refreshed === false) throw new Error('无法恢复波形行结构');
       }
-      this.simplified = clone(snapshot.simplified);
+      this.simplified = snapshot.simplified ? clone(snapshot.simplified) : null;
       this.outputContent = snapshot.outputContent;
       this.modes = Object.assign({}, snapshot.modes || this.modes);
       this.busFormats = clone(snapshot.busFormats || this.busFormats);
@@ -7341,7 +7350,9 @@
       this.columnSelection = snapshot.rowState && snapshot.rowState.columnSelection
         ? clone(snapshot.rowState.columnSelection)
         : null;
-      this.outputTitleInput.value = snapshot.outputTitle || this.simplified.model.title;
+      this.outputTitleInput.value = snapshot.outputTitle
+        || (this.simplified && this.simplified.model ? this.simplified.model.title : '')
+        || (this.meta ? this.meta.title : '');
       this.presentationDraftDirty = !!snapshot.presentationDraftDirty;
       this.dataDraftDirty = !!snapshot.dataDraftDirty;
       this.simplifiedDisplayActive = !!snapshot.simplifiedDisplayActive;
@@ -7353,7 +7364,8 @@
       this.signalScroll.scrollTop = scrollTop;
       this.positionPlotCanvas();
       this.updatePointEditor();
-      this.updateMetrics(this.simplified.metrics);
+      this.updateMetrics(this.simplified ? this.simplified.metrics : null);
+      this.updateCursorControls();
       this.updateHistoryButtons();
       this.scheduleWindowRequest();
       this.scheduleBuild();
@@ -7683,7 +7695,6 @@
       }
       this.closeDisplayPopover();
       this.closeStylePopover();
-      this.closeRowMovePopover();
       this.formulaDrafts.clear();
       this.transientFormulaState = reconcileTransientStateWithDocument(
         saved.content,
