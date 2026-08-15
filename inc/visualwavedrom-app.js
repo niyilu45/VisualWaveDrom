@@ -15119,14 +15119,31 @@ ${lines.join('\n')}`;
       };
     }
 
-    function buildFormulaUpdatesOffThread(workerInput, definitions, onProgress, fallbackFactory) {
+    function createImportAbortError() {
+      const error = new Error('导入已取消');
+      error.name = 'AbortError';
+      return error;
+    }
+
+    function throwIfImportAborted(signal) {
+      if (signal && signal.aborted) throw createImportAbortError();
+    }
+
+    function buildFormulaUpdatesOffThread(
+      workerInput,
+      definitions,
+      onProgress,
+      fallbackFactory,
+      signal
+    ) {
       const formulaEngine = window.VisualWaveDromFormula;
       const runFallback = (input) => {
+        throwIfImportAborted(signal);
         const sourceInput = input || workerInput;
         const build = typeof formulaEngine.buildFormulaUpdatesAsync === 'function'
           ? formulaEngine.buildFormulaUpdatesAsync.bind(formulaEngine)
           : formulaEngine.buildFormulaUpdates.bind(formulaEngine);
-        return Promise.resolve(build(
+        return Promise.resolve().then(() => build(
           sourceInput.documentValue,
           sourceInput.importedUpdates,
           definitions,
@@ -15148,13 +15165,19 @@ ${lines.join('\n')}`;
             if (typeof onProgress === 'function') {
               onProgress(Object.assign({ phase: 'formula', stage: 'layer' }, progress));
             }
-          }
-        }));
+          },
+          signal
+        })).then((result) => {
+          throwIfImportAborted(signal);
+          return result;
+        });
       };
       if (typeof window.Worker !== 'function') return runFallback();
+      if (signal && signal.aborted) return Promise.reject(createImportAbortError());
       return new Promise((resolve, reject) => {
         let worker;
         let settled = false;
+        let abortHandler = null;
         try {
           worker = new Worker(FORMULA_IMPORT_WORKER_URL);
         } catch (_error) {
@@ -15163,6 +15186,8 @@ ${lines.join('\n')}`;
         }
         const requestId = ++formulaImportRequestSequence;
         const finish = () => {
+          if (signal && abortHandler) signal.removeEventListener('abort', abortHandler);
+          abortHandler = null;
           if (worker) worker.terminate();
           worker = null;
         };
@@ -15170,11 +15195,22 @@ ${lines.join('\n')}`;
           if (settled) return;
           settled = true;
           finish();
+          if (signal && signal.aborted) {
+            reject(createImportAbortError());
+            return;
+          }
           const fallbackInput = typeof fallbackFactory === 'function'
             ? fallbackFactory()
             : workerInput;
           void runFallback(fallbackInput).then(resolve, reject);
         };
+        abortHandler = () => {
+          if (settled) return;
+          settled = true;
+          finish();
+          reject(createImportAbortError());
+        };
+        if (signal) signal.addEventListener('abort', abortHandler, { once: true });
         worker.addEventListener('message', (event) => {
           const message = event.data || {};
           if (message.requestId !== requestId) return;
@@ -15228,7 +15264,8 @@ ${lines.join('\n')}`;
         workerInput,
         definitions,
         opts.onProgress,
-        createWorkerInput
+        createWorkerInput,
+        opts.signal
       );
       const invalid = built.analysis.items.filter((item) => !item.valid);
       const merged = [];
@@ -20614,7 +20651,13 @@ ${lines.join('\n')}`;
         },
         applyImport: async (payload, importOptions) => {
           const applyStartedAt = Date.now();
+          const signal = importOptions && importOptions.signal;
+          let cancellationAllowed = true;
+          const checkCancellation = () => {
+            if (cancellationAllowed) throwIfImportAborted(signal);
+          };
           const reportApplyStage = async (stage, yieldBeforeWork) => {
+            checkCancellation();
             if (importOptions && typeof importOptions.onProgress === 'function') {
               importOptions.onProgress({ phase: 'applying', stage });
             }
@@ -20625,8 +20668,10 @@ ${lines.join('\n')}`;
             });
             if (yieldBeforeWork) {
               await new Promise((resolve) => setTimeout(resolve, 0));
+              checkCancellation();
             }
           };
+          checkCancellation();
           const definitions = payload && Array.isArray(payload.formulas) ? payload.formulas : [];
           let resolvedPayload = payload;
           if (definitions.length) {
@@ -20636,11 +20681,18 @@ ${lines.join('\n')}`;
                 ? jsonDocumentSource
                 : editor.value,
               formulaSourceUpdates: importedUpdates,
-              onProgress: importOptions && importOptions.onProgress
+              onProgress: importOptions && importOptions.onProgress,
+              signal
             });
           }
+          checkCancellation();
           resolvedPayload = importedPayloadWithMultiWaves(resolvedPayload);
           await reportApplyStage('writing', true);
+          checkCancellation();
+          if (importOptions && typeof importOptions.onCancelableChange === 'function') {
+            importOptions.onCancelableChange(false);
+          }
+          cancellationAllowed = false;
           const result = applyImportedWaveRows(resolvedPayload, {
             createMissing: true,
             replaceScopeFormulas: true,

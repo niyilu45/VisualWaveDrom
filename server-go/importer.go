@@ -859,6 +859,14 @@ func (m *importManager) runCollectionRegexSearch(
 }
 
 func (m *importManager) runParser(mapping importMapping, python pythonRuntime) (map[string]any, error) {
+	return m.runParserContext(context.Background(), mapping, python)
+}
+
+func (m *importManager) runParserContext(
+	parent context.Context,
+	mapping importMapping,
+	python pythonRuntime,
+) (map[string]any, error) {
 	if info, err := os.Stat(m.fileProcPath); err != nil || info.IsDir() {
 		return nil, errors.New("import/inc/fileProc.py was not found")
 	}
@@ -869,7 +877,10 @@ func (m *importManager) runParser(mapping importMapping, python pythonRuntime) (
 	args := append(append([]string{}, python.PrefixArgs...),
 		m.fileProcPath, "--parser", mapping.Parser, "--file", mapping.SourcePath,
 		"--options-json", string(optionsJSON))
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, python.Command, args...)
 	command.Dir = m.rootDir
@@ -878,6 +889,9 @@ func (m *importManager) runParser(mapping importMapping, python pythonRuntime) (
 	command.Stdout = &limitedOutputBuffer{buffer: &stdout, limit: limit}
 	command.Stderr = &limitedOutputBuffer{buffer: &stderr, limit: limit}
 	err = command.Run()
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return nil, context.Canceled
+	}
 	if ctx.Err() == context.DeadlineExceeded {
 		return nil, errors.New("Python parser timed out after 60 seconds")
 	}
@@ -1132,6 +1146,22 @@ func (m *importManager) runSourceFile(
 	hasIndex bool,
 	optionOverrides map[string]any,
 ) (map[string]any, error) {
+	return m.runSourceFileContext(
+		context.Background(), schemeID, mappingIndex, signalName, sourcePath,
+		displayName, hasIndex, optionOverrides,
+	)
+}
+
+func (m *importManager) runSourceFileContext(
+	ctx context.Context,
+	schemeID string,
+	mappingIndex int,
+	signalName string,
+	sourcePath string,
+	displayName string,
+	hasIndex bool,
+	optionOverrides map[string]any,
+) (map[string]any, error) {
 	python := m.pythonRuntime()
 	if !python.Available {
 		return nil, errors.New(python.Error)
@@ -1180,7 +1210,7 @@ func (m *importManager) runSourceFile(
 	effective.SourcePath = sourcePath
 	effective.DisplayPath = displayName
 	effective.Options = options
-	result, err := m.runParser(effective, python)
+	result, err := m.runParserContext(ctx, effective, python)
 	if err != nil {
 		return nil, err
 	}
@@ -1209,6 +1239,17 @@ type tableImportOptions struct {
 }
 
 func (m *importManager) runTableSourceFileWithOptions(
+	sourcePath string,
+	displayName string,
+	tableOptions tableImportOptions,
+) (map[string]any, error) {
+	return m.runTableSourceFileWithOptionsContext(
+		context.Background(), sourcePath, displayName, tableOptions,
+	)
+}
+
+func (m *importManager) runTableSourceFileWithOptionsContext(
+	ctx context.Context,
 	sourcePath string,
 	displayName string,
 	tableOptions tableImportOptions,
@@ -1260,7 +1301,7 @@ func (m *importManager) runTableSourceFileWithOptions(
 	if len(tableOptions.Tbl) > 0 {
 		mapping.Options["tbl"] = tableOptions.Tbl
 	}
-	result, err := m.runParser(mapping, python)
+	result, err := m.runParserContext(ctx, mapping, python)
 	if err != nil {
 		return nil, err
 	}
@@ -1378,7 +1419,23 @@ func (m *importManager) runLocalFileWithOptions(
 	hasIndex bool,
 	options map[string]any,
 ) (map[string]any, error) {
-	return m.runSourceFile(
+	return m.runLocalFileWithOptionsContext(
+		context.Background(), schemeID, mappingIndex, signalName, sourcePath,
+		hasIndex, options,
+	)
+}
+
+func (m *importManager) runLocalFileWithOptionsContext(
+	ctx context.Context,
+	schemeID string,
+	mappingIndex int,
+	signalName string,
+	sourcePath string,
+	hasIndex bool,
+	options map[string]any,
+) (map[string]any, error) {
+	return m.runSourceFileContext(
+		ctx,
 		schemeID,
 		mappingIndex,
 		signalName,
@@ -1400,7 +1457,16 @@ func (m *importManager) runTableLocalFileWithOptions(
 	sourcePath string,
 	options tableImportOptions,
 ) (map[string]any, error) {
-	return m.runTableSourceFileWithOptions(
+	return m.runTableLocalFileWithOptionsContext(context.Background(), sourcePath, options)
+}
+
+func (m *importManager) runTableLocalFileWithOptionsContext(
+	ctx context.Context,
+	sourcePath string,
+	options tableImportOptions,
+) (map[string]any, error) {
+	return m.runTableSourceFileWithOptionsContext(
+		ctx,
 		sourcePath,
 		filepath.Base(sourcePath),
 		options,

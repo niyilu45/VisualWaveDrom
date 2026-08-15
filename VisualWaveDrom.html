@@ -7,7 +7,7 @@
   <script src="inc/skins/default.js?v=20260712"></script>
   <script src="inc/wavedrom.min.js?v=20260712"></script>
   <link rel="stylesheet" href="inc/codemirror.css?v=5.65.21">
-  <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260811-wave-hover-v1">
+  <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260815-import-cancel-v1">
   <link rel="stylesheet" href="inc/visualwavedrom-scope.css?v=20260815-offscreen-cursors-v1">
 </head>
 <body>
@@ -746,7 +746,8 @@
         </section>
         <div class="modal-hint wave-collection-hint" id="wave-collection-hint" aria-live="polite"></div>
       </div>
-      <div class="modal-footer">
+      <div class="modal-footer wave-collection-import-footer">
+        <span class="wave-collection-import-progress" id="wave-collection-import-progress" aria-live="polite" hidden></span>
         <button type="button" class="modal-btn" id="wave-collection-cancel">取消</button>
         <button type="button" class="modal-btn" id="wave-collection-save-preset" disabled>保存预设</button>
         <button type="button" class="modal-btn" id="wave-collection-search" disabled>搜索数据</button>
@@ -784,7 +785,7 @@
     <script src="inc/visualwavedrom-formula.js?v=20260815-large-import-v1"></script>
     <script src="inc/visualwavedrom-scope-worker.js?v=20260815-interactive-cancel-v1"></script>
     <script src="inc/visualwavedrom-scope.js?v=20260815-cursor-label-toggle-v1"></script>
-    <script src="inc/visualwavedrom-import-collection.js?v=20260815-modal-backdrop-v1"></script>
-    <script src="inc/visualwavedrom-app.js?v=20260815-large-import-v1"></script>
+    <script src="inc/visualwavedrom-import-collection.js?v=20260815-import-cancel-v1"></script>
+    <script src="inc/visualwavedrom-app.js?v=20260815-import-cancel-v1"></script>
 </body>
 </html>

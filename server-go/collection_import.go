@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha256"
 	"encoding/csv"
 	"encoding/json"
@@ -337,10 +338,12 @@ type collectionImportProgress struct {
 	FailedFiles     int    `json:"failedFiles"`
 	SignalCount     int    `json:"signalCount"`
 	Done            bool   `json:"done"`
+	Cancelled       bool   `json:"cancelled,omitempty"`
 	Error           string `json:"error,omitempty"`
 	DurationMS      int64  `json:"durationMs"`
 	startedAt       time.Time
 	updatedAt       time.Time
+	cancel          context.CancelFunc
 }
 
 func anyList(value any) ([]any, bool) {
@@ -2729,11 +2732,15 @@ func (s *service) cachedCollectionSearch(
 }
 
 func (s *service) parseCollectionEntry(
+	ctx context.Context,
 	catalog importCatalog,
 	search collectionSearchResult,
 	entry collectionSearchEntry,
 	rule collectionPresetPath,
 ) collectionImportEntryResult {
+	if err := ctx.Err(); err != nil {
+		return collectionImportEntryResult{err: err}
+	}
 	match := entry.Matches[0]
 	sourcePath := canonicalExistingPath(match.Path)
 	if !pathInside(search.RootPath, sourcePath) {
@@ -2750,7 +2757,8 @@ func (s *service) parseCollectionEntry(
 	var parser any
 	var analysis map[string]any
 	if preparedEntry.ImportMode == "table" {
-		result, err = s.imports.runTableLocalFileWithOptions(
+		result, err = s.imports.runTableLocalFileWithOptionsContext(
+			ctx,
 			sourcePath,
 			tableImportOptions{
 				HeaderRow:          preparedRule.HeaderRow,
@@ -2780,7 +2788,8 @@ func (s *service) parseCollectionEntry(
 			}
 		}
 		parser = recommended["parser"]
-		result, err = s.imports.runLocalFileWithOptions(
+		result, err = s.imports.runLocalFileWithOptionsContext(
+			ctx,
 			stringValue(recommended["schemeId"]),
 			intValue(recommended["mappingIndex"], -1),
 			preparedEntry.Name,
@@ -2830,6 +2839,9 @@ func normalizeCollectionImportProgressToken(raw string) (string, error) {
 func (s *service) pruneCollectionImportProgressLocked(now time.Time) {
 	for token, progress := range s.collectionImportJobs {
 		if now.Sub(progress.updatedAt) > collectionImportProgressTTL {
+			if progress.cancel != nil {
+				progress.cancel()
+			}
 			delete(s.collectionImportJobs, token)
 		}
 	}
@@ -2845,15 +2857,30 @@ func (s *service) pruneCollectionImportProgressLocked(now time.Time) {
 		if oldestToken == "" {
 			break
 		}
+		if progress := s.collectionImportJobs[oldestToken]; progress.cancel != nil {
+			progress.cancel()
+		}
 		delete(s.collectionImportJobs, oldestToken)
 	}
 }
 
 func (s *service) beginCollectionImportProgress(rawToken string) (string, error) {
+	token, _, err := s.beginCollectionImportProgressContext(context.Background(), rawToken)
+	return token, err
+}
+
+func (s *service) beginCollectionImportProgressContext(
+	parent context.Context,
+	rawToken string,
+) (string, context.Context, error) {
 	token, err := normalizeCollectionImportProgressToken(rawToken)
 	if err != nil || token == "" {
-		return token, err
+		return token, parent, err
 	}
+	if parent == nil {
+		parent = context.Background()
+	}
+	jobContext, cancel := context.WithCancel(parent)
 	now := time.Now()
 	s.collectionImportMu.Lock()
 	defer s.collectionImportMu.Unlock()
@@ -2861,13 +2888,17 @@ func (s *service) beginCollectionImportProgress(rawToken string) (string, error)
 		s.collectionImportJobs = make(map[string]collectionImportProgress)
 	}
 	s.pruneCollectionImportProgressLocked(now)
+	if previous, found := s.collectionImportJobs[token]; found && previous.cancel != nil {
+		previous.cancel()
+	}
 	s.collectionImportJobs[token] = collectionImportProgress{
 		ProgressToken: token,
 		Phase:         "preparing",
 		startedAt:     now,
 		updatedAt:     now,
+		cancel:        cancel,
 	}
-	return token, nil
+	return token, jobContext, nil
 }
 
 func (s *service) setCollectionImportProgressTotal(token string, total int) {
@@ -2877,7 +2908,7 @@ func (s *service) setCollectionImportProgressTotal(token string, total int) {
 	s.collectionImportMu.Lock()
 	defer s.collectionImportMu.Unlock()
 	progress, found := s.collectionImportJobs[token]
-	if !found {
+	if !found || progress.Cancelled {
 		return
 	}
 	progress.TotalFiles = total
@@ -2896,7 +2927,7 @@ func (s *service) recordCollectionImportProgress(
 	s.collectionImportMu.Lock()
 	defer s.collectionImportMu.Unlock()
 	progress, found := s.collectionImportJobs[token]
-	if !found {
+	if !found || progress.Cancelled {
 		return
 	}
 	progress.CompletedFiles++
@@ -2922,14 +2953,55 @@ func (s *service) finishCollectionImportProgress(token string, importErr error) 
 		return
 	}
 	progress.Done = true
-	progress.Phase = "complete"
-	if importErr != nil {
+	if progress.Cancelled || errors.Is(importErr, context.Canceled) {
+		progress.Cancelled = true
+		progress.Phase = "cancelled"
+		progress.Error = ""
+	} else if importErr != nil {
 		progress.Phase = "error"
 		progress.Error = importErr.Error()
+	} else {
+		progress.Phase = "complete"
 	}
+	if progress.cancel != nil {
+		progress.cancel()
+	}
+	progress.cancel = nil
 	progress.DurationMS = now.Sub(progress.startedAt).Milliseconds()
 	progress.updatedAt = now
 	s.collectionImportJobs[token] = progress
+}
+
+func (s *service) cancelCollectionImport(
+	rawToken string,
+) (collectionImportProgress, error) {
+	token, err := normalizeCollectionImportProgressToken(rawToken)
+	if err != nil {
+		return collectionImportProgress{}, err
+	}
+	if token == "" {
+		return collectionImportProgress{}, errors.New("collection import progress token is required")
+	}
+	s.collectionImportMu.Lock()
+	progress, found := s.collectionImportJobs[token]
+	if !found {
+		s.collectionImportMu.Unlock()
+		return collectionImportProgress{}, errors.New("collection import progress was not found")
+	}
+	if progress.Done {
+		s.collectionImportMu.Unlock()
+		return progress, nil
+	}
+	progress.Cancelled = true
+	progress.Phase = "cancelling"
+	progress.updatedAt = time.Now()
+	cancel := progress.cancel
+	s.collectionImportJobs[token] = progress
+	s.collectionImportMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	return progress, nil
 }
 
 func (s *service) collectionImportProgressSnapshot(
@@ -2951,6 +3023,9 @@ func (s *service) collectionImportProgressSnapshot(
 	progress, found := s.collectionImportJobs[token]
 	if !found || now.Sub(progress.updatedAt) > collectionImportProgressTTL {
 		if found {
+			if progress.cancel != nil {
+				progress.cancel()
+			}
 			delete(s.collectionImportJobs, token)
 		}
 		return collectionImportProgress{}, errors.New("collection import progress was not found")
@@ -2962,16 +3037,26 @@ func (s *service) collectionImportProgressSnapshot(
 }
 
 func (s *service) importCollectionFiles(
+	ctx context.Context,
 	rawRootPath string,
 	preset collectionPreset,
 	variables map[string]string,
 	searchToken string,
 	progressToken string,
 ) (map[string]any, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	startedAt := time.Now()
 	search, err := s.cachedCollectionSearch(
 		searchToken, rawRootPath, preset, variables, false)
 	if err != nil {
+		return nil, err
+	}
+	if err = ctx.Err(); err != nil {
 		return nil, err
 	}
 	importEntries := make([]collectionSearchEntry, 0, search.ResultCount)
@@ -3022,7 +3107,17 @@ func (s *service) importCollectionFiles(
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
-			for index := range jobs {
+			for {
+				var index int
+				var ok bool
+				select {
+				case <-ctx.Done():
+					return
+				case index, ok = <-jobs:
+					if !ok {
+						return
+					}
+				}
 				entry := importEntries[index]
 				var result collectionImportEntryResult
 				if entry.Index < 0 || entry.Index >= len(preset.Paths) {
@@ -3031,18 +3126,26 @@ func (s *service) importCollectionFiles(
 					}
 				} else {
 					result = s.parseCollectionEntry(
-						catalog, search, entry, preset.Paths[entry.Index])
+						ctx, catalog, search, entry, preset.Paths[entry.Index])
 				}
 				entryResults[index] = result
 				s.recordCollectionImportProgress(progressToken, result)
 			}
 		}()
 	}
+enqueueJobs:
 	for index := range importEntries {
-		jobs <- index
+		select {
+		case <-ctx.Done():
+			break enqueueJobs
+		case jobs <- index:
+		}
 	}
 	close(jobs)
 	workers.Wait()
+	if err = ctx.Err(); err != nil {
+		return nil, err
+	}
 	parseDurationMS := time.Since(parseStartedAt).Milliseconds()
 
 	updates := make([]map[string]any, 0, len(importEntries))
@@ -3360,6 +3463,16 @@ func (s *service) handleImportCollection(writer http.ResponseWriter, request *ht
 			return
 		}
 		sendJSON(writer, 200, map[string]any{"ok": true, "progress": progress})
+	case "cancel-import":
+		progress, err := s.cancelCollectionImport(
+			stringValue(payload["progressToken"]))
+		if err != nil {
+			sendJSON(writer, 404, map[string]any{"error": err.Error()})
+			return
+		}
+		sendJSON(writer, 200, map[string]any{
+			"ok": true, "cancelled": true, "progress": progress,
+		})
 	case "search", "preview", "single-preview", "import":
 		preset, err := normalizeCollectionPreset(payload["preset"])
 		if err != nil {
@@ -3421,13 +3534,15 @@ func (s *service) handleImportCollection(writer http.ResponseWriter, request *ht
 			sendJSON(writer, 200, result)
 			return
 		}
-		progressToken, progressErr := s.beginCollectionImportProgress(
+		progressToken, importContext, progressErr := s.beginCollectionImportProgressContext(
+			request.Context(),
 			stringValue(payload["progressToken"]))
 		if progressErr != nil {
 			sendJSON(writer, 400, map[string]any{"error": progressErr.Error()})
 			return
 		}
 		result, importErr := s.importCollectionFiles(
+			importContext,
 			stringValue(payload["rootPath"]),
 			preset,
 			variables,
@@ -3436,6 +3551,12 @@ func (s *service) handleImportCollection(writer http.ResponseWriter, request *ht
 		)
 		s.finishCollectionImportProgress(progressToken, importErr)
 		if importErr != nil {
+			if errors.Is(importErr, context.Canceled) {
+				sendJSON(writer, 409, map[string]any{
+					"error": "import cancelled", "cancelled": true,
+				})
+				return
+			}
 			sendJSON(writer, 400, map[string]any{"error": importErr.Error()})
 			return
 		}

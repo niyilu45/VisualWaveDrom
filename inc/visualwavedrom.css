@@ -3052,6 +3052,28 @@
       color: var(--text-muted);
     }
 
+    .wave-collection-import-footer {
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .wave-collection-import-progress {
+      flex: 1 1 320px;
+      min-width: 0;
+      color: var(--text-muted);
+      font-size: 0.78rem;
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
+
+    .wave-collection-import-progress.is-error {
+      color: var(--error);
+    }
+
+    .wave-collection-import-progress[hidden] {
+      display: none;
+    }
+
     @media (max-width: 720px) {
       .wave-collection-preset-workspace {
         grid-template-columns: 116px minmax(0, 1fr);

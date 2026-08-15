@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 func runTestCollectionRegexSearch(
@@ -1567,5 +1569,38 @@ func TestCollectionImportProgressRejectsInvalidToken(t *testing.T) {
 	}
 	if _, err := instance.collectionImportProgressSnapshot(""); err == nil {
 		t.Fatal("empty progress token returned a snapshot")
+	}
+}
+
+func TestCollectionImportProgressCanBeCancelled(t *testing.T) {
+	instance := &service{
+		collectionImportJobs: make(map[string]collectionImportProgress),
+	}
+	token, jobContext, err := instance.beginCollectionImportProgressContext(
+		context.Background(), "import-cancel-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	progress, err := instance.cancelCollectionImport(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !progress.Cancelled || progress.Phase != "cancelling" || progress.Done {
+		t.Fatalf("unexpected cancelling import progress: %#v", progress)
+	}
+	select {
+	case <-jobContext.Done():
+	case <-time.After(time.Second):
+		t.Fatal("collection import context was not cancelled")
+	}
+
+	instance.finishCollectionImportProgress(token, context.Canceled)
+	progress, err = instance.collectionImportProgressSnapshot(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !progress.Done || !progress.Cancelled || progress.Phase != "cancelled" ||
+		progress.Error != "" {
+		t.Fatalf("unexpected cancelled import progress: %#v", progress)
 	}
 }

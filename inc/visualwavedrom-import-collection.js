@@ -111,12 +111,18 @@
     const resultsHost = document.getElementById('wave-collection-results');
     const resultSummary = document.getElementById('wave-collection-result-summary');
     const hint = document.getElementById('wave-collection-hint');
+    const footerProgress = document.getElementById('wave-collection-import-progress');
     const cancelButton = document.getElementById('wave-collection-cancel');
     const savePresetButton = document.getElementById('wave-collection-save-preset');
     const searchButton = document.getElementById('wave-collection-search');
     const confirmButton = document.getElementById('wave-collection-confirm');
 
     let busy = false;
+    let busyAction = '';
+    let activeImportController = null;
+    let activeImportProgressToken = '';
+    let importCancelRequested = false;
+    let importCancellationAllowed = false;
     let parsedPreset = null;
     let originalPresetPath = '';
     let searchResult = null;
@@ -162,6 +168,14 @@
       hint.classList.toggle('is-info', !!message && !isError);
     }
 
+    function setFooterProgress(message, isError) {
+      if (!footerProgress) return;
+      const text = String(message || '');
+      footerProgress.textContent = text;
+      footerProgress.hidden = !text;
+      footerProgress.classList.toggle('is-error', !!text && !!isError);
+    }
+
     function progressNow() {
       return window.performance && typeof window.performance.now === 'function'
         ? window.performance.now()
@@ -185,7 +199,8 @@
         successfulFiles: Math.max(0, Number(progress.successfulFiles || 0)),
         failedFiles: Math.max(0, Number(progress.failedFiles || 0)),
         signalCount: Math.max(0, Number(progress.signalCount || 0)),
-        done: !!progress.done
+        done: !!progress.done,
+        cancelled: !!progress.cancelled
       });
       renderProgress();
     }
@@ -251,25 +266,7 @@
         message += '，' + (applyMessages[state.applyStage] || '正在写入并保存当前波形图');
       }
       message += '，已等待 ' + seconds + ' 秒';
-      setHint(message, false);
-      if (busy && state.phase === 'formula') {
-        const formulaIndex = Math.max(0, Number(state.formulaIndex || 0));
-        const totalFormulas = Math.max(0, Number(state.totalFormulas || 0));
-        confirmButton.textContent = totalFormulas > 0
-          ? ('计算公式 ' + formulaIndex + '/' + totalFormulas)
-          : '正在计算公式';
-      } else if (busy && state.phase === 'applying') {
-        const applyButtons = {
-          writing: '正在写入波形…',
-          reconciling: '正在整理数据…',
-          saving: '正在保存波形库…',
-          notifying: '正在同步窗口…',
-          finalizing: '正在完成导入…'
-        };
-        confirmButton.textContent = applyButtons[state.applyStage] || '正在写入波形…';
-      } else if (busy && total > 0) {
-        confirmButton.textContent = '导入中 ' + completed + '/' + total;
-      }
+      setFooterProgress(message, false);
     }
 
     function renderProgress() {
@@ -279,7 +276,10 @@
         renderImportProgress(seconds);
         return;
       }
-      setHint(progressMessage + (seconds ? '（已等待 ' + seconds + ' 秒，程序仍在处理）' : ''), false);
+      const message = progressMessage
+        + (seconds ? '（已等待 ' + seconds + ' 秒，程序仍在处理）' : '');
+      if (busyAction === 'import') setFooterProgress(message, false);
+      else setHint(message, false);
     }
 
     function stopImportProgressPolling() {
@@ -356,6 +356,7 @@
       progressStartedAt = 0;
       progressMessage = '';
       importProgressState = null;
+      setFooterProgress('', false);
     }
 
     function getPresetEditorValue() {
@@ -1022,11 +1023,12 @@
       return presetCodeEditor;
     }
 
-    async function post(action, payload) {
+    async function post(action, payload, options) {
       const response = await fetch('/api/import-wave-collection', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(Object.assign({ action }, payload || {}))
+        body: JSON.stringify(Object.assign({ action }, payload || {})),
+        signal: options && options.signal ? options.signal : undefined
       });
       let result = null;
       try {
@@ -1966,7 +1968,7 @@
       });
     }
 
-    async function validateSingleFileSelections(preset, variables, rootPath) {
+    async function validateSingleFileSelections(preset, variables, rootPath, signal) {
       const entries = Array.isArray(searchResult && searchResult.entries)
         ? searchResult.entries
         : [];
@@ -1992,7 +1994,7 @@
           startLine: 1,
           lineCount: 64,
           quick: true
-        });
+        }, { signal });
         const validationError = entry.hasSeq
           ? sequencePreviewError(payload.lines, entry.delimiter)
           : unsequencedPreviewError(payload.lines, entry.delimiter);
@@ -2188,7 +2190,8 @@
       variablesHost.querySelectorAll('input').forEach((input) => {
         input.disabled = busy;
       });
-      cancelButton.disabled = busy;
+      cancelButton.disabled = busy
+        && (busyAction !== 'import' || importCancelRequested || !importCancellationAllowed);
       savePresetButton.disabled = busy || !parsedPreset;
       searchButton.disabled = busy || !canSearch;
       const selection = collectionSelectionStatus();
@@ -2203,6 +2206,7 @@
 
     function setBusy(nextBusy, action) {
       busy = nextBusy;
+      busyAction = nextBusy ? String(action || '') : '';
       if (!nextBusy) stopProgress();
       searchButton.textContent = nextBusy && action === 'search' ? '正在搜索…' : '搜索数据';
       scanPresetsButton.textContent = nextBusy && action === 'scan-presets'
@@ -2211,6 +2215,7 @@
       confirmButton.textContent = nextBusy
         ? (action === 'import' ? '正在导入…' : (action === 'validate' ? '正在检查…' : '确定导入'))
         : '确定导入';
+      cancelButton.textContent = nextBusy && action === 'import' ? '取消导入' : '取消';
       savePresetButton.textContent = nextBusy && action === 'save'
         ? '正在保存…'
         : (manualSavePathMode ? '保存到此路径' : '保存预设');
@@ -3478,6 +3483,38 @@
       }
     }
 
+    function importWasCancelled(error) {
+      const message = String(error && error.message || error || '');
+      return importCancelRequested
+        || !!(error && error.name === 'AbortError')
+        || /import cancelled|导入已取消/i.test(message);
+    }
+
+    async function cancelImport() {
+      if (!busy || busyAction !== 'import' || importCancelRequested
+          || !importCancellationAllowed) return;
+      importCancelRequested = true;
+      importCancellationAllowed = false;
+      updateButtons();
+      stopProgress();
+      setFooterProgress('正在取消导入…', false);
+      const controller = activeImportController;
+      const progressToken = activeImportProgressToken;
+      const cancelRequest = progressToken
+        ? post('cancel-import', { progressToken })
+        : Promise.resolve({});
+      if (controller) controller.abort();
+      debug({ phase: 'import-cancel-requested', progressToken });
+      try {
+        await cancelRequest;
+      } catch (error) {
+        debug({
+          phase: 'import-cancel-notify-error',
+          message: error.message || String(error)
+        });
+      }
+    }
+
     async function confirmImport() {
       if (busy || !searchResult) return;
       const selection = collectionSelectionStatus();
@@ -3495,34 +3532,25 @@
         return;
       }
       const rootPath = String(rootPathInput.value || '').trim();
-      let preflightValid = false;
-      setBusy(true, 'validate');
-      setHint('正在检查第一列和文件解析设置…', false);
-      try {
-        preflightValid = await validateSingleFileSelections(preset, variables, rootPath);
-      } catch (error) {
-        const message = error.message || String(error);
-        setHint('序号设置检查失败：' + message, true);
-        status(false, '导入前检查失败：' + message);
-        debug({ phase: 'single-parser-preflight-error', message });
-      } finally {
-        setBusy(false, '');
-      }
-      if (!preflightValid) return;
-
       const contextToken = typeof settings.getContextToken === 'function'
         ? settings.getContextToken()
         : '';
-      setBusy(true, 'import');
       const fileCount = (searchResult.entries || []).filter((entry) =>
         entry.importMode !== 'formula' && entry.importMode !== 'multi-wave'
           && Array.isArray(entry.matches) && entry.matches.length > 0).length;
       const formulas = validFormulaDefinitions();
       const multiWaves = validMultiWaveDefinitions();
       const progressToken = createImportProgressToken();
-      startProgress('正在核对并解析 ' + fileCount + ' 个文件、'
-        + formulas.length + ' 个公式、' + multiWaves.length + ' 个多波形…');
-      startImportProgressPolling(progressToken, fileCount);
+      const importController = typeof window.AbortController === 'function'
+        ? new window.AbortController()
+        : null;
+      activeImportController = importController;
+      activeImportProgressToken = progressToken;
+      importCancelRequested = false;
+      importCancellationAllowed = true;
+      setBusy(true, 'import');
+      setHint('', false);
+      startProgress('正在检查第一列和文件解析设置…');
       const startedAt = progressStartedAt;
       debug({
         phase: 'import-start',
@@ -3534,6 +3562,21 @@
         hasSearchToken: !!searchResult.searchToken
       });
       try {
+        const preflightValid = await validateSingleFileSelections(
+          preset,
+          variables,
+          rootPath,
+          importController ? importController.signal : undefined
+        );
+        if (!preflightValid) return;
+        if (importCancelRequested) {
+          const cancelled = new Error('导入已取消');
+          cancelled.name = 'AbortError';
+          throw cancelled;
+        }
+        updateProgress('正在核对并解析 ' + fileCount + ' 个文件、'
+          + formulas.length + ' 个公式、' + multiWaves.length + ' 个多波形…');
+        startImportProgressPolling(progressToken, fileCount);
         const payload = fileCount > 0
           ? await post('import', {
             rootPath,
@@ -3541,7 +3584,7 @@
             variables,
             searchToken: searchResult.searchToken || '',
             progressToken
-          })
+          }, { signal: importController ? importController.signal : undefined })
           : {
             files: [],
             updates: [],
@@ -3558,6 +3601,11 @@
               done: true
             }
           };
+        if (importCancelRequested) {
+          const cancelled = new Error('导入已取消');
+          cancelled.name = 'AbortError';
+          throw cancelled;
+        }
         payload.formulas = formulas;
         payload.multiWaves = multiWaves;
         payload.updates = (Array.isArray(payload.updates) ? payload.updates : []).concat(
@@ -3592,7 +3640,12 @@
           ? '文件解析完成，正在计算公式…'
           : '文件解析完成，正在写入当前波形图…');
         const result = await settings.applyImport(payload, {
-          onProgress: applyFormulaProgress
+          onProgress: applyFormulaProgress,
+          signal: importController ? importController.signal : undefined,
+          onCancelableChange: (allowed) => {
+            importCancellationAllowed = !!allowed;
+            updateButtons();
+          }
         });
         const completedFiles = payload.progress
           ? Number(payload.progress.successfulFiles || payload.progress.completedFiles || 0)
@@ -3624,6 +3677,16 @@
         close();
       } catch (error) {
         const message = error.message || String(error);
+        if (importWasCancelled(error)) {
+          setHint('已取消导入，波形数据未写入', false);
+          status(true, '已取消预设集合导入');
+          debug({
+            phase: 'import-cancelled',
+            message,
+            progress: importProgressState
+          });
+          return;
+        }
         const entries = Array.isArray(searchResult && searchResult.entries)
           ? searchResult.entries
           : [];
@@ -3650,6 +3713,12 @@
             .map((entry) => ({ index: entry.index, hasSeq: !!entry.hasSeq }))
         });
       } finally {
+        if (activeImportController === importController) {
+          activeImportController = null;
+          activeImportProgressToken = '';
+        }
+        importCancelRequested = false;
+        importCancellationAllowed = false;
         setBusy(false, '');
       }
     }
@@ -3661,6 +3730,12 @@
         return;
       }
       busy = false;
+      busyAction = '';
+      activeImportController = null;
+      activeImportProgressToken = '';
+      importCancelRequested = false;
+      importCancellationAllowed = false;
+      setFooterProgress('', false);
       manualSavePathMode = false;
       activePresetNavigationIndex = -1;
       presetNavigationRanges = [];
@@ -3729,7 +3804,13 @@
     savePresetButton.addEventListener('click', () => { void savePreset(); });
     searchButton.addEventListener('click', () => { void searchFiles(); });
     confirmButton.addEventListener('click', () => { void confirmImport(); });
-    cancelButton.addEventListener('click', close);
+    cancelButton.addEventListener('click', () => {
+      if (busy && busyAction === 'import') {
+        void cancelImport();
+        return;
+      }
+      close();
+    });
     presetEditor.addEventListener('input', scheduleEditorParse);
     rootPathInput.addEventListener('input', () => {
       invalidateSearch('root-path-change');
