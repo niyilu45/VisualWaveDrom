@@ -2074,8 +2074,19 @@ function createWindow(payload) {
     rowStart,
     activeSession.rows.length
   );
+  const hasRequestedRows = Array.isArray(payload.rowIndices);
+  const requestedRows = hasRequestedRows
+    ? Array.from(new Set(payload.rowIndices.map((value) => Math.floor(Number(value)))
+      .filter((value) => Number.isInteger(value)
+        && value >= 0
+        && value < activeSession.rows.length)))
+    : null;
+  const rowIndices = requestedRows || Array.from(
+    { length: Math.max(0, rowEnd - rowStart) },
+    (_value, index) => rowStart + index
+  );
   const rows = [];
-  for (let index = rowStart; index < rowEnd; index += 1) {
+  rowIndices.forEach((index) => {
     const row = activeSession.rows[index];
     const mode = row.multiWave
       ? 'analog'
@@ -2103,7 +2114,7 @@ function createWindow(payload) {
         mode: 'analog',
         data: { kind: 'multi-analog', range: row.range, series }
       });
-      continue;
+      return;
     }
     const analogRow = mode === 'analog'
       ? analogRowForFormat(
@@ -2124,7 +2135,7 @@ function createWindow(payload) {
         payload.busFormats && payload.busFormats[index] || row.busFormat
       );
     rows.push({ index, mode, data });
-  }
+  });
   return { start, end, width, rowStart, rowEnd, rows };
 }
 

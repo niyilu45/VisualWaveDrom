@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260815-formula-analog-v1';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260815-overview-zoom-v1';
   const FormulaEngine = global.VisualWaveDromFormula || null;
   const DEFAULT_ROW_HEIGHT = 42;
   const DEFAULT_MULTI_WAVE_ROW_HEIGHT = 68;
@@ -577,6 +577,8 @@
       this.cursorReadoutQueued = false;
       this.selectedPoint = null;
       this.columnSelection = null;
+      this.transientStatusTimer = 0;
+      this.transientStatusRestore = null;
       this.lockedColumns = new Set();
       this.undoStack = [];
       this.redoStack = [];
@@ -594,6 +596,10 @@
       this.windowBuildKey = '';
       this.windowBuildPromise = null;
       this.windowBackgroundPromise = null;
+      this.overviewData = null;
+      this.overviewDataCacheKey = '';
+      this.overviewDataRequestSequence = 0;
+      this.overviewDataRequestPromise = null;
       this.lastSynchronizedScrollTop = Number.NaN;
       this.verticalScrollFrame = 0;
       this.pendingVerticalScrollOptions = null;
@@ -635,6 +641,9 @@
       this.resizeObserver = null;
       this.scheduleWindowRequest = debounce(() => this.requestWindow(), 24);
       this.scheduleBuild = debounce(() => this.rebuildOutput(), 80);
+      this.scheduleOverviewDataRequest = debounce(() => {
+        void this.requestOverviewData();
+      }, 60);
       this.scheduleFormulaRefresh = debounce(() => {
         void this.refreshFormulaSession({ preservePopover: true, persist: true });
       }, 260);
@@ -887,6 +896,9 @@
                     id="scope-expand-all" title="恢复所有已收起的信号行" disabled>全部展开</button>
                 <button type="button" class="scope-command-btn scope-overview-fit-btn"
                     id="scope-fit-cursors" title="显示 A、B 游标之间的区域">适应游标</button>
+                <button type="button" class="scope-command-btn scope-overview-fit-btn"
+                    id="scope-fit-selection" title="显示当前框选区域（快捷键 Z）"
+                    aria-keyshortcuts="Z">适应选区</button>
               </div>
             </div>
           </aside>
@@ -1213,6 +1225,9 @@
       this.root.querySelector('#scope-fit').addEventListener('click', () => this.fit());
       this.root.querySelector('#scope-fit-cursors').addEventListener('click', () => {
         this.fitToCursors();
+      });
+      this.root.querySelector('#scope-fit-selection').addEventListener('click', () => {
+        this.fitToSelection();
       });
       this.expandAllRowsButton.addEventListener('click', () => this.expandAllRows());
       this.addSignalButton.addEventListener('click', () => {
@@ -1605,6 +1620,10 @@
             && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
           event.preventDefault();
           void this.navigateActiveCursor(event.key === 'ArrowLeft' ? -1 : 1);
+        } else if (!event.ctrlKey && !event.metaKey && !event.altKey
+            && event.key.toLowerCase() === 'z' && target === this.plotCanvas) {
+          event.preventDefault();
+          this.fitToSelection();
         } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
           event.preventDefault();
           if (event.shiftKey) void this.redo();
@@ -1652,6 +1671,7 @@
       }
       global.addEventListener('beforeunload', this.handleBeforeUnload);
       global.addEventListener('pagehide', () => {
+        if (this.transientStatusTimer) global.clearTimeout(this.transientStatusTimer);
         if (this.cursorReadoutFrame) global.cancelAnimationFrame(this.cursorReadoutFrame);
         if (this.overviewWindowRequestFrame) {
           global.cancelAnimationFrame(this.overviewWindowRequestFrame);
@@ -1665,8 +1685,32 @@
 
     setStatus(message, error) {
       if (!this.statusEl) return;
+      if (this.transientStatusTimer) {
+        global.clearTimeout(this.transientStatusTimer);
+        this.transientStatusTimer = 0;
+      }
+      this.transientStatusRestore = null;
       this.statusEl.textContent = String(message || '');
       this.statusEl.classList.toggle('error', !!error);
+    }
+
+    showTransientStatus(message, error, duration) {
+      if (!this.statusEl) return;
+      const restore = this.transientStatusRestore || {
+        message: this.statusEl.textContent,
+        error: this.statusEl.classList.contains('error')
+      };
+      this.setStatus(message, error);
+      this.transientStatusRestore = restore;
+      const transientMessage = String(message || '');
+      this.transientStatusTimer = global.setTimeout(() => {
+        const previous = this.transientStatusRestore;
+        this.transientStatusTimer = 0;
+        this.transientStatusRestore = null;
+        if (!previous || this.statusEl.textContent !== transientMessage) return;
+        this.statusEl.textContent = previous.message;
+        this.statusEl.classList.toggle('error', !!previous.error);
+      }, Math.max(0, Number(duration) || 0));
     }
 
     hasUnsavedChanges() {
@@ -1796,6 +1840,7 @@
       this.restoreVerticalScrollAnchor(anchor);
       this.positionPlotCanvas();
       this.scheduleWindowRequest();
+      this.scheduleOverviewDataRequest();
       this.updateCollapsedRowControls();
       this.updateMeasurements();
       this.draw();
@@ -1818,6 +1863,7 @@
       this.restoreVerticalScrollAnchor(anchor);
       this.positionPlotCanvas();
       this.scheduleWindowRequest();
+      this.scheduleOverviewDataRequest();
       this.updateCollapsedRowControls();
       this.draw();
       this.setStatus('已展开全部 ' + expandedCount + ' 个信号行');
@@ -3867,6 +3913,7 @@
       this.plotViewport.scrollTop = scrollTop;
       this.signalScroll.scrollTop = scrollTop;
       this.scheduleWindowRequest();
+      this.scheduleOverviewDataRequest();
       if (this.simplified) void this.runSimplify(false, { background: true });
       const nextAnchor = this.signalList.querySelector(
         '[data-scope-display-row="' + index + '"]'
@@ -3896,6 +3943,7 @@
       this.markDraftDirty('presentation');
       this.cursorNavigationSequence += 1;
       this.scheduleWindowRequest();
+      this.scheduleOverviewDataRequest();
       this.scheduleBuild();
       void this.updateCursorReadout();
       this.draw();
@@ -3930,6 +3978,7 @@
       this.markDraftDirty('presentation');
       this.cursorNavigationSequence += 1;
       this.scheduleWindowRequest();
+      this.scheduleOverviewDataRequest();
       void this.updateCursorReadout();
       if (this.simplified) void this.runSimplify(false, { background: true });
       const typeLabel = this.signalAnalogTypeSelect.options[
@@ -4214,6 +4263,7 @@
       this.resizeCanvas(this.overviewCanvas, this.plotViewport.clientWidth, OVERVIEW_HEIGHT);
       this.positionPlotCanvas();
       this.scheduleWindowRequest();
+      this.scheduleOverviewDataRequest();
       this.draw();
     }
 
@@ -4227,6 +4277,10 @@
       this.windowBuildKey = '';
       this.windowBuildPromise = null;
       this.windowBackgroundPromise = null;
+      this.overviewData = null;
+      this.overviewDataCacheKey = '';
+      this.overviewDataRequestSequence += 1;
+      this.overviewDataRequestPromise = null;
       this.windowData = null;
       this.rowStart = 0;
       this.rowEnd = 0;
@@ -4364,6 +4418,78 @@
       };
     }
 
+    overviewRowIndices() {
+      if (!this.meta || !Array.isArray(this.meta.rows)) return [];
+      return this.meta.rows
+        .map((row) => row.index)
+        .filter((rowIndex) => !this.isRowCollapsed(rowIndex))
+        .slice(0, 8);
+    }
+
+    overviewDataRequestConfig() {
+      const rowIndices = this.overviewRowIndices();
+      return {
+        start: 0,
+        end: this.meta.totalColumns,
+        width: Math.max(32, Math.floor(
+          this.overviewCanvas.clientWidth || this.plotViewport.clientWidth || 1
+        )),
+        rowIndices,
+        modes: Object.assign({}, this.modes),
+        busFormats: clone(this.busFormats),
+        analogFormats: clone(this.analogFormats)
+      };
+    }
+
+    buildOverviewDataRequestKey(config) {
+      return JSON.stringify([
+        this.windowSessionRevision,
+        config.end,
+        config.width,
+        config.rowIndices,
+        config.modes,
+        config.busFormats,
+        config.analogFormats
+      ]);
+    }
+
+    async requestOverviewData() {
+      if (!this.meta || !this.overviewCanvas.clientWidth) return;
+      const config = this.overviewDataRequestConfig();
+      const key = this.buildOverviewDataRequestKey(config);
+      if (this.overviewData && this.overviewData.requestKey === key) return;
+      if (this.overviewDataCacheKey === key && this.overviewDataRequestPromise) {
+        return this.overviewDataRequestPromise;
+      }
+      const sequence = ++this.overviewDataRequestSequence;
+      this.overviewDataCacheKey = key;
+      const promise = this.worker.call('window', config);
+      this.overviewDataRequestPromise = promise;
+      try {
+        const result = await promise;
+        if (sequence !== this.overviewDataRequestSequence
+            || key !== this.overviewDataCacheKey) return;
+        this.overviewData = Object.assign({}, result, { requestKey: key });
+        this.drawOverview();
+        this.log('scope-overview', {
+          phase: 'ready',
+          rows: Array.isArray(result.rows) ? result.rows.length : 0,
+          totalColumns: this.meta.totalColumns,
+          width: config.width
+        });
+      } catch (error) {
+        if (sequence !== this.overviewDataRequestSequence) return;
+        this.log('scope-overview', {
+          phase: 'error',
+          message: error && error.message ? error.message : String(error)
+        });
+      } finally {
+        if (this.overviewDataRequestPromise === promise) {
+          this.overviewDataRequestPromise = null;
+        }
+      }
+    }
+
     windowRequestKey(config) {
       return JSON.stringify([
         this.windowSessionRevision,
@@ -4463,11 +4589,13 @@
         complete: config.rowCount === 0,
         viewportKey: key
       };
-      this.windowData = cache;
-      this.rowStart = 0;
-      this.rowEnd = config.rowCount;
-      this.draw({ plotOnly: true });
-      if (!config.rowCount) return;
+      if (!config.rowCount) {
+        this.windowData = cache;
+        this.rowStart = 0;
+        this.rowEnd = 0;
+        this.draw({ plotOnly: true });
+        return;
+      }
 
       const initialResult = await this.worker.call(
         'window',
@@ -4475,6 +4603,9 @@
       );
       if (sequence !== this.windowRequestSequence || key !== this.windowBuildKey) return;
       this.mergeWindowResult(cache, initialResult);
+      this.windowData = cache;
+      this.rowStart = 0;
+      this.rowEnd = config.rowCount;
       this.draw({ plotOnly: true });
       this.log('scope-window', {
         phase: 'visible-ready',
@@ -5568,6 +5699,14 @@
       if (!this.meta || !this.plotViewport.clientWidth) return;
       const plotOnly = !!(options && options.plotOnly);
       if (!plotOnly) this.drawAxis();
+      const hasStaleViewportFrame = this.windowData
+        && (Math.abs(Number(this.windowData.start) - this.viewStart) > 1e-7
+          || Math.abs(Number(this.windowData.end) - this.viewEnd) > 1e-7
+          || Number(this.windowData.width) !== Math.floor(this.plotViewport.clientWidth));
+      if (hasStaleViewportFrame) {
+        if (!plotOnly) this.drawOverview();
+        return;
+      }
       const resized = this.resizeCanvas(
         this.plotCanvas,
         this.plotViewport.clientWidth,
@@ -5720,6 +5859,40 @@
       context.clearRect(0, 0, width, height);
       context.fillStyle = '#f8f9fa';
       context.fillRect(0, 0, width, height);
+      const overviewRows = !this.simplified && this.overviewData
+        && Array.isArray(this.overviewData.rows)
+        ? this.overviewData.rows.filter((row) => (
+          row && !this.isRowCollapsed(row.index)
+        )).slice(0, 8)
+        : [];
+      if (overviewRows.length) {
+        const savedViewStart = this.viewStart;
+        const savedViewEnd = this.viewEnd;
+        this.viewStart = 0;
+        this.viewEnd = this.meta.totalColumns;
+        try {
+          overviewRows.forEach((rowResult, visibleRowIndex) => {
+            const rowIndex = rowResult.index;
+            const yTop = 5 + visibleRowIndex
+              * Math.max(6, (height - 10) / Math.max(1, overviewRows.length));
+            const yBottom = yTop
+              + Math.max(4, (height - 14) / Math.max(1, overviewRows.length) - 2);
+            this.drawOverviewRowBackground(context, rowIndex, yTop, yBottom, width);
+            this.drawSegments(
+              context,
+              rowResult,
+              rowIndex,
+              yTop,
+              yBottom,
+              width,
+              this.rowWaveColor(rowIndex)
+            );
+          });
+        } finally {
+          this.viewStart = savedViewStart;
+          this.viewEnd = savedViewEnd;
+        }
+      }
       const rows = this.simplified
         ? this.simplified.model.rows.filter((row) => !this.isRowCollapsed(row.index)).slice(0, 8)
         : [];
@@ -5946,6 +6119,33 @@
         '已适应游标区域：A ' + this.formatTime(this.cursorA)
         + '，B ' + this.formatTime(this.cursorB)
       );
+    }
+
+    fitToSelection() {
+      const selection = this.columnSelection;
+      const start = Number(selection && selection.start);
+      const end = Number(selection && selection.end);
+      if (!this.meta || !Number.isFinite(start) || !Number.isFinite(end)
+          || end - start <= 1) {
+        this.showTransientStatus('请选中一段波形', true, 1000);
+        return false;
+      }
+      const total = Math.max(1, this.meta.totalColumns);
+      const nextStart = clamp(start, 0, total);
+      const nextEnd = clamp(end, nextStart, total);
+      if (nextEnd - nextStart <= 1) {
+        this.showTransientStatus('请选中一段波形', true, 1000);
+        return false;
+      }
+      this.viewStart = nextStart;
+      this.viewEnd = nextEnd;
+      this.scheduleWindowRequest();
+      this.draw();
+      this.setStatus(
+        '已适应选区：第 ' + (Math.floor(nextStart) + 1)
+        + '-' + Math.ceil(nextEnd) + ' 列'
+      );
+      return true;
     }
 
     selectionZoomAnchor() {
