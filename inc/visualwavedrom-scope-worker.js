@@ -1366,6 +1366,11 @@ async function createSession(content, transientState, previousSession) {
         dependencyVersions: entry ? entry.dependencyVersions : {}
       };
       if (!item.valid || !entry) return;
+      // Formula output replaces the row's sampled data. Any analog or
+      // transition result cached while the row was empty is now stale.
+      row.analogCache = new Map();
+      row.sampleTransitionCache = new Map();
+      row.conditionTransitionCache = new Map();
       row.sampleStep = Number(entry.sampleStep || 0.5);
       let generatedSegments;
       if (row.mode === 'analog') {

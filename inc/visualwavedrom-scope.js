@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260817-analog-changepoints-v1';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260817-formula-cache-v2';
   const FormulaEngine = global.VisualWaveDromFormula || null;
   const DEFAULT_ROW_HEIGHT = 42;
   const DEFAULT_MULTI_WAVE_ROW_HEIGHT = 68;
@@ -4164,6 +4164,41 @@
       return { context, width: cssWidth, height: cssHeight, dpr };
     }
 
+    capturePlotPanFrame() {
+      if (!this.plotCanvas || !this.plotCanvas.width || !this.plotCanvas.height) return null;
+      const snapshot = document.createElement('canvas');
+      snapshot.width = this.plotCanvas.width;
+      snapshot.height = this.plotCanvas.height;
+      snapshot.getContext('2d').drawImage(this.plotCanvas, 0, 0);
+      return snapshot;
+    }
+
+    drawPlotPanPreview() {
+      const drag = this.drag;
+      if (!drag || drag.kind !== 'pan' || !drag.previewCanvas) return false;
+      const resized = this.resizeCanvas(
+        this.plotCanvas,
+        this.plotViewport.clientWidth,
+        Math.max(1, this.plotViewport.clientHeight)
+      );
+      const context = resized.context;
+      context.clearRect(0, 0, resized.width, resized.height);
+      context.fillStyle = '#ffffff';
+      context.fillRect(0, 0, resized.width, resized.height);
+      context.drawImage(
+        drag.previewCanvas,
+        0,
+        0,
+        drag.previewCanvas.width,
+        drag.previewCanvas.height,
+        Number(drag.previewOffsetX) || 0,
+        0,
+        resized.width,
+        resized.height
+      );
+      return true;
+    }
+
     updateLayout() {
       if (!this.meta || !this.plotViewport.clientWidth) return;
       this.resizeCanvas(this.axisCanvas, this.plotViewport.clientWidth, AXIS_HEIGHT);
@@ -5712,6 +5747,10 @@
       const overlayOnly = !!(options && options.overlayOnly);
       const plotOnly = overlayOnly || !!(options && options.plotOnly);
       if (!plotOnly) this.drawAxis();
+      if (this.drawPlotPanPreview()) {
+        if (!plotOnly) this.drawOverview();
+        return;
+      }
       const hasStaleViewportFrame = this.windowData
         && (Math.abs(Number(this.windowData.start) - this.viewStart) > 1e-7
           || Math.abs(Number(this.windowData.end) - this.viewEnd) > 1e-7
@@ -6340,11 +6379,16 @@
       );
       event.preventDefault();
       if (event.button === 1 || event.shiftKey) {
+        this.pauseBackgroundWindowWork(200);
         this.drag = {
           kind: 'pan',
           pointerId: event.pointerId,
           startX: event.clientX,
           viewStart: this.viewStart,
+          viewEnd: this.viewEnd,
+          canvasWidth: Math.max(1, rect.width),
+          previewCanvas: this.capturePlotPanFrame(),
+          previewOffsetX: 0,
           moved: false
         };
         this.plotCanvas.classList.add('dragging-pan');
@@ -6455,6 +6499,26 @@
     }
 
     onPlotPointerMove(event) {
+      if (this.drag && this.drag.kind === 'pan') {
+        if (this.drag.pointerId !== event.pointerId) return;
+        event.preventDefault();
+        const delta = event.clientX - this.drag.startX;
+        if (Math.abs(delta) > 3) this.drag.moved = true;
+        const span = this.drag.viewEnd - this.drag.viewStart;
+        const start = clamp(
+          this.drag.viewStart - delta / this.drag.canvasWidth * span,
+          0,
+          Math.max(0, this.meta.totalColumns - span)
+        );
+        if (Math.abs(start - this.viewStart) < 1e-9) return;
+        this.viewStart = start;
+        this.viewEnd = start + span;
+        this.drag.previewOffsetX = span > 0
+          ? (this.drag.viewStart - start) / span * this.drag.canvasWidth
+          : 0;
+        this.draw();
+        return;
+      }
       const rect = this.plotCanvas.getBoundingClientRect();
       const x = event.clientX - rect.left;
       if (!this.drag) {
@@ -6519,19 +6583,6 @@
         this.draw();
         return;
       }
-      const delta = event.clientX - this.drag.startX;
-      if (Math.abs(delta) > 3) this.drag.moved = true;
-      const span = this.viewEnd - this.viewStart;
-      const start = clamp(
-        this.drag.viewStart - delta / Math.max(1, this.plotCanvas.clientWidth) * span,
-        0,
-        Math.max(0, this.meta.totalColumns - span)
-      );
-      this.pauseBackgroundWindowWork(140);
-      this.viewStart = start;
-      this.viewEnd = start + span;
-      this.scheduleWindowRequest();
-      this.draw();
     }
 
     onPlotPointerUp(event) {
@@ -6540,6 +6591,12 @@
       try { this.plotCanvas.releasePointerCapture(event.pointerId); } catch (_error) {}
       this.drag = null;
       this.plotCanvas.classList.remove('dragging-pan', 'dragging-cursor', 'cursor-hover');
+      if (drag.kind === 'pan') {
+        this.pauseBackgroundWindowWork(100);
+        this.scheduleWindowRequest();
+        this.draw();
+        return;
+      }
       if (drag.kind === 'cursor') {
         if (drag.moved) {
           void this.snapActiveCursorPosition(drag.column, drag.rowIndex);
@@ -6581,9 +6638,14 @@
 
     cancelPlotDrag(event) {
       if (!this.drag || this.drag.pointerId !== event.pointerId) return;
+      const drag = this.drag;
       try { this.plotCanvas.releasePointerCapture(event.pointerId); } catch (_error) {}
       this.drag = null;
       this.plotCanvas.classList.remove('dragging-pan', 'dragging-cursor', 'cursor-hover');
+      if (drag.kind === 'pan') {
+        this.pauseBackgroundWindowWork(100);
+        this.scheduleWindowRequest();
+      }
       this.draw();
     }
 
