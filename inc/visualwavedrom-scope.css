@@ -745,6 +745,7 @@ body.scope-row-dragging * {
   line-height: 14px;
   text-align: left;
   cursor: grab;
+  touch-action: none;
   user-select: none;
 }
 
@@ -784,6 +785,14 @@ body.scope-row-dragging * {
   box-shadow: inset 0 0 0 1px #2f73bf;
   cursor: grabbing;
   opacity: 0.92;
+}
+
+.scope-multi-wave-legend-item.is-drop-before {
+  box-shadow: inset 0 2px 0 #2f73bf;
+}
+
+.scope-multi-wave-legend-item.is-drop-after {
+  box-shadow: inset 0 -2px 0 #2f73bf;
 }
 
 body.scope-multi-wave-legend-dragging,

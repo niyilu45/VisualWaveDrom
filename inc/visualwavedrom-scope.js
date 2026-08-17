@@ -15,6 +15,8 @@
   const OVERVIEW_HEIGHT = 76;
   const MAX_HISTORY = 100;
   const CURSOR_HIT_RADIUS = 10;
+  const PAN_PREFETCH_VIEWPORTS = 1;
+  const PAN_BUFFER_MAX_CSS_WIDTH = 8192;
 
   function scopeStartupElapsedMs() {
     const state = global.__visualWaveDromScopeBootstrap;
@@ -655,6 +657,8 @@
       this.plotBaseCanvas = null;
       this.plotBaseCacheKey = '';
       this.plotBaseRevision = 0;
+      this.plotPanBuffer = null;
+      this.plotPanBufferTimer = 0;
       this.backgroundWindowPausedUntil = 0;
       this.buildSequence = 0;
       this.drag = null;
@@ -1457,10 +1461,24 @@
         this.finishRowResize(event);
         this.finishSignalRowDrag(event, true);
       });
+      const ownerDocument = this.root.ownerDocument || document;
+      ownerDocument.addEventListener('pointerup', (event) => {
+        this.finishMultiWaveLegendDrag(event, false);
+      }, true);
+      ownerDocument.addEventListener('pointercancel', (event) => {
+        this.finishMultiWaveLegendDrag(event, true);
+      }, true);
       this.signalList.addEventListener('lostpointercapture', (event) => {
         if (this.multiWaveLegendDrag
             && this.multiWaveLegendDrag.pointerId === event.pointerId) {
-          this.finishMultiWaveLegendDrag(event, true);
+          const drag = this.multiWaveLegendDrag;
+          this.log('scope-multi-wave-legend', {
+            phase: 'capture-lost',
+            rowId: drag.rowId,
+            sourceName: drag.sourceName,
+            started: drag.started
+          });
+          this.finishMultiWaveLegendDrag(event, !drag.started);
         }
         if (this.signalRowDrag && this.signalRowDrag.pointerId === event.pointerId) {
           this.finishSignalRowDrag(event, true);
@@ -3076,8 +3094,12 @@
       const row = this.meta.rows[rowIndex];
       const legend = item.closest('.scope-multi-wave-legend');
       if (!row || !legend || !sourceName) return;
+      event.preventDefault();
       event.stopPropagation();
       const rowId = String(row.rowId || ('source:' + row.index));
+      const initialOrder = Array.from(legend.querySelectorAll(
+        '[data-scope-multi-wave-legend-item]'
+      )).map((entry) => String(entry.dataset.scopeMultiWaveName || ''));
       this.setActiveCursorRow(rowIndex);
       this.multiWaveLegendHover = { rowId, sourceName };
       this.multiWaveLegendDrag = {
@@ -3088,10 +3110,15 @@
         startX: event.clientX,
         startY: event.clientY,
         started: false,
+        initialOrder,
+        targetIndex: Math.max(0, initialOrder.indexOf(sourceName)),
         item,
         legend
       };
       try { item.setPointerCapture(event.pointerId); } catch (_error) {}
+      this.log('scope-multi-wave-legend', {
+        phase: 'drag-ready', rowId, sourceName, order: initialOrder.slice()
+      });
     }
 
     moveMultiWaveLegendDrag(event) {
@@ -3103,10 +3130,14 @@
         drag.started = true;
         drag.item.classList.add('is-dragging');
         document.body.classList.add('scope-multi-wave-legend-dragging');
+        this.log('scope-multi-wave-legend', {
+          phase: 'drag-start', rowId: drag.rowId, sourceName: drag.sourceName
+        });
         this.draw();
       }
       event.preventDefault();
       event.stopPropagation();
+      drag.item.style.transform = 'translateY(' + (event.clientY - drag.startY) + 'px)';
       const candidates = Array.from(drag.legend.querySelectorAll(
         '[data-scope-multi-wave-legend-item]'
       )).filter((item) => item !== drag.item);
@@ -3114,8 +3145,12 @@
         const rect = item.getBoundingClientRect();
         return event.clientY < rect.top + rect.height / 2;
       });
-      if (before) drag.legend.insertBefore(drag.item, before);
-      else drag.legend.appendChild(drag.item);
+      drag.legend.querySelectorAll('.is-drop-before, .is-drop-after').forEach((item) => {
+        item.classList.remove('is-drop-before', 'is-drop-after');
+      });
+      drag.targetIndex = before ? candidates.indexOf(before) : candidates.length;
+      if (before) before.classList.add('is-drop-before');
+      else if (candidates.length) candidates[candidates.length - 1].classList.add('is-drop-after');
       const legendRect = drag.legend.getBoundingClientRect();
       if (event.clientY < legendRect.top + 14) drag.legend.scrollTop -= 8;
       else if (event.clientY > legendRect.bottom - 14) drag.legend.scrollTop += 8;
@@ -3129,6 +3164,10 @@
         try { drag.item.releasePointerCapture(event.pointerId); } catch (_error) {}
       }
       drag.item.classList.remove('is-dragging');
+      drag.item.style.transform = '';
+      drag.legend.querySelectorAll('.is-drop-before, .is-drop-after').forEach((item) => {
+        item.classList.remove('is-drop-before', 'is-drop-after');
+      });
       document.body.classList.remove('scope-multi-wave-legend-dragging');
       if (!drag.started) {
         if (!drag.item.matches(':hover')) {
@@ -3160,9 +3199,15 @@
         this.draw();
         return;
       }
-      const order = Array.from(drag.legend.querySelectorAll(
-        '[data-scope-multi-wave-legend-item]'
-      )).map((item) => String(item.dataset.scopeMultiWaveName || ''));
+      const order = drag.initialOrder.filter((name) => name !== drag.sourceName);
+      order.splice(clamp(drag.targetIndex, 0, order.length), 0, drag.sourceName);
+      this.log('scope-multi-wave-legend', {
+        phase: 'drag-finish',
+        rowId: drag.rowId,
+        sourceName: drag.sourceName,
+        targetIndex: drag.targetIndex,
+        order: order.slice()
+      });
       this.applyMultiWaveLegendOrder(drag.rowIndex, order);
     }
 
@@ -4148,8 +4193,11 @@
       }, (clear ? '已清除 ' : '已设置 ') + row.name + ' 指定列的背景色');
     }
 
-    resizeCanvas(canvas, width, height) {
-      const dpr = Math.max(1, Math.min(2, global.devicePixelRatio || 1));
+    resizeCanvas(canvas, width, height, pixelRatio) {
+      const requestedPixelRatio = Number(pixelRatio);
+      const dpr = Number.isFinite(requestedPixelRatio)
+        ? Math.max(1, Math.min(2, requestedPixelRatio))
+        : Math.max(1, Math.min(2, global.devicePixelRatio || 1));
       const cssWidth = Math.max(1, Math.floor(width));
       const cssHeight = Math.max(1, Math.floor(height));
       if (canvas.width !== Math.floor(cssWidth * dpr)
@@ -4164,18 +4212,118 @@
       return { context, width: cssWidth, height: cssHeight, dpr };
     }
 
+    windowDataCoversRange(start, end) {
+      const windowStart = Number(this.windowData && this.windowData.start);
+      const windowEnd = Number(this.windowData && this.windowData.end);
+      return Number.isFinite(windowStart)
+        && Number.isFinite(windowEnd)
+        && windowStart <= Number(start) + 1e-7
+        && windowEnd >= Number(end) - 1e-7;
+    }
+
+    plotPanBufferKey() {
+      if (!this.windowData || !this.windowDataCoversRange(this.viewStart, this.viewEnd)) return '';
+      const visible = this.visibleRows();
+      const visibleRowsReady = [];
+      for (let index = visible.start; index < visible.end; index += 1) {
+        visibleRowsReady.push(this.windowData.rows[index] ? 1 : 0);
+      }
+      return [
+        this.windowSessionRevision,
+        this.windowData.viewportKey || '',
+        this.windowData.start,
+        this.windowData.end,
+        this.windowData.width,
+        this.plotBaseRevision,
+        this.plotViewport.clientWidth,
+        this.plotViewport.clientHeight,
+        Math.round(this.plotViewport.scrollTop * 100) / 100,
+        visible.start,
+        visible.end,
+        visibleRowsReady.join('')
+      ].join('|');
+    }
+
+    buildPlotPanBuffer() {
+      const key = this.plotPanBufferKey();
+      if (!key) return null;
+      if (this.plotPanBuffer && this.plotPanBuffer.key === key) return this.plotPanBuffer;
+      const start = Number(this.windowData.start);
+      const end = Number(this.windowData.end);
+      const width = clamp(
+        Math.round(Number(this.windowData.width) || this.plotViewport.clientWidth),
+        Math.max(1, Math.floor(this.plotViewport.clientWidth)),
+        PAN_BUFFER_MAX_CSS_WIDTH
+      );
+      const height = Math.max(1, Math.floor(this.plotViewport.clientHeight));
+      const canvas = document.createElement('canvas');
+      const savedStart = this.viewStart;
+      const savedEnd = this.viewEnd;
+      this.viewStart = start;
+      this.viewEnd = end;
+      try {
+        this.drawNow({
+          plotOnly: true,
+          isolated: true,
+          renderCanvas: canvas,
+          renderWidth: width,
+          renderHeight: height,
+          renderPixelRatio: 1,
+          skipPanPreview: true
+        });
+      } finally {
+        this.viewStart = savedStart;
+        this.viewEnd = savedEnd;
+      }
+      this.plotPanBuffer = { key, canvas, start, end, width, height };
+      this.log('scope-pan', {
+        phase: 'buffer-ready',
+        start,
+        end,
+        width,
+        viewportStart: savedStart,
+        viewportEnd: savedEnd
+      });
+      return this.plotPanBuffer;
+    }
+
+    schedulePlotPanBuffer() {
+      if (this.drag && this.drag.kind === 'pan') return;
+      const currentRequestKey = this.windowRequestKey(this.windowRequestConfig());
+      if (!this.windowData || this.windowData.viewportKey !== currentRequestKey) return;
+      const key = this.plotPanBufferKey();
+      if (!key || (this.plotPanBuffer && this.plotPanBuffer.key === key)) return;
+      if (this.plotPanBufferTimer) return;
+      this.plotPanBufferTimer = global.setTimeout(() => {
+        this.plotPanBufferTimer = 0;
+        if (!this.drag) this.buildPlotPanBuffer();
+      }, 0);
+    }
+
     capturePlotPanFrame() {
+      if (this.plotPanBufferTimer) global.clearTimeout(this.plotPanBufferTimer);
+      this.plotPanBufferTimer = 0;
+      const buffer = this.buildPlotPanBuffer();
+      if (buffer) return buffer;
       if (!this.plotCanvas || !this.plotCanvas.width || !this.plotCanvas.height) return null;
       const snapshot = document.createElement('canvas');
       snapshot.width = this.plotCanvas.width;
       snapshot.height = this.plotCanvas.height;
       snapshot.getContext('2d').drawImage(this.plotCanvas, 0, 0);
-      return snapshot;
+      return {
+        key: 'current-frame',
+        canvas: snapshot,
+        start: this.viewStart,
+        end: this.viewEnd,
+        width: this.plotViewport.clientWidth,
+        height: this.plotViewport.clientHeight
+      };
     }
 
     drawPlotPanPreview() {
       const drag = this.drag;
-      if (!drag || drag.kind !== 'pan' || !drag.previewCanvas) return false;
+      const buffer = drag && drag.previewBuffer;
+      if (!drag || drag.kind !== 'pan' || !buffer || !buffer.canvas) return false;
       const resized = this.resizeCanvas(
         this.plotCanvas,
         this.plotViewport.clientWidth,
@@ -4185,17 +4333,27 @@
       context.clearRect(0, 0, resized.width, resized.height);
       context.fillStyle = '#ffffff';
       context.fillRect(0, 0, resized.width, resized.height);
-      context.drawImage(
-        drag.previewCanvas,
-        0,
-        0,
-        drag.previewCanvas.width,
-        drag.previewCanvas.height,
-        Number(drag.previewOffsetX) || 0,
-        0,
-        resized.width,
-        resized.height
-      );
+      const viewSpan = Math.max(1e-9, this.viewEnd - this.viewStart);
+      const bufferSpan = Math.max(1e-9, buffer.end - buffer.start);
+      const visibleStart = Math.max(this.viewStart, buffer.start);
+      const visibleEnd = Math.min(this.viewEnd, buffer.end);
+      if (visibleEnd > visibleStart + 1e-9) {
+        const sourceX = (visibleStart - buffer.start) / bufferSpan * buffer.canvas.width;
+        const sourceWidth = (visibleEnd - visibleStart) / bufferSpan * buffer.canvas.width;
+        const destinationX = (visibleStart - this.viewStart) / viewSpan * resized.width;
+        const destinationWidth = (visibleEnd - visibleStart) / viewSpan * resized.width;
+        context.drawImage(
+          buffer.canvas,
+          sourceX,
+          0,
+          sourceWidth,
+          buffer.canvas.height,
+          destinationX,
+          0,
+          destinationWidth,
+          resized.height
+        );
+      }
       return true;
     }
 
@@ -4220,6 +4378,9 @@
 
     resetWindowCache() {
       if (this.worker) this.worker.cancelWindowWork();
+      if (this.plotPanBufferTimer) global.clearTimeout(this.plotPanBufferTimer);
+      this.plotPanBufferTimer = 0;
+      this.plotPanBuffer = null;
       this.windowSessionRevision += 1;
       this.windowRequestSequence += 1;
       this.visibleWindowRequestSequence += 1;
@@ -4384,10 +4545,21 @@
     }
 
     windowRequestConfig() {
+      const viewportWidth = Math.max(1, Math.floor(this.plotViewport.clientWidth));
+      const viewportSpan = Math.max(1e-9, this.viewEnd - this.viewStart);
+      const totalColumns = Math.max(viewportSpan, Number(this.meta.totalColumns) || viewportSpan);
+      const margin = viewportSpan * PAN_PREFETCH_VIEWPORTS;
+      const start = clamp(this.viewStart - margin, 0, Math.max(0, totalColumns - viewportSpan));
+      const end = clamp(this.viewEnd + margin, start + viewportSpan, totalColumns);
+      const width = clamp(
+        Math.round(viewportWidth * (end - start) / viewportSpan),
+        viewportWidth,
+        PAN_BUFFER_MAX_CSS_WIDTH
+      );
       return {
-        start: this.viewStart,
-        end: this.viewEnd,
-        width: Math.max(1, Math.floor(this.plotViewport.clientWidth)),
+        start,
+        end,
+        width,
         rowCount: this.meta.rows.length,
         modes: Object.assign({}, this.modes),
         busFormats: clone(this.busFormats),
@@ -5744,25 +5916,30 @@
 
     drawNow(options) {
       if (!this.meta || !this.plotViewport.clientWidth) return;
-      const overlayOnly = !!(options && options.overlayOnly);
-      const plotOnly = overlayOnly || !!(options && options.plotOnly);
+      const settings = options || {};
+      const isolated = !!settings.isolated;
+      const overlayOnly = !isolated && !!settings.overlayOnly;
+      const plotOnly = isolated || overlayOnly || !!settings.plotOnly;
       if (!plotOnly) this.drawAxis();
-      if (this.drawPlotPanPreview()) {
+      if (!isolated && !settings.skipPanPreview && this.drawPlotPanPreview()) {
         if (!plotOnly) this.drawOverview();
         return;
       }
       const hasStaleViewportFrame = this.windowData
-        && (Math.abs(Number(this.windowData.start) - this.viewStart) > 1e-7
-          || Math.abs(Number(this.windowData.end) - this.viewEnd) > 1e-7
-          || Number(this.windowData.width) !== Math.floor(this.plotViewport.clientWidth));
+        && !this.windowDataCoversRange(this.viewStart, this.viewEnd);
       if (hasStaleViewportFrame) {
         if (!plotOnly) this.drawOverview();
         return;
       }
+      const renderCanvas = settings.renderCanvas || this.plotCanvas;
+      const renderWidth = Number(settings.renderWidth) || this.plotViewport.clientWidth;
+      const renderHeight = Number(settings.renderHeight)
+        || Math.max(1, this.plotViewport.clientHeight);
       const resized = this.resizeCanvas(
-        this.plotCanvas,
-        this.plotViewport.clientWidth,
-        Math.max(1, this.plotViewport.clientHeight)
+        renderCanvas,
+        renderWidth,
+        renderHeight,
+        settings.renderPixelRatio
       );
       const context = resized.context;
       const width = resized.width;
@@ -5774,13 +5951,15 @@
         this.windowSessionRevision,
         this.windowData && this.windowData.viewportKey || '',
         this.windowData && this.windowData.computedRowCount || 0,
+        Math.round(this.viewStart * 10000000) / 10000000,
+        Math.round(this.viewEnd * 10000000) / 10000000,
         width,
         height,
         Math.round(scrollTop * 100) / 100,
         visible.start,
         visible.end
       ].join('|');
-      const canReusePlotBase = overlayOnly
+      const canReusePlotBase = !isolated && overlayOnly
         && this.plotBaseCanvas
         && this.plotBaseCacheKey === plotBaseKey
         && this.plotBaseCanvas.width === this.plotCanvas.width
@@ -5924,22 +6103,25 @@
           }
         });
       }
-      if (!this.plotBaseCanvas) this.plotBaseCanvas = document.createElement('canvas');
-      if (this.plotBaseCanvas.width !== this.plotCanvas.width) {
-        this.plotBaseCanvas.width = this.plotCanvas.width;
+      if (!isolated) {
+        if (!this.plotBaseCanvas) this.plotBaseCanvas = document.createElement('canvas');
+        if (this.plotBaseCanvas.width !== this.plotCanvas.width) {
+          this.plotBaseCanvas.width = this.plotCanvas.width;
+        }
+        if (this.plotBaseCanvas.height !== this.plotCanvas.height) {
+          this.plotBaseCanvas.height = this.plotCanvas.height;
+        }
+        const plotBaseContext = this.plotBaseCanvas.getContext('2d');
+        plotBaseContext.setTransform(1, 0, 0, 1, 0, 0);
+        plotBaseContext.clearRect(0, 0, this.plotBaseCanvas.width, this.plotBaseCanvas.height);
+        plotBaseContext.drawImage(this.plotCanvas, 0, 0);
+        this.plotBaseCacheKey = plotBaseKey;
       }
-      if (this.plotBaseCanvas.height !== this.plotCanvas.height) {
-        this.plotBaseCanvas.height = this.plotCanvas.height;
-      }
-      const plotBaseContext = this.plotBaseCanvas.getContext('2d');
-      plotBaseContext.setTransform(1, 0, 0, 1, 0, 0);
-      plotBaseContext.clearRect(0, 0, this.plotBaseCanvas.width, this.plotBaseCanvas.height);
-      plotBaseContext.drawImage(this.plotCanvas, 0, 0);
-      this.plotBaseCacheKey = plotBaseKey;
       this.drawSelectedPointOverlay(context, width, height);
       this.drawColumnSelection(context, width, height);
       this.drawConnections(context, width, height);
       this.drawCursors(context, width, height);
+      if (!isolated) this.schedulePlotPanBuffer();
       if (!plotOnly) this.drawOverview();
     }
 
@@ -6379,6 +6561,7 @@
       );
       event.preventDefault();
       if (event.button === 1 || event.shiftKey) {
+        const previewBuffer = this.capturePlotPanFrame();
         this.pauseBackgroundWindowWork(200);
         this.drag = {
           kind: 'pan',
@@ -6387,8 +6570,7 @@
           viewStart: this.viewStart,
           viewEnd: this.viewEnd,
           canvasWidth: Math.max(1, rect.width),
-          previewCanvas: this.capturePlotPanFrame(),
-          previewOffsetX: 0,
+          previewBuffer,
           moved: false
         };
         this.plotCanvas.classList.add('dragging-pan');
@@ -6505,17 +6687,22 @@
         const delta = event.clientX - this.drag.startX;
         if (Math.abs(delta) > 3) this.drag.moved = true;
         const span = this.drag.viewEnd - this.drag.viewStart;
+        const maximumStart = Math.max(0, this.meta.totalColumns - span);
+        const buffer = this.drag.previewBuffer;
+        const minimumBufferedStart = buffer
+          ? clamp(buffer.start, 0, maximumStart)
+          : 0;
+        const maximumBufferedStart = buffer
+          ? clamp(buffer.end - span, minimumBufferedStart, maximumStart)
+          : maximumStart;
         const start = clamp(
           this.drag.viewStart - delta / this.drag.canvasWidth * span,
-          0,
-          Math.max(0, this.meta.totalColumns - span)
+          minimumBufferedStart,
+          maximumBufferedStart
         );
         if (Math.abs(start - this.viewStart) < 1e-9) return;
         this.viewStart = start;
         this.viewEnd = start + span;
-        this.drag.previewOffsetX = span > 0
-          ? (this.drag.viewStart - start) / span * this.drag.canvasWidth
-          : 0;
         this.draw();
         return;
       }
