@@ -802,6 +802,27 @@ function numericSamplesFromScopeValues(values, format) {
   return finiteCount ? samples : null;
 }
 
+function numericSamplesFromChangePoints(value, format) {
+  if (!FormulaEngine || typeof FormulaEngine.normalizeChangePoints !== 'function') return null;
+  const changePoints = FormulaEngine.normalizeChangePoints(value);
+  const length = Math.max(0, Math.floor(Number(changePoints.totalSamples) || 0));
+  if (!length) return null;
+  const samples = new Float64Array(length);
+  samples.fill(Number.NaN);
+  for (let point = 0; point < changePoints.indices.length; point += 1) {
+    const start = clamp(Math.floor(Number(changePoints.indices[point]) || 0), 0, length);
+    const end = point + 1 < changePoints.indices.length
+      ? clamp(Math.floor(Number(changePoints.indices[point + 1]) || 0), start, length)
+      : length;
+    samples.fill(
+      parseAnalogValueNormalized(changePoints.values[point], format),
+      start,
+      end
+    );
+  }
+  return samples;
+}
+
 function buildAnalogLevels(samples) {
   const levels = [];
   if (!samples || !samples.length) return levels;
@@ -2172,16 +2193,19 @@ function analogRowForFormat(row, requestedFormat, totalColumns) {
     + ':' + totalColumns;
   if (row.analogCache && row.analogCache.has(key)) return row.analogCache.get(key);
   const sourceValues = Array.isArray(row.scopeValues) ? row.scopeValues : null;
-  const sampleStep = sourceValues ? rowSampleStep(row) : 1;
-  const samples = new Float64Array(sourceValues
+  const changePointSamples = !sourceValues && row.changePoints
+    ? numericSamplesFromChangePoints(row.changePoints, format)
+    : null;
+  const sampleStep = sourceValues || changePointSamples ? rowSampleStep(row) : 1;
+  const samples = changePointSamples || new Float64Array(sourceValues
     ? Math.max(1, sourceValues.length)
     : Math.max(1, totalColumns));
-  samples.fill(Number.NaN);
+  if (!changePointSamples) samples.fill(Number.NaN);
   if (sourceValues) {
     sourceValues.forEach((value, index) => {
       samples[index] = parseAnalogValueNormalized(value, format);
     });
-  } else {
+  } else if (!changePointSamples) {
     const sourceLength = Math.min(samples.length, row.wave.length);
     let segmentIndex = 0;
     for (let column = 0; column < sourceLength; column += 1) {
