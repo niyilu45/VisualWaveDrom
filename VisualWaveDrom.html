@@ -4,13 +4,47 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>VisualWaveDrom</title>
-  <script src="inc/skins/default.js?v=20260712"></script>
-  <script src="inc/wavedrom.min.js?v=20260712"></script>
+  <script>
+    (function () {
+      const params = new URLSearchParams(window.location.search);
+      const active = params.get('view') === 'scope'
+        && !!String(params.get('waveId') || '').trim();
+      window.__visualWaveDromScopeBootstrap = {
+        active,
+        startedAt: window.performance && typeof window.performance.now === 'function'
+          ? window.performance.now()
+          : Date.now()
+      };
+      if (active) document.documentElement.classList.add('scope-bootstrap-document');
+    })();
+  </script>
   <link rel="stylesheet" href="inc/codemirror.css?v=5.65.21">
   <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260815-import-cancel-v1">
-  <link rel="stylesheet" href="inc/visualwavedrom-scope.css?v=20260815-offscreen-cursors-v1">
+  <link rel="stylesheet" href="inc/visualwavedrom-scope.css?v=20260817-scope-startup-v1">
 </head>
 <body>
+  <div class="scope-bootstrap" id="scope-bootstrap" role="status" aria-live="polite" hidden>
+    <div class="scope-bootstrap-content">
+      <div class="scope-bootstrap-wave" aria-hidden="true">
+        <i></i><i></i><i></i><i></i><i></i>
+      </div>
+      <strong>正在打开示波器</strong>
+      <span id="scope-bootstrap-stage">正在读取当前波形...</span>
+    </div>
+  </div>
+  <script>
+    (function () {
+      const state = window.__visualWaveDromScopeBootstrap;
+      if (!state || !state.active) return;
+      document.body.classList.add('scope-wave-view');
+      const loader = document.getElementById('scope-bootstrap');
+      if (loader) loader.hidden = false;
+      state.setStage = function (message) {
+        const stage = document.getElementById('scope-bootstrap-stage');
+        if (stage) stage.textContent = String(message || '正在加载波形数据...');
+      };
+    })();
+  </script>
   <div class="app" id="app">
     <!-- Nav Sidebar -->
     <aside class="nav-sidebar" id="nav-sidebar" tabindex="-1">
@@ -775,6 +809,8 @@
     </div>
   </div>
 
+    <script src="inc/skins/default.js?v=20260712"></script>
+    <script src="inc/wavedrom.min.js?v=20260712"></script>
     <script src="inc/codemirror.js?v=5.65.21"></script>
     <script src="inc/codemirror-javascript.js?v=5.65.21"></script>
     <script src="inc/codemirror-vim.js?v=5.65.21"></script>
@@ -784,8 +820,8 @@
     <script src="inc/visualwavedrom-json-bigdata.js?v=20260731-bigdata-fix-v1"></script>
     <script src="inc/visualwavedrom-formula.js?v=20260815-large-import-v1"></script>
     <script src="inc/visualwavedrom-scope-worker.js?v=20260815-interactive-cancel-v1"></script>
-    <script src="inc/visualwavedrom-scope.js?v=20260815-cursor-label-toggle-v1"></script>
+    <script src="inc/visualwavedrom-scope.js?v=20260817-scope-startup-v1"></script>
     <script src="inc/visualwavedrom-import-collection.js?v=20260815-import-cancel-v1"></script>
-    <script src="inc/visualwavedrom-app.js?v=20260815-import-cancel-v1"></script>
+    <script src="inc/visualwavedrom-app.js?v=20260817-scope-startup-v1"></script>
 </body>
 </html>

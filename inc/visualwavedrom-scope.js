@@ -15,6 +15,15 @@
   const OVERVIEW_HEIGHT = 76;
   const MAX_HISTORY = 100;
   const CURSOR_HIT_RADIUS = 10;
+
+  function scopeStartupElapsedMs() {
+    const state = global.__visualWaveDromScopeBootstrap;
+    if (!state || !Number.isFinite(Number(state.startedAt))) return null;
+    const now = global.performance && typeof global.performance.now === 'function'
+      ? global.performance.now()
+      : Date.now();
+    return Math.max(0, Math.round(now - Number(state.startedAt)));
+  }
   const COLOR_PRESETS = [
     { name: '绿色', value: '#07853d' },
     { name: '青色', value: '#0097a7' },
@@ -709,10 +718,19 @@
       this.buildShell();
       this.bindEvents();
       this.setStatus('正在加载波形数据');
+      this.log('scope-startup', {
+        phase: 'source-wait-start',
+        elapsedMs: scopeStartupElapsedMs()
+      });
       this.document = await this.adapter.getDocument();
       if (!this.document || typeof this.document.content !== 'string') {
         throw new Error('指定的波形图不存在或尚未载入');
       }
+      this.log('scope-startup', {
+        phase: 'source-ready',
+        contentLength: this.document.content.length,
+        elapsedMs: scopeStartupElapsedMs()
+      });
       if (typeof this.adapter.getTransientState === 'function') {
         try {
           this.transientFormulaState = normalizeTransientFormulaState(
@@ -729,9 +747,16 @@
         this.document.content,
         this.transientFormulaState
       );
+      this.setStatus('正在解析波形数据');
       this.meta = await this.worker.call('prepare', {
         content: this.document.content,
         transient: clone(this.transientFormulaState)
+      });
+      this.log('scope-startup', {
+        phase: 'prepare-complete',
+        rows: this.meta && this.meta.rows ? this.meta.rows.length : 0,
+        totalColumns: this.meta && this.meta.totalColumns || 0,
+        elapsedMs: scopeStartupElapsedMs()
       });
       this.resetWindowCache();
       this.adoptPreparedFormulaDefinitions();
@@ -770,6 +795,7 @@
       this.updateCursorControls();
       this.updateMeasurements();
       this.updateLayout();
+      this.setStatus('正在绘制首屏波形');
       await this.requestWindow();
       await this.updateCursorReadout();
       this.updateDraftState();
@@ -778,7 +804,8 @@
         phase: 'ready',
         waveId: this.document.name,
         rows: this.meta.rows.length,
-        totalColumns: this.meta.totalColumns
+        totalColumns: this.meta.totalColumns,
+        startupElapsedMs: scopeStartupElapsedMs()
       });
       this.scheduleInitialSimplify();
     }
@@ -1138,6 +1165,13 @@
         </div>
       `;
       document.body.appendChild(root);
+      const bootstrap = document.getElementById('scope-bootstrap');
+      if (bootstrap) bootstrap.remove();
+      document.documentElement.classList.remove('scope-bootstrap-document');
+      this.log('scope-startup', {
+        phase: 'shell-visible',
+        elapsedMs: scopeStartupElapsedMs()
+      });
 
       this.root = root;
       this.titleEl = root.querySelector('#scope-title');

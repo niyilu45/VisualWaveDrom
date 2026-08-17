@@ -13599,6 +13599,8 @@ ${lines.join('\n')}`;
               || message.scopeToken !== requestedScopeToken) return;
           if (message.error) finish(new Error(message.error));
           else finish(null, {
+            libraryId: String(message.libraryId || ''),
+            libraryFile: String(message.libraryFile || ''),
             document: message.document || null,
             transientState: message.transientState || null
           });
@@ -13617,33 +13619,108 @@ ${lines.join('\n')}`;
       });
     }
 
-    async function initializeScopeWaveView() {
+    async function initializeScopeWaveView(options) {
       if (!scopeWaveViewActive) return false;
       if (!window.VisualWaveDromScope || typeof window.VisualWaveDromScope.mount !== 'function') {
         throw new Error('示波器窗口模块未加载');
       }
-      const openerPayload = await requestScopeSourceFromOpener();
-      const openerDocument = openerPayload && openerPayload.document;
-      let scopeTransientState = openerPayload && openerPayload.transientState || null;
-      if (openerDocument) {
-        const incoming = normalizeSavedTag(openerDocument);
-        if (incoming) {
-          const index = findSavedTagIndex(incoming.name);
-          if (index >= 0) savedTags[index] = incoming;
-          else savedTags.push(incoming);
-          rebuildSavedTagIndex();
+      const startupOptions = options && typeof options === 'object' ? options : {};
+      let fallbackLibraryReadyPromise = null;
+      const ensureLibraryReady = typeof startupOptions.ensureLibraryReady === 'function'
+        ? startupOptions.ensureLibraryReady
+        : () => {
+          if (!fallbackLibraryReadyPromise) {
+            fallbackLibraryReadyPromise = Promise.resolve().then(() => initializeWaveLibrary());
+          }
+          return fallbackLibraryReadyPromise;
+        };
+      const openerPayloadPromise = requestScopeSourceFromOpener();
+      let openerPayload = null;
+      let scopeTransientState = null;
+      let initialTag = null;
+      let scopeLibraryStatePromise = null;
+
+      const setBootstrapStage = (message) => {
+        const bootstrap = window.__visualWaveDromScopeBootstrap;
+        if (bootstrap && typeof bootstrap.setStage === 'function') bootstrap.setStage(message);
+      };
+
+      const updateScopeLibraryLabel = () => {
+        const label = document.getElementById('scope-library-name');
+        if (label) label.textContent = currentWaveLibraryFile || 'SQLite 波形库';
+      };
+
+      const resolveInitialTag = async () => {
+        if (initialTag) return initialTag;
+        setBootstrapStage('正在读取当前波形...');
+        openerPayload = await openerPayloadPromise;
+        scopeTransientState = openerPayload && openerPayload.transientState || null;
+        if (openerPayload && openerPayload.libraryId) {
+          if (requestedLibraryId && openerPayload.libraryId !== requestedLibraryId) {
+            throw new Error('主窗口与示波器窗口的波形库不一致');
+          }
+          currentWaveLibraryId = openerPayload.libraryId;
+        } else if (!currentWaveLibraryId && requestedLibraryId) {
+          currentWaveLibraryId = requestedLibraryId;
         }
-      }
-      const tag = await ensureWaveDocumentLoaded(requestedWaveDocumentName);
-      if (!tag) throw new Error('链接指定的波形图不存在或已被删除');
-      editingWaveDocumentName = tag.name;
-      activeTagName = tag.name;
-      setEditorValue(tag.content, { clearCodeMirrorHistory: true });
-      setEditorHistoryBaseline(tag.content);
+        if (openerPayload && openerPayload.libraryFile) {
+          currentWaveLibraryFile = openerPayload.libraryFile;
+        }
+        const incoming = normalizeSavedTag(openerPayload && openerPayload.document);
+        if (incoming && incoming.name === requestedWaveDocumentName) {
+          initialTag = incoming;
+          vwdDebugLog('scope-startup', {
+            phase: 'opener-source-ready',
+            documentName: incoming.name,
+            contentLength: incoming.content.length,
+            libraryInitializationDeferred: true
+          });
+        } else {
+          setBootstrapStage('正在载入波形库...');
+          await ensureLibraryReady();
+          initialTag = await ensureWaveDocumentLoaded(requestedWaveDocumentName);
+        }
+        if (!initialTag) throw new Error('链接指定的波形图不存在或已被删除');
+        updateScopeLibraryLabel();
+        return initialTag;
+      };
+
+      const ensureScopeLibraryState = () => {
+        if (scopeLibraryStatePromise) return scopeLibraryStatePromise;
+        scopeLibraryStatePromise = (async () => {
+          const sourceTag = await resolveInitialTag();
+          await ensureLibraryReady();
+          const incoming = normalizeSavedTag(sourceTag);
+          if (incoming) {
+            const index = findSavedTagIndex(incoming.name);
+            if (index >= 0) savedTags[index] = incoming;
+            else savedTags.push(incoming);
+            rebuildSavedTagIndex();
+          }
+          const stored = await ensureWaveDocumentLoaded(sourceTag.name);
+          if (!stored) throw new Error('链接指定的波形图不存在或已被删除');
+          editingWaveDocumentName = stored.name;
+          activeTagName = stored.name;
+          setEditorValue(stored.content, { clearCodeMirrorHistory: true });
+          setEditorHistoryBaseline(stored.content);
+          updateScopeLibraryLabel();
+          vwdDebugLog('scope-startup', {
+            phase: 'library-state-ready',
+            documentName: stored.name,
+            libraryFile: currentWaveLibraryFile
+          });
+          return stored;
+        })();
+        return scopeLibraryStatePromise;
+      };
+
       await window.VisualWaveDromScope.mount({
         libraryName: currentWaveLibraryFile || 'SQLite 波形库',
-        getDocument: async () => Object.assign({}, getSavedTagByName(tag.name)),
-        getTransientState: async () => scopeTransientState,
+        getDocument: async () => Object.assign({}, await resolveInitialTag()),
+        getTransientState: async () => {
+          await resolveInitialTag();
+          return scopeTransientState;
+        },
         setTransientState: (state) => {
           scopeTransientState = state && typeof state === 'object'
             ? JSON.parse(JSON.stringify(state))
@@ -13652,20 +13729,26 @@ ${lines.join('\n')}`;
             if (window.opener && !window.opener.closed) {
               window.opener.postMessage({
                 type: 'visualwavedrom-scope-transient-state',
-                libraryId: currentWaveLibraryId,
-                waveId: tag.name,
+                libraryId: currentWaveLibraryId || requestedLibraryId,
+                waveId: requestedWaveDocumentName,
                 state: scopeTransientState
               }, '*');
             }
           } catch (_error) { /* opener may have been closed */ }
         },
-        saveInstance: saveScopeDisplayInstance,
-        saveSource: overwriteScopeSourceDocument,
+        saveInstance: async (payload) => {
+          await ensureScopeLibraryState();
+          return saveScopeDisplayInstance(payload);
+        },
+        saveSource: async (payload) => {
+          await ensureScopeLibraryState();
+          return overwriteScopeSourceDocument(payload);
+        },
         openNormalView: () => {
-          const params = getWaveDocumentSingleViewParams(tag.name);
+          const params = getWaveDocumentSingleViewParams(requestedWaveDocumentName);
           window.location.href = waveLibraryServerMode
             ? new URL('/open?' + params.toString(), window.location.origin).href
-            : getWaveDocumentSingleViewUrl(tag.name);
+            : getWaveDocumentSingleViewUrl(requestedWaveDocumentName);
         },
         log: vwdDebugLog
       });
@@ -14511,6 +14594,7 @@ ${lines.join('\n')}`;
               type: 'visualwavedrom-scope-source-response',
               scopeToken: message.scopeToken,
               libraryId: currentWaveLibraryId,
+              libraryFile: currentWaveLibraryFile,
               document: documentSnapshot,
               transientState: scopeTransientStates.get(scopeTransientStateKey(
                 currentWaveLibraryId,
@@ -21126,34 +21210,57 @@ ${lines.join('\n')}`;
     initBackBtnDrag();
     initNavSidebarResize();
 
-    window.addEventListener('load', () => {
+    function startScopeWaveViewPage() {
       initScopeWindowSync();
-      if (scopeWaveViewActive) {
-        setStatus(true, '示波器加载中');
-        initWaveLibrarySyncChannel();
-        void initializeWaveLibrary()
-          .then(() => initializeScopeWaveView())
-          .catch((error) => {
-            setStatus(false, '示波器加载失败');
-            vwdDebugLog('scope-view', {
-              phase: 'initialize-error',
-              message: error && error.message ? error.message : String(error)
-            });
-            if (window.VisualWaveDromScope && typeof window.VisualWaveDromScope.mount === 'function') {
-              return window.VisualWaveDromScope.mount({
-                getDocument: async () => {
-                  throw error;
-                },
-                log: vwdDebugLog
-              }).catch(() => {});
-            }
-            return null;
-          })
+      setStatus(true, '示波器加载中');
+      initWaveLibrarySyncChannel();
+      let libraryReadyPromise = null;
+      const ensureLibraryReady = () => {
+        if (libraryReadyPromise) return libraryReadyPromise;
+        const bootstrap = window.__visualWaveDromScopeBootstrap;
+        if (bootstrap && typeof bootstrap.setStage === 'function') {
+          bootstrap.setStage('正在载入波形库...');
+        }
+        vwdDebugLog('scope-startup', { phase: 'library-initialize-start' });
+        libraryReadyPromise = Promise.resolve()
+          .then(() => initializeWaveLibrary())
           .finally(() => {
             waveLibraryInitializationPending = false;
+            vwdDebugLog('scope-startup', { phase: 'library-initialize-complete' });
           });
-        return;
-      }
+        return libraryReadyPromise;
+      };
+      vwdDebugLog('scope-startup', {
+        phase: 'bootstrap-start',
+        hasOpenerSource: !!(requestedScopeToken && window.opener && !window.opener.closed)
+      });
+      void initializeScopeWaveView({ ensureLibraryReady })
+        .catch((error) => {
+          setStatus(false, '示波器加载失败');
+          const bootstrap = window.__visualWaveDromScopeBootstrap;
+          if (bootstrap && typeof bootstrap.setStage === 'function') {
+            bootstrap.setStage('示波器加载失败：' + (error.message || String(error)));
+          }
+          vwdDebugLog('scope-view', {
+            phase: 'initialize-error',
+            message: error && error.message ? error.message : String(error)
+          });
+          if (!document.getElementById('scope-app')
+              && window.VisualWaveDromScope
+              && typeof window.VisualWaveDromScope.mount === 'function') {
+            return window.VisualWaveDromScope.mount({
+              getDocument: async () => {
+                throw error;
+              },
+              log: vwdDebugLog
+            }).catch(() => {});
+          }
+          return null;
+        });
+    }
+
+    function startNormalWaveViewPage() {
+      initScopeWindowSync();
       migrateSessionStorageToLocal(WAVE_EDIT_MODE_KEY);
       migrateSessionStorageToLocal(BACK_BTN_POS_KEY);
       migrateSessionStorageToLocal(NAV_SIDEBAR_WIDTH_KEY);
@@ -21189,7 +21296,15 @@ ${lines.join('\n')}`;
         waveLibraryInitializationPending = false;
         if (singleWaveViewActive) renderWaveLibrary();
       });
-    });
+    }
+
+    if (scopeWaveViewActive) {
+      startScopeWaveViewPage();
+    } else if (document.readyState === 'complete') {
+      startNormalWaveViewPage();
+    } else {
+      window.addEventListener('load', startNormalWaveViewPage, { once: true });
+    }
 
 
 

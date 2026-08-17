@@ -1,3 +1,79 @@
+html.scope-bootstrap-document,
+html.scope-bootstrap-document body {
+  min-height: 100%;
+  background: #eef0f2;
+}
+
+.scope-bootstrap[hidden] {
+  display: none;
+}
+
+.scope-bootstrap {
+  position: fixed;
+  z-index: 1000;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  box-sizing: border-box;
+  padding: 24px;
+  color: #25282d;
+  background: #eef0f2;
+  font-family: "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
+}
+
+.scope-bootstrap-content {
+  width: min(420px, 100%);
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  text-align: center;
+}
+
+.scope-bootstrap-content strong {
+  font-size: 16px;
+  font-weight: 650;
+}
+
+.scope-bootstrap-content span {
+  color: #626a73;
+  font-size: 12px;
+}
+
+.scope-bootstrap-wave {
+  height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.scope-bootstrap-wave i {
+  width: 4px;
+  height: 10px;
+  border-radius: 2px;
+  background: #2f73bf;
+  animation: scope-bootstrap-pulse 1s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+}
+
+.scope-bootstrap-wave i:nth-child(2),
+.scope-bootstrap-wave i:nth-child(4) {
+  animation-delay: 90ms;
+}
+
+.scope-bootstrap-wave i:nth-child(3) {
+  animation-delay: 180ms;
+}
+
+@keyframes scope-bootstrap-pulse {
+  0%, 100% { height: 10px; opacity: 0.5; }
+  50% { height: 28px; opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scope-bootstrap-wave i {
+    animation: none;
+  }
+}
+
 body.scope-wave-view {
   margin: 0;
   overflow: hidden;
