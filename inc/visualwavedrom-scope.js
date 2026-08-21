@@ -4913,6 +4913,22 @@
       }
     }
 
+    visibleBusLabelGeometry(start, end, width) {
+      const segmentStart = Number(start);
+      const segmentEnd = Number(end);
+      if (!Number.isFinite(segmentStart) || !Number.isFinite(segmentEnd)) return null;
+      const visibleStart = Math.max(segmentStart, this.viewStart);
+      const visibleEnd = Math.min(segmentEnd, this.viewEnd);
+      if (!(visibleEnd > visibleStart)) return null;
+      const left = clamp(this.xForColumn(visibleStart, width), 0, width);
+      const right = clamp(this.xForColumn(visibleEnd, width), 0, width);
+      if (!(right > left)) return null;
+      return {
+        center: (left + right) / 2,
+        width: right - left
+      };
+    }
+
     drawRowBackground(context, rowIndex, rowTop, rowHeight, width) {
       const style = this.rowStyle(rowIndex);
       context.save();
@@ -5090,6 +5106,9 @@
           const x1 = this.xForColumn(bucket.start, width);
           const x2 = this.xForColumn(bucket.end, width);
           const bucketWidth = Math.max(0, x2 - x1);
+          const busLabelGeometry = bucket.bus
+            ? this.visibleBusLabelGeometry(bucket.start, bucket.end, width)
+            : null;
           if (bucket.bus) {
             context.fillStyle = 'rgba(0, 151, 167, 0.12)';
             context.fillRect(x1, yTop + 3, Math.max(1, bucketWidth), yBottom - yTop - 6);
@@ -5134,14 +5153,15 @@
             this.drawUnknownDigitalSegment(context, x1, x2, yTop, yBottom, 1, true);
           }
           const busLabel = String(bucket.value == null ? '' : bucket.value);
-          if (bucket.bus && !bucket.unknown && busLabel && busLabel !== '*' && bucketWidth > 38) {
+          if (bucket.bus && !bucket.unknown && busLabel && busLabel !== '*'
+              && busLabelGeometry && busLabelGeometry.width > 38) {
             context.fillStyle = '#165d68';
             context.font = '11px "Segoe UI", sans-serif';
             context.textAlign = 'center';
             context.textBaseline = 'middle';
             context.fillText(
-              compactBusLabel(busLabel, bucketWidth),
-              (x1 + x2) / 2,
+              compactBusLabel(busLabel, busLabelGeometry.width),
+              busLabelGeometry.center,
               (yTop + yBottom) / 2
             );
           }
@@ -5193,6 +5213,11 @@
           const top = yTop + 5;
           const bottom = yBottom - 5;
           const segmentWidth = Math.max(0, x2 - x1);
+          const busLabelGeometry = this.visibleBusLabelGeometry(
+            segment.start,
+            segment.end,
+            width
+          );
           const bevel = Math.min(4, segmentWidth / 2);
           context.fillStyle = 'rgba(0, 151, 167, 0.08)';
           context.fillRect(x1, top, Math.max(1, segmentWidth), bottom - top);
@@ -5206,15 +5231,15 @@
           context.lineTo(x1 + bevel, bottom);
           context.closePath();
           context.stroke();
-          if (segmentWidth > 38) {
+          if (busLabelGeometry && busLabelGeometry.width > 38) {
             context.fillStyle = '#165d68';
             context.font = '11px "Segoe UI", sans-serif';
             context.textAlign = 'center';
             context.textBaseline = 'middle';
             const label = String(segment.value == null ? '' : segment.value);
             context.fillText(
-              compactBusLabel(label, segmentWidth),
-              (x1 + x2) / 2,
+              compactBusLabel(label, busLabelGeometry.width),
+              busLabelGeometry.center,
               (top + bottom) / 2
             );
           }
