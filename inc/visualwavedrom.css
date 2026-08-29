@@ -987,6 +987,42 @@
       animation: waveEdgePathBlink 1.2s step-end infinite;
     }
 
+    .wave-edge-label-move-handle {
+      cursor: grab;
+      pointer-events: all !important;
+      touch-action: none;
+      user-select: none;
+    }
+
+    .wave-edge-label-move-handle.dragging {
+      cursor: grabbing;
+    }
+
+    .wave-edge-label-move-handle-bg {
+      fill: #ffffff;
+      stroke: var(--accent);
+      stroke-width: 1.25;
+    }
+
+    .wave-edge-label-move-handle-icon {
+      fill: var(--accent);
+      font-family: "Segoe UI Symbol", "Segoe UI", sans-serif;
+      font-weight: 700;
+      pointer-events: none;
+    }
+
+    body.wave-edge-label-dragging,
+    body.wave-edge-label-dragging * {
+      cursor: grabbing !important;
+      user-select: none !important;
+    }
+
+    body.wave-edge-label-dragging .wave-edge-label-blink {
+      animation: none !important;
+      visibility: visible !important;
+      opacity: 1 !important;
+    }
+
     /* Main content */
     .main {
       order: 2;

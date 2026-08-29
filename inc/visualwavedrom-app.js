@@ -144,6 +144,8 @@ if (!window.VWDCodeEditorPairs) {
 
     const CONNECTION_ARROW_STYLES = ['start', 'end', 'both'];
     const CONNECTION_LINE_STYLES = ['straight', 'dashed', 'orthogonal', 'curve'];
+    const EDGE_LABEL_SAFE_MARGIN_PX = 6;
+    const EDGE_LABEL_MOVE_HANDLE_SIZE_PX = 14;
     const CONNECTION_LINE_VARIANTS = {
       straight: [{ id: 'straight', token: '-', label: '实线' }],
       dashed: [{ id: 'dashed', token: '-', label: '虚线' }],
@@ -468,6 +470,7 @@ if (!window.VWDCodeEditorPairs) {
     let connectionLineStyle = 'straight';
     let connectionLineVariant = 'straight';
     let selectedEdgeIndex = -1;
+    let edgeLabelDragState = null;
     let isRenderingWaveform = false;
     let pendingRenderText = null;
     let pendingRenderAnalysis = null;
@@ -6956,6 +6959,192 @@ ${lines.join('\n')}`;
       else delete source.edgeOptions;
     }
 
+    function normalizeEdgeLabelOffset(value) {
+      const source = value && typeof value === 'object' ? value : {};
+      const x = Number(source.x);
+      const y = Number(source.y);
+      return {
+        x: Number.isFinite(x) ? x : 0,
+        y: Number.isFinite(y) ? y : 0
+      };
+    }
+
+    function getEdgeLabelOffsetOption(source, index) {
+      if (!source || !Array.isArray(source.edgeOptions)) return { x: 0, y: 0 };
+      const option = source.edgeOptions[index];
+      return normalizeEdgeLabelOffset(option && option.labelOffset);
+    }
+
+    function setEdgeLabelOffsetOption(source, index, value) {
+      const options = Array.isArray(source.edgeOptions) ? source.edgeOptions.slice() : [];
+      while (options.length <= index) options.push(null);
+      const option = options[index] && typeof options[index] === 'object'
+        ? Object.assign({}, options[index])
+        : {};
+      const normalized = normalizeEdgeLabelOffset(value);
+      const x = Math.round(normalized.x * 100) / 100;
+      const y = Math.round(normalized.y * 100) / 100;
+      if (Math.abs(x) < 0.01 && Math.abs(y) < 0.01) delete option.labelOffset;
+      else option.labelOffset = { x, y };
+      options[index] = Object.keys(option).length ? option : null;
+      while (options.length && !options[options.length - 1]) options.pop();
+      if (options.some(Boolean)) source.edgeOptions = options;
+      else delete source.edgeOptions;
+    }
+
+    function getSvgViewportMetrics(svg) {
+      const viewBox = svg && svg.viewBox && svg.viewBox.baseVal;
+      const x = viewBox && Number.isFinite(viewBox.x) ? viewBox.x : 0;
+      const y = viewBox && Number.isFinite(viewBox.y) ? viewBox.y : 0;
+      const width = viewBox && viewBox.width > 0
+        ? viewBox.width
+        : Math.max(1, parseFloat(svg && svg.getAttribute('width') || '1'));
+      const height = viewBox && viewBox.height > 0
+        ? viewBox.height
+        : Math.max(1, parseFloat(svg && svg.getAttribute('height') || '1'));
+      return { x, y, width, height, right: x + width, bottom: y + height };
+    }
+
+    function getSvgUserUnitScale(svg, viewport) {
+      try {
+        const rect = svg.getBoundingClientRect();
+        return {
+          x: rect.width > 0 ? viewport.width / rect.width : 1,
+          y: rect.height > 0 ? viewport.height / rect.height : 1
+        };
+      } catch (_e) {
+        return { x: 1, y: 1 };
+      }
+    }
+
+    function getEdgeLabelSafeBounds(svg) {
+      const viewport = getSvgViewportMetrics(svg);
+      const scale = getSvgUserUnitScale(svg, viewport);
+      const visibleLanes = getWaveLaneGroups(svg).filter((lane) => (
+        !lane.classList.contains('wave-lane-hidden') && lane.style.display !== 'none'
+      ));
+      const drawBounds = visibleLanes
+        .map((lane) => getSvgElementBounds(lane.querySelector('[id^="wavelane_draw_"]')))
+        .filter(Boolean);
+      let left = viewport.x;
+      let right = viewport.right;
+      if (drawBounds.length) {
+        left = Math.max(left, Math.min(...drawBounds.map((bounds) => bounds.x)));
+        right = Math.min(right, Math.max(...drawBounds.map((bounds) => bounds.right)));
+      }
+      const horizontalPadding = EDGE_LABEL_SAFE_MARGIN_PX * scale.x;
+      const verticalPadding = EDGE_LABEL_SAFE_MARGIN_PX * scale.y;
+      if (right - left <= horizontalPadding * 2) {
+        left = viewport.x;
+        right = viewport.right;
+      }
+      return {
+        left: left + horizontalPadding,
+        right: right - horizontalPadding,
+        top: viewport.y + verticalPadding,
+        bottom: viewport.bottom - verticalPadding,
+        viewport,
+        scale
+      };
+    }
+
+    function getEdgeLabelBackgroundElement(labelText) {
+      const parent = labelText && labelText.parentNode;
+      if (!parent || !parent.children) return null;
+      return Array.from(parent.children).find((element) => (
+        element !== labelText && String(element.tagName || '').toLowerCase() === 'rect'
+      )) || null;
+    }
+
+    function setEdgeLabelElementTransform(element, offset) {
+      if (!element) return;
+      if (!element.dataset.vwdEdgeLabelBaseTransformReady) {
+        element.dataset.vwdEdgeLabelBaseTransform = element.getAttribute('transform') || '';
+        element.dataset.vwdEdgeLabelBaseTransformReady = '1';
+      }
+      const normalized = normalizeEdgeLabelOffset(offset);
+      const translate = Math.abs(normalized.x) >= 1e-7 || Math.abs(normalized.y) >= 1e-7
+        ? ('translate(' + normalized.x + ' ' + normalized.y + ')')
+        : '';
+      const transform = [translate, element.dataset.vwdEdgeLabelBaseTransform || '']
+        .filter(Boolean)
+        .join(' ');
+      if (transform) element.setAttribute('transform', transform);
+      else element.removeAttribute('transform');
+    }
+
+    function setEdgeLabelTransform(labelText, offset) {
+      setEdgeLabelElementTransform(getEdgeLabelBackgroundElement(labelText), offset);
+      setEdgeLabelElementTransform(labelText, offset);
+    }
+
+    function getEdgeLabelVisualBounds(labelText) {
+      const background = getEdgeLabelBackgroundElement(labelText);
+      return getSvgElementBounds(background ? labelText.parentNode : labelText);
+    }
+
+    function rootDeltaToLabelParent(labelText, deltaX, deltaY) {
+      const parent = labelText && labelText.parentNode;
+      if (!parent || typeof parent.getCTM !== 'function') return { x: deltaX, y: deltaY };
+      try {
+        const matrix = parent.getCTM();
+        const determinant = matrix.a * matrix.d - matrix.b * matrix.c;
+        if (!Number.isFinite(determinant) || Math.abs(determinant) < 1e-12) {
+          return { x: deltaX, y: deltaY };
+        }
+        return {
+          x: (matrix.d * deltaX - matrix.c * deltaY) / determinant,
+          y: (-matrix.b * deltaX + matrix.a * deltaY) / determinant
+        };
+      } catch (_e) {
+        return { x: deltaX, y: deltaY };
+      }
+    }
+
+    function applyEdgeLabelPosition(svg, labelText, index, source, requestedOffset) {
+      const storedOffset = requestedOffset == null
+        ? getEdgeLabelOffsetOption(source, index)
+        : normalizeEdgeLabelOffset(requestedOffset);
+      setEdgeLabelTransform(labelText, storedOffset);
+
+      const bounds = getEdgeLabelVisualBounds(labelText);
+      if (!bounds) {
+        labelText.__vwdEdgeLabelStoredOffset = storedOffset;
+        labelText.__vwdEdgeLabelEffectiveOffset = storedOffset;
+        return storedOffset;
+      }
+      const safe = getEdgeLabelSafeBounds(svg);
+      const availableWidth = Math.max(0, safe.right - safe.left);
+      const availableHeight = Math.max(0, safe.bottom - safe.top);
+      const labelWidth = Math.max(0, bounds.right - bounds.x);
+      const labelHeight = Math.max(0, bounds.bottom - bounds.y);
+      let correctionX = 0;
+      let correctionY = 0;
+      if (labelWidth > availableWidth) {
+        correctionX = (safe.left + safe.right - bounds.x - bounds.right) / 2;
+      } else if (bounds.x < safe.left) {
+        correctionX = safe.left - bounds.x;
+      } else if (bounds.right > safe.right) {
+        correctionX = safe.right - bounds.right;
+      }
+      if (labelHeight > availableHeight) {
+        correctionY = (safe.top + safe.bottom - bounds.y - bounds.bottom) / 2;
+      } else if (bounds.y < safe.top) {
+        correctionY = safe.top - bounds.y;
+      } else if (bounds.bottom > safe.bottom) {
+        correctionY = safe.bottom - bounds.bottom;
+      }
+      const localCorrection = rootDeltaToLabelParent(labelText, correctionX, correctionY);
+      const effectiveOffset = {
+        x: storedOffset.x + localCorrection.x,
+        y: storedOffset.y + localCorrection.y
+      };
+      setEdgeLabelTransform(labelText, effectiveOffset);
+      labelText.__vwdEdgeLabelStoredOffset = storedOffset;
+      labelText.__vwdEdgeLabelEffectiveOffset = effectiveOffset;
+      return effectiveOffset;
+    }
+
     function getEdgePresentation(edgeStr, source, index) {
       const parsedEdge = parseEdgeString(edgeStr);
       const arrow = parsedEdge.arrow || '';
@@ -8619,10 +8808,237 @@ ${lines.join('\n')}`;
       gmark.classList.add('wave-edge-blink');
     }
 
+    function edgeLabelParentPointFromClient(labelText, clientX, clientY) {
+      const svg = labelText && labelText.ownerSVGElement;
+      const parent = labelText && labelText.parentNode;
+      if (!svg || !parent || typeof svg.createSVGPoint !== 'function'
+          || typeof parent.getScreenCTM !== 'function') {
+        return { x: clientX, y: clientY };
+      }
+      try {
+        const matrix = parent.getScreenCTM();
+        if (!matrix || typeof matrix.inverse !== 'function') return { x: clientX, y: clientY };
+        const point = svg.createSVGPoint();
+        point.x = clientX;
+        point.y = clientY;
+        const local = point.matrixTransform(matrix.inverse());
+        return { x: local.x, y: local.y };
+      } catch (_e) {
+        return { x: clientX, y: clientY };
+      }
+    }
+
+    function positionEdgeLabelMoveHandle(svg, handle, labelText) {
+      const bounds = getEdgeLabelVisualBounds(labelText);
+      if (!bounds) return false;
+      const viewport = getSvgViewportMetrics(svg);
+      const scale = getSvgUserUnitScale(svg, viewport);
+      const handleWidth = EDGE_LABEL_MOVE_HANDLE_SIZE_PX * scale.x;
+      const handleHeight = EDGE_LABEL_MOVE_HANDLE_SIZE_PX * scale.y;
+      const halfWidth = handleWidth / 2;
+      const halfHeight = handleHeight / 2;
+      const centerX = Math.max(
+        viewport.x + halfWidth,
+        Math.min(viewport.right - halfWidth, bounds.right + handleWidth * 0.3)
+      );
+      const centerY = Math.max(
+        viewport.y + halfHeight,
+        Math.min(viewport.bottom - halfHeight, bounds.bottom + handleHeight * 0.3)
+      );
+      handle.setAttribute('transform', 'translate(' + centerX + ' ' + centerY + ')');
+      const background = handle.querySelector('.wave-edge-label-move-handle-bg');
+      if (background) {
+        background.setAttribute('x', String(-halfWidth));
+        background.setAttribute('y', String(-halfHeight));
+        background.setAttribute('width', String(handleWidth));
+        background.setAttribute('height', String(handleHeight));
+        background.setAttribute('rx', String(Math.max(1, 2 * Math.min(scale.x, scale.y))));
+      }
+      const icon = handle.querySelector('.wave-edge-label-move-handle-icon');
+      if (icon) {
+        icon.setAttribute('font-size', String(Math.max(8 * scale.y, 10 * Math.min(scale.x, scale.y))));
+      }
+      return true;
+    }
+
+    function persistEdgeLabelOffset(index, offset) {
+      let parsed;
+      try {
+        parsed = JSON.parse(editor.value);
+      } catch (_e) {
+        setStatus(false, 'JSON 错误，无法保存连接标签位置');
+        return false;
+      }
+      const edges = Array.isArray(parsed.edge) ? parsed.edge : [];
+      if (index < 0 || index >= edges.length) return false;
+      const previous = getEdgeLabelOffsetOption(parsed, index);
+      setEdgeLabelOffsetOption(parsed, index, offset);
+      const next = getEdgeLabelOffsetOption(parsed, index);
+      if (Math.abs(previous.x - next.x) < 0.01 && Math.abs(previous.y - next.y) < 0.01) {
+        return false;
+      }
+      const newText = JSON.stringify(parsed, null, 2);
+      const selectionStart = editor.selectionStart;
+      const selectionEnd = editor.selectionEnd;
+      pushUndoBeforeChange(newText);
+      applyEditorChange(newText, selectionStart, selectionEnd);
+      setStatus(true, '已移动连接标签');
+      vwdDebugLog('connection-label', {
+        phase: 'position-commit',
+        edgeIndex: index,
+        previous,
+        next
+      });
+      return true;
+    }
+
+    function moveEdgeLabelDrag(event) {
+      const state = edgeLabelDragState;
+      if (!state || event.pointerId !== state.pointerId) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const point = edgeLabelParentPointFromClient(state.labelText, event.clientX, event.clientY);
+      const nextOffset = {
+        x: state.startOffset.x + point.x - state.startPoint.x,
+        y: state.startOffset.y + point.y - state.startPoint.y
+      };
+      state.lastOffset = applyEdgeLabelPosition(
+        state.svg,
+        state.labelText,
+        state.index,
+        state.source,
+        nextOffset
+      );
+      state.moved = state.moved
+        || Math.hypot(event.clientX - state.startClientX, event.clientY - state.startClientY) >= 2;
+      positionEdgeLabelMoveHandle(state.svg, state.handle, state.labelText);
+    }
+
+    function removeEdgeLabelDragDocumentListeners() {
+      document.removeEventListener('pointermove', moveEdgeLabelDrag, true);
+      document.removeEventListener('pointerup', finishEdgeLabelDragFromDocument, true);
+      document.removeEventListener('pointercancel', cancelEdgeLabelDragFromDocument, true);
+    }
+
+    function finishEdgeLabelDragFromDocument(event) {
+      finishEdgeLabelDrag(event, false);
+    }
+
+    function cancelEdgeLabelDragFromDocument(event) {
+      finishEdgeLabelDrag(event, true);
+    }
+
+    function finishEdgeLabelDrag(event, cancelled) {
+      const state = edgeLabelDragState;
+      if (!state || (event && event.pointerId !== state.pointerId)) return;
+      edgeLabelDragState = null;
+      removeEdgeLabelDragDocumentListeners();
+      document.body.classList.remove('wave-edge-label-dragging');
+      state.handle.classList.remove('dragging');
+      try {
+        if (state.handle.hasPointerCapture(state.pointerId)) {
+          state.handle.releasePointerCapture(state.pointerId);
+        }
+      } catch (_e) { /* capture may already be gone */ }
+      if (cancelled) {
+        applyEdgeLabelPosition(state.svg, state.labelText, state.index, state.source);
+        positionEdgeLabelMoveHandle(state.svg, state.handle, state.labelText);
+        vwdDebugLog('connection-label', { phase: 'position-cancel', edgeIndex: state.index });
+        return;
+      }
+      if (state.moved) persistEdgeLabelOffset(state.index, state.lastOffset);
+      vwdDebugLog('connection-label', {
+        phase: 'position-finish',
+        edgeIndex: state.index,
+        moved: state.moved,
+        offset: state.lastOffset
+      });
+    }
+
+    function startEdgeLabelDrag(event, svg, handle, labelText, index) {
+      if (selectedEdgeIndex !== index || edgeLabelDragState) return;
+      let source;
+      try {
+        source = JSON.parse(editor.value);
+      } catch (_e) {
+        setStatus(false, 'JSON 错误，无法移动连接标签');
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      const startPoint = edgeLabelParentPointFromClient(labelText, event.clientX, event.clientY);
+      const startOffset = normalizeEdgeLabelOffset(
+        labelText.__vwdEdgeLabelEffectiveOffset || getEdgeLabelOffsetOption(source, index)
+      );
+      edgeLabelDragState = {
+        pointerId: event.pointerId,
+        svg,
+        handle,
+        labelText,
+        index,
+        source,
+        startPoint,
+        startOffset,
+        lastOffset: startOffset,
+        startClientX: event.clientX,
+        startClientY: event.clientY,
+        moved: false
+      };
+      document.body.classList.add('wave-edge-label-dragging');
+      handle.classList.add('dragging');
+      document.addEventListener('pointermove', moveEdgeLabelDrag, true);
+      document.addEventListener('pointerup', finishEdgeLabelDragFromDocument, true);
+      document.addEventListener('pointercancel', cancelEdgeLabelDragFromDocument, true);
+      try { handle.setPointerCapture(event.pointerId); } catch (_e) { /* use local events */ }
+      vwdDebugLog('connection-label', {
+        phase: 'position-start',
+        edgeIndex: index,
+        offset: startOffset
+      });
+    }
+
+    function createEdgeLabelMoveHandle(svg, labelText, index) {
+      if (!svg || !labelText) return null;
+      const svgNs = 'http://www.w3.org/2000/svg';
+      const handle = document.createElementNS(svgNs, 'g');
+      handle.setAttribute('class', 'wave-edge-label-move-handle');
+      handle.dataset.vwdEdgeIndex = String(index);
+      handle.setAttribute('aria-label', '拖动连接标签');
+
+      const title = document.createElementNS(svgNs, 'title');
+      title.textContent = '按住拖动连接标签';
+      const background = document.createElementNS(svgNs, 'rect');
+      background.setAttribute('class', 'wave-edge-label-move-handle-bg');
+      background.setAttribute('vector-effect', 'non-scaling-stroke');
+      const icon = document.createElementNS(svgNs, 'text');
+      icon.setAttribute('class', 'wave-edge-label-move-handle-icon');
+      icon.setAttribute('x', '0');
+      icon.setAttribute('y', '0');
+      icon.setAttribute('text-anchor', 'middle');
+      icon.setAttribute('dominant-baseline', 'central');
+      icon.textContent = '↘';
+      handle.appendChild(title);
+      handle.appendChild(background);
+      handle.appendChild(icon);
+      svg.appendChild(handle);
+      positionEdgeLabelMoveHandle(svg, handle, labelText);
+
+      handle.addEventListener('pointerdown', (event) => {
+        startEdgeLabelDrag(event, svg, handle, labelText, index);
+      });
+      handle.addEventListener('lostpointercapture', (event) => finishEdgeLabelDrag(event, false));
+      handle.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      });
+      return handle;
+    }
+
     function highlightSelectedEdgeInSvg() {
       const svg = waveContainer.querySelector('svg');
       if (!svg) return;
 
+      svg.querySelectorAll('.wave-edge-label-move-handle').forEach((element) => element.remove());
       svg.querySelectorAll('.wave-edge-selected').forEach((el) => {
         el.classList.remove('wave-edge-selected');
       });
@@ -8656,6 +9072,10 @@ ${lines.join('\n')}`;
       svg.querySelectorAll('[data-vwd-edge-index="' + selectedEdgeIndex + '"]').forEach((element) => {
         element.classList.add('wave-edge-label-editable');
       });
+      const labelText = svg.querySelector(
+        '.wave-edge-label-text[data-vwd-edge-index="' + selectedEdgeIndex + '"]'
+      );
+      if (labelText) createEdgeLabelMoveHandle(svg, labelText, selectedEdgeIndex);
     }
 
     function getSelectedEdgeLabelEditAnchor(index) {
@@ -9761,7 +10181,7 @@ ${lines.join('\n')}`;
       edgeElement.parentNode.insertBefore(hit, edgeElement.nextSibling);
     }
 
-    function attachEdgeLabelTextInteractivity(edgeElement, index, edgeStr, usedLabels) {
+    function attachEdgeLabelTextInteractivity(edgeElement, index, edgeStr, usedLabels, source) {
       const parsedEdge = parseEdgeString(edgeStr);
       const label = String(parsedEdge.label || '').trim();
       const parent = edgeElement && edgeElement.parentNode;
@@ -9792,14 +10212,23 @@ ${lines.join('\n')}`;
         : candidates[0];
 
       if (usedLabels) usedLabels.add(labelText);
+      const labelBackground = getEdgeLabelBackgroundElement(labelText);
       labelText.classList.add('wave-edge-label-text');
       labelText.dataset.vwdEdgeIndex = String(index);
       labelText.setAttribute('pointer-events', 'all');
-      labelText.addEventListener('click', (event) => {
+      if (labelBackground) {
+        labelBackground.classList.add('wave-edge-label-background');
+        labelBackground.dataset.vwdEdgeIndex = String(index);
+        labelBackground.setAttribute('pointer-events', 'all');
+      }
+      applyEdgeLabelPosition(labelText.ownerSVGElement, labelText, index, source);
+      const selectLabelEdge = (event) => {
         if (!isTextEditModeActive() && !connectionSelectActive) return;
         event.preventDefault();
         selectEdgeFromWaveform(index, edgeStr, event);
-      });
+      };
+      labelText.addEventListener('click', selectLabelEdge);
+      if (labelBackground) labelBackground.addEventListener('click', selectLabelEdge);
     }
 
     function attachEdgeInteractivity(jsonText, parsedSource) {
@@ -9831,7 +10260,7 @@ ${lines.join('\n')}`;
         const presentation = getEdgePresentation(edges[idx], parsed, idx);
         applyEdgeLineVisual(el, presentation);
         ensureEdgeHitTarget(el, idx, edges[idx]);
-        attachEdgeLabelTextInteractivity(el, idx, edges[idx], usedEdgeLabelTexts);
+        attachEdgeLabelTextInteractivity(el, idx, edges[idx], usedEdgeLabelTexts, parsed);
         if (el.dataset.vwdEdgeBound === '1') return;
         el.dataset.vwdEdgeBound = '1';
         el.addEventListener('click', (e) => {
@@ -17777,20 +18206,46 @@ ${lines.join('\n')}`;
 
     function getWaveScreenshotMetrics(svg) {
       const viewBox = svg && svg.viewBox && svg.viewBox.baseVal;
+      let metrics = null;
       if (viewBox && viewBox.width > 0 && viewBox.height > 0) {
-        return { x: viewBox.x, y: viewBox.y, width: viewBox.width, height: viewBox.height };
+        metrics = { x: viewBox.x, y: viewBox.y, width: viewBox.width, height: viewBox.height };
       }
-      try {
-        const box = svg.getBBox();
-        if (box.width > 0 && box.height > 0) {
-          return { x: box.x, y: box.y, width: box.width, height: box.height };
-        }
-      } catch (_e) { /* use attributes below */ }
+      if (!metrics) {
+        try {
+          const box = svg.getBBox();
+          if (box.width > 0 && box.height > 0) {
+            metrics = { x: box.x, y: box.y, width: box.width, height: box.height };
+          }
+        } catch (_e) { /* use attributes below */ }
+      }
+      if (!metrics) {
+        metrics = {
+          x: 0,
+          y: 0,
+          width: Math.max(1, parseFloat(svg.getAttribute('width') || '1')),
+          height: Math.max(1, parseFloat(svg.getAttribute('height') || '1'))
+        };
+      }
+
+      const signalNameBounds = getWaveLaneGroups(svg)
+        .filter((lane) => (
+          !lane.classList.contains('wave-lane-hidden') && lane.style.display !== 'none'
+        ))
+        .map((lane) => getSvgElementBounds(lane.querySelector('text.info')))
+        .filter(Boolean);
+      if (!signalNameBounds.length) return metrics;
+
+      const currentRight = metrics.x + metrics.width;
+      const signalLeft = Math.min(...signalNameBounds.map((bounds) => bounds.x));
+      const signalRight = Math.max(...signalNameBounds.map((bounds) => bounds.right));
+      const padding = 4;
+      const expandedLeft = signalLeft < metrics.x ? signalLeft - padding : metrics.x;
+      const expandedRight = signalRight > currentRight ? signalRight + padding : currentRight;
       return {
-        x: 0,
-        y: 0,
-        width: Math.max(1, parseFloat(svg.getAttribute('width') || '1')),
-        height: Math.max(1, parseFloat(svg.getAttribute('height') || '1'))
+        x: expandedLeft,
+        y: metrics.y,
+        width: Math.max(1, expandedRight - expandedLeft),
+        height: metrics.height
       };
     }
 
@@ -17802,6 +18257,7 @@ ${lines.join('\n')}`;
         '.wave-col-highlight-from',
         '.wave-col-highlight-to',
         '.wave-edge-hit-target',
+        '.wave-edge-label-move-handle',
         '.wave-name-click-zone',
         '.wave-text-edit-overlay',
         '.wave-group-label-fallback',
