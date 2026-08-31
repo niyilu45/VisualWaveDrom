@@ -12,9 +12,9 @@
   const INK_PROPERTIES = [
     'fill', 'fill-opacity', 'stroke', 'stroke-width', 'stroke-opacity', 'stroke-dasharray',
     'stroke-linecap', 'stroke-linejoin', 'font-family', 'font-size', 'font-weight',
-    'font-style', 'text-anchor', 'dominant-baseline', 'letter-spacing', 'opacity', 'vector-effect'
+    'font-style', 'text-anchor', 'dominant-baseline', 'letter-spacing', 'white-space', 'tab-size', 'opacity', 'vector-effect'
   ];
-  const TRANSIENT = '.presenter-focus-shade, .presenter-focus-outline, .presenter-shape-hit, .presenter-shape-selection';
+  const TRANSIENT = '.presenter-focus-shade, .presenter-focus-outline, .presenter-shape-hit, .presenter-shape-selection, .presenter-mark-controls, .presenter-pointer-ink';
   let sequence = 0;
 
   function element(document, name, attributes) {

@@ -14,12 +14,39 @@
   const MAX_SCALE = 3;
   const HISTORY_LIMIT = 100;
   const DEFAULT_STEP_TITLE = '演讲步骤';
+  const SHORTCUTS = root.VisualWaveDromPresenterShortcuts;
+  const SHORTCUT_COMMANDS = [
+    ['pointer', '指示', '1', 'tool'], ['pen', '画笔', '2', 'tool'],
+    ['arrow', '箭头', '3', 'tool'], ['rectangle', '多边形', '4', 'tool'],
+    ['eraser', '橡皮擦', 'q', 'tool'], ['text', '文字', 'w', 'tool'],
+    ['focus', '聚焦', 'e', 'tool'], ['cursor-A', '游标A', 'r', 'cursor', 'A'],
+    ['cursor-B', '游标B', 'a', 'cursor', 'B'], ['step-prev', '上一步', 's'],
+    ['step-next', '下一步', 'd'], ['step-add', '新增步骤', 'f'],
+    ['fit', '适应窗口', 'z'], ['notes', '讲解备注', 'x'],
+    ['copy-image', '复制图片', 'c'], ['fullscreen', '全屏', 'v'],
+    ['save', '保存演讲步骤', 'Ctrl+s'], ['undo', '撤销标注', 'Ctrl+z'],
+    ['redo', '重做标注', 'Ctrl+Shift+z'], ['settings', '设置', 'Shift+1'],
+    ['shape-style', '画笔与图形样式', 'Shift+2'], ['clear', '清除标注', 'Shift+3'],
+    ['notes-detach', '悬浮窗显示备注', 'Shift+4'], ['notes-restore', '恢复备注', 'Shift+q'],
+    ['window-prev', '上一段波形', 'Shift+w'], ['window-next', '下一段波形', 'Shift+e'],
+    ['exit', '退出演讲者模式', 'Shift+r'], ['copy-full', '复制整张图片', 'Shift+a'],
+    ['copy-focus', '复制聚焦区域', 'Shift+s'], ['text-done', '完成文字编辑', 'Ctrl+Enter'],
+    ['text-cancel', '取消文字编辑', ''], ['copy-close', '关闭图片复制选项', ''],
+    ['focus-close', '收起聚焦配置', ''], ['shape-style-close', '收起图形样式', ''],
+    ['exit-save', '保存并退出', ''], ['exit-discard', '不保存并退出', ''],
+    ['exit-cancel', '取消退出', ''], ['settings-close', '关闭设置', ''],
+    ['shortcuts-reset', '恢复默认快捷键', '']
+  ].map(([id, label, key, attribute, value]) => ({
+    id, label, key, selector: 'button[data-' + (attribute || 'action') + '="' + (value || id) + '"]'
+  }));
+  const DEFAULT_SHORTCUTS = Object.fromEntries(SHORTCUT_COMMANDS.map(command => [command.id, command.key]));
   const SHAPE_COLORS = [
     ['#ce2f2f', '红色'], ['#2775b8', '蓝色'], ['#19804e', '绿色'],
     ['#bf650d', '橙色'], ['#7f52b8', '紫色'], ['#263541', '深灰色']
   ];
 
   const ICONS = {
+    settings: '<path d="M20 7h-9M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/>',
     close: '<path d="M18 6 6 18M6 6l12 12"/>',
     fullscreen: '<path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/>',
     fit: '<path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/><path d="M9 9h6v6H9z"/>',
@@ -36,6 +63,7 @@
     pen: '<path d="m16 3 5 5M4 20l4-1L21 6a2.1 2.1 0 0 0-3-3L5 16z"/>',
     arrow: '<path d="M7 7h10v10M7 17 17 7"/>',
     rectangle: '<rect x="3" y="3" width="18" height="18" rx="2"/>',
+    move: '<path d="m5 9-3 3 3 3m4-10 3-3 3 3m0 14-3 3-3-3m10-10 3 3-3 3M2 12h20M12 2v20"/>',
     text: '<path d="M4 7V4h16v3M9 20h6M12 4v16"/>',
     eraser: '<path d="m16 3 5 5a2 2 0 0 1 0 3L11 21H6l-3-3a2 2 0 0 1 0-3L13 3a2 2 0 0 1 3 0ZM8 10l7 7M11 21h10"/>',
     undo: '<path d="M3 7v6h6M3 13l4-4a7 7 0 0 1 12 5v4"/>',
@@ -277,16 +305,23 @@
       this.redoStack = [];
       this.markSequence = 0;
       this.markGeometry = new Map();
-      this.selectedShapeId = null;
+      this.selectedMarkId = null;
+      this.markPick = null;
       this.shapeStyles = {
         arrow: { color: SHAPE_COLORS[0][0], width: 3 },
         rectangle: { color: SHAPE_COLORS[0][0], width: 3 }
       };
+      this.penColor = SHAPE_COLORS[0][0];
       this.lastHistoryEdit = null;
       this.annotationFrame = 0;
       this.laserFrame = 0;
       this.laserPosition = null;
+      this.pointerStroke = [];
+      this.pointerStrokeFrame = 0;
+      this.pointerInk = null;
+      this.pointerStrokeColor = this.penColor;
       this.textEdit = null;
+      this.annotationTextMetrics = null;
       this.steps = [];
       this.stepIndex = -1;
       this.stepTitleEdit = null;
@@ -303,6 +338,14 @@
       this.closeTimer = 0;
       this.beforeUnloadAttached = false;
       this.eventsBound = false;
+      this.shortcutBindings = SHORTCUTS ? SHORTCUTS.read(DEFAULT_SHORTCUTS) : Object.assign({}, DEFAULT_SHORTCUTS);
+      this.shortcutChannel = null;
+      this.boundShortcutStorage = (event) => {
+        if (SHORTCUTS && (event.key === SHORTCUTS.storageKey || event.key === null)) {
+          this.shortcutBindings = SHORTCUTS.read(DEFAULT_SHORTCUTS);
+          this.refreshShortcutUI();
+        }
+      };
       this.sourceDescription = '';
       this.drag = null;
       this.renderSequence = 0;
@@ -354,9 +397,9 @@
         + '  <div class="presenter-step-controls" aria-label="演讲步骤">'
         + '    <textarea class="presenter-step-title" id="presenter-step-title" rows="1" aria-label="演讲步骤文字" disabled>' + DEFAULT_STEP_TITLE + '</textarea>'
         + '    <div class="presenter-step-navigation">'
-        + '    <button type="button" class="presenter-icon-button" data-action="step-prev" title="上一步（左方向键）" aria-label="上一步">' + icon('chevronLeft') + '</button>'
+        + '    <button type="button" class="presenter-icon-button" data-action="step-prev" title="上一步" aria-label="上一步">' + icon('chevronLeft') + '</button>'
         + '    <span class="presenter-step-count" id="presenter-step-count">1 / 1</span>'
-        + '    <button type="button" class="presenter-icon-button" data-action="step-next" title="下一步（右方向键）" aria-label="下一步">' + icon('chevronRight') + '</button>'
+        + '    <button type="button" class="presenter-icon-button" data-action="step-next" title="下一步" aria-label="下一步">' + icon('chevronRight') + '</button>'
         + '    <button type="button" class="presenter-icon-button" data-action="step-add" title="记录当前画面为新步骤" aria-label="记录当前步骤">' + icon('plus') + '</button>'
         + '    </div>'
         + '  </div>'
@@ -367,12 +410,13 @@
         + '  </div>'
         + '  <div class="presenter-top-actions">'
         + '    <span class="presenter-save-state" id="presenter-save-state" role="status" aria-live="polite"></span>'
-        + buttonMarkup('save', 'save', '保存', '保存演讲步骤（Ctrl+S）')
-        + buttonMarkup('fit', 'fit', '适应窗口', '适应窗口（Z）')
+        + buttonMarkup('save', 'save', '保存', '保存演讲步骤')
+        + buttonMarkup('fit', 'fit', '适应窗口', '适应窗口')
         + '    <button type="button" class="presenter-button" data-action="copy-image" title="复制图片" aria-haspopup="dialog" aria-controls="presenter-copy-options" aria-expanded="false" disabled>' + icon('image') + '<span>复制图片</span></button>'
-        + buttonMarkup('notes', 'notes', '讲解备注', '显示或隐藏讲解备注（N）')
+        + buttonMarkup('notes', 'notes', '讲解备注', '显示或隐藏讲解备注')
         + '    <button type="button" class="presenter-icon-button" data-action="notes-restore" title="恢复备注到当前窗口" aria-label="恢复备注" hidden>' + icon('restore') + '</button>'
-        + buttonMarkup('fullscreen', 'fullscreen', '全屏', '进入或退出全屏（F）')
+        + buttonMarkup('fullscreen', 'fullscreen', '全屏', '进入或退出全屏')
+        + '    <button type="button" class="presenter-button" data-action="settings" title="设置" aria-haspopup="dialog" aria-controls="presenter-settings" aria-expanded="false">' + icon('settings') + '<span>设置</span></button>'
         + buttonMarkup('exit', 'close', '退出', '退出演讲者模式', 'presenter-exit-button')
         + '  </div>'
         + '</header>'
@@ -384,6 +428,16 @@
         + '        <div class="presenter-wave-surface" id="presenter-wave-surface">'
         + '          <div class="presenter-wave-display" id="presenter-wave-display"></div>'
         + '          <svg class="presenter-overlay" id="presenter-overlay" aria-label="演讲标注层"></svg>'
+        + '          <section class="presenter-text-editor" id="presenter-text-editor" role="group" aria-label="图中文字编辑" hidden>'
+        + '            <div class="presenter-text-clip"><div class="presenter-text-field" id="presenter-text-field">'
+        + '              <span class="presenter-text-measure" id="presenter-text-measure" aria-hidden="true"></span>'
+        + '              <textarea id="presenter-text-input" aria-label="标注文字内容" rows="1" wrap="off" spellcheck="false"></textarea>'
+        + '            </div></div>'
+        + '            <div class="presenter-text-actions" id="presenter-text-actions">'
+        + buttonMarkup('text-done', 'save', '完成', '完成文字编辑')
+        + '              <button type="button" class="presenter-icon-button" data-action="text-cancel" title="取消" aria-label="取消文字编辑">' + icon('close') + '</button>'
+        + '            </div>'
+        + '          </section>'
         + '        </div>'
         + '      </div>'
         + '      <div class="presenter-frozen-labels" id="presenter-frozen-labels" aria-hidden="true"></div>'
@@ -401,16 +455,16 @@
         + '</div>'
         + '<footer class="presenter-tooltray" aria-label="讲解工具">'
         + '  <div class="presenter-tool-group">'
-        + '    <button type="button" class="presenter-icon-button" data-action="undo" title="撤销标注（Ctrl+Z）" aria-label="撤销" disabled>' + icon('undo') + '</button>'
-        + '    <button type="button" class="presenter-icon-button" data-action="redo" title="重做标注（Ctrl+Shift+Z）" aria-label="重做" disabled>' + icon('redo') + '</button>'
-        + '    <button type="button" class="presenter-tool-button" data-tool="pointer" title="激光指示（P）">' + icon('pointer') + '<span>指示</span></button>'
+        + '    <button type="button" class="presenter-icon-button" data-action="undo" title="撤销标注" aria-label="撤销" disabled>' + icon('undo') + '</button>'
+        + '    <button type="button" class="presenter-icon-button" data-action="redo" title="重做标注" aria-label="重做" disabled>' + icon('redo') + '</button>'
+        + '    <button type="button" class="presenter-tool-button" data-tool="pointer" title="激光指示">' + icon('pointer') + '<span>指示</span></button>'
         + '    <button type="button" class="presenter-tool-button" data-tool="pen" title="画笔">' + icon('pen') + '<span>画笔</span></button>'
         + '    <button type="button" class="presenter-tool-button" data-tool="arrow" title="绘制箭头">' + icon('arrow') + '<span>箭头</span></button>'
         + '    <button type="button" class="presenter-tool-button" data-tool="rectangle" title="绘制矩形">' + icon('rectangle') + '<span>多边形</span></button>'
         + '    <button type="button" class="presenter-tool-button presenter-shape-style-button" data-action="shape-style" title="图形颜色和线宽" aria-label="图形颜色和线宽" aria-haspopup="dialog" aria-controls="presenter-shape-options" aria-expanded="false" disabled><span class="presenter-style-swatch" aria-hidden="true"></span><span id="presenter-shape-width-value">3 px</span></button>'
         + '    <button type="button" class="presenter-tool-button" data-tool="eraser" title="擦除笔迹、图形或文字">' + icon('eraser') + '<span>橡皮擦</span></button>'
         + '    <button type="button" class="presenter-tool-button" data-tool="text" title="添加或修改文字">' + icon('text') + '<span>文字</span></button>'
-        + '    <button type="button" class="presenter-tool-button" data-tool="focus" title="配置或取消聚焦（R）" aria-haspopup="dialog" aria-controls="presenter-focus-options" aria-expanded="false">' + icon('focus') + '<span>聚焦</span></button>'
+        + '    <button type="button" class="presenter-tool-button" data-tool="focus" title="配置或取消聚焦" aria-haspopup="dialog" aria-controls="presenter-focus-options" aria-expanded="false">' + icon('focus') + '<span>聚焦</span></button>'
         + '    <button type="button" class="presenter-tool-button" data-cursor="A" title="选择或取消游标 A">' + icon('cursor') + '<span>游标A</span></button>'
         + '    <button type="button" class="presenter-tool-button" data-cursor="B" title="选择或取消游标 B">' + icon('cursor') + '<span>游标B</span></button>'
         + '    <button type="button" class="presenter-tool-button" data-action="clear" title="清除当前演讲标注">' + icon('clear') + '<span>清除</span></button>'
@@ -421,6 +475,15 @@
         + '    <span class="presenter-measurement" id="presenter-measure-delta">B-A: --</span>'
         + '  </div>'
         + '</footer>'
+        + '<section class="presenter-popover presenter-settings" id="presenter-settings" role="dialog" aria-labelledby="presenter-settings-title" hidden>'
+        + '  <div class="presenter-popover-header"><strong id="presenter-settings-title">设置</strong><button type="button" class="presenter-icon-button" data-action="settings-close" title="关闭设置" aria-label="关闭设置">' + icon('close') + '</button></div>'
+        + '  <h2>快捷键</h2><div class="presenter-shortcut-list">'
+        + SHORTCUT_COMMANDS.map(command => '<div class="presenter-shortcut-row"><label for="presenter-shortcut-' + command.id + '">' + command.label + '</label>'
+          + '<input id="presenter-shortcut-' + command.id + '" data-shortcut-input="' + command.id + '" aria-label="' + command.label + '快捷键" aria-describedby="presenter-shortcut-status" type="text" readonly placeholder="未设置" autocomplete="off" spellcheck="false">'
+          + '<button type="button" class="presenter-icon-button" data-shortcut-clear="' + command.id + '" title="清除' + command.label + '快捷键" aria-label="清除' + command.label + '快捷键">' + icon('close') + '</button></div>').join('')
+        + '  </div><p id="presenter-shortcut-status" role="status" aria-live="polite"></p>'
+        + '  <div class="presenter-settings-footer">' + buttonMarkup('shortcuts-reset', 'undo', '恢复默认', '恢复默认快捷键') + '</div>'
+        + '</section>'
         + '<section class="presenter-popover presenter-copy-options" id="presenter-copy-options" role="dialog" aria-label="复制图片" hidden>'
         + '  <div class="presenter-popover-header"><strong>复制图片</strong><button type="button" class="presenter-icon-button" data-action="copy-close" title="关闭" aria-label="关闭图片复制选项">' + icon('close') + '</button></div>'
         + '  <div class="presenter-copy-choices">' + buttonMarkup('copy-full', 'image', '整张图片', '复制整张波形和批注') + buttonMarkup('copy-focus', 'focus', '仅聚焦区域', '复制聚焦区域、波形名和批注') + '</div>'
@@ -442,12 +505,6 @@
         }).join('')
         + '  </div>'
         + '  <div class="presenter-shape-width-row"><label for="presenter-shape-width">线宽</label><input id="presenter-shape-width" type="range" min="1" max="16" step="1" value="3"><output id="presenter-shape-width-output" for="presenter-shape-width">3 px</output></div>'
-        + '</section>'
-        + '<section class="presenter-popover presenter-text-editor" id="presenter-text-editor" role="dialog" aria-label="标注文字" hidden>'
-        + '  <div class="presenter-popover-header"><strong>标注文字</strong><div class="presenter-text-actions">'
-        + buttonMarkup('text-done', 'text', '完成', '完成（Ctrl+Enter）')
-        + '    <button type="button" class="presenter-icon-button" data-action="text-cancel" title="取消" aria-label="取消文字编辑">' + icon('close') + '</button></div></div>'
-        + '  <textarea id="presenter-text-input" aria-label="标注文字内容" rows="3" spellcheck="false"></textarea>'
         + '</section>'
         + '<dialog class="presenter-exit-dialog" id="presenter-exit-dialog" aria-labelledby="presenter-exit-title" aria-describedby="presenter-exit-message" hidden>'
         + '  <h2 id="presenter-exit-title">保存演讲步骤？</h2><p id="presenter-exit-message">演讲步骤有未保存的改动。</p>'
@@ -490,17 +547,25 @@
       this.saveState = app.querySelector('#presenter-save-state');
       this.exitDialog = app.querySelector('#presenter-exit-dialog');
       this.exitMessage = app.querySelector('#presenter-exit-message');
+      this.settingsOptions = app.querySelector('#presenter-settings');
+      this.settingsButton = app.querySelector('[data-action="settings"]');
+      this.shortcutStatus = app.querySelector('#presenter-shortcut-status');
       this.shapeOptions = app.querySelector('#presenter-shape-options');
       this.shapeStyleButton = app.querySelector('[data-action="shape-style"]');
       this.shapeWidthInput = app.querySelector('#presenter-shape-width');
+      this.shapeWidthRow = app.querySelector('.presenter-shape-width-row');
       this.textEditor = app.querySelector('#presenter-text-editor');
+      this.textField = app.querySelector('#presenter-text-field');
       this.textInput = app.querySelector('#presenter-text-input');
+      this.textMeasure = app.querySelector('#presenter-text-measure');
+      this.textActions = app.querySelector('#presenter-text-actions');
       this.laser = app.querySelector('#presenter-laser');
       this.libraryEl.textContent = this.adapter.libraryName || 'SQLite 波形库';
       if (document.documentElement.clientWidth < 760) this.workspace.classList.add('notes-collapsed');
       this.updateNotesControls();
       this.updateToolState();
       this.updateSaveControls();
+      this.refreshShortcutUI();
     }
 
     bindEvents() {
@@ -534,7 +599,13 @@
         this.notesDirty = true;
         this.saveStepNotes();
       });
-      this.textInput.addEventListener('input', () => this.updateSaveControls());
+      this.textInput.addEventListener('input', () => {
+        this.resizeTextEditor();
+        this.updateSaveControls();
+      });
+      this.textEditor.addEventListener('focusout', (event) => {
+        if (event.relatedTarget && !this.textEditor.contains(event.relatedTarget)) this.finishTextEdit(true, false);
+      });
       this.exitDialog.addEventListener('cancel', (event) => {
         event.preventDefault();
         if (!this.saving) this.cancelExit();
@@ -546,8 +617,24 @@
         this.handleAction(button.dataset.action);
       });
       this.notesPanel.addEventListener('keydown', (event) => {
-        if ((event.ctrlKey || event.metaKey) && String(event.key).toLowerCase() === 's') this.handleKeydown(event);
+        if (this.notesPanel.ownerDocument !== document) this.handleKeydown(event);
       });
+      this.settingsOptions.addEventListener('keydown', (event) => this.captureShortcut(event));
+      this.settingsOptions.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-shortcut-clear]');
+        if (button) this.setShortcut(button.dataset.shortcutClear, '');
+      });
+      root.addEventListener('storage', this.boundShortcutStorage);
+      if (SHORTCUTS && typeof root.BroadcastChannel === 'function') {
+        try {
+          this.shortcutChannel = new root.BroadcastChannel(SHORTCUTS.storageKey);
+          this.shortcutChannel.addEventListener('message', (event) => {
+            if (!event.data || event.data.version !== 1) return;
+            this.shortcutBindings = SHORTCUTS.sanitize(event.data, DEFAULT_SHORTCUTS);
+            this.refreshShortcutUI();
+          });
+        } catch (_error) { /* storage events still synchronize supported windows */ }
+      }
       if (root.VisualWaveDromPresenterNotes) {
         this.notesWindow = root.VisualWaveDromPresenterNotes.create({
           element: this.notesPanel,
@@ -594,18 +681,22 @@
       this.viewport.addEventListener('pointermove', (event) => this.moveLaser(event), { passive: true });
       this.viewport.addEventListener('pointerleave', () => this.hideLaser());
       this.viewport.addEventListener('pointerdown', (event) => {
-        if (this.tool === 'pointer' && event.button === 0) this.pulseLaser(event);
-      });
+        if (this.tool === 'pointer' && event.button === 0 && event.isPrimary !== false && !this.drag) {
+          this.clearPointerStroke();
+          this.pulseLaser(event);
+        }
+      }, true);
       this.overlay.addEventListener('pointerdown', (event) => {
         if (this.tool && this.tool !== 'pointer') this.syncBeforeUnload(true);
         this.handleOverlayPointerDown(event);
       });
-      this.overlay.addEventListener('pointermove', (event) => this.handleOverlayPointerMove(event));
-      this.overlay.addEventListener('pointerup', (event) => this.handleOverlayPointerUp(event));
-      this.overlay.addEventListener('pointercancel', (event) => {
+      this.viewport.addEventListener('pointerdown', (event) => this.handleViewportPointerDown(event));
+      this.viewport.addEventListener('pointermove', (event) => this.handleOverlayPointerMove(event));
+      this.viewport.addEventListener('pointerup', (event) => this.handleOverlayPointerUp(event));
+      this.viewport.addEventListener('pointercancel', (event) => {
         if (this.drag && this.drag.pointerId === event.pointerId) this.finishGesture(true);
       });
-      this.overlay.addEventListener('lostpointercapture', (event) => {
+      this.viewport.addEventListener('lostpointercapture', (event) => {
         if (this.drag && this.drag.pointerId === event.pointerId) this.finishGesture(false);
       });
       document.addEventListener('keydown', this.boundKeydown);
@@ -625,20 +716,30 @@
           if (!this.focusOptions.hidden) this.positionFocusOptions();
           if (!this.shapeOptions.hidden) this.positionShapeOptions();
           if (!this.copyOptions.hidden) this.positionCopyOptions();
+          if (!this.settingsOptions.hidden) this.positionSettings();
           if (this.textEdit) this.positionTextEditor();
         });
         this.resizeObserver.observe(this.viewport);
         this.resizeObserver.observe(this.focusOptions);
         this.resizeObserver.observe(this.shapeOptions);
         this.resizeObserver.observe(this.copyOptions);
-        this.resizeObserver.observe(this.textEditor);
         this.resizeObserver.observe(this.stepTitleInput);
+        this.resizeObserver.observe(this.settingsOptions);
       }
     }
 
     handleAction(action) {
       if (action !== 'text-cancel') this.finishTextEdit(true);
-      if (action === 'exit') {
+      if (!['settings', 'settings-close', 'shortcuts-reset'].includes(action)) this.closeSettings(false);
+      if (action === 'settings') {
+        if (this.settingsOptions.hidden) this.openSettings();
+        else this.closeSettings();
+      } else if (action === 'settings-close') {
+        this.closeSettings();
+      } else if (action === 'shortcuts-reset') {
+        this.shortcutBindings = Object.assign({}, DEFAULT_SHORTCUTS);
+        this.persistShortcuts();
+      } else if (action === 'exit') {
         this.requestExit();
       } else if (action === 'save') {
         void this.savePresentation();
@@ -693,6 +794,151 @@
       } else if (action === 'text-cancel') {
         this.finishTextEdit(false);
       }
+    }
+
+    shortcutButtons(command) {
+      const buttons = Array.from(this.app.querySelectorAll(command.selector));
+      if (this.notesPanel && !this.app.contains(this.notesPanel)) buttons.push(...this.notesPanel.querySelectorAll(command.selector));
+      return buttons;
+    }
+
+    refreshShortcutUI() {
+      if (!this.settingsOptions || !SHORTCUTS || this.destroyed) return;
+      SHORTCUT_COMMANDS.forEach(command => {
+        const key = this.shortcutBindings[command.id];
+        const text = SHORTCUTS.display(key);
+        this.shortcutButtons(command).forEach(button => {
+          if (!button.dataset.shortcutTitle) button.dataset.shortcutTitle = button.title || command.label;
+          button.title = button.dataset.shortcutTitle + (key ? '（' + text + '）' : '');
+          if (key) button.setAttribute('aria-keyshortcuts', key.replace(/\bCtrl\b/g, 'Control'));
+          else button.removeAttribute('aria-keyshortcuts');
+          const single = !!key && !key.includes('+');
+          button.classList.toggle('has-shortcut', single);
+          let badge = button.querySelector('.presenter-shortcut-hint');
+          if (single && !badge) {
+            badge = button.ownerDocument.createElement('kbd');
+            badge.className = 'presenter-shortcut-hint';
+            badge.setAttribute('aria-hidden', 'true');
+            button.appendChild(badge);
+          }
+          if (badge) {
+            if (single) badge.textContent = text;
+            else badge.remove();
+          }
+        });
+        const input = this.settingsOptions.querySelector('[data-shortcut-input="' + command.id + '"]');
+        input.value = text;
+        input.title = text || '未设置';
+        input.removeAttribute('aria-invalid');
+        this.settingsOptions.querySelector('[data-shortcut-clear="' + command.id + '"]').disabled = !key;
+      });
+    }
+
+    persistShortcuts() {
+      if (!SHORTCUTS) return;
+      const saved = SHORTCUTS.write(this.shortcutBindings);
+      this.refreshShortcutUI();
+      this.shortcutStatus.textContent = saved ? '已保存' : '当前窗口已生效，但浏览器未允许保存设置';
+      this.shortcutStatus.classList.toggle('error', !saved);
+      if (this.shortcutChannel) {
+        try { this.shortcutChannel.postMessage({ version: 1, bindings: this.shortcutBindings }); }
+        catch (_error) { /* local settings are already applied */ }
+      }
+      this.log('presenter-shortcut', { phase: 'saved', persisted: saved });
+    }
+
+    setShortcut(id, value) {
+      if (!SHORTCUTS || !Object.prototype.hasOwnProperty.call(DEFAULT_SHORTCUTS, id)) return;
+      const key = SHORTCUTS.normalize(value);
+      const conflict = SHORTCUT_COMMANDS.find(command => command.id !== id && key && this.shortcutBindings[command.id] === key);
+      const message = key === null ? '不支持这个按键'
+        : SHORTCUTS.reserved(key) ? '该按键由浏览器或文本编辑使用，请换一个'
+          : conflict ? SHORTCUTS.display(key) + ' 已用于“' + conflict.label + '”，请先清除该项或换一个按键' : '';
+      if (message) {
+        this.shortcutStatus.textContent = message;
+        this.shortcutStatus.classList.add('error');
+        this.settingsOptions.querySelector('[data-shortcut-input="' + id + '"]').setAttribute('aria-invalid', 'true');
+        return;
+      }
+      this.shortcutBindings[id] = key;
+      this.persistShortcuts();
+    }
+
+    captureShortcut(event) {
+      const input = event.target.closest('[data-shortcut-input]');
+      if (!input || event.key === 'Tab') return;
+      event.stopPropagation();
+      if (event.isComposing || event.keyCode === 229) return;
+      event.preventDefault();
+      if (event.key === 'Escape') { this.closeSettings(); return; }
+      if (event.repeat || ['Control', 'Meta', 'Alt', 'Shift', 'CapsLock'].includes(event.key)) return;
+      if ((event.key === 'Backspace' || event.key === 'Delete') && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) {
+        this.setShortcut(input.dataset.shortcutInput, '');
+      } else if (SHORTCUTS) this.setShortcut(input.dataset.shortcutInput, SHORTCUTS.fromEvent(event));
+    }
+
+    openSettings() {
+      if (!SHORTCUTS) { this.showToast('快捷键模块未加载，请刷新页面后重试', true); return; }
+      this.closeFocusOptions();
+      this.closeShapeOptions();
+      if (!this.copying) this.closeCopyOptions();
+      this.refreshShortcutUI();
+      this.shortcutStatus.textContent = '';
+      this.shortcutStatus.classList.remove('error');
+      this.settingsOptions.hidden = false;
+      this.settingsButton.setAttribute('aria-expanded', 'true');
+      this.positionSettings();
+      this.settingsOptions.querySelector('[data-shortcut-input]').focus({ preventScroll: true });
+      this.noteActivity();
+    }
+
+    positionSettings() {
+      const button = this.settingsButton.getBoundingClientRect();
+      this.positionPopover(this.settingsOptions, button.right - this.settingsOptions.offsetWidth, button.bottom, false);
+    }
+
+    closeSettings(restoreFocus) {
+      if (!this.settingsOptions || this.settingsOptions.hidden) return;
+      this.settingsOptions.hidden = true;
+      this.settingsButton.setAttribute('aria-expanded', 'false');
+      if (restoreFocus !== false) this.settingsButton.focus({ preventScroll: true });
+    }
+
+    isShortcutButtonVisible(button) {
+      if (button.closest('[hidden]')) return false;
+      if (this.workspace && this.workspace.classList.contains('notes-collapsed')
+          && this.app.contains(this.notesPanel) && button.closest('.presenter-notes') === this.notesPanel) return false;
+      if (typeof button.getClientRects === 'function' && !button.getClientRects().length) return false;
+      const owner = button.ownerDocument && button.ownerDocument.defaultView;
+      if (owner && typeof owner.getComputedStyle === 'function') {
+        try {
+          const style = owner.getComputedStyle(button);
+          if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false;
+        } catch (_error) { return false; }
+      }
+      return true;
+    }
+
+    dispatchShortcut(event, context) {
+      if (!SHORTCUTS || !this.app) return false;
+      const key = SHORTCUTS.fromEvent(event);
+      if (!key) return false;
+      const command = SHORTCUT_COMMANDS.find(item => this.shortcutBindings[item.id] === key);
+      if (!command) return false;
+      const target = event.target;
+      const typing = target && (['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) || target.isContentEditable);
+      if (typing && (SHORTCUTS.isEditingKey(key) || !(event.ctrlKey || event.metaKey || event.altKey)
+          || !['save', 'text-done'].includes(command.id))) return false;
+      const button = this.shortcutButtons(command).find(item => this.isShortcutButtonVisible(item)
+        && (!context || context.contains(item) || (context === this.settingsOptions && command.id === 'settings')
+          || (context === this.textEditor && command.id === 'save')));
+      if (!button && !context) return false;
+      event.preventDefault();
+      event.stopPropagation();
+      if (!button || button.disabled || (event.repeat && !['step-prev', 'step-next', 'window-prev', 'window-next', 'undo', 'redo'].includes(command.id))) return true;
+      this.noteActivity();
+      button.click();
+      return true;
     }
 
     setStageMessage(detail, title) {
@@ -1039,8 +1285,9 @@
       const next = String(tool || '');
       this.finishTextEdit(true);
       this.finishGesture(false);
-      const hadSelectedShape = !!this.selectedShapeId;
-      this.selectedShapeId = null;
+      const hadSelectedMark = !!this.selectedMarkId;
+      this.selectedMarkId = null;
+      this.markPick = null;
       this.lastHistoryEdit = null;
       this.closeShapeOptions();
       if (next === 'focus') {
@@ -1056,10 +1303,13 @@
         this.tool = !force && this.tool === next ? '' : next;
         this.closeFocusOptions();
       }
-      if (this.tool !== 'pointer') this.hideLaser();
+      if (this.tool !== 'pointer') {
+        this.hideLaser();
+        this.clearPointerStroke();
+      }
       this.updateToolState();
-      if (hadSelectedShape) this.drawAnnotations();
-      if (isShapeKind(this.tool)) this.openShapeOptions();
+      if (hadSelectedMark) this.drawAnnotations();
+      if (isShapeKind(this.tool) || this.tool === 'pen') this.openShapeOptions();
       this.viewport.focus({ preventScroll: true });
     }
 
@@ -1085,6 +1335,7 @@
       this.focusOptions.querySelectorAll('input').forEach((input) => { input.checked = input.value === this.focusMode; });
       this.overlay.classList.remove('tool-pointer', 'tool-focus', 'tool-pen', 'tool-eraser', 'tool-text', 'tool-cursor', 'tool-arrow', 'tool-rectangle');
       if (this.tool) this.overlay.classList.add('tool-' + this.tool);
+      this.viewport.classList.toggle('can-pan', !this.tool);
       this.updateCopyControls();
       this.updateShapeControls();
       this.updateHistoryControls();
@@ -1114,6 +1365,7 @@
     restoreHistory(redo) {
       this.finishGesture(false);
       this.lastHistoryEdit = null;
+      this.markPick = null;
       const from = redo ? this.redoStack : this.undoStack;
       const to = redo ? this.undoStack : this.redoStack;
       if (!from.length) return;
@@ -1150,9 +1402,11 @@
       this.focusMode = mode;
       this.focusEnabled = true;
       this.tool = 'focus';
-      this.selectedShapeId = null;
+      this.selectedMarkId = null;
+      this.markPick = null;
       this.closeShapeOptions();
       this.hideLaser();
+      this.clearPointerStroke();
       this.recordAnnotationChange(before, 'focus-mode');
       this.drawAnnotations();
       this.updateToolState();
@@ -1179,6 +1433,8 @@
     }
 
     handleOutsidePointerDown(event) {
+      if (this.settingsOptions && !this.settingsOptions.hidden && !this.settingsOptions.contains(event.target)
+          && !event.target.closest('[data-action="settings"]')) this.closeSettings(false);
       if (this.textEdit && !this.textEditor.contains(event.target)) this.finishTextEdit(true, false);
       if (!this.focusOptions.hidden && !this.focusOptions.contains(event.target)
           && !event.target.closest('[data-tool="focus"]')) this.closeFocusOptions();
@@ -1197,8 +1453,10 @@
       const focusButton = this.copyOptions.querySelector('[data-action="copy-focus"]');
       const hasFocus = ready && !!this.getFocusBounds();
       focusButton.disabled = !hasFocus;
-      focusButton.title = hasFocus ? '复制聚焦区域、波形名和批注' : '请先选择聚焦区域';
+      focusButton.dataset.shortcutTitle = hasFocus ? '复制聚焦区域、波形名和批注' : '请先选择聚焦区域';
+      focusButton.title = focusButton.dataset.shortcutTitle;
       this.copyOptions.querySelector('[data-action="copy-close"]').disabled = this.copying;
+      this.refreshShortcutUI();
     }
 
     openCopyOptions() {
@@ -1335,12 +1593,18 @@
       }
     }
 
+    selectedMark() {
+      return this.annotations.marks.find((mark) => mark.id === this.selectedMarkId);
+    }
+
     selectedShape() {
-      return this.annotations.marks.find((mark) => mark.id === this.selectedShapeId && isShapeKind(mark.kind));
+      const mark = this.selectedMark();
+      return mark && isShapeKind(mark.kind) ? mark : null;
     }
 
     shapeContext() {
-      return this.selectedShape() || (isShapeKind(this.tool) ? { kind: this.tool, ...this.shapeStyles[this.tool] } : null);
+      return this.selectedShape() || (isShapeKind(this.tool) ? { kind: this.tool, ...this.shapeStyles[this.tool] }
+        : this.tool === 'pen' || this.tool === 'pointer' ? { kind: this.tool, color: this.penColor } : null);
     }
 
     shapeStyle(shape) {
@@ -1353,7 +1617,7 @@
 
     updateShapeControls() {
       if (!this.shapeOptions) return;
-      if (!this.selectedShape()) this.selectedShapeId = null;
+      if (!this.selectedMark()) this.selectedMarkId = null;
       const context = this.shapeContext();
       this.shapeStyleButton.disabled = !context;
       if (!context) {
@@ -1361,14 +1625,23 @@
         return;
       }
       const style = this.shapeStyle(context);
+      const colorOnly = !isShapeKind(context.kind);
+      const title = colorOnly ? (context.kind === 'pointer' ? '指示画线颜色' : '画笔颜色') : '图形颜色和线宽';
+      this.shapeStyleButton.dataset.shortcutTitle = title;
+      this.shapeStyleButton.title = title;
+      this.shapeStyleButton.setAttribute('aria-label', title);
       this.shapeStyleButton.querySelector('.presenter-style-swatch').style.backgroundColor = style.color;
-      this.app.querySelector('#presenter-shape-width-value').textContent = style.width + ' px';
+      this.app.querySelector('#presenter-shape-width-value').textContent = colorOnly ? '颜色' : style.width + ' px';
+      this.shapeWidthRow.hidden = colorOnly;
+      this.shapeWidthInput.disabled = colorOnly;
       this.shapeWidthInput.value = String(style.width);
       this.app.querySelector('#presenter-shape-width-output').textContent = style.width + ' px';
-      this.app.querySelector('#presenter-shape-options-title').textContent = (context.kind === 'arrow' ? '箭头' : '矩形') + '样式';
+      this.app.querySelector('#presenter-shape-options-title').textContent = colorOnly ? title
+        : (context.kind === 'arrow' ? '箭头' : '矩形') + '样式';
       this.shapeOptions.querySelectorAll('[data-shape-color]').forEach((swatch) => {
         swatch.setAttribute('aria-pressed', String(swatch.dataset.shapeColor === style.color));
       });
+      this.refreshShortcutUI();
     }
 
     openShapeOptions() {
@@ -1394,7 +1667,8 @@
       const context = this.shapeContext();
       if (!context) return;
       const style = this.shapeStyle(Object.assign({}, context, patch));
-      this.shapeStyles[context.kind] = style;
+      if (isShapeKind(context.kind)) this.shapeStyles[context.kind] = style;
+      else this.penColor = style.color;
       const mark = this.selectedShape();
       if (mark && (mark.color !== style.color || mark.width !== style.width)) {
         const before = this.drag ? null : cloneValue(this.annotations);
@@ -1407,7 +1681,7 @@
 
     handleShapeWheel(event) {
       const context = this.shapeContext();
-      if (!context || !event.deltaY || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return false;
+      if (!context || !isShapeKind(context.kind) || !event.deltaY || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return false;
       event.preventDefault();
       event.stopPropagation();
       this.noteActivity();
@@ -1416,16 +1690,140 @@
     }
 
     selectShape(id) {
-      this.selectedShapeId = id;
-      const shape = this.selectedShape();
-      if (!shape) return;
-      this.shapeStyles[shape.kind] = this.shapeStyle(shape);
+      this.selectMark(id);
+      if (this.selectedShape()) this.openShapeOptions();
+    }
+
+    selectMark(id) {
+      this.selectedMarkId = id || null;
+      this.markPick = null;
+      const mark = this.selectedMark();
+      if (!mark) this.selectedMarkId = null;
+      else if (isShapeKind(mark.kind)) this.shapeStyles[mark.kind] = this.shapeStyle(mark);
       this.tool = '';
       this.lastHistoryEdit = null;
       this.closeFocusOptions();
+      this.closeShapeOptions();
       this.updateToolState();
       this.drawAnnotations();
-      this.openShapeOptions();
+    }
+
+    markBounds(mark) {
+      const geometry = mark && this.markGeometry.get(mark.id);
+      if (!geometry) return null;
+      if (geometry.bounds) return geometry.bounds;
+      const points = geometry.points;
+      if (!points || !points.length) return null;
+      let left = Infinity;
+      let right = -Infinity;
+      let top = Infinity;
+      let bottom = -Infinity;
+      points.forEach((point) => {
+        left = Math.min(left, point.x);
+        right = Math.max(right, point.x);
+        top = Math.min(top, point.y);
+        bottom = Math.max(bottom, point.y);
+      });
+      return { x: left, y: top, width: right - left, height: bottom - top };
+    }
+
+    pickMark(point) {
+      const view = this.svgMetrics;
+      const inside = point.x >= view.x && point.x <= view.x + view.width
+        && point.y >= view.y && point.y <= view.y + view.height;
+      const hits = inside ? this.annotations.marks.filter((mark) => {
+        const geometry = this.markGeometry.get(mark.id);
+        if (!geometry) return false;
+        const radius = 6 / this.scale + (geometry.strokeWidth || 0) / 2;
+        if (geometry.points) return geometry.points.some((end, index, points) =>
+          segmentsNear(point, point, points[Math.max(0, index - 1)], end, radius));
+        const box = geometry.bounds;
+        return box && point.x >= box.x - radius && point.x <= box.x + box.width + radius
+          && point.y >= box.y - radius && point.y <= box.y + box.height + radius;
+      }).map((mark) => mark.id).reverse() : [];
+      const last = this.markPick;
+      const same = last && last.id === this.selectedMarkId
+        && Math.hypot(last.point.x - point.x, last.point.y - point.y) * this.scale <= 5
+        && hits.length === last.hits.length && hits.every((id, index) => id === last.hits[index]);
+      const index = same && hits.length ? (hits.indexOf(this.selectedMarkId) + 1) % hits.length : 0;
+      this.selectMark(hits[index]);
+      this.markPick = hits.length ? { point: point, hits: hits, id: this.selectedMarkId } : null;
+    }
+
+    startMarkMove(event, point) {
+      const mark = this.selectedMark();
+      if (!mark || this.tool) return;
+      this.markPick = null;
+      this.lastHistoryEdit = null;
+      this.closeShapeOptions();
+      const anchors = mark.kind === 'pen' ? mark.points : isShapeKind(mark.kind) ? [mark.start, mark.end] : [mark.anchor];
+      this.drag = {
+        kind: 'move', pointerId: event.pointerId, before: cloneValue(this.annotations),
+        mark: mark, startPoint: point, points: anchors.map((anchor) => this.pointFromAnchor(anchor)),
+        previousSelectedMarkId: mark.id
+      };
+      this.syncBeforeUnload(true);
+      try { this.overlay.setPointerCapture(event.pointerId); } catch (_error) { /* pointer already ended */ }
+      this.drawAnnotations();
+    }
+
+    handleViewportPointerDown(event) {
+      if (event.defaultPrevented || event.button !== 0 || event.isPrimary === false || this.tool || this.drag || !this.svg) return;
+      const target = event.target;
+      if (target && typeof target.closest === 'function'
+          && target.closest('input, textarea, select, button, a, [contenteditable], [role="dialog"], .presenter-text-editor')) return;
+      if (target === this.viewport) {
+        const rect = this.viewport.getBoundingClientRect();
+        if (event.clientX >= rect.left + this.viewport.clientLeft + this.viewport.clientWidth
+            || event.clientY >= rect.top + this.viewport.clientTop + this.viewport.clientHeight) return;
+      }
+      this.startCanvasPan(event, null);
+    }
+
+    startCanvasPan(event, point) {
+      event.preventDefault();
+      this.viewport.focus({ preventScroll: true });
+      this.drag = {
+        kind: 'pan', pointerId: event.pointerId, point: point,
+        startX: event.clientX, startY: event.clientY,
+        left: this.viewport.scrollLeft, top: this.viewport.scrollTop, moved: false
+      };
+      try { this.viewport.setPointerCapture(event.pointerId); } catch (_error) { /* pointer already ended */ }
+    }
+
+    moveCanvasPan(event) {
+      const drag = this.drag;
+      const dx = event.clientX - drag.startX;
+      const dy = event.clientY - drag.startY;
+      if (!drag.moved && Math.hypot(dx, dy) < 4) return;
+      drag.moved = true;
+      this.markPick = null;
+      this.viewport.classList.add('is-panning');
+      // Screen deltas stay stable while scrolling changes the SVG coordinate transform.
+      this.viewport.scrollLeft = clamp(drag.left - dx, 0, Math.max(0, this.viewport.scrollWidth - this.viewport.clientWidth));
+      this.viewport.scrollTop = clamp(drag.top - dy, 0, Math.max(0, this.viewport.scrollHeight - this.viewport.clientHeight));
+    }
+
+    moveMark(point) {
+      const drag = this.drag;
+      const dx = point.x - drag.startPoint.x;
+      const dy = point.y - drag.startPoint.y;
+      if (!drag.moved && Math.hypot(dx, dy) * this.scale < 2) return;
+      drag.moved = true;
+      // Always translate the original points, including across differently sized signal rows.
+      const anchors = drag.points.map((original) => this.anchorFromPoint({ x: original.x + dx, y: original.y + dy }));
+      if (drag.mark.kind === 'pen') drag.mark.points = anchors;
+      else if (isShapeKind(drag.mark.kind)) [drag.mark.start, drag.mark.end] = anchors;
+      else drag.mark.anchor = anchors[0];
+    }
+
+    deleteSelectedMark() {
+      if (this.tool || !this.selectedMark()) return;
+      this.finishGesture(false);
+      const before = cloneValue(this.annotations);
+      this.annotations.marks = this.annotations.marks.filter((mark) => mark.id !== this.selectedMarkId);
+      this.selectMark(null);
+      this.recordAnnotationChange(before, 'mark-delete');
     }
 
     resolveAnchorRow(anchor) {
@@ -1455,22 +1853,64 @@
     }
 
     openTextEditor(point, id) {
+      this.finishTextEdit(true, false);
       const mark = this.annotations.marks.find(function (item) { return item.id === id && item.kind === 'text'; });
       this.textEdit = { id: mark ? mark.id : null, anchor: mark ? cloneValue(mark.anchor) : this.anchorFromPoint(point) };
       this.textInput.value = mark ? mark.text : '';
       this.textEditor.hidden = false;
-      this.positionTextEditor();
+      this.resizeTextEditor();
+      this.drawAnnotations();
       this.textInput.focus({ preventScroll: true });
       this.textInput.select();
+    }
+
+    resizeTextEditor() {
+      if (!this.textEdit) return;
+      // The mirror sizes the native textarea without rewriting its value or selection.
+      this.textMeasure.textContent = this.textInput.value + '\u200b';
+      this.positionTextEditor();
     }
 
     positionTextEditor() {
       if (!this.textEdit || !this.svgMetrics) return;
       const point = this.pointFromAnchor(this.textEdit.anchor);
-      const matrix = this.overlay.getScreenCTM();
-      if (!matrix) return;
-      const position = new DOMPoint(point.x, point.y).matrixTransform(matrix);
-      this.positionPopover(this.textEditor, position.x, position.y, false);
+      const widthRemaining = Math.max(1, this.svgMetrics.x + this.svgMetrics.width - point.x);
+      const heightRemaining = Math.max(1, this.svgMetrics.y + this.svgMetrics.height - point.y);
+      this.textField.style.left = (point.x - this.svgMetrics.x) + 'px';
+      this.textField.style.top = (point.y - this.svgMetrics.y) + 'px';
+      this.textField.style.minWidth = Math.min(56, widthRemaining) + 'px';
+      this.textField.style.maxWidth = widthRemaining + 'px';
+      this.textField.style.maxHeight = heightRemaining + 'px';
+      const editor = this.textField.getBoundingClientRect();
+      const origin = this.textEditor.getBoundingClientRect();
+      const viewport = this.viewport.getBoundingClientRect();
+      const width = this.textActions.offsetWidth;
+      const height = this.textActions.offsetHeight;
+      const left = clamp(editor.left, viewport.left + 8, viewport.left + this.viewport.clientWidth - width - 8);
+      const preferredTop = editor.top - height - 8 >= viewport.top + 8
+        ? editor.top - height - 8 : editor.bottom + 8;
+      const top = clamp(preferredTop, viewport.top + 8, viewport.top + this.viewport.clientHeight - height - 8);
+      // Text shares the image transform; its small action buttons remain screen-sized.
+      this.textActions.style.transform = 'scale(' + (1 / this.scale) + ')';
+      this.textActions.style.left = ((left - origin.left) / this.scale) + 'px';
+      this.textActions.style.top = ((top - origin.top) / this.scale) + 'px';
+    }
+
+    getAnnotationTextMetrics() {
+      if (this.annotationTextMetrics) return this.annotationTextMetrics;
+      const ruler = document.createElement('span');
+      ruler.className = 'presenter-text-ruler';
+      ruler.textContent = 'M';
+      const baseline = document.createElement('span');
+      ruler.appendChild(baseline);
+      document.body.appendChild(ruler);
+      const bounds = ruler.getBoundingClientRect();
+      this.annotationTextMetrics = {
+        baseline: baseline.getBoundingClientRect().top - bounds.top,
+        lineHeight: bounds.height
+      };
+      ruler.remove();
+      return this.annotationTextMetrics;
     }
 
     finishTextEdit(commit, focus) {
@@ -1490,8 +1930,8 @@
           this.annotations.marks.splice(index, 1);
         }
         this.recordAnnotationChange(before, 'text');
-        this.drawAnnotations();
       }
+      this.drawAnnotations();
       if (focus !== false) this.viewport.focus({ preventScroll: true });
       this.updateSaveControls();
     }
@@ -1527,6 +1967,41 @@
       const previous = this.app.querySelectorAll('.presenter-pointer-pulse');
       if (previous.length >= 5) previous[0].remove();
       this.app.appendChild(pulse);
+    }
+
+    clearPointerStroke() {
+      cancelAnimationFrame(this.pointerStrokeFrame);
+      this.pointerStrokeFrame = 0;
+      this.pointerStroke = [];
+      if (this.pointerInk) this.pointerInk.remove();
+      this.pointerInk = null;
+    }
+
+    schedulePointerStrokeDraw() {
+      if (this.pointerStrokeFrame) return;
+      this.pointerStrokeFrame = requestAnimationFrame(() => {
+        this.pointerStrokeFrame = 0;
+        if (!this.destroyed) this.drawPointerStroke();
+      });
+    }
+
+    drawPointerStroke() {
+      cancelAnimationFrame(this.pointerStrokeFrame);
+      this.pointerStrokeFrame = 0;
+      if (this.pointerStroke.length < 2 || !this.overlay || !this.svgMetrics) return;
+      if (!this.pointerInk || this.pointerInk.parentNode !== this.overlay) {
+        this.pointerInk = createSvgElement('path', {
+          class: 'presenter-pointer-ink', 'aria-hidden': 'true',
+          stroke: this.pointerStrokeColor,
+          'clip-path': 'url(#' + (this.markClipId || 'presenter-mark-clip') + ')'
+        });
+        this.overlay.appendChild(this.pointerInk);
+      }
+      const path = this.pointerStroke.map((anchor, index) => {
+        const point = this.pointFromAnchor(anchor);
+        return (index ? 'L' : 'M') + point.x.toFixed(2) + ' ' + point.y.toFixed(2);
+      }).join(' ');
+      this.pointerInk.setAttribute('d', path);
     }
 
     scheduleAnnotationDraw() {
@@ -1588,29 +2063,37 @@
 
     handleOverlayPointerDown(event) {
       if (event.button !== 0 || this.drag || !this.svg) return;
+      if (event.isPrimary === false) return;
       const cursor = event.target.dataset && event.target.dataset.cursor;
       const target = typeof event.target.closest === 'function' ? event.target.closest('[data-mark-id]') : event.target;
       const shape = target && this.annotations.marks.find((mark) => mark.id === target.dataset.markId && isShapeKind(mark.kind));
-      if (!this.tool && !cursor && !shape) {
-        if (this.selectedShapeId) {
-          this.selectedShapeId = null;
-          this.updateToolState();
-          this.drawAnnotations();
-        }
-        return;
-      }
       const point = this.clientPoint(event);
       if (!point) return;
       event.preventDefault();
       this.viewport.focus({ preventScroll: true });
+      if (!this.tool && !cursor) {
+        const handle = typeof event.target.closest === 'function' ? event.target.closest('[data-mark-move-id]') : null;
+        if (handle && handle.dataset.markMoveId === this.selectedMarkId) this.startMarkMove(event, point);
+        else this.startCanvasPan(event, point);
+        return;
+      }
       if (shape && (!this.tool || isShapeKind(this.tool))) {
         this.selectShape(shape.id);
         return;
       }
-      const previousSelectedShapeId = this.selectedShapeId;
-      this.selectedShapeId = null;
+      const previousSelectedMarkId = this.selectedMarkId;
+      this.selectedMarkId = null;
+      this.markPick = null;
       this.lastHistoryEdit = null;
-      if (this.tool === 'pointer') return;
+      if (this.tool === 'pointer') {
+        this.clearPointerStroke();
+        this.pointerStrokeColor = this.penColor;
+        this.pointerStroke.push(this.anchorFromPoint(point));
+        // Pointer ink is transient, so it must not snapshot or mutate annotations.
+        this.drag = { kind: 'pointer', pointerId: event.pointerId, lastPoint: point };
+        try { this.overlay.setPointerCapture(event.pointerId); } catch (_error) { /* pointer already ended */ }
+        return;
+      }
       if (this.tool === 'text') {
         const target = event.target.closest('[data-mark-id]');
         this.openTextEditor(point, target && target.dataset.markId);
@@ -1622,7 +2105,7 @@
       }
       this.drag = {
         kind: this.tool, pointerId: event.pointerId, before: cloneValue(this.annotations),
-        lastPoint: point, cursor: this.activeCursor, previousSelectedShapeId: previousSelectedShapeId
+        lastPoint: point, cursor: this.activeCursor, previousSelectedMarkId: previousSelectedMarkId
       };
       try { this.overlay.setPointerCapture(event.pointerId); } catch (_error) { /* pointer already ended */ }
       if (this.tool === 'cursor') {
@@ -1634,7 +2117,7 @@
       } else if (this.tool === 'pen') {
         const anchor = this.anchorFromPoint(point);
         const mark = {
-          id: 'mark-' + (++this.markSequence), kind: 'pen', points: [anchor, cloneValue(anchor)]
+          id: 'mark-' + (++this.markSequence), kind: 'pen', color: this.penColor, points: [anchor, cloneValue(anchor)]
         };
         this.annotations.marks.push(mark);
         this.drag.mark = mark;
@@ -1645,7 +2128,7 @@
         }, this.shapeStyles[this.tool]);
         this.annotations.marks.push(mark);
         this.drag.mark = mark;
-        this.selectedShapeId = mark.id;
+        this.selectedMarkId = mark.id;
       } else if (this.tool === 'eraser') {
         this.eraseMarks(point, point);
       }
@@ -1655,20 +2138,27 @@
 
     handleOverlayPointerMove(event) {
       if (!this.drag || this.drag.pointerId !== event.pointerId) return;
+      if (this.drag.kind === 'pan') {
+        this.moveCanvasPan(event);
+        return;
+      }
       const point = this.clientPoint(event);
       if (!point) return;
-      if (this.drag.kind === 'focus' && this.annotations.focus) {
+      if (this.drag.kind === 'move') {
+        this.moveMark(point);
+      } else if (this.drag.kind === 'focus' && this.annotations.focus) {
         const anchor = this.anchorFromPoint(point);
         if (this.focusMode === 'columns') anchor.cycle = this.cycleFromX(point.x);
         this.annotations.focus.end = anchor;
       } else if (this.drag.kind === 'cursor') {
         this.annotations[this.drag.cursor === 'B' ? 'cursorB' : 'cursorA'] = this.cycleFromX(point.x);
-      } else if (this.drag.kind === 'pen') {
+      } else if (this.drag.kind === 'pen' || this.drag.kind === 'pointer') {
+        const points = this.drag.kind === 'pointer' ? this.pointerStroke : this.drag.mark.points;
         const samples = typeof event.getCoalescedEvents === 'function' ? event.getCoalescedEvents() : [];
         (samples.length ? samples : [event]).forEach((sample) => {
           const next = this.clientPoint(sample);
           if (next && Math.hypot(next.x - this.drag.lastPoint.x, next.y - this.drag.lastPoint.y) * this.scale >= 1) {
-            this.drag.mark.points.push(this.anchorFromPoint(next));
+            points.push(this.anchorFromPoint(next));
             this.drag.lastPoint = next;
           }
         });
@@ -1678,23 +2168,41 @@
         this.eraseMarks(this.drag.lastPoint, point);
         this.drag.lastPoint = point;
       }
-      this.scheduleAnnotationDraw();
+      if (this.drag.kind === 'pointer') this.schedulePointerStrokeDraw();
+      else this.scheduleAnnotationDraw();
     }
 
     handleOverlayPointerUp(event) {
       if (!this.drag || this.drag.pointerId !== event.pointerId) return;
       this.handleOverlayPointerMove(event);
-      this.finishGesture(false);
+      this.finishGesture(false, true);
     }
 
-    finishGesture(cancel) {
+    finishGesture(cancel, completeClick) {
       if (!this.drag) return;
       const drag = this.drag;
       this.drag = null;
-      try { this.overlay.releasePointerCapture(drag.pointerId); } catch (_error) { /* already released */ }
+      const capture = drag.kind === 'pan' ? this.viewport : this.overlay;
+      try { capture.releasePointerCapture(drag.pointerId); } catch (_error) { /* already released */ }
+      if (drag.kind === 'pan') {
+        this.viewport.classList.remove('is-panning');
+        if (cancel && drag.moved) {
+          this.viewport.scrollLeft = drag.left;
+          this.viewport.scrollTop = drag.top;
+        } else if (!cancel && completeClick && !drag.moved) {
+          if (drag.point) this.pickMark(drag.point);
+          else this.selectMark(null);
+        }
+        return;
+      }
+      if (drag.kind === 'pointer') {
+        if (cancel) this.clearPointerStroke();
+        else this.drawPointerStroke();
+        return;
+      }
       if (cancel) {
         this.annotations = drag.before;
-        this.selectedShapeId = drag.previousSelectedShapeId || null;
+        this.selectedMarkId = drag.previousSelectedMarkId || null;
       } else {
         if (isShapeKind(drag.kind)) {
           const start = this.pointFromAnchor(drag.mark.start);
@@ -1704,7 +2212,7 @@
           const empty = drag.kind === 'rectangle' ? width < 4 || height < 4 : Math.hypot(width, height) < 4;
           if (empty) {
             this.annotations.marks = this.annotations.marks.filter((mark) => mark.id !== drag.mark.id);
-            this.selectedShapeId = drag.previousSelectedShapeId || null;
+            this.selectedMarkId = drag.previousSelectedMarkId || null;
           }
         }
         const focus = this.annotations.focus;
@@ -1724,6 +2232,7 @@
       }
       this.drawAnnotations();
       this.updateShapeControls();
+      this.updateSaveControls();
     }
 
     eraseMarks(start, end) {
@@ -1808,16 +2317,6 @@
         class: 'presenter-shape-ink', d: path, stroke: style.color, 'stroke-width': style.width, 'data-mark-id': mark.id
       }));
       this.markGeometry.set(mark.id, { points: points, strokeWidth: style.width / this.scale });
-      if (mark.id === this.selectedShapeId && !this.drag) {
-        const padding = (4 + style.width / 2) / this.scale;
-        const left = Math.min(...points.map((point) => point.x)) - padding;
-        const top = Math.min(...points.map((point) => point.y)) - padding;
-        layer.appendChild(createSvgElement('rect', {
-          class: 'presenter-shape-selection', x: left, y: top,
-          width: Math.max(...points.map((point) => point.x)) - left + padding,
-          height: Math.max(...points.map((point) => point.y)) - top + padding
-        }));
-      }
     }
 
     drawMarks() {
@@ -1831,23 +2330,25 @@
       const layer = createSvgElement('g', { 'clip-path': 'url(#' + markClipId + ')' });
       this.overlay.appendChild(layer);
       this.annotations.marks.forEach((mark) => {
+        if (this.textEdit && mark.id === this.textEdit.id) return;
         if (mark.kind === 'pen') {
           const points = mark.points.map((anchor) => this.pointFromAnchor(anchor));
           const path = points.map(function (point, index) {
             return (index ? 'L' : 'M') + point.x.toFixed(2) + ' ' + point.y.toFixed(2);
           }).join(' ');
           layer.appendChild(createSvgElement('path', {
-            class: 'presenter-annotation-ink', d: path, 'data-mark-id': mark.id
+            class: 'presenter-annotation-ink', d: path, 'data-mark-id': mark.id, stroke: this.shapeStyle(mark).color
           }));
-          this.markGeometry.set(mark.id, { points: points });
+          this.markGeometry.set(mark.id, { points: points, strokeWidth: 2.5 / this.scale });
         } else if (isShapeKind(mark.kind)) {
           this.drawShape(layer, mark);
         } else if (mark.kind === 'text') {
           const point = this.pointFromAnchor(mark.anchor);
+          const metrics = this.getAnnotationTextMetrics();
           const group = createSvgElement('g', { 'data-mark-id': mark.id });
-          const label = createSvgElement('text', { class: 'presenter-annotation-text', x: point.x, y: point.y });
+          const label = createSvgElement('text', { class: 'presenter-annotation-text', x: point.x, y: point.y + metrics.baseline });
           mark.text.split(/\r?\n/).forEach(function (line, index) {
-            const span = createSvgElement('tspan', { x: point.x, dy: index ? '1.4em' : 0 });
+            const span = createSvgElement('tspan', { x: point.x, dy: index ? metrics.lineHeight : 0 });
             span.textContent = line || '\u00a0';
             label.appendChild(span);
           });
@@ -1862,6 +2363,40 @@
           this.markGeometry.set(mark.id, { bounds: { x: bounds.x - 3, y: bounds.y - 2, width: bounds.width + 6, height: bounds.height + 4 } });
         }
       });
+    }
+
+    drawMarkSelection() {
+      const mark = this.selectedMark();
+      const bounds = this.markBounds(mark);
+      if (!bounds || (this.drag && this.drag.kind !== 'move' && this.drag.kind !== 'pan')) return;
+      const view = this.svgMetrics;
+      const padding = (4 + (isShapeKind(mark.kind) ? this.shapeStyle(mark).width / 2 : 1.25)) / this.scale;
+      const left = Math.max(view.x, bounds.x - padding);
+      const top = Math.max(view.y, bounds.y - padding);
+      const right = Math.min(view.x + view.width, bounds.x + bounds.width + padding);
+      const bottom = Math.min(view.y + view.height, bounds.y + bounds.height + padding);
+      if (right <= left || bottom <= top) return;
+      const layer = createSvgElement('g', { class: 'presenter-mark-controls' });
+      layer.appendChild(createSvgElement('rect', {
+        class: 'presenter-shape-selection', x: left, y: top, width: right - left, height: bottom - top
+      }));
+      this.overlay.appendChild(layer);
+      if (this.tool) return;
+      const size = 24 / this.scale;
+      const x = clamp(right + 3 / this.scale, view.x, view.x + view.width - size);
+      const y = clamp(bottom + 3 / this.scale, view.y, view.y + view.height - size);
+      const handle = createSvgElement('g', {
+        class: 'presenter-mark-move-handle' + (this.drag && this.drag.kind === 'move' ? ' dragging' : ''),
+        'data-mark-move-id': mark.id, 'aria-label': '拖动批注', transform: 'translate(' + x + ' ' + y + ') scale(' + 1 / this.scale + ')'
+      });
+      const title = createSvgElement('title');
+      title.textContent = '按住拖动批注';
+      handle.appendChild(title);
+      handle.appendChild(createSvgElement('rect', { x: 0, y: 0, width: 24, height: 24, rx: 4 }));
+      const glyph = createSvgElement('g', { class: 'presenter-mark-move-icon', transform: 'translate(4 4) scale(0.6666667)' });
+      glyph.innerHTML = ICONS.move;
+      handle.appendChild(glyph);
+      layer.appendChild(handle);
     }
 
     drawAnnotations() {
@@ -1886,6 +2421,8 @@
       }
       this.drawCursor('A', this.annotations.cursorA);
       this.drawCursor('B', this.annotations.cursorB);
+      this.drawPointerStroke();
+      this.drawMarkSelection();
       this.updateMeasurements();
       this.updateCopyControls();
     }
@@ -1935,7 +2472,9 @@
 
     clearAnnotations() {
       this.finishGesture(false);
-      this.selectedShapeId = null;
+      this.clearPointerStroke();
+      this.selectedMarkId = null;
+      this.markPick = null;
       this.closeShapeOptions();
       const before = cloneValue(this.annotations);
       this.annotations = emptyAnnotations();
@@ -2131,6 +2670,7 @@
     recordStep() {
       this.finishStepTitleEdit(true);
       this.finishGesture(false);
+      this.clearPointerStroke();
       this.saveStepNotes();
       const step = this.captureStep();
       this.steps = this.steps.slice(0, this.stepIndex + 1);
@@ -2146,9 +2686,11 @@
       if (index < 0 || index >= this.steps.length || index === this.stepIndex) return;
       this.finishStepTitleEdit(true);
       this.finishGesture(false);
+      this.clearPointerStroke();
       this.storeCurrentStep();
       this.closeFocusOptions();
-      this.selectedShapeId = null;
+      this.selectedMarkId = null;
+      this.markPick = null;
       this.lastHistoryEdit = null;
       this.closeShapeOptions();
       this.hideLaser();
@@ -2245,12 +2787,14 @@
       const detached = !!(this.notesWindow && this.notesWindow.detached);
       const topButton = this.app.querySelector('.presenter-top-actions [data-action="notes"]');
       topButton.setAttribute('aria-pressed', detached || !this.workspace.classList.contains('notes-collapsed') ? 'true' : 'false');
-      topButton.title = detached ? '唤起独立备注窗口（N）' : '显示或隐藏讲解备注（N）';
+      topButton.dataset.shortcutTitle = detached ? '唤起独立备注窗口' : '显示或隐藏讲解备注';
+      topButton.title = topButton.dataset.shortcutTitle;
       this.app.querySelector('.presenter-top-actions [data-action="notes-restore"]').hidden = !detached && !this.notesWindowOpening;
       this.notesPanel.querySelector('[data-action="notes-detach"]').hidden = detached;
       this.notesPanel.querySelector('[data-action="notes-detach"]').disabled = this.notesWindowOpening;
       this.notesPanel.querySelector('[data-action="notes-restore"]').hidden = !detached;
       this.notesPanel.querySelector('[data-action="notes"]').hidden = detached;
+      this.refreshShortcutUI();
     }
 
     async toggleFullscreen() {
@@ -2279,6 +2823,7 @@
       this.controlsTimer = setTimeout(() => {
         if (document.activeElement === this.notesText || this.stepTitleEdit || this.textEdit || !this.focusOptions.hidden
             || (this.shapeOptions && !this.shapeOptions.hidden) || (this.copyOptions && !this.copyOptions.hidden)
+            || (this.settingsOptions && !this.settingsOptions.hidden)
             || (this.exitDialog && !this.exitDialog.hidden) || this.drag) return;
         this.app.classList.add('controls-idle');
       }, 2600);
@@ -2286,20 +2831,22 @@
 
     handleKeydown(event) {
       const target = event.target;
-      if (event.isComposing || event.keyCode === 229) return;
+      if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
       const key = String(event.key || '').toLowerCase();
       if (this.exitDialog && !this.exitDialog.hidden) {
         if (key === 'escape') {
           event.preventDefault();
           event.stopPropagation();
           if (!this.saving) this.cancelExit();
-        }
+        } else this.dispatchShortcut(event, this.exitDialog);
         return;
       }
-      if ((event.ctrlKey || event.metaKey) && key === 's') {
-        event.preventDefault();
-        event.stopPropagation();
-        void this.savePresentation();
+      if (this.settingsOptions && !this.settingsOptions.hidden) {
+        if (key === 'escape') {
+          event.preventDefault();
+          event.stopPropagation();
+          this.closeSettings();
+        } else this.dispatchShortcut(event, this.settingsOptions);
         return;
       }
       if (target === this.stepTitleInput && (key === 'enter' || key === 'escape')) {
@@ -2315,14 +2862,15 @@
           if (!this.copying) this.closeCopyOptions();
           return;
         }
-        if (this.selectedShapeId) {
+        if (this.selectedMarkId) {
           this.finishGesture(true);
-          this.selectedShapeId = null;
+          this.selectedMarkId = null;
           this.setTool('');
           this.drawAnnotations();
           return;
         }
         this.finishGesture(true);
+        this.clearPointerStroke();
         const editingText = !!this.textEdit;
         this.finishTextEdit(false);
         if (this.focusEnabled || this.annotations.focus) this.clearFocus();
@@ -2332,45 +2880,17 @@
         this.viewport.focus({ preventScroll: true });
         return;
       }
-      if (this.textEdit && (event.ctrlKey || event.metaKey) && key === 'enter') {
+      const dialog = this.textEdit && this.textEditor.contains(target) ? this.textEditor
+        : target && typeof target.closest === 'function' ? target.closest('[role="dialog"], dialog') : null;
+      const typing = target && (['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) || target.isContentEditable);
+      if (key === 'delete' && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey
+          && !typing && !dialog && !this.tool && this.selectedMark()) {
         event.preventDefault();
-        this.finishTextEdit(true);
+        event.stopPropagation();
+        this.deleteSelectedMark();
         return;
       }
-      const typing = target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA'
-        || target.isContentEditable);
-      if (typing) return;
-      if ((event.ctrlKey || event.metaKey) && (key === 'z' || key === 'y')) {
-        event.preventDefault();
-        this.restoreHistory(key === 'y' || event.shiftKey);
-        return;
-      }
-      if (event.ctrlKey || event.metaKey || event.altKey) return;
-      if (key === 'f') {
-        event.preventDefault();
-        void this.toggleFullscreen();
-      } else if (key === 'arrowleft') {
-        event.preventDefault();
-        this.goToStep(this.stepIndex - 1);
-      } else if (key === 'arrowright') {
-        event.preventDefault();
-        this.goToStep(this.stepIndex + 1);
-      } else if (key === 'z') {
-        event.preventDefault();
-        this.fitToWindow(true);
-      } else if (key === 'p') {
-        event.preventDefault();
-        this.setTool('pointer');
-      } else if (key === 'r') {
-        event.preventDefault();
-        this.setTool('focus');
-      } else if (key === 'a' || key === 'b') {
-        event.preventDefault();
-        this.selectCursor(key.toUpperCase(), true);
-      } else if (key === 'n') {
-        event.preventDefault();
-        this.toggleNotes();
-      }
+      this.dispatchShortcut(event, dialog && this.app.contains(dialog) ? dialog : null);
     }
 
     destroy() {
@@ -2383,7 +2903,10 @@
       clearTimeout(this.closeTimer);
       cancelAnimationFrame(this.annotationFrame);
       this.hideLaser();
+      this.clearPointerStroke();
       if (this.resizeObserver) this.resizeObserver.disconnect();
+      root.removeEventListener('storage', this.boundShortcutStorage);
+      if (this.shortcutChannel) this.shortcutChannel.close();
       document.removeEventListener('keydown', this.boundKeydown);
       document.removeEventListener('pointerdown', this.boundOutside, true);
       document.removeEventListener('fullscreenchange', this.boundFullscreen);

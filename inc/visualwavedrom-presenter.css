@@ -278,7 +278,39 @@ body.presenter-wave-view > .scope-bootstrap {
 
 .presenter-top-actions {
   flex: 0 0 auto;
+  flex-wrap: wrap;
+  max-width: 100%;
   margin-left: auto;
+}
+
+.presenter-shortcut-hint {
+  flex: 0 0 auto;
+  min-width: 1em;
+  color: inherit;
+  font: inherit;
+  font-size: 0.6875rem;
+  font-weight: 650;
+  line-height: 1;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.presenter-button.has-shortcut,
+.presenter-icon-button.has-shortcut {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.presenter-icon-button.has-shortcut {
+  width: auto;
+  min-width: 34px;
+  padding-inline: 7px;
+}
+
+.presenter-shape-style-button.has-shortcut {
+  width: auto;
 }
 
 .presenter-exit-button {
@@ -315,6 +347,17 @@ body.presenter-wave-view > .scope-bootstrap {
   overscroll-behavior: contain;
   background: #f7f9fa;
   scrollbar-color: #9aa9b6 #e9edf0;
+}
+
+.presenter-stage-viewport.can-pan,
+.presenter-stage-viewport.can-pan .presenter-overlay {
+  cursor: grab;
+}
+
+.presenter-stage-viewport.is-panning,
+.presenter-stage-viewport.is-panning * {
+  cursor: grabbing !important;
+  user-select: none;
 }
 
 .presenter-stage-content {
@@ -383,14 +426,18 @@ body.presenter-wave-view > .scope-bootstrap {
   pointer-events: none;
 }
 
-.presenter-annotation-ink {
+.presenter-annotation-ink,
+.presenter-pointer-ink {
   fill: none;
-  stroke: #ce2f2f;
   stroke-width: 2.5;
   stroke-linecap: round;
   stroke-linejoin: round;
   vector-effect: non-scaling-stroke;
   pointer-events: stroke;
+}
+
+.presenter-pointer-ink {
+  pointer-events: none;
 }
 
 .presenter-shape-ink,
@@ -416,11 +463,54 @@ body.presenter-wave-view > .scope-bootstrap {
   pointer-events: none;
 }
 
+.presenter-mark-controls {
+  pointer-events: none;
+}
+
+.presenter-mark-move-handle {
+  pointer-events: all;
+  cursor: grab;
+}
+
+.presenter-mark-move-handle rect {
+  fill: #fff;
+  stroke: #2775b8;
+  stroke-width: 1;
+}
+
+.presenter-mark-move-handle:hover rect,
+.presenter-mark-move-handle.dragging rect {
+  fill: #e7f2fa;
+}
+
+.presenter-mark-move-handle.dragging {
+  cursor: grabbing;
+}
+
+.presenter-mark-move-icon {
+  fill: none;
+  stroke: #2775b8;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  pointer-events: none;
+}
+
+.presenter-annotation-text,
+.presenter-text-editor textarea,
+.presenter-text-measure,
+.presenter-text-ruler {
+  font: 14px/1.4 "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
+  letter-spacing: 0;
+  text-align: left;
+  white-space: pre;
+  tab-size: 4;
+}
+
 .presenter-annotation-text {
   fill: #a62626;
-  font: 14px "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
   text-anchor: start;
-  dominant-baseline: hanging;
+  dominant-baseline: alphabetic;
   pointer-events: all;
 }
 
@@ -732,6 +822,98 @@ body.presenter-wave-view > .scope-bootstrap {
   font-weight: 650;
 }
 
+.presenter-settings {
+  width: min(28rem, calc(100% - 16px));
+  height: min(38rem, calc(100vh - 16px));
+  overflow: hidden;
+}
+
+.presenter-settings:not([hidden]) {
+  display: flex;
+  flex-direction: column;
+}
+
+.presenter-settings .presenter-popover-header,
+.presenter-settings-footer {
+  flex: 0 0 auto;
+}
+
+.presenter-settings h2 {
+  margin: 0 0 8px;
+  font-size: 0.875rem;
+}
+
+.presenter-shortcut-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 5px;
+}
+
+.presenter-shortcut-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 0.9fr) 32px;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  padding-block: 4px;
+  border-bottom: 1px solid #e1e7ec;
+}
+
+.presenter-shortcut-row label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.presenter-shortcut-row input {
+  width: 100%;
+  min-width: 0;
+  min-height: 32px;
+  padding: 4px 7px;
+  border: 1px solid #b9c5d0;
+  border-radius: 4px;
+  background: #f8fafb;
+  color: #243440;
+  font: inherit;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  text-align: center;
+  cursor: pointer;
+}
+
+.presenter-shortcut-row input:focus {
+  outline: 2px solid #2775b8;
+  outline-offset: 1px;
+  background: #eef6fc;
+}
+
+.presenter-shortcut-row input[aria-invalid="true"] {
+  border-color: #b43232;
+}
+
+.presenter-shortcut-row .presenter-icon-button {
+  width: 32px;
+}
+
+#presenter-shortcut-status {
+  flex: 0 0 auto;
+  min-height: 1.5em;
+  margin: 8px 0;
+  line-height: 1.5;
+  color: #316449;
+  overflow-wrap: anywhere;
+}
+
+#presenter-shortcut-status.error {
+  color: #a52b2b;
+}
+
+.presenter-settings-footer {
+  display: flex;
+  justify-content: flex-end;
+}
+
 .presenter-style-swatch {
   display: block;
   flex: 0 0 16px;
@@ -869,6 +1051,10 @@ body.presenter-wave-view > .scope-bootstrap {
   margin-top: 14px;
 }
 
+.presenter-shape-width-row[hidden] {
+  display: none;
+}
+
 .presenter-shape-width-row input {
   width: 100%;
   min-width: 0;
@@ -914,33 +1100,88 @@ body.presenter-wave-view > .scope-bootstrap {
   background: #dfeefa;
 }
 
-.presenter-focus-modes input:focus-visible + span,
-.presenter-text-editor textarea:focus-visible {
+.presenter-focus-modes input:focus-visible + span {
   outline: 2px solid #4b9bd5;
   outline-offset: 2px;
 }
 
 .presenter-text-editor {
-  width: min(25rem, calc(100% - 16px));
+  position: absolute;
+  z-index: 5;
+  inset: 0;
+  pointer-events: none;
+}
+
+.presenter-text-clip {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+
+.presenter-text-field {
+  position: absolute;
+  width: max-content;
+  background: rgba(255, 255, 255, 0.92);
+  outline: 1px solid #2775b8;
+  outline-offset: 3px;
+  pointer-events: auto;
+}
+
+.presenter-text-measure {
+  display: block;
+  max-height: inherit;
+  padding-right: 2px;
+  overflow: hidden;
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .presenter-text-editor textarea {
+  position: absolute;
+  inset: 0;
   display: block;
   width: 100%;
-  min-height: 6rem;
-  max-height: min(40vh, 20rem);
-  padding: 8px;
-  border: 1px solid #bec9d3;
-  border-radius: 4px;
-  resize: vertical;
-  color: #23313d;
-  background: #fff;
-  font: inherit;
-  line-height: 1.5;
-  overflow-wrap: anywhere;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  outline: none;
+  resize: none;
+  overflow: auto;
+  color: #a62626;
+  caret-color: #a62626;
+  background: transparent;
+}
+
+.presenter-text-actions {
+  position: absolute;
+  width: max-content;
+  gap: 4px;
+  transform-origin: 0 0;
+  pointer-events: auto;
+}
+
+.presenter-text-ruler {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: max-content;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.presenter-text-ruler > span {
+  display: inline-block;
+  width: 0;
+  height: 0;
+  vertical-align: baseline;
 }
 
 .presenter-popover[hidden],
+.presenter-text-editor[hidden],
 .presenter-laser[hidden] {
   display: none;
 }
