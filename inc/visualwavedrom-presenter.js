@@ -14,6 +14,7 @@
   const MAX_SCALE = 3;
   const HISTORY_LIMIT = 100;
   const DEFAULT_STEP_TITLE = '演讲步骤';
+  const POINTER_CLEAR_STORAGE_KEY = 'visualwavedrom.presenter.pointerClearMode.v1';
   const SHORTCUTS = root.VisualWaveDromPresenterShortcuts;
   const SHORTCUT_COMMANDS = [
     ['pointer', '指示', '1', 'tool'], ['pen', '画笔', '2', 'tool'],
@@ -32,7 +33,7 @@
     ['exit', '退出演讲者模式', 'Shift+r'], ['copy-full', '复制整张图片', 'Shift+a'],
     ['copy-focus', '复制聚焦区域', 'Shift+s'], ['text-done', '完成文字编辑', 'Ctrl+Enter'],
     ['text-cancel', '取消文字编辑', ''], ['copy-close', '关闭图片复制选项', ''],
-    ['focus-close', '收起聚焦配置', ''], ['shape-style-close', '收起图形样式', ''],
+    ['focus-close', '收起聚焦配置', ''], ['shape-style-close', '收起样式设置', ''],
     ['exit-save', '保存并退出', ''], ['exit-discard', '不保存并退出', ''],
     ['exit-cancel', '取消退出', ''], ['settings-close', '关闭设置', ''],
     ['shortcuts-reset', '恢复默认快捷键', '']
@@ -316,6 +317,11 @@
       this.annotationFrame = 0;
       this.laserFrame = 0;
       this.laserPosition = null;
+      this.pointerClearMode = 'single';
+      try {
+        if (root.localStorage.getItem(POINTER_CLEAR_STORAGE_KEY) === 'double') this.pointerClearMode = 'double';
+      } catch (_error) { /* storage may be unavailable in local-file mode */ }
+      this.pointerStrokes = [];
       this.pointerStroke = [];
       this.pointerStrokeFrame = 0;
       this.pointerInk = null;
@@ -457,7 +463,7 @@
         + '  <div class="presenter-tool-group">'
         + '    <button type="button" class="presenter-icon-button" data-action="undo" title="撤销标注" aria-label="撤销" disabled>' + icon('undo') + '</button>'
         + '    <button type="button" class="presenter-icon-button" data-action="redo" title="重做标注" aria-label="重做" disabled>' + icon('redo') + '</button>'
-        + '    <button type="button" class="presenter-tool-button" data-tool="pointer" title="激光指示">' + icon('pointer') + '<span>指示</span></button>'
+        + '    <button type="button" class="presenter-tool-button" data-tool="pointer" title="激光指示" aria-haspopup="dialog" aria-expanded="false" aria-controls="presenter-shape-options">' + icon('pointer') + '<span>指示</span></button>'
         + '    <button type="button" class="presenter-tool-button" data-tool="pen" title="画笔">' + icon('pen') + '<span>画笔</span></button>'
         + '    <button type="button" class="presenter-tool-button" data-tool="arrow" title="绘制箭头">' + icon('arrow') + '<span>箭头</span></button>'
         + '    <button type="button" class="presenter-tool-button" data-tool="rectangle" title="绘制矩形">' + icon('rectangle') + '<span>多边形</span></button>'
@@ -498,13 +504,17 @@
         + '  </div>'
         + '</section>'
         + '<section class="presenter-popover presenter-shape-options" id="presenter-shape-options" role="dialog" aria-labelledby="presenter-shape-options-title" hidden>'
-        + '  <div class="presenter-popover-header"><strong id="presenter-shape-options-title">图形样式</strong><button type="button" class="presenter-icon-button" data-action="shape-style-close" title="收起" aria-label="收起图形样式">' + icon('close') + '</button></div>'
+        + '  <div class="presenter-popover-header"><strong id="presenter-shape-options-title">图形样式</strong><button type="button" class="presenter-icon-button" data-action="shape-style-close" title="收起" aria-label="收起样式设置">' + icon('close') + '</button></div>'
         + '  <div class="presenter-shape-colors" role="group" aria-label="线条颜色">'
         + SHAPE_COLORS.map(function (color) {
           return '<button type="button" class="presenter-color-swatch" data-shape-color="' + color[0] + '" style="--swatch-color:' + color[0] + '" title="' + color[1] + '" aria-label="' + color[1] + '" aria-pressed="false"></button>';
         }).join('')
         + '  </div>'
         + '  <div class="presenter-shape-width-row"><label for="presenter-shape-width">线宽</label><input id="presenter-shape-width" type="range" min="1" max="16" step="1" value="3"><output id="presenter-shape-width-output" for="presenter-shape-width">3 px</output></div>'
+        + '  <fieldset class="presenter-pointer-clear-options" hidden><legend>清除方式</legend><div class="presenter-focus-modes">'
+        + '    <label><input type="radio" name="presenter-pointer-clear-mode" value="single" checked><span>单击清除</span></label>'
+        + '    <label><input type="radio" name="presenter-pointer-clear-mode" value="double"><span>双击清除</span></label>'
+        + '  </div></fieldset>'
         + '</section>'
         + '<dialog class="presenter-exit-dialog" id="presenter-exit-dialog" aria-labelledby="presenter-exit-title" aria-describedby="presenter-exit-message" hidden>'
         + '  <h2 id="presenter-exit-title">保存演讲步骤？</h2><p id="presenter-exit-message">演讲步骤有未保存的改动。</p>'
@@ -554,6 +564,8 @@
       this.shapeStyleButton = app.querySelector('[data-action="shape-style"]');
       this.shapeWidthInput = app.querySelector('#presenter-shape-width');
       this.shapeWidthRow = app.querySelector('.presenter-shape-width-row');
+      this.pointerButton = app.querySelector('[data-tool="pointer"]');
+      this.pointerClearRow = app.querySelector('.presenter-pointer-clear-options');
       this.textEditor = app.querySelector('#presenter-text-editor');
       this.textField = app.querySelector('#presenter-text-field');
       this.textInput = app.querySelector('#presenter-text-input');
@@ -667,6 +679,9 @@
         const swatch = event.target.closest('[data-shape-color]');
         if (swatch) this.applyShapeStyle({ color: swatch.dataset.shapeColor });
       });
+      this.pointerClearRow.addEventListener('change', (event) => {
+        if (event.target.name === 'presenter-pointer-clear-mode') this.setPointerClearMode(event.target.value);
+      });
       this.shapeWidthInput.addEventListener('input', () => {
         this.applyShapeStyle({ width: Number(this.shapeWidthInput.value) }, true);
       });
@@ -682,7 +697,7 @@
       this.viewport.addEventListener('pointerleave', () => this.hideLaser());
       this.viewport.addEventListener('pointerdown', (event) => {
         if (this.tool === 'pointer' && event.button === 0 && event.isPrimary !== false && !this.drag) {
-          this.clearPointerStroke();
+          if (this.pointerClearMode === 'single') this.clearPointerStroke();
           this.pulseLaser(event);
         }
       }, true);
@@ -693,6 +708,7 @@
       this.viewport.addEventListener('pointerdown', (event) => this.handleViewportPointerDown(event));
       this.viewport.addEventListener('pointermove', (event) => this.handleOverlayPointerMove(event));
       this.viewport.addEventListener('pointerup', (event) => this.handleOverlayPointerUp(event));
+      this.viewport.addEventListener('dblclick', (event) => this.handlePointerDoubleClick(event));
       this.viewport.addEventListener('pointercancel', (event) => {
         if (this.drag && this.drag.pointerId === event.pointerId) this.finishGesture(true);
       });
@@ -1309,7 +1325,7 @@
       }
       this.updateToolState();
       if (hadSelectedMark) this.drawAnnotations();
-      if (isShapeKind(this.tool) || this.tool === 'pen') this.openShapeOptions();
+      if (isShapeKind(this.tool) || this.tool === 'pen' || this.tool === 'pointer') this.openShapeOptions();
       this.viewport.focus({ preventScroll: true });
     }
 
@@ -1626,13 +1642,20 @@
       }
       const style = this.shapeStyle(context);
       const colorOnly = !isShapeKind(context.kind);
-      const title = colorOnly ? (context.kind === 'pointer' ? '指示画线颜色' : '画笔颜色') : '图形颜色和线宽';
+      const isPointer = context.kind === 'pointer';
+      const title = colorOnly ? (isPointer ? '指示设置' : '画笔颜色') : '图形颜色和线宽';
       this.shapeStyleButton.dataset.shortcutTitle = title;
       this.shapeStyleButton.title = title;
       this.shapeStyleButton.setAttribute('aria-label', title);
       this.shapeStyleButton.querySelector('.presenter-style-swatch').style.backgroundColor = style.color;
-      this.app.querySelector('#presenter-shape-width-value').textContent = colorOnly ? '颜色' : style.width + ' px';
+      this.app.querySelector('#presenter-shape-width-value').textContent = isPointer ? '设置' : colorOnly ? '颜色' : style.width + ' px';
       this.shapeWidthRow.hidden = colorOnly;
+      if (this.pointerClearRow) {
+        this.pointerClearRow.hidden = !isPointer;
+        this.pointerClearRow.querySelectorAll('input').forEach((input) => {
+          input.checked = input.value === this.pointerClearMode;
+        });
+      }
       this.shapeWidthInput.disabled = colorOnly;
       this.shapeWidthInput.value = String(style.width);
       this.app.querySelector('#presenter-shape-width-output').textContent = style.width + ' px';
@@ -1649,6 +1672,7 @@
       this.updateShapeControls();
       this.shapeOptions.hidden = false;
       this.shapeStyleButton.setAttribute('aria-expanded', 'true');
+      if (this.pointerButton) this.pointerButton.setAttribute('aria-expanded', String(this.tool === 'pointer'));
       this.positionShapeOptions();
     }
 
@@ -1656,10 +1680,12 @@
       if (!this.shapeOptions) return;
       this.shapeOptions.hidden = true;
       this.shapeStyleButton.setAttribute('aria-expanded', 'false');
+      if (this.pointerButton) this.pointerButton.setAttribute('aria-expanded', 'false');
     }
 
     positionShapeOptions() {
-      const button = this.shapeStyleButton.getBoundingClientRect();
+      const anchor = this.tool === 'pointer' && this.pointerButton ? this.pointerButton : this.shapeStyleButton;
+      const button = anchor.getBoundingClientRect();
       this.positionPopover(this.shapeOptions, button.left, button.top, true);
     }
 
@@ -1969,12 +1995,39 @@
       this.app.appendChild(pulse);
     }
 
-    clearPointerStroke() {
+    setPointerClearMode(mode) {
+      if (mode !== 'single' && mode !== 'double') return;
+      this.pointerClearMode = mode;
+      let saved = false;
+      try {
+        root.localStorage.setItem(POINTER_CLEAR_STORAGE_KEY, mode);
+        saved = true;
+      } catch (_error) { /* keep the current window preference if storage is blocked */ }
+      this.updateShapeControls();
+      this.log('presenter-pointer', { phase: 'clear-mode', mode, saved });
+    }
+
+    handlePointerDoubleClick(event) {
+      if (this.tool !== 'pointer' || this.pointerClearMode !== 'double' || event.button !== 0 || this.drag) return;
+      if (event.target && typeof event.target.closest === 'function'
+        && event.target.closest('button, input, textarea, select, [contenteditable="true"]')) return;
+      event.preventDefault();
+      event.stopPropagation();
+      this.clearPointerStroke();
+    }
+
+    discardPointerStroke() {
       cancelAnimationFrame(this.pointerStrokeFrame);
       this.pointerStrokeFrame = 0;
       this.pointerStroke = [];
       if (this.pointerInk) this.pointerInk.remove();
       this.pointerInk = null;
+    }
+
+    clearPointerStroke() {
+      this.discardPointerStroke();
+      this.pointerStrokes.forEach((stroke) => { if (stroke.ink) stroke.ink.remove(); });
+      this.pointerStrokes = [];
     }
 
     schedulePointerStrokeDraw() {
@@ -1988,20 +2041,30 @@
     drawPointerStroke() {
       cancelAnimationFrame(this.pointerStrokeFrame);
       this.pointerStrokeFrame = 0;
-      if (this.pointerStroke.length < 2 || !this.overlay || !this.svgMetrics) return;
-      if (!this.pointerInk || this.pointerInk.parentNode !== this.overlay) {
-        this.pointerInk = createSvgElement('path', {
-          class: 'presenter-pointer-ink', 'aria-hidden': 'true',
-          stroke: this.pointerStrokeColor,
-          'clip-path': 'url(#' + (this.markClipId || 'presenter-mark-clip') + ')'
-        });
-        this.overlay.appendChild(this.pointerInk);
-      }
-      const path = this.pointerStroke.map((anchor, index) => {
+      if (!this.overlay || !this.svgMetrics) return;
+      const pathData = (points) => points.map((anchor, index) => {
         const point = this.pointFromAnchor(anchor);
         return (index ? 'L' : 'M') + point.x.toFixed(2) + ' ' + point.y.toFixed(2);
       }).join(' ');
-      this.pointerInk.setAttribute('d', path);
+      const appendInk = (points, color) => {
+        const ink = createSvgElement('path', {
+          class: 'presenter-pointer-ink', 'aria-hidden': 'true',
+          stroke: color, d: pathData(points),
+          'clip-path': 'url(#' + (this.markClipId || 'presenter-mark-clip') + ')'
+        });
+        this.overlay.appendChild(ink);
+        return ink;
+      };
+      // Completed strokes only need rebuilding when the annotation overlay is redrawn.
+      this.pointerStrokes.forEach((stroke) => {
+        if (!stroke.ink || stroke.ink.parentNode !== this.overlay) stroke.ink = appendInk(stroke.points, stroke.color);
+      });
+      if (this.pointerStroke.length < 2) return;
+      if (!this.pointerInk || this.pointerInk.parentNode !== this.overlay) {
+        this.pointerInk = appendInk(this.pointerStroke, this.pointerStrokeColor);
+      } else {
+        this.pointerInk.setAttribute('d', pathData(this.pointerStroke));
+      }
     }
 
     scheduleAnnotationDraw() {
@@ -2086,7 +2149,14 @@
       this.markPick = null;
       this.lastHistoryEdit = null;
       if (this.tool === 'pointer') {
-        this.clearPointerStroke();
+        if (this.pointerClearMode === 'single') this.clearPointerStroke();
+        else {
+          if (this.pointerStroke.length > 1) {
+            this.pointerStrokes.push({ points: this.pointerStroke, color: this.pointerStrokeColor, ink: this.pointerInk });
+            this.pointerInk = null;
+          }
+          this.discardPointerStroke();
+        }
         this.pointerStrokeColor = this.penColor;
         this.pointerStroke.push(this.anchorFromPoint(point));
         // Pointer ink is transient, so it must not snapshot or mutate annotations.
@@ -2196,7 +2266,7 @@
         return;
       }
       if (drag.kind === 'pointer') {
-        if (cancel) this.clearPointerStroke();
+        if (cancel) this.discardPointerStroke();
         else this.drawPointerStroke();
         return;
       }

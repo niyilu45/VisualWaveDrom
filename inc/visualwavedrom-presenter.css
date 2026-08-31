@@ -1105,6 +1105,26 @@ body.presenter-wave-view > .scope-bootstrap {
   outline-offset: 2px;
 }
 
+.presenter-pointer-clear-options {
+  min-width: 0;
+  margin: 14px 0 0;
+  padding: 0;
+  border: 0;
+}
+
+.presenter-pointer-clear-options[hidden] {
+  display: none;
+}
+
+.presenter-pointer-clear-options legend {
+  padding: 0;
+  margin-bottom: 8px;
+}
+
+.presenter-pointer-clear-options .presenter-focus-modes {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .presenter-text-editor {
   position: absolute;
   z-index: 5;
