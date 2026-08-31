@@ -442,7 +442,10 @@ ON CONFLICT(name) DO UPDATE SET
  wave_edit_mode=excluded.wave_edit_mode, revision=excluded.revision,
  saved_at=excluded.saved_at, title_cache=excluded.title_cache,
  description_cache=excluded.description_cache,
- content_length=excluded.content_length, extra_json=excluded.extra_json`
+ content_length=excluded.content_length,
+ extra_json=CASE WHEN json_type(vwd_documents.extra_json, '$.presentation')='text'
+ THEN json_set(excluded.extra_json, '$.presentation', json_extract(vwd_documents.extra_json, '$.presentation'))
+ ELSE excluded.extra_json END`
 	}
 	if _, err := tx.Exec(query, document.Name, document.SortOrder, document.InlineContent,
 		document.Hscale, document.WaveEditMode, document.Revision, document.SavedAt,
@@ -765,6 +768,9 @@ func (s *sqliteStore) updateDocument(filePath, waveID string, expectedRevision *
 		return documentUpdateResult{}, err
 	}
 	if err = writePreparedDocument(tx, document, false); err != nil {
+		return documentUpdateResult{}, err
+	}
+	if err = tx.QueryRow("SELECT extra_json FROM vwd_documents WHERE name=?", waveID).Scan(&document.ExtraJSON); err != nil {
 		return documentUpdateResult{}, err
 	}
 	if _, err = tx.Exec("UPDATE vwd_library SET updated_at=? WHERE singleton=1", savedAt); err != nil {

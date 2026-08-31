@@ -327,7 +327,9 @@
           wave_edit_mode=excluded.wave_edit_mode, revision=excluded.revision,
           saved_at=excluded.saved_at, title_cache=excluded.title_cache,
           description_cache=excluded.description_cache, content_length=excluded.content_length,
-          extra_json=excluded.extra_json`,
+          extra_json=CASE WHEN json_type(vwd_documents.extra_json, '$.presentation')='text'
+            THEN json_set(excluded.extra_json, '$.presentation', json_extract(vwd_documents.extra_json, '$.presentation'))
+            ELSE excluded.extra_json END`,
         bind: [
           document.name, document.sortOrder, document.inlineContent, document.hscale,
           document.waveEditMode, document.revision, document.savedAt, document.titleCache,
@@ -467,6 +469,25 @@
         this.writeLibraryRow(updated);
       });
       return { revisions, deletedDocuments: Array.from(deletedNames) };
+    }
+
+    savePresentation(name, value, expected) {
+      const state = JSON.parse(value);
+      if (!state || state.kind !== 'VisualWaveDromPresentation' || state.version !== 1
+          || !Array.isArray(state.steps) || !state.steps.length) throw new Error('演讲步骤数据无效');
+      return this.transaction(() => {
+        const row = this.query('SELECT extra_json FROM vwd_documents WHERE name=?', [name])[0];
+        if (!row) throw new Error('波形不存在，请先在主界面保存波形库');
+        const extra = JSON.parse(row.extra_json);
+        const previous = typeof extra.presentation === 'string' ? extra.presentation : '';
+        if (expected !== undefined && previous !== expected && previous !== value) {
+          throw new Error('演讲步骤已被其他窗口修改，请重新打开演讲者模式后再保存');
+        }
+        extra.presentation = value;
+        this.db.exec({ sql: 'UPDATE vwd_documents SET extra_json=? WHERE name=?', bind: [JSON.stringify(extra), name] });
+        this.db.exec({ sql: 'UPDATE vwd_library SET updated_at=? WHERE singleton=1', bind: [new Date().toISOString()] });
+        return value;
+      });
     }
 
     exportBytes() {

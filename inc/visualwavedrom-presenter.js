@@ -12,20 +12,36 @@
   const LARGE_WINDOW_COLUMNS = 320;
   const MIN_SCALE = 0.05;
   const MAX_SCALE = 3;
+  const HISTORY_LIMIT = 100;
+  const DEFAULT_STEP_TITLE = '演讲步骤';
+  const SHAPE_COLORS = [
+    ['#ce2f2f', '红色'], ['#2775b8', '蓝色'], ['#19804e', '绿色'],
+    ['#bf650d', '橙色'], ['#7f52b8', '紫色'], ['#263541', '深灰色']
+  ];
 
   const ICONS = {
     close: '<path d="M18 6 6 18M6 6l12 12"/>',
     fullscreen: '<path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/>',
     fit: '<path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/><path d="M9 9h6v6H9z"/>',
     notes: '<path d="M14 2H6a2 2 0 0 0-2 2v16l4-4h10a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/>',
+    image: '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/>',
+    save: '<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h12l4 4v12a2 2 0 0 1-2 2Z"/><path d="M17 21v-8H7v8M7 3v5h8"/>',
+    popout: '<path d="M15 3h6v6M10 14 21 3M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h6"/>',
+    restore: '<path d="M8 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-3M21 3l-9 9m0-6v6h6"/>',
     chevronLeft: '<path d="m15 18-6-6 6-6"/>',
     chevronRight: '<path d="m9 18 6-6-6-6"/>',
     plus: '<path d="M12 5v14M5 12h14"/>',
     pointer: '<path d="m3 3 7.1 17 2.4-7.5L20 10.1z"/>',
     focus: '<path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/>',
-    range: '<path d="M4 7V4h3M17 4h3v3M20 17v3h-3M7 20H4v-3"/><path d="M8 12h8"/>',
+    pen: '<path d="m16 3 5 5M4 20l4-1L21 6a2.1 2.1 0 0 0-3-3L5 16z"/>',
+    arrow: '<path d="M7 7h10v10M7 17 17 7"/>',
+    rectangle: '<rect x="3" y="3" width="18" height="18" rx="2"/>',
+    text: '<path d="M4 7V4h16v3M9 20h6M12 4v16"/>',
+    eraser: '<path d="m16 3 5 5a2 2 0 0 1 0 3L11 21H6l-3-3a2 2 0 0 1 0-3L13 3a2 2 0 0 1 3 0ZM8 10l7 7M11 21h10"/>',
+    undo: '<path d="M3 7v6h6M3 13l4-4a7 7 0 0 1 12 5v4"/>',
+    redo: '<path d="M21 7v6h-6M21 13l-4-4a7 7 0 0 0-12 5v4"/>',
     cursor: '<path d="M8 3v18M16 3v18"/><path d="m5 6 3-3 3 3M13 18l3 3 3-3"/>',
-    clear: '<path d="m3 15 8-8 6 6-8 8H3z"/><path d="m14 4 6 6-3 3-6-6z"/>',
+    clear: '<path d="M3 6h18M9 6V4h6v2M5 6l1 14h12l1-14M10 10v6M14 10v6"/>',
     panelClose: '<path d="m9 18 6-6-6-6"/>'
   };
 
@@ -42,6 +58,57 @@
 
   function cloneValue(value) {
     return value == null ? value : JSON.parse(JSON.stringify(value));
+  }
+
+  function emptyAnnotations() {
+    return { focus: null, cursorA: null, cursorB: null, marks: [] };
+  }
+
+  function isShapeKind(kind) {
+    return kind === 'arrow' || kind === 'rectangle';
+  }
+
+  function parsePresentation(text) {
+    const state = JSON.parse(text);
+    const anchorOK = (anchor) => anchor && Number.isFinite(anchor.cycle)
+      && Number.isInteger(anchor.rowIndex) && typeof anchor.rowKey === 'string' && Number.isFinite(anchor.offsetY);
+    if (!state || state.kind !== 'VisualWaveDromPresentation' || state.version !== 1
+        || !Array.isArray(state.steps) || !state.steps.length) throw new Error('不支持的演讲步骤格式');
+    state.steps.forEach((step) => {
+      if (!step || typeof step.title !== 'string' || typeof step.notes !== 'string'
+          || !step.annotations || !Array.isArray(step.annotations.marks)) throw new Error('演讲步骤内容无效');
+      const annotations = step.annotations;
+      if (['cursorA', 'cursorB'].some((key) => annotations[key] != null && !Number.isFinite(annotations[key]))) {
+        throw new Error('演讲游标位置无效');
+      }
+      if (annotations.focus && (!['rows', 'columns', 'rectangle'].includes(annotations.focus.mode)
+          || !anchorOK(annotations.focus.start) || !anchorOK(annotations.focus.end))) throw new Error('聚焦位置无效');
+      annotations.marks.forEach((mark) => {
+        const valid = mark && typeof mark.id === 'string' && (mark.kind === 'pen'
+          ? Array.isArray(mark.points) && mark.points.every(anchorOK)
+          : isShapeKind(mark.kind) ? anchorOK(mark.start) && anchorOK(mark.end)
+            : mark.kind === 'text' && anchorOK(mark.anchor) && typeof mark.text === 'string');
+        if (!valid) throw new Error('演讲批注内容无效');
+      });
+    });
+    return state;
+  }
+
+  function pointSegmentDistance(point, start, end) {
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    const length = dx * dx + dy * dy;
+    const t = length ? clamp(((point.x - start.x) * dx + (point.y - start.y) * dy) / length, 0, 1) : 0;
+    return Math.hypot(point.x - start.x - t * dx, point.y - start.y - t * dy);
+  }
+
+  function segmentsNear(a, b, c, d, radius) {
+    const cross = function (p, q, r) {
+      return (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+    };
+    if (cross(a, b, c) * cross(a, b, d) < 0 && cross(c, d, a) * cross(c, d, b) < 0) return true;
+    return Math.min(pointSegmentDistance(a, c, d), pointSegmentDistance(b, c, d),
+      pointSegmentDistance(c, a, b), pointSegmentDistance(d, a, b)) <= radius;
   }
 
   function formatCycle(value) {
@@ -200,18 +267,42 @@
       this.plotBounds = null;
       this.laneBounds = [];
       this.rowKeys = [];
+      this.rowKeyIndices = new Map();
       this.tool = '';
       this.activeCursor = 'A';
-      this.annotations = {
-        pointer: null,
-        focus: null,
-        range: null,
-        cursorA: null,
-        cursorB: null
+      this.annotations = emptyAnnotations();
+      this.focusEnabled = false;
+      this.focusMode = 'rows';
+      this.undoStack = [];
+      this.redoStack = [];
+      this.markSequence = 0;
+      this.markGeometry = new Map();
+      this.selectedShapeId = null;
+      this.shapeStyles = {
+        arrow: { color: SHAPE_COLORS[0][0], width: 3 },
+        rectangle: { color: SHAPE_COLORS[0][0], width: 3 }
       };
+      this.lastHistoryEdit = null;
+      this.annotationFrame = 0;
+      this.laserFrame = 0;
+      this.laserPosition = null;
+      this.textEdit = null;
       this.steps = [];
       this.stepIndex = -1;
+      this.stepTitleEdit = null;
       this.notesDirty = false;
+      this.notesWindow = null;
+      this.notesWindowOpening = false;
+      this.copying = false;
+      this.copySequence = 0;
+      this.savedPresentation = '';
+      this.savedSignature = null;
+      this.saving = false;
+      this.savePromise = null;
+      this.allowClose = false;
+      this.closeTimer = 0;
+      this.beforeUnloadAttached = false;
+      this.eventsBound = false;
       this.sourceDescription = '';
       this.drag = null;
       this.renderSequence = 0;
@@ -223,6 +314,8 @@
       this.boundKeydown = this.handleKeydown.bind(this);
       this.boundFullscreen = this.handleFullscreenChange.bind(this);
       this.boundActivity = this.noteActivity.bind(this);
+      this.boundOutside = this.handleOutsidePointerDown.bind(this);
+      this.boundBeforeUnload = this.handleBeforeUnload.bind(this);
     }
 
     async mount() {
@@ -259,10 +352,13 @@
         + '    <span class="presenter-library-name" id="presenter-library-name"></span>'
         + '  </div>'
         + '  <div class="presenter-step-controls" aria-label="演讲步骤">'
+        + '    <textarea class="presenter-step-title" id="presenter-step-title" rows="1" aria-label="演讲步骤文字" disabled>' + DEFAULT_STEP_TITLE + '</textarea>'
+        + '    <div class="presenter-step-navigation">'
         + '    <button type="button" class="presenter-icon-button" data-action="step-prev" title="上一步（左方向键）" aria-label="上一步">' + icon('chevronLeft') + '</button>'
         + '    <span class="presenter-step-count" id="presenter-step-count">1 / 1</span>'
         + '    <button type="button" class="presenter-icon-button" data-action="step-next" title="下一步（右方向键）" aria-label="下一步">' + icon('chevronRight') + '</button>'
         + '    <button type="button" class="presenter-icon-button" data-action="step-add" title="记录当前画面为新步骤" aria-label="记录当前步骤">' + icon('plus') + '</button>'
+        + '    </div>'
         + '  </div>'
         + '  <div class="presenter-window-controls" id="presenter-window-controls" aria-label="大波形分段浏览" hidden>'
         + '    <button type="button" class="presenter-icon-button" data-action="window-prev" title="上一段" aria-label="上一段">' + icon('chevronLeft') + '</button>'
@@ -270,8 +366,12 @@
         + '    <button type="button" class="presenter-icon-button" data-action="window-next" title="下一段" aria-label="下一段">' + icon('chevronRight') + '</button>'
         + '  </div>'
         + '  <div class="presenter-top-actions">'
+        + '    <span class="presenter-save-state" id="presenter-save-state" role="status" aria-live="polite"></span>'
+        + buttonMarkup('save', 'save', '保存', '保存演讲步骤（Ctrl+S）')
         + buttonMarkup('fit', 'fit', '适应窗口', '适应窗口（Z）')
+        + '    <button type="button" class="presenter-button" data-action="copy-image" title="复制图片" aria-haspopup="dialog" aria-controls="presenter-copy-options" aria-expanded="false" disabled>' + icon('image') + '<span>复制图片</span></button>'
         + buttonMarkup('notes', 'notes', '讲解备注', '显示或隐藏讲解备注（N）')
+        + '    <button type="button" class="presenter-icon-button" data-action="notes-restore" title="恢复备注到当前窗口" aria-label="恢复备注" hidden>' + icon('restore') + '</button>'
         + buttonMarkup('fullscreen', 'fullscreen', '全屏', '进入或退出全屏（F）')
         + buttonMarkup('exit', 'close', '退出', '退出演讲者模式', 'presenter-exit-button')
         + '  </div>'
@@ -279,7 +379,7 @@
         + '<div class="presenter-workspace" id="presenter-workspace">'
         + '  <main class="presenter-stage-shell">'
         + '    <div class="presenter-live-status" id="presenter-live-status" aria-live="polite" hidden></div>'
-        + '    <div class="presenter-stage-viewport" id="presenter-stage-viewport" tabindex="0" aria-label="只读波形演讲区域">'
+        + '    <div class="presenter-stage-viewport" id="presenter-stage-viewport" tabindex="0" aria-label="波形演讲与标注区域">'
         + '      <div class="presenter-stage-content" id="presenter-stage-content">'
         + '        <div class="presenter-wave-surface" id="presenter-wave-surface">'
         + '          <div class="presenter-wave-display" id="presenter-wave-display"></div>'
@@ -291,19 +391,28 @@
         + '    <div class="presenter-stage-message" id="presenter-stage-message"><div><strong id="presenter-stage-message-title">正在加载</strong><span id="presenter-stage-message-detail"></span></div></div>'
         + '  </main>'
         + '  <aside class="presenter-notes" id="presenter-notes" aria-label="讲解备注">'
-        + '    <div class="presenter-notes-header"><h2>讲解备注</h2><button type="button" class="presenter-icon-button" data-action="notes" title="收起备注" aria-label="收起备注">' + icon('panelClose') + '</button></div>'
+        + '    <div class="presenter-notes-header"><h2>讲解备注</h2><div class="presenter-notes-actions">'
+        + '      <button type="button" class="presenter-icon-button" data-action="notes-detach" title="在独立悬浮窗口中显示备注" aria-label="悬浮窗显示备注">' + icon('popout') + '</button>'
+        + '      <button type="button" class="presenter-icon-button" data-action="notes-restore" title="恢复备注到原窗口" aria-label="恢复备注" hidden>' + icon('restore') + '</button>'
+        + '      <button type="button" class="presenter-icon-button" data-action="notes" title="收起备注" aria-label="收起备注">' + icon('panelClose') + '</button>'
+        + '    </div></div>'
         + '    <textarea class="presenter-notes-text" id="presenter-notes-text" spellcheck="false" placeholder="记录本次讲解要点"></textarea>'
-        + '    <p class="presenter-notes-hint">备注只在当前演讲窗口中保留，不会写入波形库。</p>'
         + '  </aside>'
         + '</div>'
         + '<footer class="presenter-tooltray" aria-label="讲解工具">'
         + '  <div class="presenter-tool-group">'
+        + '    <button type="button" class="presenter-icon-button" data-action="undo" title="撤销标注（Ctrl+Z）" aria-label="撤销" disabled>' + icon('undo') + '</button>'
+        + '    <button type="button" class="presenter-icon-button" data-action="redo" title="重做标注（Ctrl+Shift+Z）" aria-label="重做" disabled>' + icon('redo') + '</button>'
         + '    <button type="button" class="presenter-tool-button" data-tool="pointer" title="激光指示（P）">' + icon('pointer') + '<span>指示</span></button>'
-        + '    <button type="button" class="presenter-tool-button" data-tool="focus" title="聚焦信号或连接（点击波形）">' + icon('focus') + '<span>聚焦</span></button>'
-        + '    <button type="button" class="presenter-tool-button" data-tool="range" title="拖动框选一段波形（R）">' + icon('range') + '<span>范围</span></button>'
-        + '    <button type="button" class="presenter-tool-button" data-tool="cursor" title="放置 A/B 游标">' + icon('cursor') + '<span>游标</span></button>'
-        + '    <button type="button" class="presenter-icon-button" data-cursor="A" title="选择 A 游标">A</button>'
-        + '    <button type="button" class="presenter-icon-button" data-cursor="B" title="选择 B 游标">B</button>'
+        + '    <button type="button" class="presenter-tool-button" data-tool="pen" title="画笔">' + icon('pen') + '<span>画笔</span></button>'
+        + '    <button type="button" class="presenter-tool-button" data-tool="arrow" title="绘制箭头">' + icon('arrow') + '<span>箭头</span></button>'
+        + '    <button type="button" class="presenter-tool-button" data-tool="rectangle" title="绘制矩形">' + icon('rectangle') + '<span>多边形</span></button>'
+        + '    <button type="button" class="presenter-tool-button presenter-shape-style-button" data-action="shape-style" title="图形颜色和线宽" aria-label="图形颜色和线宽" aria-haspopup="dialog" aria-controls="presenter-shape-options" aria-expanded="false" disabled><span class="presenter-style-swatch" aria-hidden="true"></span><span id="presenter-shape-width-value">3 px</span></button>'
+        + '    <button type="button" class="presenter-tool-button" data-tool="eraser" title="擦除笔迹、图形或文字">' + icon('eraser') + '<span>橡皮擦</span></button>'
+        + '    <button type="button" class="presenter-tool-button" data-tool="text" title="添加或修改文字">' + icon('text') + '<span>文字</span></button>'
+        + '    <button type="button" class="presenter-tool-button" data-tool="focus" title="配置或取消聚焦（R）" aria-haspopup="dialog" aria-controls="presenter-focus-options" aria-expanded="false">' + icon('focus') + '<span>聚焦</span></button>'
+        + '    <button type="button" class="presenter-tool-button" data-cursor="A" title="选择或取消游标 A">' + icon('cursor') + '<span>游标A</span></button>'
+        + '    <button type="button" class="presenter-tool-button" data-cursor="B" title="选择或取消游标 B">' + icon('cursor') + '<span>游标B</span></button>'
         + '    <button type="button" class="presenter-tool-button" data-action="clear" title="清除当前演讲标注">' + icon('clear') + '<span>清除</span></button>'
         + '  </div>'
         + '  <div class="presenter-measurements" aria-label="游标测量">'
@@ -312,6 +421,41 @@
         + '    <span class="presenter-measurement" id="presenter-measure-delta">B-A: --</span>'
         + '  </div>'
         + '</footer>'
+        + '<section class="presenter-popover presenter-copy-options" id="presenter-copy-options" role="dialog" aria-label="复制图片" hidden>'
+        + '  <div class="presenter-popover-header"><strong>复制图片</strong><button type="button" class="presenter-icon-button" data-action="copy-close" title="关闭" aria-label="关闭图片复制选项">' + icon('close') + '</button></div>'
+        + '  <div class="presenter-copy-choices">' + buttonMarkup('copy-full', 'image', '整张图片', '复制整张波形和批注') + buttonMarkup('copy-focus', 'focus', '仅聚焦区域', '复制聚焦区域、波形名和批注') + '</div>'
+        + '  <p id="presenter-copy-status" class="presenter-copy-status" role="status" aria-live="polite" hidden></p>'
+        + '</section>'
+        + '<section class="presenter-popover presenter-focus-options" id="presenter-focus-options" role="dialog" aria-label="聚焦模式" hidden>'
+        + '  <div class="presenter-popover-header"><strong>聚焦模式</strong><button type="button" class="presenter-icon-button" data-action="focus-close" title="收起" aria-label="收起聚焦配置">' + icon('close') + '</button></div>'
+        + '  <div class="presenter-focus-modes">'
+        + '    <label><input type="radio" name="presenter-focus-mode" value="rows" checked><span>多行</span></label>'
+        + '    <label><input type="radio" name="presenter-focus-mode" value="columns"><span>多列</span></label>'
+        + '    <label><input type="radio" name="presenter-focus-mode" value="rectangle"><span>矩形</span></label>'
+        + '  </div>'
+        + '</section>'
+        + '<section class="presenter-popover presenter-shape-options" id="presenter-shape-options" role="dialog" aria-labelledby="presenter-shape-options-title" hidden>'
+        + '  <div class="presenter-popover-header"><strong id="presenter-shape-options-title">图形样式</strong><button type="button" class="presenter-icon-button" data-action="shape-style-close" title="收起" aria-label="收起图形样式">' + icon('close') + '</button></div>'
+        + '  <div class="presenter-shape-colors" role="group" aria-label="线条颜色">'
+        + SHAPE_COLORS.map(function (color) {
+          return '<button type="button" class="presenter-color-swatch" data-shape-color="' + color[0] + '" style="--swatch-color:' + color[0] + '" title="' + color[1] + '" aria-label="' + color[1] + '" aria-pressed="false"></button>';
+        }).join('')
+        + '  </div>'
+        + '  <div class="presenter-shape-width-row"><label for="presenter-shape-width">线宽</label><input id="presenter-shape-width" type="range" min="1" max="16" step="1" value="3"><output id="presenter-shape-width-output" for="presenter-shape-width">3 px</output></div>'
+        + '</section>'
+        + '<section class="presenter-popover presenter-text-editor" id="presenter-text-editor" role="dialog" aria-label="标注文字" hidden>'
+        + '  <div class="presenter-popover-header"><strong>标注文字</strong><div class="presenter-text-actions">'
+        + buttonMarkup('text-done', 'text', '完成', '完成（Ctrl+Enter）')
+        + '    <button type="button" class="presenter-icon-button" data-action="text-cancel" title="取消" aria-label="取消文字编辑">' + icon('close') + '</button></div></div>'
+        + '  <textarea id="presenter-text-input" aria-label="标注文字内容" rows="3" spellcheck="false"></textarea>'
+        + '</section>'
+        + '<dialog class="presenter-exit-dialog" id="presenter-exit-dialog" aria-labelledby="presenter-exit-title" aria-describedby="presenter-exit-message" hidden>'
+        + '  <h2 id="presenter-exit-title">保存演讲步骤？</h2><p id="presenter-exit-message">演讲步骤有未保存的改动。</p>'
+        + '  <div class="presenter-exit-actions">' + buttonMarkup('exit-cancel', 'undo', '取消', '继续演讲')
+        + buttonMarkup('exit-discard', 'close', '不保存', '放弃未保存的改动并退出')
+        + buttonMarkup('exit-save', 'save', '保存并退出', '保存演讲步骤并退出', 'presenter-primary-button') + '</div>'
+        + '</dialog>'
+        + '<div class="presenter-laser" id="presenter-laser" aria-hidden="true" hidden></div>'
         + '<div class="presenter-toast" id="presenter-toast" role="status" aria-live="polite" hidden></div>';
       document.body.appendChild(app);
       this.app = app;
@@ -329,17 +473,38 @@
       this.stageMessageDetail = app.querySelector('#presenter-stage-message-detail');
       this.liveStatus = app.querySelector('#presenter-live-status');
       this.notesText = app.querySelector('#presenter-notes-text');
+      this.notesPanel = app.querySelector('#presenter-notes');
       this.stepCount = app.querySelector('#presenter-step-count');
+      this.stepTitleInput = app.querySelector('#presenter-step-title');
       this.windowControls = app.querySelector('#presenter-window-controls');
       this.windowRange = app.querySelector('#presenter-window-range');
       this.measureA = app.querySelector('#presenter-measure-a');
       this.measureB = app.querySelector('#presenter-measure-b');
       this.measureDelta = app.querySelector('#presenter-measure-delta');
       this.toast = app.querySelector('#presenter-toast');
+      this.focusOptions = app.querySelector('#presenter-focus-options');
+      this.copyOptions = app.querySelector('#presenter-copy-options');
+      this.copyButton = app.querySelector('[data-action="copy-image"]');
+      this.copyStatus = app.querySelector('#presenter-copy-status');
+      this.saveButton = app.querySelector('[data-action="save"]');
+      this.saveState = app.querySelector('#presenter-save-state');
+      this.exitDialog = app.querySelector('#presenter-exit-dialog');
+      this.exitMessage = app.querySelector('#presenter-exit-message');
+      this.shapeOptions = app.querySelector('#presenter-shape-options');
+      this.shapeStyleButton = app.querySelector('[data-action="shape-style"]');
+      this.shapeWidthInput = app.querySelector('#presenter-shape-width');
+      this.textEditor = app.querySelector('#presenter-text-editor');
+      this.textInput = app.querySelector('#presenter-text-input');
+      this.laser = app.querySelector('#presenter-laser');
       this.libraryEl.textContent = this.adapter.libraryName || 'SQLite 波形库';
+      if (document.documentElement.clientWidth < 760) this.workspace.classList.add('notes-collapsed');
+      this.updateNotesControls();
+      this.updateToolState();
+      this.updateSaveControls();
     }
 
     bindEvents() {
+      this.eventsBound = true;
       this.app.addEventListener('click', (event) => {
         const actionButton = event.target.closest('[data-action]');
         if (actionButton) {
@@ -351,43 +516,155 @@
           this.setTool(toolButton.dataset.tool);
           return;
         }
-        const cursorButton = event.target.closest('[data-cursor]');
+        const cursorButton = event.target.closest('button[data-cursor]');
         if (cursorButton) {
-          this.activeCursor = cursorButton.dataset.cursor === 'B' ? 'B' : 'A';
-          this.setTool('cursor', true);
-          this.updateToolState();
+          this.selectCursor(cursorButton.dataset.cursor);
         }
       });
-      this.notesText.addEventListener('input', () => { this.notesDirty = true; });
-      this.viewport.addEventListener('scroll', () => this.updateFrozenLabels(), { passive: true });
+      this.stepTitleInput.addEventListener('focus', () => {
+        this.stepTitleEdit = this.steps[this.stepIndex] || null;
+        this.noteActivity();
+      });
+      this.stepTitleInput.addEventListener('input', () => {
+        this.resizeStepTitle();
+        this.updateSaveControls();
+      });
+      this.stepTitleInput.addEventListener('blur', () => this.finishStepTitleEdit(true));
+      this.notesText.addEventListener('input', () => {
+        this.notesDirty = true;
+        this.saveStepNotes();
+      });
+      this.textInput.addEventListener('input', () => this.updateSaveControls());
+      this.exitDialog.addEventListener('cancel', (event) => {
+        event.preventDefault();
+        if (!this.saving) this.cancelExit();
+      });
+      this.notesPanel.addEventListener('click', (event) => {
+        const button = event.target.closest('button[data-action]');
+        if (!button || !this.notesPanel.contains(button)) return;
+        event.stopPropagation();
+        this.handleAction(button.dataset.action);
+      });
+      this.notesPanel.addEventListener('keydown', (event) => {
+        if ((event.ctrlKey || event.metaKey) && String(event.key).toLowerCase() === 's') this.handleKeydown(event);
+      });
+      if (root.VisualWaveDromPresenterNotes) {
+        this.notesWindow = root.VisualWaveDromPresenterNotes.create({
+          element: this.notesPanel,
+          getTitle: () => this.titleEl.textContent + ' - 讲解备注',
+          onPending: (pending) => {
+            this.notesWindowOpening = pending;
+            if (!this.destroyed) this.updateNotesControls();
+          },
+          onChange: (detached) => {
+            if (this.destroyed) return;
+            this.workspace.classList.toggle('notes-detached', detached);
+            if (!detached) this.workspace.classList.remove('notes-collapsed');
+            this.updateNotesControls();
+            if (!detached) this.log('presenter-notes', { phase: 'restored' });
+            if (this.fitMode) requestAnimationFrame(() => { if (!this.destroyed) this.fitToWindow(false); });
+          },
+          onOpen: (kind) => this.log('presenter-notes', { phase: 'detached', kind: kind }),
+          onError: (error) => {
+            this.log('presenter-notes', { phase: 'window-error', message: error.message });
+            this.showToast(error.message === 'popup-blocked'
+              ? '备注窗口被浏览器阻止，请允许此页面弹出窗口后重试。'
+              : '备注窗口打开失败，内容仍保留在原窗口。', true);
+          }
+        });
+      }
+      this.focusOptions.addEventListener('change', (event) => {
+        if (event.target.name === 'presenter-focus-mode') this.setFocusMode(event.target.value);
+      });
+      this.shapeOptions.addEventListener('click', (event) => {
+        const swatch = event.target.closest('[data-shape-color]');
+        if (swatch) this.applyShapeStyle({ color: swatch.dataset.shapeColor });
+      });
+      this.shapeWidthInput.addEventListener('input', () => {
+        this.applyShapeStyle({ width: Number(this.shapeWidthInput.value) }, true);
+      });
+      this.shapeWidthInput.addEventListener('change', () => { this.lastHistoryEdit = null; });
+      this.shapeWidthInput.addEventListener('wheel', (event) => this.handleShapeWheel(event), { passive: false });
+      this.shapeStyleButton.addEventListener('wheel', (event) => this.handleShapeWheel(event), { passive: false });
+      this.viewport.addEventListener('scroll', () => {
+        this.updateFrozenLabels();
+        if (this.textEdit) this.positionTextEditor();
+      }, { passive: true });
       this.viewport.addEventListener('wheel', (event) => this.handleWheel(event), { passive: false });
-      this.overlay.addEventListener('pointerdown', (event) => this.handleOverlayPointerDown(event));
+      this.viewport.addEventListener('pointermove', (event) => this.moveLaser(event), { passive: true });
+      this.viewport.addEventListener('pointerleave', () => this.hideLaser());
+      this.viewport.addEventListener('pointerdown', (event) => {
+        if (this.tool === 'pointer' && event.button === 0) this.pulseLaser(event);
+      });
+      this.overlay.addEventListener('pointerdown', (event) => {
+        if (this.tool && this.tool !== 'pointer') this.syncBeforeUnload(true);
+        this.handleOverlayPointerDown(event);
+      });
       this.overlay.addEventListener('pointermove', (event) => this.handleOverlayPointerMove(event));
       this.overlay.addEventListener('pointerup', (event) => this.handleOverlayPointerUp(event));
-      this.overlay.addEventListener('pointercancel', (event) => this.handleOverlayPointerUp(event));
+      this.overlay.addEventListener('pointercancel', (event) => {
+        if (this.drag && this.drag.pointerId === event.pointerId) this.finishGesture(true);
+      });
+      this.overlay.addEventListener('lostpointercapture', (event) => {
+        if (this.drag && this.drag.pointerId === event.pointerId) this.finishGesture(false);
+      });
       document.addEventListener('keydown', this.boundKeydown);
+      document.addEventListener('pointerdown', this.boundOutside, true);
       document.addEventListener('fullscreenchange', this.boundFullscreen);
       document.addEventListener('mousemove', this.boundActivity, { passive: true });
       document.addEventListener('pointerdown', this.boundActivity, { passive: true });
       if (typeof ResizeObserver === 'function') {
-        this.resizeObserver = new ResizeObserver(() => {
+        this.resizeObserver = new ResizeObserver((entries) => {
+          const titleEntry = entries.find((entry) => entry.target === this.stepTitleInput);
+          if (titleEntry && titleEntry.contentRect.width !== this.stepTitleWidth) {
+            this.stepTitleWidth = titleEntry.contentRect.width;
+            this.resizeStepTitle();
+          }
           if (this.fitMode && this.svg) this.fitToWindow(false);
           else this.updateFrozenLabels();
+          if (!this.focusOptions.hidden) this.positionFocusOptions();
+          if (!this.shapeOptions.hidden) this.positionShapeOptions();
+          if (!this.copyOptions.hidden) this.positionCopyOptions();
+          if (this.textEdit) this.positionTextEditor();
         });
         this.resizeObserver.observe(this.viewport);
+        this.resizeObserver.observe(this.focusOptions);
+        this.resizeObserver.observe(this.shapeOptions);
+        this.resizeObserver.observe(this.copyOptions);
+        this.resizeObserver.observe(this.textEditor);
+        this.resizeObserver.observe(this.stepTitleInput);
       }
     }
 
     handleAction(action) {
+      if (action !== 'text-cancel') this.finishTextEdit(true);
       if (action === 'exit') {
-        if (typeof this.adapter.close === 'function') this.adapter.close();
-        else root.close();
+        this.requestExit();
+      } else if (action === 'save') {
+        void this.savePresentation();
+      } else if (action === 'exit-save') {
+        void this.saveAndExit();
+      } else if (action === 'exit-discard') {
+        if (!this.saving) this.closePresenter();
+      } else if (action === 'exit-cancel') {
+        if (!this.saving) this.cancelExit();
       } else if (action === 'fullscreen') {
         void this.toggleFullscreen();
       } else if (action === 'fit') {
         this.fitToWindow(true);
+      } else if (action === 'copy-image') {
+        this.openCopyOptions();
+      } else if (action === 'copy-close') {
+        this.closeCopyOptions();
+      } else if (action === 'copy-full' || action === 'copy-focus') {
+        void this.copyScreenshot(action === 'copy-focus' ? 'focus' : 'full');
       } else if (action === 'notes') {
         this.toggleNotes();
+      } else if (action === 'notes-detach') {
+        if (this.notesWindow) void this.notesWindow.open();
+        else this.showToast('备注窗口模块未加载，请刷新页面后重试。', true);
+      } else if (action === 'notes-restore') {
+        if (this.notesWindow) this.notesWindow.restore();
       } else if (action === 'step-prev') {
         this.goToStep(this.stepIndex - 1);
       } else if (action === 'step-next') {
@@ -400,6 +677,21 @@
         this.moveWindow(1);
       } else if (action === 'clear') {
         this.clearAnnotations();
+      } else if (action === 'undo') {
+        this.restoreHistory(false);
+      } else if (action === 'redo') {
+        this.restoreHistory(true);
+      } else if (action === 'focus-close') {
+        this.closeFocusOptions();
+        this.viewport.focus({ preventScroll: true });
+      } else if (action === 'shape-style') {
+        if (this.shapeOptions.hidden) this.openShapeOptions();
+        else this.closeShapeOptions();
+      } else if (action === 'shape-style-close') {
+        this.closeShapeOptions();
+        this.viewport.focus({ preventScroll: true });
+      } else if (action === 'text-cancel') {
+        this.finishTextEdit(false);
       }
     }
 
@@ -441,11 +733,12 @@
         throw new Error('波形 JSON 无法解析：' + error.message);
       }
       const previousTotal = this.metrics.maxWaveLength || 0;
-      const previousDescription = this.sourceDescription;
+      this.finishGesture(false);
       this.document = Object.assign({}, rawDocument);
       this.source = source;
       this.renderSource = prepareRenderSource(source);
       this.rowKeys = collectSignalKeys(this.renderSource.signal, [], new Map());
+      this.rowKeyIndices = new Map(this.rowKeys.map(function (key, index) { return [key, index]; }));
       const bigApi = root.VisualWaveDromBigData;
       this.metrics = bigApi && typeof bigApi.measureSource === 'function'
         ? bigApi.measureSource(this.renderSource)
@@ -453,7 +746,9 @@
       this.sourceDescription = sourceDescription(source);
       this.titleEl.textContent = sourceTitle(source, rawDocument.name);
       document.title = this.titleEl.textContent + ' - 演讲者模式';
-      if (!this.notesDirty || this.notesText.value === previousDescription) {
+      if (this.notesWindow) this.notesWindow.refresh();
+      // The source description seeds the first step; recorded notes are independent.
+      if (!this.steps.length && !this.notesDirty) {
         this.notesText.value = this.sourceDescription;
       }
 
@@ -471,7 +766,25 @@
         this.steps = [this.captureStep()];
         this.stepIndex = 0;
       }
+      if (opts.initial && rawDocument.presentation) {
+        this.savedPresentation = rawDocument.presentation;
+        try {
+          const stored = parsePresentation(rawDocument.presentation);
+          this.steps = stored.steps;
+          this.stepIndex = -1;
+          this.steps.forEach((step) => step.annotations.marks.forEach((mark) => {
+            const match = /^mark-(\d+)$/.exec(mark.id);
+            if (match) this.markSequence = Math.max(this.markSequence, Number(match[1]));
+          }));
+          await this.goToStep(Math.trunc(clamp(stored.activeStep, 0, this.steps.length - 1)));
+          this.savedSignature = this.presentationSignature();
+        } catch (error) {
+          this.showToast('已保存的演讲步骤无法恢复：' + error.message, true);
+          this.log('presenter-save', { phase: 'restore-error', message: error.message });
+        }
+      }
       this.updateStepControls();
+      this.updateSaveControls();
       if (!opts.initial) this.showLiveStatus('波形已同步，讲解标注保持不变');
       this.log('presenter-view', {
         phase: opts.initial ? 'mounted' : 'live-update-applied',
@@ -489,43 +802,14 @@
             this.annotations[key] = clamp(this.annotations[key], 0, totalColumns);
           }
         });
-        if (this.annotations.range) {
-          this.annotations.range.startCycle = clamp(
-            this.annotations.range.startCycle,
-            0,
-            totalColumns
-          );
-          this.annotations.range.endCycle = clamp(
-            this.annotations.range.endCycle,
-            0,
-            totalColumns
-          );
-        }
-        if (this.annotations.pointer && Number.isFinite(this.annotations.pointer.cycle)) {
-          this.annotations.pointer.cycle = clamp(this.annotations.pointer.cycle, 0, totalColumns);
-        }
       }
-      if (signalCount > 0) {
-        if (this.annotations.focus && Number.isFinite(this.annotations.focus.rowIndex)) {
-          const resolvedFocusIndex = this.annotations.focus.rowKey
-            ? this.rowKeys.indexOf(this.annotations.focus.rowKey)
-            : -1;
-          this.annotations.focus.rowIndex = clamp(
-            resolvedFocusIndex >= 0 ? resolvedFocusIndex : Math.round(this.annotations.focus.rowIndex),
-            0,
-            signalCount - 1
-          );
-        }
-        if (this.annotations.pointer && Number.isFinite(this.annotations.pointer.rowIndex)) {
-          const resolvedPointerIndex = this.annotations.pointer.rowKey
-            ? this.rowKeys.indexOf(this.annotations.pointer.rowKey)
-            : -1;
-          this.annotations.pointer.rowIndex = clamp(
-            resolvedPointerIndex >= 0 ? resolvedPointerIndex : Math.round(this.annotations.pointer.rowIndex),
-            0,
-            signalCount - 1
-          );
-        }
+      const focus = this.annotations.focus;
+      if (focus) {
+        [focus.start, focus.end].forEach((anchor) => {
+          if (!anchor) return;
+          if (totalColumns > 0) anchor.cycle = clamp(anchor.cycle, 0, totalColumns);
+          if (signalCount > 0) anchor.rowIndex = this.resolveAnchorRow(anchor);
+        });
       }
     }
 
@@ -610,6 +894,7 @@
         return true;
       } catch (error) {
         this.svg = null;
+        this.updateCopyControls();
         this.setStageMessage(
           '其他波形窗口不会受影响。请检查这张波形的 JSON 后重新打开。',
           '波形渲染失败：' + (error && error.message ? error.message : String(error))
@@ -624,7 +909,7 @@
 
     collectGeometry() {
       const lanes = getLaneGroups(this.svg);
-      this.laneBounds = lanes.map(getElementBounds).filter(Boolean);
+      this.laneBounds = lanes.map(getElementBounds);
       const drawBounds = lanes.map(function (lane) {
         return getElementBounds(lane.querySelector('[id^="wavelane_draw_"]'));
       });
@@ -653,6 +938,7 @@
         this.frozenLabels.appendChild(label);
       });
       this.updateFrozenLabels();
+      if (this.textEdit) this.positionTextEditor();
     }
 
     updateFrozenLabels() {
@@ -687,11 +973,13 @@
       this.surface.style.transform = 'scale(' + this.scale + ')';
       this.stageContent.style.width = Math.max(this.viewport.clientWidth, scaledWidth + left + 24) + 'px';
       this.stageContent.style.height = Math.max(this.viewport.clientHeight, scaledHeight + top + 20) + 'px';
+      if (this.annotations.marks.some((mark) => isShapeKind(mark.kind))) this.scheduleAnnotationDraw();
       if (centerContent) {
         this.viewport.scrollLeft = Math.max(0, (this.stageContent.scrollWidth - this.viewport.clientWidth) / 2);
         this.viewport.scrollTop = Math.max(0, (this.stageContent.scrollHeight - this.viewport.clientHeight) / 2);
       }
       this.updateFrozenLabels();
+      if (this.textEdit) this.positionTextEditor();
     }
 
     fitToWindow(showMessage) {
@@ -704,6 +992,7 @@
     }
 
     handleWheel(event) {
+      if (this.handleShapeWheel(event)) return;
       if (!event.ctrlKey || !this.svg) return;
       event.preventDefault();
       const rect = this.viewport.getBoundingClientRect();
@@ -748,23 +1037,504 @@
 
     setTool(tool, force) {
       const next = String(tool || '');
-      this.tool = !force && this.tool === next ? '' : next;
+      this.finishTextEdit(true);
+      this.finishGesture(false);
+      const hadSelectedShape = !!this.selectedShapeId;
+      this.selectedShapeId = null;
+      this.lastHistoryEdit = null;
+      this.closeShapeOptions();
+      if (next === 'focus') {
+        if (this.focusEnabled && !force) {
+          this.clearFocus();
+        } else {
+          this.focusEnabled = true;
+          this.tool = 'focus';
+          this.focusOptions.hidden = false;
+          this.positionFocusOptions();
+        }
+      } else {
+        this.tool = !force && this.tool === next ? '' : next;
+        this.closeFocusOptions();
+      }
+      if (this.tool !== 'pointer') this.hideLaser();
       this.updateToolState();
+      if (hadSelectedShape) this.drawAnnotations();
+      if (isShapeKind(this.tool)) this.openShapeOptions();
       this.viewport.focus({ preventScroll: true });
+    }
+
+    selectCursor(cursor, force) {
+      const next = cursor === 'B' ? 'B' : 'A';
+      const active = this.tool === 'cursor' && this.activeCursor === next;
+      this.activeCursor = next;
+      this.setTool(!force && active ? '' : 'cursor', true);
     }
 
     updateToolState() {
       this.app.querySelectorAll('[data-tool]').forEach((button) => {
-        button.classList.toggle('active', button.dataset.tool === this.tool);
-        button.setAttribute('aria-pressed', button.dataset.tool === this.tool ? 'true' : 'false');
+        const active = button.dataset.tool === 'focus' ? this.focusEnabled : button.dataset.tool === this.tool;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-pressed', active ? 'true' : 'false');
+        if (button.dataset.tool === 'focus') button.setAttribute('aria-expanded', this.focusOptions.hidden ? 'false' : 'true');
       });
-      this.app.querySelectorAll('[data-cursor]').forEach((button) => {
+      this.app.querySelectorAll('button[data-cursor]').forEach((button) => {
         const active = this.tool === 'cursor' && button.dataset.cursor === this.activeCursor;
         button.classList.toggle('active', active);
         button.setAttribute('aria-pressed', active ? 'true' : 'false');
       });
-      this.overlay.classList.remove('tool-pointer', 'tool-focus', 'tool-range', 'tool-cursor');
+      this.focusOptions.querySelectorAll('input').forEach((input) => { input.checked = input.value === this.focusMode; });
+      this.overlay.classList.remove('tool-pointer', 'tool-focus', 'tool-pen', 'tool-eraser', 'tool-text', 'tool-cursor', 'tool-arrow', 'tool-rectangle');
       if (this.tool) this.overlay.classList.add('tool-' + this.tool);
+      this.updateCopyControls();
+      this.updateShapeControls();
+      this.updateHistoryControls();
+    }
+
+    recordAnnotationChange(before, reason, mergeKey) {
+      if (JSON.stringify(before) === JSON.stringify(this.annotations)) return false;
+      const now = Date.now();
+      const merge = mergeKey && this.lastHistoryEdit && this.lastHistoryEdit.key === mergeKey
+        && now - this.lastHistoryEdit.time < 350 && !this.redoStack.length;
+      if (!merge) this.undoStack.push(before);
+      this.lastHistoryEdit = mergeKey ? { key: mergeKey, time: now } : null;
+      if (this.undoStack.length > HISTORY_LIMIT) this.undoStack.shift();
+      this.redoStack.length = 0;
+      this.updateHistoryControls();
+      this.updateSaveControls();
+      this.log('presenter-annotation', { phase: reason, undoCount: this.undoStack.length, markCount: this.annotations.marks.length });
+      return true;
+    }
+
+    updateHistoryControls() {
+      if (!this.app) return;
+      this.app.querySelector('[data-action="undo"]').disabled = !this.undoStack.length;
+      this.app.querySelector('[data-action="redo"]').disabled = !this.redoStack.length;
+    }
+
+    restoreHistory(redo) {
+      this.finishGesture(false);
+      this.lastHistoryEdit = null;
+      const from = redo ? this.redoStack : this.undoStack;
+      const to = redo ? this.undoStack : this.redoStack;
+      if (!from.length) return;
+      to.push(cloneValue(this.annotations));
+      this.annotations = from.pop();
+      const selectedShape = this.selectedShape();
+      if (selectedShape) this.shapeStyles[selectedShape.kind] = this.shapeStyle(selectedShape);
+      this.keepAnnotationsInSourceBounds(this.metrics.maxWaveLength, this.metrics.signalCount);
+      this.focusEnabled = !!this.annotations.focus;
+      if (this.annotations.focus) this.focusMode = this.annotations.focus.mode;
+      else if (this.tool === 'focus') this.tool = '';
+      this.closeFocusOptions();
+      this.drawAnnotations();
+      this.updateToolState();
+      this.updateSaveControls();
+      this.viewport.focus({ preventScroll: true });
+    }
+
+    clearFocus() {
+      const before = cloneValue(this.annotations);
+      this.annotations.focus = null;
+      this.focusEnabled = false;
+      if (this.tool === 'focus') this.tool = '';
+      this.closeFocusOptions();
+      this.recordAnnotationChange(before, 'focus-clear');
+      this.drawAnnotations();
+      this.updateToolState();
+    }
+
+    setFocusMode(mode) {
+      if (!['rows', 'columns', 'rectangle'].includes(mode)) return;
+      const before = cloneValue(this.annotations);
+      if (mode !== this.focusMode) this.annotations.focus = null;
+      this.focusMode = mode;
+      this.focusEnabled = true;
+      this.tool = 'focus';
+      this.selectedShapeId = null;
+      this.closeShapeOptions();
+      this.hideLaser();
+      this.recordAnnotationChange(before, 'focus-mode');
+      this.drawAnnotations();
+      this.updateToolState();
+    }
+
+    closeFocusOptions() {
+      if (!this.focusOptions) return;
+      this.focusOptions.hidden = true;
+      this.app.querySelector('[data-tool="focus"]').setAttribute('aria-expanded', 'false');
+    }
+
+    positionPopover(element, x, y, above) {
+      const width = document.documentElement.clientWidth;
+      const height = document.documentElement.clientHeight;
+      const box = element.getBoundingClientRect();
+      element.style.left = clamp(x, 8, Math.max(8, width - box.width - 8)) + 'px';
+      element.style.top = clamp(above ? y - box.height - 8 : y + 10,
+        8, Math.max(8, height - box.height - 8)) + 'px';
+    }
+
+    positionFocusOptions() {
+      const button = this.app.querySelector('[data-tool="focus"]').getBoundingClientRect();
+      this.positionPopover(this.focusOptions, button.left, button.top, true);
+    }
+
+    handleOutsidePointerDown(event) {
+      if (this.textEdit && !this.textEditor.contains(event.target)) this.finishTextEdit(true, false);
+      if (!this.focusOptions.hidden && !this.focusOptions.contains(event.target)
+          && !event.target.closest('[data-tool="focus"]')) this.closeFocusOptions();
+      if (this.shapeOptions && !this.shapeOptions.hidden && !this.shapeOptions.contains(event.target)
+          && !event.target.closest('[data-action="shape-style"], [data-tool="arrow"], [data-tool="rectangle"]')) this.closeShapeOptions();
+      if (this.copyOptions && !this.copyOptions.hidden && !this.copying && !this.copyOptions.contains(event.target)
+          && !event.target.closest('[data-action="copy-image"]')) this.closeCopyOptions();
+    }
+
+    updateCopyControls() {
+      if (!this.copyOptions) return;
+      const ready = !!this.svg && !this.copying;
+      this.copyButton.disabled = !ready;
+      this.copyOptions.setAttribute('aria-busy', String(this.copying));
+      this.copyOptions.querySelector('[data-action="copy-full"]').disabled = !ready;
+      const focusButton = this.copyOptions.querySelector('[data-action="copy-focus"]');
+      const hasFocus = ready && !!this.getFocusBounds();
+      focusButton.disabled = !hasFocus;
+      focusButton.title = hasFocus ? '复制聚焦区域、波形名和批注' : '请先选择聚焦区域';
+      this.copyOptions.querySelector('[data-action="copy-close"]').disabled = this.copying;
+    }
+
+    openCopyOptions() {
+      this.updateCopyControls();
+      this.copyStatus.hidden = true;
+      this.copyOptions.hidden = false;
+      this.copyButton.setAttribute('aria-expanded', 'true');
+      this.positionCopyOptions();
+    }
+
+    closeCopyOptions() {
+      if (!this.copyOptions) return;
+      this.copyOptions.hidden = true;
+      this.copyButton.setAttribute('aria-expanded', 'false');
+    }
+
+    positionCopyOptions() {
+      const button = this.copyButton.getBoundingClientRect();
+      this.positionPopover(this.copyOptions, button.left, button.bottom, false);
+    }
+
+    createScreenshot(request) {
+      if (this.destroyed) throw new Error('capture-cancelled');
+      const fullRender = request.mode === 'full' && request.total > request.window.size;
+      if (fullRender && (request.total > 2000 || request.total * Math.max(1, request.rowKeys.length) > 50000)) {
+        throw new Error('image-too-large');
+      }
+      const prefix = 'presenter-capture-' + (++this.copySequence) + '-';
+      const host = document.createElement('div');
+      host.style.cssText = 'position:fixed;left:-100000px;top:0;opacity:0;pointer-events:none';
+      document.body.appendChild(host);
+      try {
+        let svg = request.svg;
+        if (fullRender) {
+          const display = document.createElement('div');
+          display.id = prefix + '0';
+          host.appendChild(display);
+          root.WaveDrom.RenderWaveForm(0, cloneValue(request.source), prefix, false);
+          svg = display.querySelector('svg');
+          if (!svg) throw new Error('missing-waveform');
+        } else {
+          host.appendChild(svg);
+        }
+        const snapshot = new PresenterView({});
+        snapshot.svg = svg;
+        snapshot.svgMetrics = getSvgMetrics(svg);
+        snapshot.renderWindow = fullRender ? { start: 0, end: request.total, size: request.total } : request.window;
+        snapshot.rowKeys = request.rowKeys;
+        snapshot.rowKeyIndices = new Map(request.rowKeys.map((key, index) => [key, index]));
+        snapshot.annotations = request.annotations;
+        snapshot.markClipId = prefix + 'marks';
+        snapshot.buildFrozenLabels = function () {};
+        snapshot.updateMeasurements = function () {};
+        snapshot.collectGeometry();
+        snapshot.overlay = createSvgElement('svg', {
+          class: 'presenter-overlay', width: snapshot.svgMetrics.width, height: snapshot.svgMetrics.height,
+          viewBox: [snapshot.svgMetrics.x, snapshot.svgMetrics.y, snapshot.svgMetrics.width, snapshot.svgMetrics.height].join(' ')
+        });
+        host.appendChild(snapshot.overlay);
+        snapshot.drawAnnotations();
+        const focus = snapshot.annotations.focus;
+        let focusRows = [];
+        if (focus) {
+          const first = focus.mode === 'columns' ? 0 : Math.min(snapshot.resolveAnchorRow(focus.start), snapshot.resolveAnchorRow(focus.end));
+          const last = focus.mode === 'columns' ? request.rowKeys.length - 1 : Math.max(snapshot.resolveAnchorRow(focus.start), snapshot.resolveAnchorRow(focus.end));
+          for (let row = first; row <= last; row++) focusRows.push(row);
+        }
+        return root.VisualWaveDromPresenterExport.compose({
+          svg: svg, overlay: snapshot.overlay, metrics: snapshot.svgMetrics, plot: snapshot.plotBounds,
+          names: getLaneGroups(svg).map((lane) => getElementBounds(lane.querySelector('text.info'))),
+          focus: snapshot.getFocusBounds(), focusRows: focusRows
+        }, request.mode);
+      } finally {
+        host.remove();
+      }
+    }
+
+    async copyScreenshot(mode) {
+      if (this.copying || !this.svg) return false;
+      const api = root.VisualWaveDromPresenterExport;
+      if (!api || typeof this.adapter.renderScreenshot !== 'function') {
+        this.showToast('图片复制模块未加载，请刷新页面后重试。', true);
+        return false;
+      }
+      if (mode === 'focus' && !this.getFocusBounds()) {
+        this.showToast('请先选择聚焦区域。', true);
+        return false;
+      }
+      this.finishGesture(false);
+      this.finishTextEdit(true);
+      const request = {
+        mode: mode, svg: this.svg.cloneNode(true), source: this.renderSource,
+        total: this.metrics.maxWaveLength,
+        window: { start: this.renderWindow.start, end: this.renderWindow.end, size: this.renderWindow.size },
+        rowKeys: this.rowKeys.slice(), annotations: cloneValue(this.annotations)
+      };
+      const filename = (this.titleEl.textContent.replace(/[\\/:*?"<>|]+/g, '_').slice(0, 96) || 'VisualWaveDrom') + '.png';
+      this.copying = true;
+      this.copyStatus.hidden = false;
+      this.copyStatus.textContent = '正在生成图片...';
+      this.updateCopyControls();
+      this.log('presenter-copy', { phase: 'start', mode: mode });
+      const rendering = new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)))
+        .then(() => this.createScreenshot(request))
+        .then((result) => this.adapter.renderScreenshot(result.svg, result.metrics));
+      try {
+        const result = await api.writeImage(rendering, this.adapter.downloadImage, filename);
+        if (!this.destroyed) {
+          this.closeCopyOptions();
+          this.showToast(result.copied ? '图片已复制到剪贴板。' : '图片剪贴板不可用，已下载 PNG。');
+          this.log('presenter-copy', {
+            phase: result.copied ? 'copied' : 'downloaded', mode: mode, reason: result.reason,
+            width: result.image.width, height: result.image.height
+          });
+        }
+        return true;
+      } catch (error) {
+        const messages = {
+          'image-too-large': '整张图片过大，请缩小聚焦范围后选择“仅聚焦区域”。',
+          'missing-focus': '请先选择聚焦区域。',
+          'focus-outside-waveform': '聚焦区域未包含波形，请重新选择。',
+          'missing-waveform': '当前波形未成功渲染，无法复制图片。',
+          'clipboard-unavailable': '浏览器无法复制图片，请检查剪贴板权限。',
+          'capture-cancelled': '已取消图片生成。'
+        };
+        if (!this.destroyed) {
+          this.copyStatus.textContent = messages[error.message] || ('图片生成失败：' + error.message);
+          this.log('presenter-copy', { phase: 'error', mode: mode, message: error.message });
+        }
+        return false;
+      } finally {
+        this.copying = false;
+        if (!this.destroyed) this.updateCopyControls();
+      }
+    }
+
+    selectedShape() {
+      return this.annotations.marks.find((mark) => mark.id === this.selectedShapeId && isShapeKind(mark.kind));
+    }
+
+    shapeContext() {
+      return this.selectedShape() || (isShapeKind(this.tool) ? { kind: this.tool, ...this.shapeStyles[this.tool] } : null);
+    }
+
+    shapeStyle(shape) {
+      const width = Number(shape.width);
+      return {
+        color: SHAPE_COLORS.some((color) => color[0] === shape.color) ? shape.color : SHAPE_COLORS[0][0],
+        width: clamp(Number.isFinite(width) ? Math.round(width) : 3, 1, 16)
+      };
+    }
+
+    updateShapeControls() {
+      if (!this.shapeOptions) return;
+      if (!this.selectedShape()) this.selectedShapeId = null;
+      const context = this.shapeContext();
+      this.shapeStyleButton.disabled = !context;
+      if (!context) {
+        this.closeShapeOptions();
+        return;
+      }
+      const style = this.shapeStyle(context);
+      this.shapeStyleButton.querySelector('.presenter-style-swatch').style.backgroundColor = style.color;
+      this.app.querySelector('#presenter-shape-width-value').textContent = style.width + ' px';
+      this.shapeWidthInput.value = String(style.width);
+      this.app.querySelector('#presenter-shape-width-output').textContent = style.width + ' px';
+      this.app.querySelector('#presenter-shape-options-title').textContent = (context.kind === 'arrow' ? '箭头' : '矩形') + '样式';
+      this.shapeOptions.querySelectorAll('[data-shape-color]').forEach((swatch) => {
+        swatch.setAttribute('aria-pressed', String(swatch.dataset.shapeColor === style.color));
+      });
+    }
+
+    openShapeOptions() {
+      if (!this.shapeOptions || !this.shapeContext()) return;
+      this.updateShapeControls();
+      this.shapeOptions.hidden = false;
+      this.shapeStyleButton.setAttribute('aria-expanded', 'true');
+      this.positionShapeOptions();
+    }
+
+    closeShapeOptions() {
+      if (!this.shapeOptions) return;
+      this.shapeOptions.hidden = true;
+      this.shapeStyleButton.setAttribute('aria-expanded', 'false');
+    }
+
+    positionShapeOptions() {
+      const button = this.shapeStyleButton.getBoundingClientRect();
+      this.positionPopover(this.shapeOptions, button.left, button.top, true);
+    }
+
+    applyShapeStyle(patch, continuous) {
+      const context = this.shapeContext();
+      if (!context) return;
+      const style = this.shapeStyle(Object.assign({}, context, patch));
+      this.shapeStyles[context.kind] = style;
+      const mark = this.selectedShape();
+      if (mark && (mark.color !== style.color || mark.width !== style.width)) {
+        const before = this.drag ? null : cloneValue(this.annotations);
+        Object.assign(mark, style);
+        if (before) this.recordAnnotationChange(before, 'shape-style', continuous ? 'shape-width:' + mark.id : null);
+        this.scheduleAnnotationDraw();
+      }
+      this.updateShapeControls();
+    }
+
+    handleShapeWheel(event) {
+      const context = this.shapeContext();
+      if (!context || !event.deltaY || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return false;
+      event.preventDefault();
+      event.stopPropagation();
+      this.noteActivity();
+      this.applyShapeStyle({ width: this.shapeStyle(context).width - Math.sign(event.deltaY) }, true);
+      return true;
+    }
+
+    selectShape(id) {
+      this.selectedShapeId = id;
+      const shape = this.selectedShape();
+      if (!shape) return;
+      this.shapeStyles[shape.kind] = this.shapeStyle(shape);
+      this.tool = '';
+      this.lastHistoryEdit = null;
+      this.closeFocusOptions();
+      this.updateToolState();
+      this.drawAnnotations();
+      this.openShapeOptions();
+    }
+
+    resolveAnchorRow(anchor) {
+      const byKey = this.rowKeyIndices.get(anchor.rowKey);
+      return Number.isFinite(byKey) ? byKey : clamp(anchor.rowIndex, 0, Math.max(0, this.rowKeys.length - 1));
+    }
+
+    anchorFromPoint(point) {
+      const rowIndex = this.laneIndexFromY(point.y);
+      const lane = this.laneBounds[rowIndex];
+      return {
+        cycle: this.renderWindow.start + (point.x - this.plotBounds.x)
+          / Math.max(1, this.plotBounds.width) * Math.max(1, this.renderWindow.size),
+        rowIndex: rowIndex,
+        rowKey: this.rowKeys[rowIndex] || '',
+        offsetY: point.y - (lane ? lane.y + lane.height / 2 : this.svgMetrics.y)
+      };
+    }
+
+    pointFromAnchor(anchor) {
+      const lane = this.laneBounds[this.resolveAnchorRow(anchor)];
+      return {
+        x: this.plotBounds.x + (anchor.cycle - this.renderWindow.start)
+          / Math.max(1, this.renderWindow.size) * this.plotBounds.width,
+        y: (lane ? lane.y + lane.height / 2 : this.svgMetrics.y) + anchor.offsetY
+      };
+    }
+
+    openTextEditor(point, id) {
+      const mark = this.annotations.marks.find(function (item) { return item.id === id && item.kind === 'text'; });
+      this.textEdit = { id: mark ? mark.id : null, anchor: mark ? cloneValue(mark.anchor) : this.anchorFromPoint(point) };
+      this.textInput.value = mark ? mark.text : '';
+      this.textEditor.hidden = false;
+      this.positionTextEditor();
+      this.textInput.focus({ preventScroll: true });
+      this.textInput.select();
+    }
+
+    positionTextEditor() {
+      if (!this.textEdit || !this.svgMetrics) return;
+      const point = this.pointFromAnchor(this.textEdit.anchor);
+      const matrix = this.overlay.getScreenCTM();
+      if (!matrix) return;
+      const position = new DOMPoint(point.x, point.y).matrixTransform(matrix);
+      this.positionPopover(this.textEditor, position.x, position.y, false);
+    }
+
+    finishTextEdit(commit, focus) {
+      if (!this.textEdit) return;
+      const edit = this.textEdit;
+      this.textEdit = null;
+      this.textEditor.hidden = true;
+      if (commit) {
+        const before = cloneValue(this.annotations);
+        const value = this.textInput.value;
+        const index = this.annotations.marks.findIndex(function (mark) { return mark.id === edit.id; });
+        if (value.trim()) {
+          const mark = { id: edit.id || 'mark-' + (++this.markSequence), kind: 'text', anchor: edit.anchor, text: value };
+          if (index >= 0) this.annotations.marks[index] = mark;
+          else this.annotations.marks.push(mark);
+        } else if (index >= 0) {
+          this.annotations.marks.splice(index, 1);
+        }
+        this.recordAnnotationChange(before, 'text');
+        this.drawAnnotations();
+      }
+      if (focus !== false) this.viewport.focus({ preventScroll: true });
+      this.updateSaveControls();
+    }
+
+    moveLaser(event) {
+      if (this.tool !== 'pointer') return;
+      this.laserPosition = { x: event.clientX, y: event.clientY };
+      if (this.laserFrame) return;
+      this.laserFrame = requestAnimationFrame(() => {
+        this.laserFrame = 0;
+        if (this.tool !== 'pointer' || !this.laserPosition || this.destroyed) return;
+        this.laser.style.transform = 'translate3d(' + (this.laserPosition.x - 11) + 'px,'
+          + (this.laserPosition.y - 11) + 'px,0)';
+        this.laser.hidden = false;
+      });
+    }
+
+    hideLaser() {
+      cancelAnimationFrame(this.laserFrame);
+      this.laserFrame = 0;
+      this.laserPosition = null;
+      if (this.laser) this.laser.hidden = true;
+    }
+
+    pulseLaser(event) {
+      this.moveLaser(event);
+      const pulse = document.createElement('span');
+      pulse.className = 'presenter-pointer-pulse';
+      pulse.setAttribute('aria-hidden', 'true');
+      pulse.style.left = event.clientX + 'px';
+      pulse.style.top = event.clientY + 'px';
+      pulse.addEventListener('animationend', () => pulse.remove(), { once: true });
+      const previous = this.app.querySelectorAll('.presenter-pointer-pulse');
+      if (previous.length >= 5) previous[0].remove();
+      this.app.appendChild(pulse);
+    }
+
+    scheduleAnnotationDraw() {
+      if (this.annotationFrame) return;
+      this.annotationFrame = requestAnimationFrame(() => {
+        this.annotationFrame = 0;
+        if (!this.destroyed) this.drawAnnotations();
+      });
     }
 
     clientPoint(event) {
@@ -800,6 +1570,7 @@
       let nearest = -1;
       let distance = Infinity;
       this.laneBounds.forEach(function (bounds, index) {
+        if (!bounds) return;
         if (y >= bounds.y && y <= bounds.y + bounds.height) {
           nearest = index;
           distance = 0;
@@ -816,37 +1587,67 @@
     }
 
     handleOverlayPointerDown(event) {
-      if (!this.tool && !event.target.classList.contains('presenter-cursor-line')) return;
+      if (event.button !== 0 || this.drag || !this.svg) return;
+      const cursor = event.target.dataset && event.target.dataset.cursor;
+      const target = typeof event.target.closest === 'function' ? event.target.closest('[data-mark-id]') : event.target;
+      const shape = target && this.annotations.marks.find((mark) => mark.id === target.dataset.markId && isShapeKind(mark.kind));
+      if (!this.tool && !cursor && !shape) {
+        if (this.selectedShapeId) {
+          this.selectedShapeId = null;
+          this.updateToolState();
+          this.drawAnnotations();
+        }
+        return;
+      }
       const point = this.clientPoint(event);
       if (!point) return;
       event.preventDefault();
-      this.overlay.setPointerCapture(event.pointerId);
-      if (event.target.dataset && event.target.dataset.cursor) {
-        this.activeCursor = event.target.dataset.cursor;
+      this.viewport.focus({ preventScroll: true });
+      if (shape && (!this.tool || isShapeKind(this.tool))) {
+        this.selectShape(shape.id);
+        return;
+      }
+      const previousSelectedShapeId = this.selectedShapeId;
+      this.selectedShapeId = null;
+      this.lastHistoryEdit = null;
+      if (this.tool === 'pointer') return;
+      if (this.tool === 'text') {
+        const target = event.target.closest('[data-mark-id]');
+        this.openTextEditor(point, target && target.dataset.markId);
+        return;
+      }
+      if (!this.tool && cursor) {
+        this.activeCursor = cursor;
         this.tool = 'cursor';
       }
-      if (this.tool === 'range') {
-        const cycle = this.cycleFromX(point.x);
-        this.annotations.range = { startCycle: cycle, endCycle: cycle };
-        this.drag = { kind: 'range', pointerId: event.pointerId };
-      } else if (this.tool === 'cursor') {
-        const cycle = this.cycleFromX(point.x);
-        this.annotations[this.activeCursor === 'B' ? 'cursorB' : 'cursorA'] = cycle;
-        this.drag = { kind: 'cursor', pointerId: event.pointerId, cursor: this.activeCursor };
+      this.drag = {
+        kind: this.tool, pointerId: event.pointerId, before: cloneValue(this.annotations),
+        lastPoint: point, cursor: this.activeCursor, previousSelectedShapeId: previousSelectedShapeId
+      };
+      try { this.overlay.setPointerCapture(event.pointerId); } catch (_error) { /* pointer already ended */ }
+      if (this.tool === 'cursor') {
+        this.annotations[this.activeCursor === 'B' ? 'cursorB' : 'cursorA'] = this.cycleFromX(point.x);
       } else if (this.tool === 'focus') {
-        const rowIndex = this.laneIndexFromY(point.y);
-        this.annotations.focus = {
-          rowIndex: rowIndex,
-          rowKey: this.rowKeys[rowIndex] || ''
+        const anchor = this.anchorFromPoint(point);
+        if (this.focusMode === 'columns') anchor.cycle = this.cycleFromX(point.x);
+        this.annotations.focus = { mode: this.focusMode, start: anchor, end: cloneValue(anchor) };
+      } else if (this.tool === 'pen') {
+        const anchor = this.anchorFromPoint(point);
+        const mark = {
+          id: 'mark-' + (++this.markSequence), kind: 'pen', points: [anchor, cloneValue(anchor)]
         };
-      } else if (this.tool === 'pointer') {
-        const rowIndex = this.laneIndexFromY(point.y);
-        this.annotations.pointer = {
-          cycle: this.cycleFromX(point.x),
-          rowIndex: rowIndex,
-          rowKey: this.rowKeys[rowIndex] || ''
-        };
-        this.drag = { kind: 'pointer', pointerId: event.pointerId };
+        this.annotations.marks.push(mark);
+        this.drag.mark = mark;
+      } else if (isShapeKind(this.tool)) {
+        const start = this.anchorFromPoint(point);
+        const mark = Object.assign({
+          id: 'mark-' + (++this.markSequence), kind: this.tool, start: start, end: cloneValue(start)
+        }, this.shapeStyles[this.tool]);
+        this.annotations.marks.push(mark);
+        this.drag.mark = mark;
+        this.selectedShapeId = mark.id;
+      } else if (this.tool === 'eraser') {
+        this.eraseMarks(point, point);
       }
       this.drawAnnotations();
       this.updateToolState();
@@ -856,97 +1657,237 @@
       if (!this.drag || this.drag.pointerId !== event.pointerId) return;
       const point = this.clientPoint(event);
       if (!point) return;
-      if (this.drag.kind === 'range' && this.annotations.range) {
-        this.annotations.range.endCycle = this.cycleFromX(point.x);
+      if (this.drag.kind === 'focus' && this.annotations.focus) {
+        const anchor = this.anchorFromPoint(point);
+        if (this.focusMode === 'columns') anchor.cycle = this.cycleFromX(point.x);
+        this.annotations.focus.end = anchor;
       } else if (this.drag.kind === 'cursor') {
         this.annotations[this.drag.cursor === 'B' ? 'cursorB' : 'cursorA'] = this.cycleFromX(point.x);
-      } else if (this.drag.kind === 'pointer') {
-        const rowIndex = this.laneIndexFromY(point.y);
-        this.annotations.pointer = {
-          cycle: this.cycleFromX(point.x),
-          rowIndex: rowIndex,
-          rowKey: this.rowKeys[rowIndex] || ''
-        };
+      } else if (this.drag.kind === 'pen') {
+        const samples = typeof event.getCoalescedEvents === 'function' ? event.getCoalescedEvents() : [];
+        (samples.length ? samples : [event]).forEach((sample) => {
+          const next = this.clientPoint(sample);
+          if (next && Math.hypot(next.x - this.drag.lastPoint.x, next.y - this.drag.lastPoint.y) * this.scale >= 1) {
+            this.drag.mark.points.push(this.anchorFromPoint(next));
+            this.drag.lastPoint = next;
+          }
+        });
+      } else if (isShapeKind(this.drag.kind)) {
+        this.drag.mark.end = this.anchorFromPoint(point);
+      } else if (this.drag.kind === 'eraser') {
+        this.eraseMarks(this.drag.lastPoint, point);
+        this.drag.lastPoint = point;
       }
-      this.drawAnnotations();
+      this.scheduleAnnotationDraw();
     }
 
     handleOverlayPointerUp(event) {
       if (!this.drag || this.drag.pointerId !== event.pointerId) return;
-      try { this.overlay.releasePointerCapture(event.pointerId); } catch (_error) { /* already released */ }
-      if (this.drag.kind === 'range' && this.annotations.range) {
-        const start = Math.min(this.annotations.range.startCycle, this.annotations.range.endCycle);
-        const end = Math.max(this.annotations.range.startCycle, this.annotations.range.endCycle);
-        this.annotations.range = Math.abs(end - start) < 0.25 ? null : { startCycle: start, endCycle: end };
-      }
+      this.handleOverlayPointerMove(event);
+      this.finishGesture(false);
+    }
+
+    finishGesture(cancel) {
+      if (!this.drag) return;
+      const drag = this.drag;
       this.drag = null;
+      try { this.overlay.releasePointerCapture(drag.pointerId); } catch (_error) { /* already released */ }
+      if (cancel) {
+        this.annotations = drag.before;
+        this.selectedShapeId = drag.previousSelectedShapeId || null;
+      } else {
+        if (isShapeKind(drag.kind)) {
+          const start = this.pointFromAnchor(drag.mark.start);
+          const end = this.pointFromAnchor(drag.mark.end);
+          const width = Math.abs(end.x - start.x) * this.scale;
+          const height = Math.abs(end.y - start.y) * this.scale;
+          const empty = drag.kind === 'rectangle' ? width < 4 || height < 4 : Math.hypot(width, height) < 4;
+          if (empty) {
+            this.annotations.marks = this.annotations.marks.filter((mark) => mark.id !== drag.mark.id);
+            this.selectedShapeId = drag.previousSelectedShapeId || null;
+          }
+        }
+        const focus = this.annotations.focus;
+        if (drag.kind === 'focus' && focus) {
+          if (focus.mode === 'columns' && focus.start.cycle === focus.end.cycle) {
+            focus.start.cycle = clamp(Math.floor(focus.start.cycle), 0, Math.max(0, this.renderWindow.end - 1));
+            focus.end.cycle = Math.min(this.renderWindow.end, focus.start.cycle + 1);
+          } else if (focus.mode === 'rectangle') {
+            const start = this.pointFromAnchor(focus.start);
+            const end = this.pointFromAnchor(focus.end);
+            if (Math.abs(start.x - end.x) * this.scale < 3 || Math.abs(start.y - end.y) * this.scale < 3) {
+              this.annotations.focus = drag.before.focus;
+            }
+          }
+        }
+        this.recordAnnotationChange(drag.before, drag.kind);
+      }
       this.drawAnnotations();
+      this.updateShapeControls();
+    }
+
+    eraseMarks(start, end) {
+      const radius = 10 / this.scale;
+      this.annotations.marks = this.annotations.marks.filter((mark) => {
+        const geometry = this.markGeometry.get(mark.id);
+        if (!geometry) return true;
+        if (geometry.points) {
+          const strokeRadius = radius + (geometry.strokeWidth || 0) / 2;
+          return !geometry.points.some(function (point, index, points) {
+            return segmentsNear(start, end, point, points[Math.max(0, index - 1)], strokeRadius);
+          });
+        }
+        const box = geometry.bounds;
+        const inside = start.x >= box.x - radius && start.x <= box.x + box.width + radius
+          && start.y >= box.y - radius && start.y <= box.y + box.height + radius;
+        if (inside) return false;
+        const corners = [
+          { x: box.x, y: box.y }, { x: box.x + box.width, y: box.y },
+          { x: box.x + box.width, y: box.y + box.height }, { x: box.x, y: box.y + box.height }
+        ];
+        return !corners.some(function (point, index) {
+          return segmentsNear(start, end, point, corners[(index + 1) % 4], radius);
+        });
+      });
+    }
+
+    getFocusBounds() {
+      const focus = this.annotations.focus;
+      if (!focus) return null;
+      const view = this.svgMetrics;
+      const start = this.pointFromAnchor(focus.start);
+      const end = this.pointFromAnchor(focus.end);
+      let left = Math.min(start.x, end.x);
+      let right = Math.max(start.x, end.x);
+      let top = Math.min(start.y, end.y);
+      let bottom = Math.max(start.y, end.y);
+      if (focus.mode === 'rows') {
+        const first = this.resolveAnchorRow(focus.start);
+        const last = this.resolveAnchorRow(focus.end);
+        const bounds = unionBounds(this.laneBounds.slice(Math.min(first, last), Math.max(first, last) + 1), view);
+        left = view.x;
+        right = view.x + view.width;
+        top = bounds.y - 3;
+        bottom = bounds.y + bounds.height + 3;
+      } else if (focus.mode === 'columns') {
+        top = view.y;
+        bottom = view.y + view.height;
+      }
+      left = Math.max(view.x, left);
+      right = Math.min(view.x + view.width, right);
+      top = Math.max(view.y, top);
+      bottom = Math.min(view.y + view.height, bottom);
+      return right > left && bottom > top ? { x: left, y: top, width: right - left, height: bottom - top } : null;
+    }
+
+    shapePoints(mark) {
+      const start = this.pointFromAnchor(mark.start);
+      const end = this.pointFromAnchor(mark.end);
+      if (mark.kind === 'rectangle') {
+        return [start, { x: end.x, y: start.y }, end, { x: start.x, y: end.y }, start];
+      }
+      const dx = end.x - start.x;
+      const dy = end.y - start.y;
+      const length = Math.hypot(dx, dy);
+      const ux = dx / (length || 1);
+      const uy = dy / (length || 1);
+      const head = Math.min(length * 0.45, (8 + this.shapeStyle(mark).width * 2) / this.scale);
+      const back = { x: end.x - ux * head, y: end.y - uy * head };
+      return [start, end, { x: back.x - uy * head * 0.55, y: back.y + ux * head * 0.55 },
+        end, { x: back.x + uy * head * 0.55, y: back.y - ux * head * 0.55 }];
+    }
+
+    drawShape(layer, mark) {
+      const points = this.shapePoints(mark);
+      const style = this.shapeStyle(mark);
+      const path = points.map((point, index) => (index ? 'L' : 'M') + point.x.toFixed(2) + ' ' + point.y.toFixed(2)).join(' ');
+      layer.appendChild(createSvgElement('path', {
+        class: 'presenter-shape-hit', d: path, 'stroke-width': Math.max(12, style.width + 8), 'data-mark-id': mark.id
+      }));
+      layer.appendChild(createSvgElement('path', {
+        class: 'presenter-shape-ink', d: path, stroke: style.color, 'stroke-width': style.width, 'data-mark-id': mark.id
+      }));
+      this.markGeometry.set(mark.id, { points: points, strokeWidth: style.width / this.scale });
+      if (mark.id === this.selectedShapeId && !this.drag) {
+        const padding = (4 + style.width / 2) / this.scale;
+        const left = Math.min(...points.map((point) => point.x)) - padding;
+        const top = Math.min(...points.map((point) => point.y)) - padding;
+        layer.appendChild(createSvgElement('rect', {
+          class: 'presenter-shape-selection', x: left, y: top,
+          width: Math.max(...points.map((point) => point.x)) - left + padding,
+          height: Math.max(...points.map((point) => point.y)) - top + padding
+        }));
+      }
+    }
+
+    drawMarks() {
+      this.markGeometry.clear();
+      const defs = createSvgElement('defs');
+      const markClipId = this.markClipId || 'presenter-mark-clip';
+      const clip = createSvgElement('clipPath', { id: markClipId });
+      clip.appendChild(createSvgElement('rect', this.svgMetrics));
+      defs.appendChild(clip);
+      this.overlay.appendChild(defs);
+      const layer = createSvgElement('g', { 'clip-path': 'url(#' + markClipId + ')' });
+      this.overlay.appendChild(layer);
+      this.annotations.marks.forEach((mark) => {
+        if (mark.kind === 'pen') {
+          const points = mark.points.map((anchor) => this.pointFromAnchor(anchor));
+          const path = points.map(function (point, index) {
+            return (index ? 'L' : 'M') + point.x.toFixed(2) + ' ' + point.y.toFixed(2);
+          }).join(' ');
+          layer.appendChild(createSvgElement('path', {
+            class: 'presenter-annotation-ink', d: path, 'data-mark-id': mark.id
+          }));
+          this.markGeometry.set(mark.id, { points: points });
+        } else if (isShapeKind(mark.kind)) {
+          this.drawShape(layer, mark);
+        } else if (mark.kind === 'text') {
+          const point = this.pointFromAnchor(mark.anchor);
+          const group = createSvgElement('g', { 'data-mark-id': mark.id });
+          const label = createSvgElement('text', { class: 'presenter-annotation-text', x: point.x, y: point.y });
+          mark.text.split(/\r?\n/).forEach(function (line, index) {
+            const span = createSvgElement('tspan', { x: point.x, dy: index ? '1.4em' : 0 });
+            span.textContent = line || '\u00a0';
+            label.appendChild(span);
+          });
+          group.appendChild(label);
+          layer.appendChild(group);
+          const bounds = label.getBBox();
+          const background = createSvgElement('rect', {
+            class: 'presenter-annotation-text-bg', x: bounds.x - 3, y: bounds.y - 2,
+            width: bounds.width + 6, height: bounds.height + 4, rx: 2
+          });
+          group.insertBefore(background, label);
+          this.markGeometry.set(mark.id, { bounds: { x: bounds.x - 3, y: bounds.y - 2, width: bounds.width + 6, height: bounds.height + 4 } });
+        }
+      });
     }
 
     drawAnnotations() {
+      cancelAnimationFrame(this.annotationFrame);
+      this.annotationFrame = 0;
       if (!this.overlay || !this.svgMetrics) return;
       while (this.overlay.firstChild) this.overlay.removeChild(this.overlay.firstChild);
+      this.drawMarks();
       const view = this.svgMetrics;
-      const plot = this.plotBounds || view;
-      const focus = this.annotations.focus;
-      if (focus && this.laneBounds[focus.rowIndex]) {
-        const bounds = this.laneBounds[focus.rowIndex];
-        const shadeRects = [
-          { x: view.x, y: view.y, width: view.width, height: Math.max(0, bounds.y - view.y) },
-          { x: view.x, y: bounds.y + bounds.height, width: view.width, height: Math.max(0, view.y + view.height - bounds.y - bounds.height) },
-          { x: view.x, y: bounds.y, width: Math.max(0, bounds.x - view.x), height: bounds.height },
-          { x: bounds.x + bounds.width, y: bounds.y, width: Math.max(0, view.x + view.width - bounds.x - bounds.width), height: bounds.height }
-        ];
-        shadeRects.filter(function (rect) { return rect.width > 0 && rect.height > 0; })
-          .forEach((rect) => {
-            this.overlay.appendChild(createSvgElement('rect', Object.assign({ class: 'presenter-focus-shade' }, rect)));
-          });
-        this.overlay.appendChild(createSvgElement('rect', {
-          class: 'presenter-focus-outline',
-          x: bounds.x,
-          y: bounds.y,
-          width: bounds.width,
-          height: bounds.height,
-          rx: 2
-        }));
+      if (this.annotations.focus) {
+        const bounds = this.getFocusBounds();
+        const shadeRects = bounds ? [
+          { x: view.x, y: view.y, width: view.width, height: bounds.y - view.y },
+          { x: view.x, y: bounds.y + bounds.height, width: view.width, height: view.y + view.height - bounds.y - bounds.height },
+          { x: view.x, y: bounds.y, width: bounds.x - view.x, height: bounds.height },
+          { x: bounds.x + bounds.width, y: bounds.y, width: view.x + view.width - bounds.x - bounds.width, height: bounds.height }
+        ] : [view];
+        shadeRects.filter(function (rect) { return rect.width > 0 && rect.height > 0; }).forEach((rect) => {
+          this.overlay.appendChild(createSvgElement('rect', Object.assign({ class: 'presenter-focus-shade' }, rect)));
+        });
+        if (bounds) this.overlay.appendChild(createSvgElement('rect', Object.assign({ class: 'presenter-focus-outline' }, bounds)));
       }
-
-      const range = this.annotations.range;
-      if (range) {
-        const x1 = this.xFromCycle(range.startCycle);
-        const x2 = this.xFromCycle(range.endCycle);
-        if (x1 != null || x2 != null) {
-          const left = x1 == null ? plot.x : x1;
-          const right = x2 == null ? plot.x + plot.width : x2;
-          this.overlay.appendChild(createSvgElement('rect', {
-            class: 'presenter-range-rect',
-            x: Math.min(left, right),
-            y: plot.y,
-            width: Math.max(1, Math.abs(right - left)),
-            height: plot.height,
-            rx: 2
-          }));
-        }
-      }
-
       this.drawCursor('A', this.annotations.cursorA);
       this.drawCursor('B', this.annotations.cursorB);
-
-      const pointer = this.annotations.pointer;
-      if (pointer) {
-        const x = this.xFromCycle(pointer.cycle);
-        const lane = this.laneBounds[pointer.rowIndex];
-        if (x != null && lane) {
-          const y = lane.y + lane.height / 2;
-          this.overlay.appendChild(createSvgElement('circle', {
-            class: 'presenter-pointer-ring', cx: x, cy: y, r: 8
-          }));
-          this.overlay.appendChild(createSvgElement('circle', {
-            class: 'presenter-pointer-dot', cx: x, cy: y, r: 2.5
-          }));
-        }
-      }
       this.updateMeasurements();
+      this.updateCopyControls();
     }
 
     drawCursor(name, cycle) {
@@ -993,14 +1934,50 @@
     }
 
     clearAnnotations() {
-      this.annotations = { pointer: null, focus: null, range: null, cursorA: null, cursorB: null };
+      this.finishGesture(false);
+      this.selectedShapeId = null;
+      this.closeShapeOptions();
+      const before = cloneValue(this.annotations);
+      this.annotations = emptyAnnotations();
+      this.focusEnabled = false;
+      if (this.tool === 'focus') this.tool = '';
+      this.closeFocusOptions();
+      this.hideLaser();
+      this.recordAnnotationChange(before, 'clear');
       this.drawAnnotations();
+      this.updateToolState();
       this.showToast('已清除讲解标注');
+    }
+
+    saveStepNotes() {
+      const step = this.steps[this.stepIndex];
+      if (!step) return;
+      step.notes = this.notesText.value;
+      step.notesView = {
+        start: this.notesText.selectionStart,
+        end: this.notesText.selectionEnd,
+        direction: this.notesText.selectionDirection,
+        top: this.notesText.scrollTop,
+        left: this.notesText.scrollLeft
+      };
+      this.updateSaveControls();
+    }
+
+    showStepNotes(step) {
+      this.notesText.value = typeof step.notes === 'string' ? step.notes : '';
+      const view = step.notesView || {};
+      this.notesText.setSelectionRange(view.start || 0, view.end || 0, view.direction || 'none');
+      this.notesText.scrollTop = view.top || 0;
+      this.notesText.scrollLeft = view.left || 0;
     }
 
     captureStep() {
       return {
+        title: DEFAULT_STEP_TITLE,
+        notes: this.notesText.value,
         annotations: cloneValue(this.annotations),
+        focusEnabled: this.focusEnabled,
+        focusMode: this.focusMode,
         tool: this.tool,
         activeCursor: this.activeCursor,
         windowStart: this.windowStart,
@@ -1011,26 +1988,184 @@
       };
     }
 
+    storeCurrentStep() {
+      const step = this.steps[this.stepIndex];
+      if (!step) return;
+      this.saveStepNotes();
+      Object.assign(step, this.captureStep(), { title: step.title || DEFAULT_STEP_TITLE });
+    }
+
+    presentationSignature() {
+      // Playback navigation, zoom and panel layout are not content edits.
+      return JSON.stringify(this.steps.map((step, index) => {
+        const current = index === this.stepIndex;
+        return {
+          title: current && this.stepTitleEdit ? this.stepTitleInput.value.trim() || DEFAULT_STEP_TITLE : step.title,
+          notes: current ? this.notesText.value : step.notes,
+          annotations: current ? this.annotations : step.annotations
+        };
+      }));
+    }
+
+    hasUnsavedChanges() {
+      if (!this.steps.length) return false;
+      if (this.savedSignature !== this.presentationSignature()) return true;
+      if (this.textEdit) {
+        const mark = this.annotations.marks.find((item) => item.id === this.textEdit.id);
+        if (this.textInput.value !== (mark ? mark.text : '') && (mark || this.textInput.value.trim())) return true;
+      }
+      return false;
+    }
+
+    syncBeforeUnload(enabled) {
+      if (!this.eventsBound || enabled === this.beforeUnloadAttached) return;
+      this.beforeUnloadAttached = enabled;
+      if (enabled) root.addEventListener('beforeunload', this.boundBeforeUnload);
+      else root.removeEventListener('beforeunload', this.boundBeforeUnload);
+    }
+
+    updateSaveControls() {
+      if (!this.saveButton || this.destroyed) return;
+      const dirty = this.hasUnsavedChanges();
+      this.saveButton.disabled = this.saving || !this.steps.length;
+      this.saveButton.setAttribute('aria-busy', String(this.saving));
+      this.saveState.textContent = this.saving ? '正在保存...' : !this.steps.length ? '' : dirty ? '未保存' : '已保存';
+      this.saveState.classList.toggle('is-dirty', dirty);
+      this.syncBeforeUnload(this.saving || dirty);
+      if (this.exitDialog) this.exitDialog.querySelectorAll('button').forEach((button) => { button.disabled = this.saving; });
+    }
+
+    savePresentation() {
+      if (this.savePromise) return this.savePromise;
+      if (!this.steps.length) return Promise.resolve(false);
+      this.finishStepTitleEdit(true);
+      this.finishGesture(false);
+      this.finishTextEdit(true);
+      this.storeCurrentStep();
+      const signature = this.presentationSignature();
+      const serialized = JSON.stringify({ kind: 'VisualWaveDromPresentation', version: 1,
+        steps: this.steps, activeStep: this.stepIndex });
+      this.saving = true;
+      this.updateSaveControls();
+      this.log('presenter-save', { phase: 'start', stepCount: this.steps.length });
+      this.savePromise = Promise.resolve().then(() => {
+        if (typeof this.adapter.savePresentation !== 'function') throw new Error('保存模块未加载，请刷新页面后重试');
+        return this.adapter.savePresentation(serialized, this.savedPresentation);
+      }).then((result) => {
+        if (!result || result.presentation !== serialized) throw new Error('未收到保存成功确认，请重试');
+        this.savedPresentation = serialized;
+        this.savedSignature = signature;
+        if (this.document) this.document.presentation = serialized;
+        if (!this.destroyed) this.showToast(result.downloaded ? '演讲步骤已保存，已导出 SQLite 波形库。' : '演讲步骤已保存。');
+        this.log('presenter-save', { phase: 'saved', changedDuringSave: this.hasUnsavedChanges() });
+        return true;
+      }).catch((error) => {
+        if (!this.destroyed) {
+          this.showToast('保存失败：' + error.message, true);
+          this.exitMessage.textContent = '保存失败：' + error.message;
+        }
+        this.log('presenter-save', { phase: 'error', message: error.message });
+        return false;
+      }).finally(() => {
+        this.saving = false;
+        this.savePromise = null;
+        this.updateSaveControls();
+      });
+      return this.savePromise;
+    }
+
+    handleBeforeUnload(event) {
+      if (this.allowClose || this.destroyed || (!this.saving && !this.hasUnsavedChanges())) return;
+      event.preventDefault();
+      event.returnValue = true;
+    }
+
+    requestExit() {
+      this.finishStepTitleEdit(true);
+      this.finishGesture(false);
+      this.finishTextEdit(true);
+      if (!this.saving && !this.hasUnsavedChanges()) {
+        this.closePresenter();
+        return;
+      }
+      this.exitMessage.textContent = this.saving ? '正在保存演讲步骤，请稍候。' : '演讲步骤有未保存的改动。';
+      if (this.exitDialog.hidden) {
+        this.exitDialog.hidden = false;
+        if (typeof this.exitDialog.showModal === 'function') this.exitDialog.showModal();
+        else this.exitDialog.setAttribute('open', '');
+      }
+      this.updateSaveControls();
+      if (!this.saving) this.exitDialog.querySelector('[data-action="exit-save"]').focus();
+      else void this.saveAndExit();
+    }
+
+    cancelExit() {
+      if (typeof this.exitDialog.close === 'function') this.exitDialog.close();
+      else this.exitDialog.removeAttribute('open');
+      this.exitDialog.hidden = true;
+      this.viewport.focus({ preventScroll: true });
+    }
+
+    async saveAndExit() {
+      if (this.closingAfterSave) return;
+      this.closingAfterSave = true;
+      try {
+        if (await this.savePresentation()) {
+          if (!this.hasUnsavedChanges()) this.closePresenter();
+          else this.exitMessage.textContent = '保存期间又有新的改动，请再次保存后退出。';
+        }
+      } finally {
+        this.closingAfterSave = false;
+      }
+    }
+
+    closePresenter() {
+      this.allowClose = true;
+      this.cancelExit();
+      if (typeof this.adapter.close === 'function') this.adapter.close();
+      else root.close();
+      clearTimeout(this.closeTimer);
+      this.closeTimer = setTimeout(() => { this.allowClose = false; }, 500);
+    }
+
     recordStep() {
+      this.finishStepTitleEdit(true);
+      this.finishGesture(false);
+      this.saveStepNotes();
       const step = this.captureStep();
       this.steps = this.steps.slice(0, this.stepIndex + 1);
       this.steps.push(step);
       this.stepIndex = this.steps.length - 1;
+      this.showStepNotes(step);
       this.updateStepControls();
+      this.updateSaveControls();
       this.showToast('已记录第 ' + (this.stepIndex + 1) + ' 个演讲步骤');
     }
 
     async goToStep(index) {
       if (index < 0 || index >= this.steps.length || index === this.stepIndex) return;
+      this.finishStepTitleEdit(true);
+      this.finishGesture(false);
+      this.storeCurrentStep();
+      this.closeFocusOptions();
+      this.selectedShapeId = null;
+      this.lastHistoryEdit = null;
+      this.closeShapeOptions();
+      this.hideLaser();
       const step = cloneValue(this.steps[index]);
       this.stepIndex = index;
+      this.showStepNotes(step);
       this.annotations = step.annotations || this.annotations;
       this.keepAnnotationsInSourceBounds(
         Math.max(0, Number(this.metrics.maxWaveLength) || 0),
         Number(this.metrics.signalCount) || 0
       );
       this.tool = step.tool || '';
+      this.focusEnabled = !!step.focusEnabled || !!this.annotations.focus;
+      this.focusMode = step.focusMode || 'rows';
       this.activeCursor = step.activeCursor || 'A';
+      this.undoStack.length = 0;
+      this.redoStack.length = 0;
       const total = Math.max(0, Number(this.metrics.maxWaveLength) || 0);
       const maxStart = Math.max(0, total - this.windowSize);
       const nextStart = clamp(step.windowStart, 0, maxStart);
@@ -1038,10 +2173,12 @@
         this.windowStart = nextStart;
         await this.renderWave({ preserveView: false });
       }
+      if (this.destroyed || this.stepIndex !== index) return;
       this.fitMode = !!step.fitMode;
       if (this.fitMode) this.fitToWindow(false);
       else this.setScale(step.scale || 1, false);
       requestAnimationFrame(() => {
+        if (this.destroyed || this.stepIndex !== index) return;
         this.viewport.scrollLeft = step.scrollLeft || 0;
         this.viewport.scrollTop = step.scrollTop || 0;
         this.drawAnnotations();
@@ -1049,24 +2186,71 @@
       });
       this.updateToolState();
       this.updateStepControls();
+      this.updateSaveControls();
     }
 
     updateStepControls() {
       const count = this.steps.length || 1;
       const index = this.stepIndex >= 0 ? this.stepIndex + 1 : 1;
       this.stepCount.textContent = index + ' / ' + count;
+      const step = this.steps[this.stepIndex];
+      if (this.stepTitleInput && !this.stepTitleEdit) {
+        const title = step && step.title || DEFAULT_STEP_TITLE;
+        if (this.stepTitleInput.value !== title) this.stepTitleInput.value = title;
+        this.stepTitleInput.title = title;
+        this.stepTitleInput.disabled = !step;
+        this.resizeStepTitle();
+      }
       const previous = this.app.querySelector('[data-action="step-prev"]');
       const next = this.app.querySelector('[data-action="step-next"]');
       previous.disabled = this.stepIndex <= 0;
       next.disabled = this.stepIndex < 0 || this.stepIndex >= this.steps.length - 1;
     }
 
+    resizeStepTitle() {
+      const input = this.stepTitleInput;
+      if (!input) return;
+      input.style.height = 'auto';
+      input.style.height = (input.scrollHeight + input.offsetHeight - input.clientHeight) + 'px';
+    }
+
+    finishStepTitleEdit(save) {
+      const step = this.stepTitleEdit;
+      if (!step) return;
+      this.stepTitleEdit = null;
+      if (save) {
+        const title = this.stepTitleInput.value.trim() || DEFAULT_STEP_TITLE;
+        if (step.title !== title) {
+          step.title = title;
+          this.log('presenter-step', { phase: 'rename', index: this.steps.indexOf(step), titleLength: title.length });
+        }
+      }
+      if (document.activeElement === this.stepTitleInput) this.stepTitleInput.blur();
+      this.updateStepControls();
+      this.updateSaveControls();
+    }
+
     toggleNotes() {
+      if (this.notesWindow && this.notesWindow.detached) {
+        this.notesWindow.focus();
+        return;
+      }
       const collapsed = this.workspace.classList.toggle('notes-collapsed');
-      const topButton = this.app.querySelector('.presenter-top-actions [data-action="notes"]');
-      if (topButton) topButton.setAttribute('aria-pressed', collapsed ? 'false' : 'true');
+      this.updateNotesControls();
       if (!collapsed) requestAnimationFrame(() => this.notesText.focus({ preventScroll: true }));
       if (this.fitMode) requestAnimationFrame(() => this.fitToWindow(false));
+    }
+
+    updateNotesControls() {
+      const detached = !!(this.notesWindow && this.notesWindow.detached);
+      const topButton = this.app.querySelector('.presenter-top-actions [data-action="notes"]');
+      topButton.setAttribute('aria-pressed', detached || !this.workspace.classList.contains('notes-collapsed') ? 'true' : 'false');
+      topButton.title = detached ? '唤起独立备注窗口（N）' : '显示或隐藏讲解备注（N）';
+      this.app.querySelector('.presenter-top-actions [data-action="notes-restore"]').hidden = !detached && !this.notesWindowOpening;
+      this.notesPanel.querySelector('[data-action="notes-detach"]').hidden = detached;
+      this.notesPanel.querySelector('[data-action="notes-detach"]').disabled = this.notesWindowOpening;
+      this.notesPanel.querySelector('[data-action="notes-restore"]').hidden = !detached;
+      this.notesPanel.querySelector('[data-action="notes"]').hidden = detached;
     }
 
     async toggleFullscreen() {
@@ -1093,20 +2277,75 @@
       clearTimeout(this.controlsTimer);
       if (!document.fullscreenElement) return;
       this.controlsTimer = setTimeout(() => {
-        if (document.activeElement === this.notesText) return;
+        if (document.activeElement === this.notesText || this.stepTitleEdit || this.textEdit || !this.focusOptions.hidden
+            || (this.shapeOptions && !this.shapeOptions.hidden) || (this.copyOptions && !this.copyOptions.hidden)
+            || (this.exitDialog && !this.exitDialog.hidden) || this.drag) return;
         this.app.classList.add('controls-idle');
       }, 2600);
     }
 
     handleKeydown(event) {
       const target = event.target;
-      const typing = target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA'
-        || target.isContentEditable);
-      if (typing) {
-        if (event.key === 'Escape') target.blur();
+      if (event.isComposing || event.keyCode === 229) return;
+      const key = String(event.key || '').toLowerCase();
+      if (this.exitDialog && !this.exitDialog.hidden) {
+        if (key === 'escape') {
+          event.preventDefault();
+          event.stopPropagation();
+          if (!this.saving) this.cancelExit();
+        }
         return;
       }
-      const key = String(event.key || '').toLowerCase();
+      if ((event.ctrlKey || event.metaKey) && key === 's') {
+        event.preventDefault();
+        event.stopPropagation();
+        void this.savePresentation();
+        return;
+      }
+      if (target === this.stepTitleInput && (key === 'enter' || key === 'escape')) {
+        event.preventDefault();
+        event.stopPropagation();
+        this.finishStepTitleEdit(key === 'enter');
+        this.viewport.focus({ preventScroll: true });
+        return;
+      }
+      if (key === 'escape') {
+        event.preventDefault();
+        if (this.copyOptions && !this.copyOptions.hidden) {
+          if (!this.copying) this.closeCopyOptions();
+          return;
+        }
+        if (this.selectedShapeId) {
+          this.finishGesture(true);
+          this.selectedShapeId = null;
+          this.setTool('');
+          this.drawAnnotations();
+          return;
+        }
+        this.finishGesture(true);
+        const editingText = !!this.textEdit;
+        this.finishTextEdit(false);
+        if (this.focusEnabled || this.annotations.focus) this.clearFocus();
+        else if (this.tool) this.setTool('');
+        else if (!editingText && document.fullscreenElement) void document.exitFullscreen();
+        if (target && typeof target.blur === 'function') target.blur();
+        this.viewport.focus({ preventScroll: true });
+        return;
+      }
+      if (this.textEdit && (event.ctrlKey || event.metaKey) && key === 'enter') {
+        event.preventDefault();
+        this.finishTextEdit(true);
+        return;
+      }
+      const typing = target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA'
+        || target.isContentEditable);
+      if (typing) return;
+      if ((event.ctrlKey || event.metaKey) && (key === 'z' || key === 'y')) {
+        event.preventDefault();
+        this.restoreHistory(key === 'y' || event.shiftKey);
+        return;
+      }
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
       if (key === 'f') {
         event.preventDefault();
         void this.toggleFullscreen();
@@ -1124,32 +2363,29 @@
         this.setTool('pointer');
       } else if (key === 'r') {
         event.preventDefault();
-        this.setTool('range');
+        this.setTool('focus');
       } else if (key === 'a' || key === 'b') {
         event.preventDefault();
-        this.activeCursor = key.toUpperCase();
-        this.setTool('cursor', true);
+        this.selectCursor(key.toUpperCase(), true);
       } else if (key === 'n') {
         event.preventDefault();
         this.toggleNotes();
-      } else if (key === 'escape') {
-        if (document.fullscreenElement) {
-          event.preventDefault();
-          void document.exitFullscreen();
-        } else if (this.tool) {
-          event.preventDefault();
-          this.setTool('');
-        }
       }
     }
 
     destroy() {
       this.destroyed = true;
+      this.syncBeforeUnload(false);
+      if (this.notesWindow) this.notesWindow.destroy();
       clearTimeout(this.toastTimer);
       clearTimeout(this.liveTimer);
       clearTimeout(this.controlsTimer);
+      clearTimeout(this.closeTimer);
+      cancelAnimationFrame(this.annotationFrame);
+      this.hideLaser();
       if (this.resizeObserver) this.resizeObserver.disconnect();
       document.removeEventListener('keydown', this.boundKeydown);
+      document.removeEventListener('pointerdown', this.boundOutside, true);
       document.removeEventListener('fullscreenchange', this.boundFullscreen);
       document.removeEventListener('mousemove', this.boundActivity);
       document.removeEventListener('pointerdown', this.boundActivity);
@@ -1168,7 +2404,7 @@
   }
 
   return {
-    version: '1.0.0',
+    version: '1.2.0',
     mount: mount
   };
 }));

@@ -1371,6 +1371,7 @@ func (s *service) routes() http.Handler {
 	mux.HandleFunc("/api/wave-library", s.handleWaveLibrary)
 	mux.HandleFunc("/api/wave-library-state", method(http.MethodPatch, s.handleLibraryState))
 	mux.HandleFunc("/api/wave-document", s.handleWaveDocument)
+	mux.HandleFunc("/api/wave-presentation", method(http.MethodPatch, s.handlePresentation))
 	mux.HandleFunc("/", s.serveStatic)
 	return mux
 }

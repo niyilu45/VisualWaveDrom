@@ -13413,6 +13413,7 @@ ${lines.join('\n')}`;
         content: deferred ? null : content,
         hscale: raw.hscale,
         waveEditMode: raw.waveEditMode,
+        presentation: typeof raw.presentation === 'string' ? raw.presentation : undefined,
         revision: Number.isInteger(raw.revision) && raw.revision >= 0 ? raw.revision : 0,
         savedAt: raw.savedAt || new Date().toISOString(),
         deferred,
@@ -13862,17 +13863,23 @@ ${lines.join('\n')}`;
       return url.href;
     }
 
+    function getPresenterWindowKey(documentName, libraryId) {
+      const libraryKey = libraryId === undefined ? currentWaveLibraryId || currentWaveLibraryFile : libraryId;
+      return 'visualwavedrom-presenter-' + encodeURIComponent(JSON.stringify([libraryKey || '', documentName]));
+    }
+
     function cleanupPresenterWindowRefs(documentName) {
-      const refs = presenterWindowRefs.get(documentName);
+      const key = getPresenterWindowKey(documentName);
+      const refs = presenterWindowRefs.get(key);
       if (!refs) return null;
       refs.forEach((ref) => {
         if (!ref || ref.closed) refs.delete(ref);
       });
       if (!refs.size) {
-        presenterWindowRefs.delete(documentName);
-        const timer = presenterSyncTimers.get(documentName);
+        presenterWindowRefs.delete(key);
+        const timer = presenterSyncTimers.get(key);
         if (timer) clearTimeout(timer);
-        presenterSyncTimers.delete(documentName);
+        presenterSyncTimers.delete(key);
         return null;
       }
       return refs;
@@ -13880,7 +13887,7 @@ ${lines.join('\n')}`;
 
     function notifyPresenterWindows(documentName) {
       const refs = cleanupPresenterWindowRefs(documentName);
-      const subscriberSeenAt = presenterLiveSubscribers.get(documentName) || 0;
+      const subscriberSeenAt = presenterLiveSubscribers.get(getPresenterWindowKey(documentName)) || 0;
       const hasLiveSubscriber = Date.now() - subscriberSeenAt < 30000;
       if (!refs && !hasLiveSubscriber) return false;
       const tag = getSavedTagByName(documentName);
@@ -13914,18 +13921,30 @@ ${lines.join('\n')}`;
     }
 
     function schedulePresenterDocumentSync(documentName) {
-      const subscriberSeenAt = presenterLiveSubscribers.get(documentName) || 0;
-      if (!documentName || (!presenterWindowRefs.has(documentName)
+      const key = getPresenterWindowKey(documentName);
+      const subscriberSeenAt = presenterLiveSubscribers.get(key) || 0;
+      if (!documentName || (!presenterWindowRefs.has(key)
           && Date.now() - subscriberSeenAt >= 30000)) return;
-      const previous = presenterSyncTimers.get(documentName);
+      const previous = presenterSyncTimers.get(key);
       if (previous) clearTimeout(previous);
-      presenterSyncTimers.set(documentName, setTimeout(() => {
-        presenterSyncTimers.delete(documentName);
-        notifyPresenterWindows(documentName);
+      presenterSyncTimers.set(key, setTimeout(() => {
+        presenterSyncTimers.delete(key);
+        if (key === getPresenterWindowKey(documentName)) notifyPresenterWindows(documentName);
       }, 80));
     }
 
+    function focusPresenterWindow(opened, documentName) {
+      try { opened.focus(); } catch (_error) { /* some browsers restrict window focus */ }
+      const tag = getSavedTagByName(documentName);
+      setStatus(true, '已切换到演讲者窗口：' + (tag ? getSavedTagTitle(tag) : documentName));
+      vwdDebugLog('presenter-view', { phase: 'reuse-window', documentName });
+      return true;
+    }
+
     async function openWaveDocumentInPresenterWindow(documentName) {
+      const key = getPresenterWindowKey(documentName);
+      const refs = cleanupPresenterWindowRefs(documentName);
+      if (refs) return focusPresenterWindow(refs.values().next().value, documentName);
       const presenterToken = 'presenter-' + Date.now().toString(36)
         + '-' + Math.random().toString(36).slice(2, 9);
       const url = getWaveDocumentPresenterViewUrl(documentName, presenterToken);
@@ -13935,9 +13954,10 @@ ${lines.join('\n')}`;
       }
       const width = Math.max(1040, Math.min(1600, (window.screen && window.screen.availWidth || 1440) - 64));
       const height = Math.max(680, Math.min(1000, (window.screen && window.screen.availHeight || 900) - 64));
+      // An empty URL reuses a named window without reloading unsaved presentation edits.
       const opened = window.open(
-        url,
-        '_blank',
+        '',
+        key,
         'popup=yes,resizable=yes,scrollbars=yes,width=' + width + ',height=' + height
       );
       if (!opened) {
@@ -13946,13 +13966,24 @@ ${lines.join('\n')}`;
         return false;
       }
 
+      presenterWindowRefs.set(key, new Set([opened]));
+      let existingDocument = true;
+      try {
+        existingDocument = !!opened.location.href && opened.location.href !== 'about:blank';
+      } catch (_error) { /* file-mode windows can have opaque origins; never reload them */ }
+      if (existingDocument) return focusPresenterWindow(opened, documentName);
+
+      const libraryId = currentWaveLibraryId;
+      const libraryFile = currentWaveLibraryFile;
       const openedAt = Date.now();
       let sourcePromise = null;
       const getSourcePromise = () => {
         if (sourcePromise) return sourcePromise;
         sourcePromise = (async () => {
+          if (key !== getPresenterWindowKey(documentName)) throw new Error('波形库已切换，请重新打开演讲者模式');
           let stored = getSavedTagByName(documentName);
           if (stored && stored.deferred) stored = await ensureWaveDocumentLoaded(documentName);
+          if (key !== getPresenterWindowKey(documentName)) throw new Error('波形库已切换，请重新打开演讲者模式');
           if (!stored) throw new Error('波形图尚未载入');
           const snapshot = getWaveDocumentServerSnapshot(
             stored,
@@ -13973,9 +14004,17 @@ ${lines.join('\n')}`;
         return sourcePromise;
       };
 
-      presenterWindowOpenStates.set(presenterToken, { documentName, getSourcePromise });
-      if (!presenterWindowRefs.has(documentName)) presenterWindowRefs.set(documentName, new Set());
-      presenterWindowRefs.get(documentName).add(opened);
+      presenterWindowOpenStates.set(presenterToken, { documentName, libraryId, libraryFile, getSourcePromise, opened });
+      try {
+        opened.location.replace(url);
+      } catch (error) {
+        presenterWindowRefs.delete(key);
+        presenterWindowOpenStates.delete(presenterToken);
+        try { opened.close(); } catch (_error) { /* the empty popup may already be closed */ }
+        setStatus(false, '打开演讲者模式失败：' + error.message);
+        vwdDebugLog('presenter-view', { phase: 'open-error', documentName, message: error.message });
+        return false;
+      }
       setTimeout(() => presenterWindowOpenStates.delete(presenterToken), 60000);
       const tag = getSavedTagByName(documentName);
       const title = tag ? getSavedTagTitle(tag) : documentName;
@@ -14383,6 +14422,82 @@ ${lines.join('\n')}`;
       });
     }
 
+    function applySavedPresentation(message) {
+      if (!currentWaveLibraryId || message.libraryId !== currentWaveLibraryId
+          || typeof message.presentation !== 'string' || !message.waveId) return;
+      const local = getSavedTagByName(message.waveId);
+      if (local) local.presentation = message.presentation;
+      if (!waveLibraryServerMode && browserWaveLibraryReady && browserWaveLibraryStore) {
+        try {
+          // Keep another window's in-memory SQLite copy from dropping saved steps.
+          browserWaveLibraryStore.savePresentation(message.waveId, message.presentation);
+        } catch (error) {
+          vwdDebugLog('presenter-save', { phase: 'metadata-sync-error', message: error.message });
+        }
+      }
+    }
+
+    async function saveWavePresentation(payload) {
+      if (!payload || payload.libraryId !== currentWaveLibraryId || !payload.waveId) {
+        throw new Error('波形库已切换，请重新打开演讲者模式');
+      }
+      return withWaveLibraryWriteLock(async () => {
+        if (payload.libraryId !== currentWaveLibraryId) throw new Error('波形库已切换，请重新打开演讲者模式');
+        if (waveLibraryServerMode) {
+          const response = await fetch('/api/wave-presentation', {
+            method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+          });
+          const result = await response.json().catch(() => ({}));
+          if (response.status === 409) throw new Error('演讲步骤已被其他窗口修改，请重新打开演讲者模式后再保存');
+          if (response.status === 404) throw new Error(result.error
+            ? '波形不存在，请先在主界面保存波形库' : '演讲保存接口不可用，请重新启动服务');
+          if (!response.ok || !result.ok) throw new Error(result.error || '演讲步骤保存失败');
+        } else {
+          const store = await ensureBrowserWaveLibraryStore();
+          if (presenterWaveViewActive) await store.loadPersisted();
+          if (store.libraryRow().libraryId !== payload.libraryId) throw new Error('波形库已切换，请重新打开演讲者模式');
+          store.savePresentation(payload.waveId, payload.presentation, payload.expected);
+          await store.persist();
+          const name = String(store.fileName || 'VisualWaveDrom-library.sqlite').split(/[\\/]/).pop();
+          downloadBlobFile(new Blob([store.exportBytes()], { type: 'application/vnd.sqlite3' }), name);
+        }
+        applySavedPresentation(payload);
+        if (presenterLiveSyncChannel) {
+          try {
+            presenterLiveSyncChannel.postMessage(Object.assign({}, payload, { type: 'visualwavedrom-presenter-state-saved' }));
+          } catch (_error) { /* the saved SQLite data remains authoritative */ }
+        }
+        return { presentation: payload.presentation, downloaded: !waveLibraryServerMode };
+      });
+    }
+
+    function requestPresentationSaveFromOpener(payload) {
+      if (!window.opener || window.opener.closed) return Promise.resolve(null);
+      const owner = window.opener;
+      const requestId = 'presenter-save-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+      return new Promise((resolve, reject) => {
+        const finish = (error, result) => {
+          clearTimeout(timer);
+          window.removeEventListener('message', receive);
+          if (error) reject(error);
+          else resolve(result);
+        };
+        const receive = (event) => {
+          const message = event.data || {};
+          if (event.source !== owner || message.type !== 'visualwavedrom-presenter-save-response'
+              || message.requestId !== requestId) return;
+          finish(message.error ? new Error(message.error) : null, message.result || null);
+        };
+        const timer = setTimeout(() => finish(new Error('保存未收到确认，请保留当前窗口并重试')), 60000);
+        window.addEventListener('message', receive);
+        try {
+          owner.postMessage({ type: 'visualwavedrom-presenter-save-request', requestId, payload }, '*');
+        } catch (error) {
+          finish(error);
+        }
+      });
+    }
+
     async function initializePresenterWaveView(options) {
       if (!presenterWaveViewActive) return false;
       if (!window.VisualWaveDromPresenter
@@ -14442,6 +14557,15 @@ ${lines.join('\n')}`;
       await window.VisualWaveDromPresenter.mount({
         libraryName: currentWaveLibraryFile || 'SQLite 波形库',
         getDocument: async () => Object.assign({}, await resolveInitialTag()),
+        savePresentation: async (presentation, expected) => {
+          const payload = { libraryId: currentWaveLibraryId || requestedLibraryId, waveId: requestedWaveDocumentName, presentation, expected };
+          const ownerResult = await requestPresentationSaveFromOpener(payload);
+          if (ownerResult) return ownerResult;
+          await ensureLibraryReady();
+          return saveWavePresentation(payload);
+        },
+        renderScreenshot: renderWaveSvgScreenshot,
+        downloadImage: downloadBlobFile,
         close: () => {
           window.close();
           setTimeout(() => {
@@ -14450,6 +14574,7 @@ ${lines.join('\n')}`;
         },
         log: vwdDebugLog
       });
+      window.name = getPresenterWindowKey(requestedWaveDocumentName);
       announcePresenterPresence('visualwavedrom-presenter-ready');
       return true;
     }
@@ -15296,6 +15421,10 @@ ${lines.join('\n')}`;
         presenterLiveSyncChannel = new BroadcastChannel('visualwavedrom-presenter-live-v1');
         presenterLiveSyncChannel.addEventListener('message', (event) => {
           const message = event.data || {};
+          if (message.type === 'visualwavedrom-presenter-state-saved') {
+            applySavedPresentation(message);
+            return;
+          }
           if (message.type === 'visualwavedrom-presenter-document-update') {
             applyPresenterDocumentUpdate(message);
             return;
@@ -15308,11 +15437,12 @@ ${lines.join('\n')}`;
               && message.libraryId !== currentWaveLibraryId) return;
           const waveId = String(message.waveId || '');
           if (!waveId) return;
+          const key = getPresenterWindowKey(waveId);
           if (message.type === 'visualwavedrom-presenter-closed') {
-            presenterLiveSubscribers.delete(waveId);
+            presenterLiveSubscribers.delete(key);
             return;
           }
-          presenterLiveSubscribers.set(waveId, Date.now());
+          presenterLiveSubscribers.set(key, Date.now());
           if (message.type === 'visualwavedrom-presenter-ready') {
             schedulePresenterDocumentSync(waveId);
           }
@@ -15321,7 +15451,7 @@ ${lines.join('\n')}`;
           presenterLiveHeartbeatTimer = setInterval(() => {
             announcePresenterPresence('visualwavedrom-presenter-heartbeat');
           }, 10000);
-          window.addEventListener('beforeunload', () => {
+          window.addEventListener('pagehide', () => {
             announcePresenterPresence('visualwavedrom-presenter-closed');
             clearInterval(presenterLiveHeartbeatTimer);
           }, { once: true });
@@ -15334,6 +15464,24 @@ ${lines.join('\n')}`;
     function initScopeWindowSync() {
       window.addEventListener('message', (event) => {
         const message = event.data || {};
+        if (message.type === 'visualwavedrom-presenter-save-request') {
+          if (!event.source || typeof message.requestId !== 'string') return;
+          const payload = message.payload || {};
+          const refs = presenterWindowRefs.get(getPresenterWindowKey(payload.waveId, payload.libraryId));
+          const respond = (result, error) => {
+            try {
+              event.source.postMessage({ type: 'visualwavedrom-presenter-save-response', requestId: message.requestId, result, error }, '*');
+            } catch (_error) { /* the presenter may have closed after saving */ }
+          };
+          if (payload.libraryId !== currentWaveLibraryId || !refs || !refs.has(event.source)) {
+            respond(null);
+            return;
+          }
+          void saveWavePresentation({ libraryId: payload.libraryId, waveId: payload.waveId,
+            presentation: payload.presentation, expected: payload.expected })
+            .then((result) => respond(result)).catch((error) => respond(null, error.message));
+          return;
+        }
         if (message.type === 'visualwavedrom-scope-import-applied') {
           if (!scopeWaveViewActive || String(message.waveId || '') !== requestedWaveDocumentName) return;
           if (currentWaveLibraryId && message.libraryId
@@ -15355,7 +15503,7 @@ ${lines.join('\n')}`;
         }
         if (message.type === 'visualwavedrom-presenter-source-request') {
           const state = presenterWindowOpenStates.get(String(message.presenterToken || ''));
-          if (!state || state.documentName !== String(message.waveId || '') || !event.source) return;
+          if (!state || state.documentName !== String(message.waveId || '') || state.opened !== event.source) return;
           const sourcePromise = typeof state.getSourcePromise === 'function'
             ? state.getSourcePromise()
             : state.promise;
@@ -15364,8 +15512,8 @@ ${lines.join('\n')}`;
             event.source.postMessage({
               type: 'visualwavedrom-presenter-source-response',
               presenterToken: message.presenterToken,
-              libraryId: currentWaveLibraryId,
-              libraryFile: currentWaveLibraryFile,
+              libraryId: state.libraryId,
+              libraryFile: state.libraryFile,
               document: documentSnapshot
             }, '*');
           }).catch((error) => {
@@ -18669,8 +18817,8 @@ ${lines.join('\n')}`;
       return clone;
     }
 
-    function renderWaveSvgScreenshot(svg) {
-      const metrics = getWaveScreenshotMetrics(svg);
+    function renderWaveSvgScreenshot(svg, suppliedMetrics) {
+      const metrics = suppliedMetrics || getWaveScreenshotMetrics(svg);
       const clone = cloneWaveSvgForScreenshot(svg, metrics);
       const maxDimension = 8192;
       const maxPixels = 32000000;
@@ -21321,6 +21469,7 @@ ${lines.join('\n')}`;
     });
 
     document.addEventListener('keydown', (e) => {
+      if (presenterWaveViewActive) return;
       if (e.target && e.target.closest && e.target.closest('.vwd-big-wave-jump')) return;
       if (e.target && e.target.closest && e.target.closest('#wave-collection-import-modal')) return;
       if (vimController && vimController.handleKeydown(e)) return;
@@ -21359,6 +21508,7 @@ ${lines.join('\n')}`;
     });
 
     function persistPageStateBeforeExit(reason) {
+      if (presenterWaveViewActive) return;
       if (pageExitStateFlushed) return;
       pageExitStateFlushed = true;
       commitOpenTextEditors(reason);
@@ -21374,6 +21524,7 @@ ${lines.join('\n')}`;
     }
 
     window.addEventListener('beforeunload', () => {
+      if (presenterWaveViewActive) return;
       persistPageStateBeforeExit('before-unload');
       stopWaveLibraryClientSession(true);
     });
