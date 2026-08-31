@@ -3796,7 +3796,7 @@ ${lines.join('\n')}`;
       setEditorSelection(block.start, block.end, false);
       const before = editor.value.slice(0, block.start);
       const line = before.split('\n').length;
-      const lineHeight = 13 * 1.6;
+      const lineHeight = getEditorLineHeight();
       setEditorScrollTop((line - 3) * lineHeight);
       syncLineNumberScroll();
     }
@@ -3997,6 +3997,12 @@ ${lines.join('\n')}`;
       const safeTop = Math.max(0, Number(top) || 0);
       editor.scrollTop = safeTop;
       if (codeMirrorEditor) codeMirrorEditor.scrollTo(null, safeTop);
+    }
+
+    function getEditorLineHeight() {
+      if (codeMirrorEditor) return codeMirrorEditor.defaultTextHeight();
+      const style = getComputedStyle(editor);
+      return parseFloat(style.lineHeight) || parseFloat(style.fontSize) * 1.6 || 20;
     }
 
     function applyEditorChange(newText, selStart, selEnd, options) {
@@ -9493,7 +9499,7 @@ ${lines.join('\n')}`;
       setEditorSelection(idx, idx + edgeJson.length, false);
       const before = text.slice(0, idx);
       const line = before.split('\n').length;
-      const lineHeight = 13 * 1.6;
+      const lineHeight = getEditorLineHeight();
       setEditorScrollTop((line - 3) * lineHeight);
       syncLineNumberScroll();
     }
@@ -10286,7 +10292,7 @@ ${lines.join('\n')}`;
       setEditorSelection(entry.start, entry.end, false);
       const before = text.slice(0, entry.start);
       const line = before.split('\n').length;
-      const lineHeight = 13 * 1.6;
+      const lineHeight = getEditorLineHeight();
       setEditorScrollTop((line - 3) * lineHeight);
       syncLineNumberScroll();
       setStatus(true, '已定位: ' + entry.signal.name);
@@ -10298,7 +10304,7 @@ ${lines.join('\n')}`;
       setEditorSelection(entry.start, entry.end, false);
       const before = text.slice(0, entry.start);
       const line = before.split('\n').length;
-      const lineHeight = 13 * 1.6;
+      const lineHeight = getEditorLineHeight();
       setEditorScrollTop((line - 3) * lineHeight);
       syncLineNumberScroll();
       setStatus(true, '已定位分组: ' + (entry.label || '分组'));
@@ -11806,7 +11812,7 @@ ${lines.join('\n')}`;
             const sourceText = editor.value || '';
             const before = sourceText.slice(0, groupForHint.start);
             const line = before.split('\n').length;
-            const lineHeight = 13 * 1.6;
+            const lineHeight = getEditorLineHeight();
             setEditorScrollTop((line - 3) * lineHeight);
             syncLineNumberScroll();
           });
@@ -16608,7 +16614,7 @@ ${lines.join('\n')}`;
       if (!rowImportSchemeOptions.childElementCount) {
         const empty = document.createElement('div');
         empty.className = 'modal-empty-state';
-        empty.textContent = 'import/Scheme 中没有可用的 JSON 预设';
+        empty.textContent = 'inc/import/Scheme 中没有可用的 JSON 预设';
         rowImportSchemeOptions.appendChild(empty);
         return;
       }
@@ -16970,7 +16976,7 @@ ${lines.join('\n')}`;
       rowImportSchemeOptions.innerHTML = '';
       const loading = document.createElement('div');
       loading.className = 'modal-empty-state';
-      loading.textContent = '正在读取 import/Scheme 并计算推荐预设…';
+      loading.textContent = '正在读取 inc/import/Scheme 并计算推荐预设…';
       rowImportSchemeOptions.appendChild(loading);
       setRowImportSchemeHint('', false);
       updateRowImportActionState();
@@ -17098,7 +17104,7 @@ ${lines.join('\n')}`;
       rowImportSchemeOptions.innerHTML = '';
       const loading = document.createElement('div');
       loading.className = 'modal-empty-state';
-      loading.textContent = '正在读取 import/Scheme 并计算推荐预设…';
+      loading.textContent = '正在读取 inc/import/Scheme 并计算推荐预设…';
       rowImportSchemeOptions.appendChild(loading);
       setRowImportSchemeHint('', false);
       updateRowImportActionState();

@@ -1,6 +1,8 @@
 # VisualWaveDrom static server
 
 This directory contains the dependency-free service-mode launcher source.
+It lives in `inc/server-go`; the project root remains the directory containing
+the HTML file and the BAT/SH launchers. Import resources live in `inc/import`.
 
 - HTTP and library APIs are implemented in Go.
 - SQLite is embedded through the CGo-free `modernc.org/sqlite` driver.

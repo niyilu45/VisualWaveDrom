@@ -153,7 +153,7 @@ func TestPresetValueTableAddsLabelsWithoutChangingSamples(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager := newImportManager(filepath.Dir(workingDirectory))
+	manager := newImportManager(filepath.Dir(filepath.Dir(workingDirectory)))
 	python := manager.pythonRuntime()
 	if !python.Available {
 		t.Skip("Python runtime is not available")
@@ -213,7 +213,7 @@ func TestLargeNumericImportCanOmitDuplicatedDataLabels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager := newImportManager(filepath.Dir(workingDirectory))
+	manager := newImportManager(filepath.Dir(filepath.Dir(workingDirectory)))
 	python := manager.pythonRuntime()
 	if !python.Available {
 		t.Skip("Python runtime is not available")
@@ -250,7 +250,7 @@ func TestIndexedImportAllowsGapsAndKeepsUnknownEnds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager := newImportManager(filepath.Dir(workingDirectory))
+	manager := newImportManager(filepath.Dir(filepath.Dir(workingDirectory)))
 	python := manager.pythonRuntime()
 	if !python.Available {
 		t.Skip("Python runtime is not available")
@@ -297,7 +297,7 @@ func TestTableImportPassesPresetValueTable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager := newImportManager(filepath.Dir(workingDirectory))
+	manager := newImportManager(filepath.Dir(filepath.Dir(workingDirectory)))
 	if python := manager.pythonRuntime(); !python.Available {
 		t.Skip("Python runtime is not available")
 	}
@@ -339,7 +339,7 @@ func TestTableImportUsesSelectedHeaderAndSplitsComplexSignals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager := newImportManager(filepath.Dir(workingDirectory))
+	manager := newImportManager(filepath.Dir(filepath.Dir(workingDirectory)))
 	if python := manager.pythonRuntime(); !python.Available {
 		t.Skip("Python runtime is not available")
 	}
@@ -378,7 +378,7 @@ func TestTableImportOnlyParsesEnabledColumnsAndAppliesNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager := newImportManager(filepath.Dir(workingDirectory))
+	manager := newImportManager(filepath.Dir(filepath.Dir(workingDirectory)))
 	if python := manager.pythonRuntime(); !python.Available {
 		t.Skip("Python runtime is not available")
 	}
@@ -419,7 +419,7 @@ func TestTableImportUsesSelectedIndexColumn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager := newImportManager(filepath.Dir(workingDirectory))
+	manager := newImportManager(filepath.Dir(filepath.Dir(workingDirectory)))
 	if python := manager.pythonRuntime(); !python.Available {
 		t.Skip("Python runtime is not available")
 	}
@@ -471,7 +471,7 @@ func TestTableImportRejectsInvalidSelectedIndexColumnValue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager := newImportManager(filepath.Dir(workingDirectory))
+	manager := newImportManager(filepath.Dir(filepath.Dir(workingDirectory)))
 	if python := manager.pythonRuntime(); !python.Available {
 		t.Skip("Python runtime is not available")
 	}
@@ -494,7 +494,7 @@ func TestTableImportFiltersRowsUsingDisabledControlColumn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager := newImportManager(filepath.Dir(workingDirectory))
+	manager := newImportManager(filepath.Dir(filepath.Dir(workingDirectory)))
 	if python := manager.pythonRuntime(); !python.Available {
 		t.Skip("Python runtime is not available")
 	}
@@ -543,7 +543,7 @@ func TestTableImportDoesNotExtendFilteredUnindexedContinuationData(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager := newImportManager(filepath.Dir(workingDirectory))
+	manager := newImportManager(filepath.Dir(filepath.Dir(workingDirectory)))
 	if python := manager.pythonRuntime(); !python.Available {
 		t.Skip("Python runtime is not available")
 	}
@@ -594,7 +594,7 @@ func TestTableImportRecognizesMultiStateIntegerColumnAsData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager := newImportManager(filepath.Dir(workingDirectory))
+	manager := newImportManager(filepath.Dir(filepath.Dir(workingDirectory)))
 	if python := manager.pythonRuntime(); !python.Available {
 		t.Skip("Python runtime is not available")
 	}
@@ -649,7 +649,7 @@ func TestTableImportUsesContinuationForAdjacentEqualValues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager := newImportManager(filepath.Dir(workingDirectory))
+	manager := newImportManager(filepath.Dir(filepath.Dir(workingDirectory)))
 	if python := manager.pythonRuntime(); !python.Available {
 		t.Skip("Python runtime is not available")
 	}
@@ -687,7 +687,7 @@ func TestTableImportRejectsInvalidColumnFilter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager := newImportManager(filepath.Dir(workingDirectory))
+	manager := newImportManager(filepath.Dir(filepath.Dir(workingDirectory)))
 	if python := manager.pythonRuntime(); !python.Available {
 		t.Skip("Python runtime is not available")
 	}

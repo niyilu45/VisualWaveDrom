@@ -14,5 +14,5 @@ The static server binaries include these Go modules:
 | `modernc.org/memory` | `v1.11.0` | `modernc.org-memory.txt` |
 | `modernc.org/sqlite` | `v1.54.0` | `modernc.org-sqlite.txt` |
 
-Versions and module checksums are pinned by `server-go/go.mod` and
-`server-go/go.sum`.
+Versions and module checksums are pinned by `inc/server-go/go.mod` and
+`inc/server-go/go.sum`.

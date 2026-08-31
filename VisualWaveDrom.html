@@ -26,10 +26,12 @@
       if (presenterActive) document.documentElement.classList.add('presenter-bootstrap-document');
     })();
   </script>
+  <script src="inc/visualwavedrom-settings.js?v=20260831-font-settings-v1"></script>
   <link rel="stylesheet" href="inc/codemirror.css?v=5.65.21">
-  <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260829-edge-label-drag-v1">
+  <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260831-font-settings-v1">
   <link rel="stylesheet" href="inc/visualwavedrom-scope.css?v=20260817-legend-drag-v1">
   <link rel="stylesheet" href="inc/visualwavedrom-presenter.css?v=20260830-presenter-v1">
+  <link rel="stylesheet" href="inc/visualwavedrom-settings.css?v=20260831-font-settings-v1">
 </head>
 <body>
   <div class="scope-bootstrap" id="scope-bootstrap" role="status" aria-live="polite" hidden>
@@ -114,6 +116,14 @@
       <!-- Function Menu -->
       <div class="menu-section">
         <div class="menu-section-title">功能菜单</div>
+        <button class="menu-btn" id="btn-settings" type="button" title="设置" aria-haspopup="dialog" aria-expanded="false" aria-controls="ui-settings-modal">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" class="lucide lucide-settings-2">
+            <path d="M20 7h-9M14 17H5"/>
+            <circle cx="17" cy="17" r="3"/>
+            <circle cx="7" cy="7" r="3"/>
+          </svg>
+          <span>设置</span>
+        </button>
         <button class="menu-btn" id="btn-toggle-json-panel" type="button" title="隐藏 WaveDrom JSON 窗口">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <path d="M4 4l16 16"/>
@@ -138,7 +148,7 @@
         <button class="menu-btn" id="btn-save-wave-library" type="button" title="保存完整 SQLite 波形库文件">
           <span id="save-wave-library-label">保存波形库</span>
         </button>
-        <button class="menu-btn" id="btn-import-wave-data" type="button" title="按 import/Scheme 中的预设方案导入一个或多个信号行">
+        <button class="menu-btn" id="btn-import-wave-data" type="button" title="按 inc/import/Scheme 中的预设方案导入一个或多个信号行">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <path d="M12 3v12"/>
             <polyline points="7 10 12 15 17 10"/>
@@ -246,7 +256,7 @@
             </svg>
             复制行
           </button>
-          <button class="menu-btn wave-copy-signal-btn" id="btn-import-wave-row" type="button" title="按 import/Scheme 中的预设方案导入一个或多个信号行">
+          <button class="menu-btn wave-copy-signal-btn" id="btn-import-wave-row" type="button" title="按 inc/import/Scheme 中的预设方案导入一个或多个信号行">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
               <path d="M12 3v12"/>
               <polyline points="7 10 12 15 17 10"/>
@@ -760,7 +770,7 @@
           <span>预设搜索目录</span>
           <span class="wave-collection-path-controls wave-collection-preset-search-controls">
             <input type="text" class="modal-input" id="wave-collection-preset-search-path"
-              autocomplete="off" spellcheck="false" value="import/SchemeCollection"
+              autocomplete="off" spellcheck="false" value="inc/import/SchemeCollection"
               placeholder="请选择或粘贴需要递归搜索的目录">
             <button type="button" class="modal-btn" id="wave-collection-pick-preset-root">选择目录</button>
             <button type="button" class="modal-btn" id="wave-collection-scan-presets">搜索预设</button>
@@ -821,6 +831,34 @@
     </div>
   </div>
 
+  <div class="modal-overlay ui-settings-overlay" id="ui-settings-modal" hidden>
+    <div class="modal-dialog ui-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="ui-settings-title">
+      <div class="modal-header" id="ui-settings-title">设置</div>
+      <div class="modal-body">
+        <label class="ui-settings-auto" for="ui-font-auto">
+          <span>自动适配系统字号</span>
+          <input type="checkbox" id="ui-font-auto" checked>
+        </label>
+        <div class="ui-settings-font-heading">
+          <label for="ui-font-scale">字体大小</label>
+          <output id="ui-font-size" aria-live="polite"></output>
+        </div>
+        <div class="ui-settings-font-controls">
+          <input type="range" id="ui-font-scale" min="80" max="200" step="5" value="100">
+          <label class="ui-settings-number">
+            <input type="number" id="ui-font-percent" aria-label="字体大小百分比" min="80" max="200" step="1" value="100" inputmode="numeric">
+            <span>%</span>
+          </label>
+        </div>
+        <div id="ui-settings-status" class="ui-settings-status" role="status" hidden></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="modal-btn" id="ui-settings-reset">恢复默认</button>
+        <button type="button" class="modal-btn modal-btn-primary" id="ui-settings-done">完成</button>
+      </div>
+    </div>
+  </div>
+
   <div class="modal-overlay" id="wave-screenshot-range-modal" hidden>
     <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="wave-screenshot-range-title">
       <div class="modal-header" id="wave-screenshot-range-title">选择截图列范围</div>
@@ -853,7 +891,7 @@
     <script src="inc/visualwavedrom-scope-worker.js?v=20260817-formula-cache-v2"></script>
     <script src="inc/visualwavedrom-scope.js?v=20260821-bus-label-viewport-v1"></script>
     <script src="inc/visualwavedrom-presenter.js?v=20260830-presenter-v1"></script>
-    <script src="inc/visualwavedrom-import-collection.js?v=20260815-import-cancel-v1"></script>
-    <script src="inc/visualwavedrom-app.js?v=20260830-presenter-v1"></script>
+    <script src="inc/visualwavedrom-import-collection.js?v=20260831-inc-layout-v1"></script>
+    <script src="inc/visualwavedrom-app.js?v=20260831-font-settings-v1"></script>
 </body>
 </html>

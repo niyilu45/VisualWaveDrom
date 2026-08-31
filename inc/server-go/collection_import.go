@@ -1108,7 +1108,7 @@ func normalizeLocalPathInput(rawPath, baseDir string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("invalid local path: %w", err)
 	}
-	return filepath.Clean(resolved), nil
+	return relocateLegacyImportPath(filepath.Clean(resolved), baseDir), nil
 }
 
 func resolveCollectionRoot(rawPath, baseDir string) (string, error) {
@@ -3083,7 +3083,7 @@ func (s *service) importCollectionFiles(
 	}
 	catalog := s.imports.listSchemes()
 	if len(catalog.Schemes) == 0 {
-		return nil, errors.New("import/Scheme does not contain a usable parser preset")
+		return nil, errors.New("inc/import/Scheme does not contain a usable parser preset")
 	}
 	python := s.imports.pythonRuntime()
 	if !python.Available {
@@ -3363,13 +3363,16 @@ func (s *service) handleImportCollection(writer http.ResponseWriter, request *ht
 		if initialPath == "" {
 			switch kind {
 			case "preset":
-				initialPath = filepath.Join(s.config.rootDir, "import", "SchemeCollection")
+				initialPath = filepath.Join(s.config.rootDir, "inc", "import", "SchemeCollection")
 			case "save-preset":
 				initialPath = filepath.Join(
-					s.config.rootDir, "import", "SchemeCollection", "preset.json")
+					s.config.rootDir, "inc", "import", "SchemeCollection", "preset.json")
 			default:
 				initialPath = s.config.rootDir
 			}
+		}
+		if resolved, err := normalizeLocalPathInput(initialPath, s.config.rootDir); err == nil {
+			initialPath = resolved
 		}
 		selected, cancelled, err := pickLocalPathNative(kind, initialPath)
 		if err != nil {

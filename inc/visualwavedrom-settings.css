@@ -1,0 +1,201 @@
+.ui-font-probes {
+  position: fixed;
+  inset: 0 auto auto 0;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.ui-font-probes span {
+  display: block;
+  width: 1em;
+  height: 1em;
+}
+
+.ui-settings-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(100%, 25rem);
+  max-height: calc(100vh - 32px);
+  font-size: 0.875rem;
+  line-height: 1.45;
+}
+
+.ui-settings-dialog .modal-body {
+  min-height: 0;
+  overflow-y: auto;
+  gap: 0.9rem;
+}
+
+.ui-settings-dialog .modal-header,
+.ui-settings-dialog .modal-footer {
+  flex-shrink: 0;
+}
+
+.ui-settings-auto,
+.ui-settings-font-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  overflow-wrap: anywhere;
+}
+
+.ui-settings-auto {
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+
+.ui-settings-auto input {
+  width: 1.05rem;
+  height: 1.05rem;
+  flex-shrink: 0;
+  accent-color: var(--accent);
+}
+
+.ui-settings-font-heading output {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.ui-settings-font-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 5.2rem;
+  align-items: center;
+  gap: 1rem;
+}
+
+#ui-font-scale {
+  width: 100%;
+  min-width: 0;
+  min-height: 2.25rem;
+  accent-color: var(--accent);
+}
+
+.ui-settings-number {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+#ui-font-percent {
+  width: 100%;
+  min-width: 0;
+  min-height: 2.25rem;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 0.35rem;
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  font-variant-numeric: tabular-nums;
+}
+
+.ui-settings-dialog input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.ui-settings-dialog .modal-btn {
+  min-height: 2.25rem;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.ui-settings-status {
+  color: var(--warning);
+  font-size: 0.75rem;
+}
+
+.sidebar {
+  overflow-x: hidden;
+}
+
+.sidebar-header h1 {
+  overflow-wrap: anywhere;
+}
+
+.menu-btn {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.menu-btn > span:not(.shortcut) {
+  min-width: 0;
+}
+
+.wave-document-card-header {
+  flex-wrap: wrap;
+}
+
+.wave-document-card-header h2 {
+  font-size: 0.84375rem;
+  flex-basis: 8rem;
+}
+
+.wave-document-card-header button {
+  height: auto;
+  min-height: 1.75rem;
+  font-size: 0.75rem;
+}
+
+.wave-document-open {
+  width: 1.75rem;
+}
+
+.wave-document-delete {
+  width: 1.625rem;
+  font-size: 1.0625rem;
+}
+
+.line-numbers {
+  width: 3rem;
+  min-width: 3rem;
+}
+
+.line-numbers,
+.code-editor {
+  font-size: 0.8125rem;
+}
+
+/* Scale window controls without changing plot, signal-row or annotation geometry. */
+.scope-toolbar {
+  font-size: 0.8125rem;
+}
+
+.scope-toolbar label,
+.scope-toolbar-label,
+.scope-cursor-signal,
+.scope-title-block span {
+  font-size: 0.6875rem;
+}
+
+.scope-title-block strong {
+  font-size: 0.875rem;
+}
+
+.scope-toolbar button:not(.scope-color-preset),
+.scope-toolbar input,
+.scope-toolbar select {
+  min-height: 1.75rem;
+  height: auto;
+  font-size: 0.75rem;
+}
+
+.scope-toolbar input[type="number"] {
+  width: 4.5rem;
+}
+
+.scope-cursor-controls #scope-cursor-jump {
+  width: 9.375rem;
+}
+
+.presenter-button,
+.presenter-icon-button {
+  min-height: 2rem;
+  font-size: 0.75rem;
+}

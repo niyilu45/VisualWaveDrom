@@ -9,7 +9,7 @@ import (
 )
 
 func TestLinuxReleaseHasNoDynamicRuntimeDependency(t *testing.T) {
-	binaryPath := filepath.Join("..", "bin", "VisualWaveDrom-server-linux-amd64")
+	binaryPath := filepath.Join("..", "..", "bin", "VisualWaveDrom-server-linux-amd64")
 	if _, err := os.Stat(binaryPath); errors.Is(err, os.ErrNotExist) {
 		t.Skip("Linux release binary has not been built")
 	}

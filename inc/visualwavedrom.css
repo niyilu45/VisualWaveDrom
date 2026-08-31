@@ -1,6 +1,6 @@
 :root {
-      --sidebar-width: 220px;
-      --nav-sidebar-width: 240px;
+      --sidebar-width: 13.75rem;
+      --nav-sidebar-width: 15rem;
       --bg: #101419;
       --surface: #181e25;
       --surface-2: #232b34;
@@ -20,7 +20,7 @@
       --shadow-float: 0 10px 30px rgba(8, 13, 18, 0.28);
       --editor-font: "Cascadia Code", "Fira Code", "Noto Sans Mono CJK SC",
         "Noto Sans Mono", "Liberation Mono", Consolas, "Courier New", monospace;
-      --editor-line-height: 20px;
+      --editor-line-height: 1.25rem;
     }
 
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -3938,7 +3938,7 @@
 
     /* Responsive */
     @media (max-width: 768px) {
-      :root { --sidebar-width: 180px; --nav-sidebar-width: 180px; }
+      :root { --sidebar-width: 11.25rem; --nav-sidebar-width: 11.25rem; }
       .nav-resize-handle { display: none; }
       .menu-btn .shortcut { display: none; }
       .wave-add-delete-row,
@@ -4997,8 +4997,8 @@
 
     @media (max-width: 1120px) {
       :root {
-        --sidebar-width: 202px;
-        --nav-sidebar-width: 218px;
+        --sidebar-width: 12.625rem;
+        --nav-sidebar-width: 13.625rem;
       }
 
       .menu-btn {

@@ -17,7 +17,7 @@
   const JSON_ERROR_GUTTER = 'vwd-collection-json-error-gutter';
   const SEARCH_GUTTER = 'vwd-collection-search-gutter';
   const LAST_STATE_STORAGE_KEY = 'visualwavedrom.importCollection.lastState.v1';
-  const DEFAULT_PRESET_SEARCH_PATH = 'import/SchemeCollection';
+  const DEFAULT_PRESET_SEARCH_PATH = 'inc/import/SchemeCollection';
   const VARIABLE_NAME_PATTERN = /^[\p{L}_][\p{L}\p{N}_.-]*$/u;
   const PYTHON_VARIABLE_NAME_PATTERN = /^[\p{L}_][\p{L}\p{N}_]*$/u;
   const LEGACY_TEMPLATE_VARIABLE_PATTERN =
@@ -855,7 +855,10 @@
         if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
         return {
           rootPath: String(value.rootPath || ''),
-          presetSearchPath: String(value.presetSearchPath || DEFAULT_PRESET_SEARCH_PATH),
+          presetSearchPath: !value.presetSearchPath
+            || /^import[\\/]SchemeCollection[\\/]?$/.test(value.presetSearchPath)
+            ? DEFAULT_PRESET_SEARCH_PATH
+            : String(value.presetSearchPath),
           presetPath: String(value.presetPath || ''),
           originalPresetPath: String(value.originalPresetPath || ''),
           discoveredPresetRelativePath: String(value.discoveredPresetRelativePath || ''),
@@ -3348,7 +3351,7 @@
           if (result.manual) {
             manualSavePathMode = true;
             presetPathInput.value = result.path || initialPath
-              || 'import/SchemeCollection/preset.json';
+              || 'inc/import/SchemeCollection/preset.json';
             setHint(
               result.message
                 || '请修改上方的预设 JSON 路径，然后点击“保存到此路径”',

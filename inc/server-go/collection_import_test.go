@@ -1084,7 +1084,7 @@ func TestCollectionSearchUsesPythonReSyntax(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager := newImportManager(filepath.Dir(workingDirectory))
+	manager := newImportManager(filepath.Dir(filepath.Dir(workingDirectory)))
 	if python := manager.pythonRuntime(); !python.Available {
 		t.Skip("Python runtime is not available")
 	}
@@ -1128,7 +1128,7 @@ func TestCollectionPythonSearchDoesNotEnterSubdirectories(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager := newImportManager(filepath.Dir(workingDirectory))
+	manager := newImportManager(filepath.Dir(filepath.Dir(workingDirectory)))
 	if python := manager.pythonRuntime(); !python.Available {
 		t.Skip("Python runtime is not available")
 	}

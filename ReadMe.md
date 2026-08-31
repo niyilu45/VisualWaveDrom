@@ -248,7 +248,7 @@ WAVE_LIBRARY_RELATIVE_PATH="Wave/VisualWaveDrom-library/library.sqlite"
 - 每次写入保留波形修订号，用于发现完整页面与单图页面之间的同步冲突。
 - 功能菜单中的“导入波形库”用于切换 `Wave` 下不同的波形库文件夹。
 - 服务会记住最后一次成功打开的波形库；下次双击 BAT 时优先恢复该库。记录文件为 `Wave\.visualwavedrom-state.json`，它是本机状态，不需要随工程提交。
-- Windows x64 与 Linux x64 服务程序均由同一份 `server-go` 源码生成，API 和波形库格式一致。
+- Windows x64 与 Linux x64 服务程序均由同一份 `inc/server-go` 源码生成，API 和波形库格式一致。
 - 网页与服务通过会话连接保持在线；关闭最后一个页面后，服务和 BAT/SH 窗口通常会在约 2 秒内
   自动退出。即使浏览器崩溃或关闭通知丢失，过期会话也会被自动清理，不再无限等待。
 
@@ -273,7 +273,7 @@ WAVE_LIBRARY_RELATIVE_PATH="Wave/VisualWaveDrom-library/library.sqlite"
    在“文件路径”中直接粘贴路径并点击 **读取路径**。
 2. 页面读取并显示文件前 5 行，自动判断单列、逗号、Tab 或空白分隔格式，分析第一列
    是否为递增序号，并推荐适合的 Python 文件处理函数和预设。
-3. 用户填写导入后的信号名，并可用鼠标改选 `import/Scheme` 中的其他 JSON 预设。
+3. 用户填写导入后的信号名，并可用鼠标改选 `inc/import/Scheme` 中的其他 JSON 预设。
 4. 点击 **生成预览**。通过文件选择器上传的文件由服务放入系统临时目录解析，解析完成
    后立即删除；通过路径读取时，服务直接读取原文件，不需要把整份文件传回浏览器。
 5. 确认效果图后点击 **确认导入**。信号名已存在时更新该行，不存在时在当前波形图末尾
@@ -311,7 +311,7 @@ Linux 可直接粘贴 `/home/user/data.csv`、`~/data.csv` 或 `file:///home/use
    **保存到此路径** 即可，不需要安装 `dbus-launch`。预设内容左侧会按每条规则的
    `usrGen.name` 生成导航，点击名称可直接定位到对应的 `paths` 字典。
 
-`import/SchemeCollection/example.json` 是可直接修改的示例：
+`inc/import/SchemeCollection/example.json` 是可直接修改的示例：
 
 ```json
 {
@@ -341,7 +341,7 @@ Linux 可直接粘贴 `/home/user/data.csv`、`~/data.csv` 或 `file:///home/use
 
 使用这份示例时，数据文件夹选择工程中的 `import`，页面会从 `grepKeys` 自动识别
 `channel` 和 `case`。填入 `basic`、`signal` 后，会同时匹配
-`import/Data/basic-signal.txt` 和 `.csv`。TXT 导入为 `basic_signal_txt`；CSV 的标题列
+`inc/import/Data/basic-signal.txt` 和 `.csv`。TXT 导入为 `basic_signal_txt`；CSV 的标题列
 会成为普通波形信号，用户可以在预览中决定导入哪些列。
 
 - `vars`：可选的旧版兼容字段；通常无需填写，变量名会按照在 `grepKeys` 中首次出现的
@@ -424,7 +424,7 @@ Linux 可直接粘贴 `/home/user/data.csv`、`~/data.csv` 或 `file:///home/use
 目录结构如下：
 
 ```text
-import/
+inc/import/
 ├─ Scheme/                 多个导入预设方案
 │  ├─ basic-index-data.json
 │  ├─ basic-csv-index-data.json
@@ -463,12 +463,13 @@ import/
 }
 ```
 
-- `file` 相对于 `import` 文件夹；也可以写成
-  `import/Data/basic-signal.txt`。它为预设提供示例/默认文件，并继续供旧接口使用；从界面
+- `file` 相对于 `inc/import` 文件夹；也可以写成
+  `inc/import/Data/basic-signal.txt`，旧的 `import/Data/basic-signal.txt` 写法仍兼容。
+  它为预设提供示例/默认文件，并继续供旧接口使用；从界面
   选择文件时会改用用户刚选择的文件。为保证工程可整体搬移和避免误读其他文件，不能使用
-  绝对路径或跳出 `import` 文件夹。
+  绝对路径或跳出 `inc/import` 文件夹。
 - `signal` 是预设的默认目标信号名；界面导入时改用用户在“导入后的信号名”中填写的值。
-- `parser` 是 `import/inc/fileProc.py` 的已注册解析函数。内置
+- `parser` 是 `inc/import/inc/fileProc.py` 的已注册解析函数。内置
   `parse_index_data`、`parse_csv_index_data`、`parse_tsv_index_data` 和
   `parse_single_column`。
 - `options` 可设置 `delimiter`、`encoding`、`skipRows`、`commentPrefixes`、
@@ -512,7 +513,7 @@ x
 页面会在末尾补 `x` 以保留端点。
 
 `fileProc.py` 只使用 Python 标准库，语法兼容 Python 3.6、3.7 和 3.12。服务会依次
-查找环境变量 `VWD_PYTHON_EXE`、项目内 `import/python-runtime`、Windows Python
+查找环境变量 `VWD_PYTHON_EXE`、项目内 `inc/import/python-runtime`、Windows Python
 Launcher 或系统 `python3/python`。直接双击 HTML 的模式受浏览器安全限制，不能调用
 本机 Python，因此该功能只在 BAT/SH 服务模式中启用。
 
@@ -776,6 +777,18 @@ Worker 和剪贴板权限可能受发行版安全策略影响，不能保证与�
 - 说明编辑框支持换行；点击“完成”保存。
 - 说明内容较长时，波形区域支持滚动查看。
 
+## 字体设置
+
+功能菜单中的“设置”可以调整界面字号。默认开启“自动适配系统字号”，跟随系统菜单
+字体和浏览器默认字号；高 DPI 和浏览器缩放仍由浏览器正常处理，不会重复放大。
+在当前默认字号下，100% 保持原有字体大小。
+
+- “字体大小”可用滑块或数字输入调整，范围为 80% 到 200%，修改立即生效。
+- “恢复默认”重新开启自动适配，并将字体大小恢复到 100%。
+- 设置保存在本机当前浏览器，刷新和重新打开后仍有效，已打开的同源窗口也会同步。
+- 字体调整适用于菜单、目录、代码区等界面控件，不会修改波形数据或缩放波形本身。
+- 浏览器无法可靠获知显示器的真实尺寸和观看距离，自动适配后仍可按个人习惯调整。
+
 ## JSON 面板
 
 JSON 面板标题栏中的“隐藏”按钮可以直接隐藏 WaveDrom JSON 编辑窗口；隐藏后可通过功能菜单中的“显示 JSON”恢复。显示状态会保存到浏览器本地设置中。
@@ -845,15 +858,22 @@ VisualWaveDrom.sh        Linux 启动入口
 bin/VisualWaveDrom-server.exe Windows x64 静态服务程序
 bin/VisualWaveDrom-server-linux-amd64 Linux x64 静态服务程序
 bin/SHA256SUMS.txt        两个平台程序的 SHA-256
-server-go/                静态服务源码、SQLite 数据层和测试
-inc/                     页面样式、应用逻辑和依赖库
+inc/                    页面样式、应用逻辑、依赖库和内部模块
 inc/sqlite/              直接打开 HTML 使用的 SQLite WebAssembly 文件
 inc/visualwavedrom-vim.js Vim 键盘控制器
-import/                  行波形导入方案、数据文件和 Python 解析函数
+inc/visualwavedrom-settings.js 界面字体设置与本机偏好
+inc/visualwavedrom-settings.css 设置面板与字号适配样式
+inc/import/              行波形导入方案、数据文件和 Python 解析函数
+inc/server-go/           静态服务源码、SQLite 数据层和测试
 Wave/                    多个 SQLite 波形库
 tools/GenerateReadMeGifs.py README 示例动画生成脚本
 tools/BuildGoServer.ps1   Windows/Linux x64 静态程序构建脚本
 ```
+
+原根目录的 `import` 和 `server-go` 已统一收纳到 `inc` 下，BAT/SH 启动方式不变。
+升级时请一并更新 `inc` 和 `bin`，并重新启动服务。已有预设中的 `Data/...` 相对路径
+不需要修改；在旧 `import` 目录不存在时，服务也会将记住的工程内旧导入路径转到
+`inc/import`。工程外的数据路径不受影响。
 
 每套波形库固定保存在 Windows 的 `Wave\<波形库名称>\library.sqlite`，或 Linux
 的 `Wave/<波形库名称>/library.sqlite`。每个 SQLite 文件都可以独立复制、备份和导入。

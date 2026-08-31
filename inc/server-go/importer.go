@@ -103,7 +103,7 @@ func (writer *limitedOutputBuffer) Write(data []byte) (int, error) {
 }
 
 func newImportManager(rootDir string) *importManager {
-	importRoot := filepath.Join(rootDir, "import")
+	importRoot := filepath.Join(rootDir, "inc", "import")
 	return &importManager{
 		rootDir:       rootDir,
 		importRootDir: importRoot,
@@ -192,6 +192,26 @@ func pathInside(rootPath, targetPath string) bool {
 			!filepath.IsAbs(relative))
 }
 
+// Keep remembered project paths usable after moving import into inc.
+func relocateLegacyImportPath(sourcePath, rootDir string) string {
+	legacyRoot := filepath.Join(rootDir, "import")
+	if !pathInside(legacyRoot, sourcePath) {
+		return sourcePath
+	}
+	if _, err := os.Stat(legacyRoot); !errors.Is(err, os.ErrNotExist) {
+		return sourcePath
+	}
+	importRoot := filepath.Join(rootDir, "inc", "import")
+	if info, err := os.Stat(importRoot); err != nil || !info.IsDir() {
+		return sourcePath
+	}
+	relative, err := filepath.Rel(legacyRoot, sourcePath)
+	if err != nil {
+		return sourcePath
+	}
+	return filepath.Join(importRoot, relative)
+}
+
 func (m *importManager) resolveSource(fileName string) (string, error) {
 	sourceName := strings.TrimSpace(fileName)
 	if sourceName == "" || filepath.IsAbs(sourceName) ||
@@ -199,8 +219,11 @@ func (m *importManager) resolveSource(fileName string) (string, error) {
 		return "", fmt.Errorf("invalid import source file: %s", sourceName)
 	}
 	slashPath := strings.TrimPrefix(strings.ReplaceAll(sourceName, `\`, "/"), "./")
-	if strings.HasPrefix(strings.ToLower(slashPath), "import/") {
-		slashPath = slashPath[len("import/"):]
+	for _, prefix := range []string{"inc/import/", "import/"} {
+		if strings.HasPrefix(strings.ToLower(slashPath), prefix) {
+			slashPath = slashPath[len(prefix):]
+			break
+		}
 	}
 	resolved, err := filepath.Abs(filepath.Join(m.importRootDir, filepath.FromSlash(slashPath)))
 	if err != nil || !pathInside(m.importRootDir, resolved) {
@@ -308,7 +331,7 @@ func (m *importManager) schemePath(schemeID string) (string, error) {
 	realRoot := canonicalExistingPath(m.schemeDir)
 	realPath := canonicalExistingPath(schemePath)
 	if !pathInside(realRoot, realPath) {
-		return "", fmt.Errorf("import scheme must stay inside import/Scheme: %s", requested)
+		return "", fmt.Errorf("import scheme must stay inside inc/import/Scheme: %s", requested)
 	}
 	return realPath, nil
 }
@@ -814,7 +837,7 @@ func (m *importManager) runCollectionRegexSearch(
 		return collectionRegexSearchResponse{}, errors.New(python.Error)
 	}
 	if info, err := os.Stat(m.fileProcPath); err != nil || info.IsDir() {
-		return collectionRegexSearchResponse{}, errors.New("import/inc/fileProc.py was not found")
+		return collectionRegexSearchResponse{}, fmt.Errorf("file parser was not found: %s", m.fileProcPath)
 	}
 	input, err := json.Marshal(request)
 	if err != nil {
@@ -868,7 +891,7 @@ func (m *importManager) runParserContext(
 	python pythonRuntime,
 ) (map[string]any, error) {
 	if info, err := os.Stat(m.fileProcPath); err != nil || info.IsDir() {
-		return nil, errors.New("import/inc/fileProc.py was not found")
+		return nil, fmt.Errorf("file parser was not found: %s", m.fileProcPath)
 	}
 	optionsJSON, err := json.Marshal(mapping.Options)
 	if err != nil {
@@ -1073,6 +1096,7 @@ func resolvePastedImportPath(rawPath, baseDir string) (string, os.FileInfo, erro
 	if err != nil {
 		return "", nil, fmt.Errorf("invalid waveform data file path: %w", err)
 	}
+	resolved = relocateLegacyImportPath(resolved, baseDir)
 	info, err := os.Stat(resolved)
 	if err != nil {
 		return "", nil, fmt.Errorf("waveform data file was not found: %s", resolved)

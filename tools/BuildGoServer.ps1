@@ -6,7 +6,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$sourceDirectory = Join-Path $projectRoot "server-go"
+$sourceDirectory = Join-Path $projectRoot "inc/server-go"
 $outputDirectory = Join-Path $projectRoot "bin"
 
 if (-not $GoExecutable) {
