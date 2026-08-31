@@ -64,7 +64,7 @@
     return { panels: panels, gap: gap, width: width, height: height };
   }
 
-  function cloneAnnotations(overlay) {
+  function cloneAnnotations(overlay, keepFocus) {
     const clone = overlay.cloneNode(true);
     const originals = [overlay, ...overlay.querySelectorAll('*')];
     const copies = [clone, ...clone.querySelectorAll('*')];
@@ -75,7 +75,9 @@
         if (value) copies[index].style.setProperty(name, value);
       });
     });
-    clone.querySelectorAll(TRANSIENT).forEach((node) => node.remove());
+    clone.querySelectorAll(TRANSIENT).forEach((node) => {
+      if (!keepFocus || !node.matches('.presenter-focus-shade, .presenter-focus-outline')) node.remove();
+    });
     return clone;
   }
 
@@ -93,7 +95,7 @@
     const marks = element(document, 'g', { id: prefix + 'marks' });
     const waveClone = snapshot.svg.cloneNode(true);
     while (waveClone.firstChild) wave.appendChild(waveClone.firstChild);
-    const annotationClone = cloneAnnotations(snapshot.overlay);
+    const annotationClone = cloneAnnotations(snapshot.overlay, mode === 'step');
     while (annotationClone.firstChild) marks.appendChild(annotationClone.firstChild);
     defs.appendChild(wave);
     defs.appendChild(marks);

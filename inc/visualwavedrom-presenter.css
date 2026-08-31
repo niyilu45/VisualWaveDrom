@@ -950,6 +950,129 @@ body.presenter-wave-view > .scope-bootstrap {
   white-space: normal;
 }
 
+.presenter-copy-choices [data-action="copy-gif"] {
+  grid-column: 1 / -1;
+}
+
+.presenter-gif-options {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid #d6dfe6;
+}
+
+.presenter-gif-fields {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.presenter-gif-fields legend {
+  padding: 0;
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+
+.presenter-gif-select-all,
+.presenter-gif-steps label,
+.presenter-gif-delay,
+.presenter-gif-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.presenter-gif-select-all output {
+  margin-left: auto;
+  color: #38566d;
+  font-variant-numeric: tabular-nums;
+}
+
+.presenter-gif-steps {
+  max-height: 12rem;
+  margin: 8px 0 14px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.presenter-gif-steps label {
+  min-height: 32px;
+  align-items: flex-start;
+  padding: 5px 0;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.presenter-gif-fields input[type="checkbox"] {
+  flex-shrink: 0;
+  margin: 3px 0 0;
+  accent-color: #2775b8;
+}
+
+.presenter-gif-delay {
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.presenter-gif-delay input {
+  width: 6rem;
+  min-height: 34px;
+  max-width: 100%;
+  padding: 5px 8px;
+  border: 1px solid #aebfcd;
+  border-radius: 4px;
+  color: #243440;
+  background: #fff;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+}
+
+.presenter-gif-fields input:focus-visible {
+  outline: 2px solid #2775b8;
+  outline-offset: 2px;
+}
+
+.presenter-gif-delay input[aria-invalid="true"] {
+  border-color: #b33030;
+}
+
+.presenter-gif-actions {
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+
+#presenter-gif-progress {
+  width: 100%;
+  height: 8px;
+  margin-top: 14px;
+  accent-color: #2775b8;
+}
+
+.presenter-gif-preview {
+  margin: 14px 0 0;
+}
+
+.presenter-gif-preview img {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 260px;
+  object-fit: contain;
+  object-position: left top;
+  background: #fff;
+}
+
+.presenter-gif-preview figcaption {
+  margin-top: 6px;
+  color: #38566d;
+  overflow-wrap: anywhere;
+}
+
+.presenter-gif-options [hidden],
+.presenter-gif-options[hidden] {
+  display: none;
+}
+
 .presenter-copy-status {
   margin: 12px 0 0;
   color: #29475f;

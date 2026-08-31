@@ -32,6 +32,8 @@
     ['window-prev', '上一段波形', 'Shift+w'], ['window-next', '下一段波形', 'Shift+e'],
     ['exit', '退出演讲者模式', 'Shift+r'], ['copy-full', '复制整张图片', 'Shift+a'],
     ['copy-focus', '复制聚焦区域', 'Shift+s'], ['text-done', '完成文字编辑', 'Ctrl+Enter'],
+    ['copy-gif', '生成 GIF', ''], ['gif-generate', '生成并下载 GIF', ''],
+    ['gif-cancel', '取消生成 GIF', ''], ['gif-download', '下载 GIF', ''],
     ['text-cancel', '取消文字编辑', ''], ['copy-close', '关闭图片复制选项', ''],
     ['focus-close', '收起聚焦配置', ''], ['shape-style-close', '收起样式设置', ''],
     ['exit-save', '保存并退出', ''], ['exit-discard', '不保存并退出', ''],
@@ -336,6 +338,9 @@
       this.notesWindowOpening = false;
       this.copying = false;
       this.copySequence = 0;
+      this.gifController = null;
+      this.gifResult = null;
+      this.gifResultUrl = '';
       this.savedPresentation = '';
       this.savedSignature = null;
       this.saving = false;
@@ -492,7 +497,20 @@
         + '</section>'
         + '<section class="presenter-popover presenter-copy-options" id="presenter-copy-options" role="dialog" aria-label="复制图片" hidden>'
         + '  <div class="presenter-popover-header"><strong>复制图片</strong><button type="button" class="presenter-icon-button" data-action="copy-close" title="关闭" aria-label="关闭图片复制选项">' + icon('close') + '</button></div>'
-        + '  <div class="presenter-copy-choices">' + buttonMarkup('copy-full', 'image', '整张图片', '复制整张波形和批注') + buttonMarkup('copy-focus', 'focus', '仅聚焦区域', '复制聚焦区域、波形名和批注') + '</div>'
+        + '  <div class="presenter-copy-choices">' + buttonMarkup('copy-full', 'image', '整张图片', '复制整张波形和批注') + buttonMarkup('copy-focus', 'focus', '仅聚焦区域', '复制聚焦区域、波形名和批注')
+        + '<button type="button" class="presenter-button" data-action="copy-gif" title="按步骤顺序生成 GIF" aria-expanded="false" aria-controls="presenter-gif-options">' + icon('image') + '<span>生成 GIF</span></button></div>'
+        + '  <div class="presenter-gif-options" id="presenter-gif-options" hidden>'
+        + '    <fieldset class="presenter-gif-fields" id="presenter-gif-fields"><legend>演讲步骤</legend>'
+        + '      <label class="presenter-gif-select-all"><input id="presenter-gif-select-all" type="checkbox" checked><span>全选</span><output id="presenter-gif-count" aria-live="polite"></output></label>'
+        + '      <div class="presenter-gif-steps" id="presenter-gif-steps"></div>'
+        + '      <label class="presenter-gif-delay"><span>切换间隔（秒）</span><input id="presenter-gif-delay" type="number" min="0.1" max="60" step="0.1" value="1" inputmode="decimal" required></label>'
+        + '    </fieldset>'
+        + '    <progress id="presenter-gif-progress" aria-label="GIF 生成进度" value="0" max="1" hidden></progress>'
+        + '    <div class="presenter-gif-actions">' + buttonMarkup('gif-generate', 'image', '生成并下载', '生成并下载 GIF', 'presenter-primary-button')
+        + '<button type="button" class="presenter-button" data-action="gif-cancel" hidden>' + icon('close') + '<span>取消生成</span></button>'
+        + '<button type="button" class="presenter-button" data-action="gif-download" hidden>' + icon('save') + '<span>下载 GIF</span></button></div>'
+        + '    <figure class="presenter-gif-preview" id="presenter-gif-preview" hidden><div id="presenter-gif-image"></div><figcaption id="presenter-gif-details"></figcaption></figure>'
+        + '  </div>'
         + '  <p id="presenter-copy-status" class="presenter-copy-status" role="status" aria-live="polite" hidden></p>'
         + '</section>'
         + '<section class="presenter-popover presenter-focus-options" id="presenter-focus-options" role="dialog" aria-label="聚焦模式" hidden>'
@@ -553,6 +571,16 @@
       this.copyOptions = app.querySelector('#presenter-copy-options');
       this.copyButton = app.querySelector('[data-action="copy-image"]');
       this.copyStatus = app.querySelector('#presenter-copy-status');
+      this.gifOptions = app.querySelector('#presenter-gif-options');
+      this.gifFields = app.querySelector('#presenter-gif-fields');
+      this.gifStepList = app.querySelector('#presenter-gif-steps');
+      this.gifSelectAll = app.querySelector('#presenter-gif-select-all');
+      this.gifCount = app.querySelector('#presenter-gif-count');
+      this.gifDelay = app.querySelector('#presenter-gif-delay');
+      this.gifProgress = app.querySelector('#presenter-gif-progress');
+      this.gifPreview = app.querySelector('#presenter-gif-preview');
+      this.gifImageHost = app.querySelector('#presenter-gif-image');
+      this.gifDetails = app.querySelector('#presenter-gif-details');
       this.saveButton = app.querySelector('[data-action="save"]');
       this.saveState = app.querySelector('#presenter-save-state');
       this.exitDialog = app.querySelector('#presenter-exit-dialog');
@@ -682,6 +710,13 @@
       this.pointerClearRow.addEventListener('change', (event) => {
         if (event.target.name === 'presenter-pointer-clear-mode') this.setPointerClearMode(event.target.value);
       });
+      this.gifStepList.addEventListener('change', () => { this.clearGifResult(); this.updateGifControls(); });
+      this.gifSelectAll.addEventListener('change', () => {
+        this.gifStepList.querySelectorAll('input').forEach(input => { input.checked = this.gifSelectAll.checked; });
+        this.clearGifResult();
+        this.updateGifControls();
+      });
+      this.gifDelay.addEventListener('input', () => { this.clearGifResult(); this.updateGifControls(); });
       this.shapeWidthInput.addEventListener('input', () => {
         this.applyShapeStyle({ width: Number(this.shapeWidthInput.value) }, true);
       });
@@ -775,6 +810,14 @@
         this.closeCopyOptions();
       } else if (action === 'copy-full' || action === 'copy-focus') {
         void this.copyScreenshot(action === 'copy-focus' ? 'focus' : 'full');
+      } else if (action === 'copy-gif') {
+        this.toggleGifOptions();
+      } else if (action === 'gif-generate') {
+        void this.generateGif();
+      } else if (action === 'gif-cancel') {
+        if (this.gifController) this.gifController.abort();
+      } else if (action === 'gif-download') {
+        void this.downloadGif();
       } else if (action === 'notes') {
         this.toggleNotes();
       } else if (action === 'notes-detach') {
@@ -1456,15 +1499,15 @@
           && !event.target.closest('[data-tool="focus"]')) this.closeFocusOptions();
       if (this.shapeOptions && !this.shapeOptions.hidden && !this.shapeOptions.contains(event.target)
           && !event.target.closest('[data-action="shape-style"], [data-tool="arrow"], [data-tool="rectangle"]')) this.closeShapeOptions();
-      if (this.copyOptions && !this.copyOptions.hidden && !this.copying && !this.copyOptions.contains(event.target)
+      if (this.copyOptions && !this.copyOptions.hidden && !this.copying && !this.gifController && !this.copyOptions.contains(event.target)
           && !event.target.closest('[data-action="copy-image"]')) this.closeCopyOptions();
     }
 
     updateCopyControls() {
       if (!this.copyOptions) return;
-      const ready = !!this.svg && !this.copying;
+      const ready = !!this.svg && !this.copying && !this.gifController;
       this.copyButton.disabled = !ready;
-      this.copyOptions.setAttribute('aria-busy', String(this.copying));
+      this.copyOptions.setAttribute('aria-busy', String(this.copying || !!this.gifController));
       this.copyOptions.querySelector('[data-action="copy-full"]').disabled = !ready;
       const focusButton = this.copyOptions.querySelector('[data-action="copy-focus"]');
       const hasFocus = ready && !!this.getFocusBounds();
@@ -1472,6 +1515,9 @@
       focusButton.dataset.shortcutTitle = hasFocus ? '复制聚焦区域、波形名和批注' : '请先选择聚焦区域';
       focusButton.title = focusButton.dataset.shortcutTitle;
       this.copyOptions.querySelector('[data-action="copy-close"]').disabled = this.copying;
+      const gifButton = this.copyOptions.querySelector('[data-action="copy-gif"]');
+      if (gifButton) gifButton.disabled = !ready;
+      this.updateGifControls();
       this.refreshShortcutUI();
     }
 
@@ -1485,6 +1531,13 @@
 
     closeCopyOptions() {
       if (!this.copyOptions) return;
+      if (this.gifController) this.gifController.abort();
+      this.clearGifResult();
+      if (this.gifOptions) this.gifOptions.hidden = true;
+      this.gifStepEntries = [];
+      if (this.gifStepList) this.gifStepList.replaceChildren();
+      const gifButton = this.copyOptions.querySelector('[data-action="copy-gif"]');
+      if (gifButton) gifButton.setAttribute('aria-expanded', 'false');
       this.copyOptions.hidden = true;
       this.copyButton.setAttribute('aria-expanded', 'false');
     }
@@ -1506,7 +1559,7 @@
       document.body.appendChild(host);
       try {
         let svg = request.svg;
-        if (fullRender) {
+        if (fullRender || !svg) {
           const display = document.createElement('div');
           display.id = prefix + '0';
           host.appendChild(display);
@@ -1551,7 +1604,7 @@
     }
 
     async copyScreenshot(mode) {
-      if (this.copying || !this.svg) return false;
+      if (this.copying || this.gifController || !this.svg) return false;
       const api = root.VisualWaveDromPresenterExport;
       if (!api || typeof this.adapter.renderScreenshot !== 'function') {
         this.showToast('图片复制模块未加载，请刷新页面后重试。', true);
@@ -1606,6 +1659,196 @@
       } finally {
         this.copying = false;
         if (!this.destroyed) this.updateCopyControls();
+      }
+    }
+
+    toggleGifOptions() {
+      if (this.copying || this.gifController) return;
+      this.gifOptions.hidden = !this.gifOptions.hidden;
+      this.copyOptions.querySelector('[data-action="copy-gif"]').setAttribute('aria-expanded', String(!this.gifOptions.hidden));
+      if (!this.gifOptions.hidden) {
+        this.refreshGifStepList(false);
+        this.clearGifResult();
+        this.copyStatus.hidden = true;
+        this.updateGifControls();
+      }
+      this.positionCopyOptions();
+    }
+
+    refreshGifStepList(preserveSelection) {
+      const previous = this.gifStepEntries || [];
+      const selected = new Set(Array.from(this.gifStepList.querySelectorAll('input:checked'))
+        .map(input => previous[Number(input.dataset.step)]).filter(Boolean).map(entry => entry.step));
+      this.gifStepEntries = this.steps.map(step => ({ step, title: step.title || DEFAULT_STEP_TITLE }));
+      this.gifStepList.replaceChildren();
+      this.gifStepEntries.forEach((entry, index) => {
+        const label = document.createElement('label');
+        const input = document.createElement('input');
+        input.type = 'checkbox';
+        input.dataset.step = String(index);
+        input.checked = !preserveSelection || selected.has(entry.step);
+        const text = document.createElement('span');
+        text.textContent = (index + 1) + '. ' + entry.title;
+        label.append(input, text);
+        this.gifStepList.appendChild(label);
+      });
+    }
+
+    selectedGifSteps() {
+      if (!this.gifStepList) return [];
+      return Array.from(this.gifStepList.querySelectorAll('input:checked'))
+        .map(input => Number(input.dataset.step)).filter(index => Number.isInteger(index) && index >= 0 && index < this.steps.length)
+        .sort((a, b) => a - b);
+    }
+
+    updateGifControls() {
+      if (!this.gifFields) return;
+      const busy = !!this.gifController;
+      const entries = this.gifStepEntries || [];
+      if (!busy && !this.gifOptions.hidden && (entries.length !== this.steps.length
+          || this.steps.some((step, index) => entries[index].step !== step || entries[index].title !== (step.title || DEFAULT_STEP_TITLE)))) {
+        this.refreshGifStepList(true);
+        if (this.gifResult) this.copyStatus.textContent += ' 演讲步骤已变化，已更新下次生成的步骤选择。';
+      }
+      const count = this.selectedGifSteps().length;
+      const delay = Number(this.gifDelay.value);
+      const validDelay = this.gifDelay.value.trim() !== '' && Number.isFinite(delay) && delay >= 0.1 && delay <= 60;
+      this.gifFields.disabled = busy || this.copying;
+      this.gifSelectAll.checked = this.steps.length > 0 && count === this.steps.length;
+      this.gifSelectAll.indeterminate = count > 0 && count < this.steps.length;
+      this.gifCount.textContent = '已选 ' + count + ' / ' + this.steps.length;
+      this.gifDelay.setAttribute('aria-invalid', String(!validDelay));
+      const generate = this.copyOptions.querySelector('[data-action="gif-generate"]');
+      const maxFrames = root.VisualWaveDromPresenterGif ? root.VisualWaveDromPresenterGif.maxFrames : 200;
+      generate.disabled = busy || this.copying || !this.svg || count < 2 || count > maxFrames || !validDelay;
+      generate.dataset.shortcutTitle = count < 2 ? '请至少选择两个步骤' : count > maxFrames ? '每次最多选择 ' + maxFrames + ' 个步骤'
+        : !validDelay ? '切换间隔应为 0.1 到 60 秒' : '生成并下载 GIF';
+      generate.title = generate.dataset.shortcutTitle;
+      this.copyOptions.querySelector('[data-action="gif-cancel"]').hidden = !busy;
+      this.copyOptions.querySelector('[data-action="gif-download"]').hidden = !this.gifResult;
+      this.gifProgress.hidden = !busy;
+    }
+
+    clearGifResult() {
+      if (this.gifResultUrl) root.URL.revokeObjectURL(this.gifResultUrl);
+      this.gifResultUrl = '';
+      this.gifResult = null;
+      if (this.gifImageHost) this.gifImageHost.replaceChildren();
+      if (this.gifPreview) this.gifPreview.hidden = true;
+      if (this.copyOptions) {
+        const button = this.copyOptions.querySelector('[data-action="gif-download"]');
+        if (button) button.hidden = true;
+      }
+    }
+
+    createGifFrame(step, context) {
+      let window = context.window;
+      let source = context.source;
+      let svg = context.svg.cloneNode(true);
+      if (context.total > MAX_DIRECT_COLUMNS) {
+        const start = clamp(Number(step.windowStart) || 0, 0, Math.max(0, context.total - context.windowSize));
+        if (start !== window.start || window.size !== context.windowSize) {
+          const bigApi = root.VisualWaveDromBigData;
+          if (!bigApi || typeof bigApi.createRenderWindow !== 'function') throw new Error('missing-waveform');
+          window = bigApi.createRenderWindow(source, { start, size: context.windowSize, metrics: context.metrics });
+          source = window.source;
+          svg = null;
+        }
+      }
+      if (window.size * Math.max(1, context.rowKeys.length) > 50000) throw new Error('image-too-large');
+      return this.createScreenshot({ mode: 'step', source, svg, total: context.total,
+        window: { start: window.start, end: window.end, size: window.size }, rowKeys: context.rowKeys,
+        annotations: step.annotations || emptyAnnotations() });
+    }
+
+    async generateGif() {
+      if (this.copying || this.gifController || !this.svg) return false;
+      const api = root.VisualWaveDromPresenterGif;
+      if (!api) { this.showToast('GIF 模块未加载，请刷新页面后重试。', true); return false; }
+      this.updateGifControls();
+      const indices = this.selectedGifSteps();
+      const delay = Number(this.gifDelay.value) * 1000;
+      this.finishGesture(false);
+      this.finishTextEdit(true);
+      this.finishStepTitleEdit(true);
+      const steps = indices.map(index => index === this.stepIndex ? this.captureStep() : cloneValue(this.steps[index]));
+      const context = { source: this.renderSource, svg: this.svg.cloneNode(true), total: this.metrics.maxWaveLength,
+        metrics: this.metrics, rowKeys: this.rowKeys.slice(), windowSize: this.windowSize,
+        window: { start: this.renderWindow.start, end: this.renderWindow.end, size: this.renderWindow.size } };
+      const filename = (this.titleEl.textContent.replace(/[\\/:*?"<>|]+/g, '_').slice(0, 96) || 'VisualWaveDrom') + '-steps.gif';
+      const controller = new AbortController();
+      this.gifController = controller;
+      this.clearGifResult();
+      this.copyStatus.hidden = false;
+      this.gifProgress.value = 0;
+      this.gifProgress.max = Math.max(1, steps.length * 2);
+      this.updateCopyControls();
+      const started = Date.now();
+      let phase = '正在准备 GIF...';
+      const showProgress = () => { if (!this.destroyed) this.copyStatus.textContent = phase + ' · ' + ((Date.now() - started) / 1000).toFixed(1) + ' 秒'; };
+      showProgress();
+      const timer = setInterval(showProgress, 250);
+      this.log('presenter-gif', { phase: 'start', steps: indices.map(index => index + 1), delay });
+      try {
+        const result = await api.generate({ count: steps.length, delay, signal: controller.signal,
+          renderFrame: index => this.createGifFrame(steps[index], context),
+          onProgress: progress => {
+            phase = (progress.phase === 'prepare' ? '正在准备步骤 ' : '正在编码步骤 ') + (indices[progress.index] + 1)
+              + '（' + (progress.index + 1) + '/' + steps.length + '）';
+            this.gifProgress.value = progress.completed;
+            showProgress();
+          }
+        });
+        if (this.destroyed || controller.signal.aborted) return false;
+        this.gifResult = { ...result, filename };
+        this.gifResultUrl = root.URL.createObjectURL(result.blob);
+        const image = document.createElement('img');
+        image.src = this.gifResultUrl;
+        image.alt = '演讲步骤 GIF 预览';
+        image.width = result.width;
+        image.height = result.height;
+        this.gifImageHost.replaceChildren(image);
+        this.gifPreview.hidden = false;
+        this.gifDetails.textContent = steps.length + ' 步 · ' + delay / 1000 + ' 秒/步 · ' + result.width + ' × ' + result.height;
+        clearInterval(timer);
+        const downloaded = await this.downloadGif();
+        if (downloaded && !this.destroyed) this.copyStatus.textContent = 'GIF 已生成并下载。';
+        this.log('presenter-gif', { phase: 'done', count: result.count, width: result.width, height: result.height, bytes: result.blob.size });
+        return true;
+      } catch (error) {
+        if (!this.destroyed) {
+          const messages = {
+            'gif-steps-required': '请至少选择两个演讲步骤。',
+            'gif-too-many-steps': '每次最多选择 200 个步骤，请减少勾选的步骤。',
+            'gif-invalid-delay': '切换间隔应为 0.1 到 60 秒。',
+            'gif-module-missing': 'GIF 编码模块未加载，请刷新页面后重试。',
+            'gif-source-too-large': '步骤图片总量过大，请减少勾选的步骤。',
+            'gif-output-too-large': 'GIF 文件超过 64 MB，请减少勾选的步骤。',
+            'image-too-large': '步骤波形过大，请缩小列范围或减少信号行后重试。',
+            'gif-cancelled': '已取消 GIF 生成。',
+            'gif-worker-failed': 'GIF 编码失败，请刷新页面后重试。',
+            'gif-image-load-failed': '步骤图片加载失败，请重新生成。'
+          };
+          this.copyStatus.textContent = messages[error.message] || ('GIF 生成失败：' + error.message);
+          this.log('presenter-gif', { phase: controller.signal.aborted ? 'cancelled' : 'error', message: error.message });
+        }
+        return false;
+      } finally {
+        clearInterval(timer);
+        if (this.gifController === controller) this.gifController = null;
+        if (!this.destroyed) this.updateCopyControls();
+      }
+    }
+
+    async downloadGif() {
+      if (!this.gifResult || typeof this.adapter.downloadImage !== 'function') return false;
+      try {
+        await this.adapter.downloadImage(this.gifResult.blob, this.gifResult.filename);
+        return true;
+      } catch (error) {
+        if (!this.destroyed) this.copyStatus.textContent = 'GIF 已生成，但下载失败，请点击“下载 GIF”重试。';
+        this.log('presenter-gif', { phase: 'download-error', message: error.message });
+        return false;
       }
     }
 
@@ -2965,6 +3208,8 @@
 
     destroy() {
       this.destroyed = true;
+      if (this.gifController) this.gifController.abort();
+      this.clearGifResult();
       this.syncBeforeUnload(false);
       if (this.notesWindow) this.notesWindow.destroy();
       clearTimeout(this.toastTimer);
