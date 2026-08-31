@@ -1033,9 +1033,11 @@ ${lines.join('\n')}`;
     const requestedLibraryId = String(pageQuery.get('libraryId') || '').trim();
     const requestedWaveDocumentName = String(pageQuery.get('waveId') || '').trim();
     const requestedScopeToken = String(pageQuery.get('scopeToken') || '').trim();
+    const requestedPresenterToken = String(pageQuery.get('presenterToken') || '').trim();
     const singleWaveViewActive = pageQuery.get('view') === 'single' && !!requestedWaveDocumentName;
     const scopeWaveViewActive = pageQuery.get('view') === 'scope' && !!requestedWaveDocumentName;
-    const focusedWaveViewActive = singleWaveViewActive || scopeWaveViewActive;
+    const presenterWaveViewActive = pageQuery.get('view') === 'presenter' && !!requestedWaveDocumentName;
+    const focusedWaveViewActive = singleWaveViewActive || scopeWaveViewActive || presenterWaveViewActive;
     const waveLibraryClientId = 'client-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
     const WAVE_LIBRARY_CLIENT_HEARTBEAT_MS = 20000;
     let waveLibraryClientEventSource = null;
@@ -1066,10 +1068,17 @@ ${lines.join('\n')}`;
     const scopeWindowOpenStates = new Map();
     const scopeWindowRefs = new Map();
     const scopeTransientStates = new Map();
+    const presenterWindowOpenStates = new Map();
+    const presenterWindowRefs = new Map();
+    const presenterSyncTimers = new Map();
+    const presenterLiveSubscribers = new Map();
+    let presenterLiveSyncChannel = null;
+    let presenterLiveHeartbeatTimer = 0;
     let pageExitStateFlushed = false;
 
     document.body.classList.toggle('single-wave-view', singleWaveViewActive);
     document.body.classList.toggle('scope-wave-view', scopeWaveViewActive);
+    document.body.classList.toggle('presenter-wave-view', presenterWaveViewActive);
 
     const savedTagsListEl = document.getElementById('saved-tags-list');
     const savedTagsEmptyEl = document.getElementById('saved-tags-empty');
@@ -13824,6 +13833,151 @@ ${lines.join('\n')}`;
       return url.href;
     }
 
+    function getWaveDocumentPresenterViewParams(documentName, presenterToken) {
+      if (!documentName) return null;
+      const params = new URLSearchParams({
+        waveId: documentName,
+        view: 'presenter'
+      });
+      if (currentWaveLibraryId) params.set('libraryId', currentWaveLibraryId);
+      if (presenterToken) params.set('presenterToken', presenterToken);
+      return params;
+    }
+
+    function getWaveDocumentPresenterViewUrl(documentName, presenterToken) {
+      const params = getWaveDocumentPresenterViewParams(documentName, presenterToken);
+      if (!params) return '';
+      if (waveLibraryServerMode) {
+        return new URL('/open?' + params.toString(), window.location.origin).href;
+      }
+      const url = new URL(window.location.href);
+      url.search = params.toString();
+      url.hash = '';
+      return url.href;
+    }
+
+    function cleanupPresenterWindowRefs(documentName) {
+      const refs = presenterWindowRefs.get(documentName);
+      if (!refs) return null;
+      refs.forEach((ref) => {
+        if (!ref || ref.closed) refs.delete(ref);
+      });
+      if (!refs.size) {
+        presenterWindowRefs.delete(documentName);
+        const timer = presenterSyncTimers.get(documentName);
+        if (timer) clearTimeout(timer);
+        presenterSyncTimers.delete(documentName);
+        return null;
+      }
+      return refs;
+    }
+
+    function notifyPresenterWindows(documentName) {
+      const refs = cleanupPresenterWindowRefs(documentName);
+      const subscriberSeenAt = presenterLiveSubscribers.get(documentName) || 0;
+      const hasLiveSubscriber = Date.now() - subscriberSeenAt < 30000;
+      if (!refs && !hasLiveSubscriber) return false;
+      const tag = getSavedTagByName(documentName);
+      const snapshot = getWaveDocumentServerSnapshot(
+        tag,
+        documentName === editingWaveDocumentName
+      );
+      if (!snapshot) return false;
+      const message = {
+        type: 'visualwavedrom-presenter-document-update',
+        libraryId: currentWaveLibraryId,
+        waveId: documentName,
+        document: snapshot
+      };
+      if (refs) {
+        refs.forEach((ref) => {
+          try { ref.postMessage(message, '*'); } catch (_error) { /* window may be closing */ }
+        });
+      }
+      if (hasLiveSubscriber && presenterLiveSyncChannel) {
+        try { presenterLiveSyncChannel.postMessage(message); } catch (_error) { /* channel unavailable */ }
+      }
+      vwdDebugLog('presenter-view', {
+        phase: 'live-update-sent',
+        documentName,
+        windowCount: refs ? refs.size : 0,
+        channelSubscriber: hasLiveSubscriber,
+        contentLength: typeof snapshot.content === 'string' ? snapshot.content.length : 0
+      });
+      return true;
+    }
+
+    function schedulePresenterDocumentSync(documentName) {
+      const subscriberSeenAt = presenterLiveSubscribers.get(documentName) || 0;
+      if (!documentName || (!presenterWindowRefs.has(documentName)
+          && Date.now() - subscriberSeenAt >= 30000)) return;
+      const previous = presenterSyncTimers.get(documentName);
+      if (previous) clearTimeout(previous);
+      presenterSyncTimers.set(documentName, setTimeout(() => {
+        presenterSyncTimers.delete(documentName);
+        notifyPresenterWindows(documentName);
+      }, 80));
+    }
+
+    async function openWaveDocumentInPresenterWindow(documentName) {
+      const presenterToken = 'presenter-' + Date.now().toString(36)
+        + '-' + Math.random().toString(36).slice(2, 9);
+      const url = getWaveDocumentPresenterViewUrl(documentName, presenterToken);
+      if (!url) {
+        setStatus(false, '无法生成演讲者窗口地址');
+        return false;
+      }
+      const width = Math.max(1040, Math.min(1600, (window.screen && window.screen.availWidth || 1440) - 64));
+      const height = Math.max(680, Math.min(1000, (window.screen && window.screen.availHeight || 900) - 64));
+      const opened = window.open(
+        url,
+        '_blank',
+        'popup=yes,resizable=yes,scrollbars=yes,width=' + width + ',height=' + height
+      );
+      if (!opened) {
+        setStatus(false, '浏览器阻止了演讲者窗口，请允许此页面打开弹出式窗口');
+        vwdDebugLog('presenter-view', { phase: 'open-blocked', documentName, url });
+        return false;
+      }
+
+      const openedAt = Date.now();
+      let sourcePromise = null;
+      const getSourcePromise = () => {
+        if (sourcePromise) return sourcePromise;
+        sourcePromise = (async () => {
+          let stored = getSavedTagByName(documentName);
+          if (stored && stored.deferred) stored = await ensureWaveDocumentLoaded(documentName);
+          if (!stored) throw new Error('波形图尚未载入');
+          const snapshot = getWaveDocumentServerSnapshot(
+            stored,
+            documentName === editingWaveDocumentName
+          );
+          if (!snapshot) throw new Error('无法生成演讲数据快照');
+          vwdDebugLog('presenter-view', {
+            phase: 'source-ready',
+            documentName,
+            contentLength: typeof snapshot.content === 'string' ? snapshot.content.length : 0,
+            elapsedMs: Date.now() - openedAt
+          });
+          return snapshot;
+        })();
+        sourcePromise.catch((error) => {
+          setStatus(false, '打开演讲者模式失败：' + (error && error.message ? error.message : String(error)));
+        });
+        return sourcePromise;
+      };
+
+      presenterWindowOpenStates.set(presenterToken, { documentName, getSourcePromise });
+      if (!presenterWindowRefs.has(documentName)) presenterWindowRefs.set(documentName, new Set());
+      presenterWindowRefs.get(documentName).add(opened);
+      setTimeout(() => presenterWindowOpenStates.delete(presenterToken), 60000);
+      const tag = getSavedTagByName(documentName);
+      const title = tag ? getSavedTagTitle(tag) : documentName;
+      setStatus(true, '已打开演讲者模式：' + title);
+      vwdDebugLog('presenter-view', { phase: 'open-window', documentName, presenterToken, url });
+      return true;
+    }
+
     async function openWaveDocumentInScopeWindow(documentName) {
       const scopeToken = 'scope-' + Date.now().toString(36)
         + '-' + Math.random().toString(36).slice(2, 9);
@@ -14181,6 +14335,116 @@ ${lines.join('\n')}`;
         },
         log: vwdDebugLog
       });
+      return true;
+    }
+
+    function requestPresenterSourceFromOpener() {
+      if (!requestedPresenterToken || !window.opener || window.opener.closed) {
+        return Promise.resolve(null);
+      }
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        const finish = (error, payload) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          window.removeEventListener('message', onMessage);
+          if (error) reject(error);
+          else resolve(payload || null);
+        };
+        const onMessage = (event) => {
+          const message = event.data || {};
+          if (message.type !== 'visualwavedrom-presenter-source-response'
+              || message.presenterToken !== requestedPresenterToken) return;
+          if (message.error) finish(new Error(message.error));
+          else finish(null, {
+            libraryId: String(message.libraryId || ''),
+            libraryFile: String(message.libraryFile || ''),
+            document: message.document || null
+          });
+        };
+        const timeout = setTimeout(() => finish(null, null), 10000);
+        window.addEventListener('message', onMessage);
+        try {
+          window.opener.postMessage({
+            type: 'visualwavedrom-presenter-source-request',
+            presenterToken: requestedPresenterToken,
+            waveId: requestedWaveDocumentName
+          }, '*');
+        } catch (error) {
+          finish(error);
+        }
+      });
+    }
+
+    async function initializePresenterWaveView(options) {
+      if (!presenterWaveViewActive) return false;
+      if (!window.VisualWaveDromPresenter
+          || typeof window.VisualWaveDromPresenter.mount !== 'function') {
+        throw new Error('演讲者模式模块未加载');
+      }
+      const startupOptions = options && typeof options === 'object' ? options : {};
+      let fallbackLibraryReadyPromise = null;
+      const ensureLibraryReady = typeof startupOptions.ensureLibraryReady === 'function'
+        ? startupOptions.ensureLibraryReady
+        : () => {
+          if (!fallbackLibraryReadyPromise) {
+            fallbackLibraryReadyPromise = Promise.resolve().then(() => initializeWaveLibrary());
+          }
+          return fallbackLibraryReadyPromise;
+        };
+      let initialTag = null;
+
+      const setBootstrapStage = (message) => {
+        const bootstrap = window.__visualWaveDromPresenterBootstrap;
+        if (bootstrap && typeof bootstrap.setStage === 'function') bootstrap.setStage(message);
+      };
+
+      const resolveInitialTag = async () => {
+        if (initialTag) return initialTag;
+        setBootstrapStage('正在读取当前波形...');
+        const openerPayload = await requestPresenterSourceFromOpener();
+        if (openerPayload && openerPayload.libraryId) {
+          if (requestedLibraryId && openerPayload.libraryId !== requestedLibraryId) {
+            throw new Error('主窗口与演讲者窗口的波形库不一致');
+          }
+          currentWaveLibraryId = openerPayload.libraryId;
+        } else if (!currentWaveLibraryId && requestedLibraryId) {
+          currentWaveLibraryId = requestedLibraryId;
+        }
+        if (openerPayload && openerPayload.libraryFile) {
+          currentWaveLibraryFile = openerPayload.libraryFile;
+        }
+        const incoming = normalizeSavedTag(openerPayload && openerPayload.document);
+        if (incoming && incoming.name === requestedWaveDocumentName) {
+          initialTag = incoming;
+        } else {
+          setBootstrapStage('正在载入波形库...');
+          await ensureLibraryReady();
+          initialTag = await ensureWaveDocumentLoaded(requestedWaveDocumentName);
+        }
+        if (!initialTag) throw new Error('链接指定的波形图不存在或已被删除');
+        vwdDebugLog('presenter-view', {
+          phase: 'source-resolved',
+          documentName: initialTag.name,
+          contentLength: typeof initialTag.content === 'string' ? initialTag.content.length : 0,
+          fromOpener: !!incoming
+        });
+        return initialTag;
+      };
+
+      await window.VisualWaveDromPresenter.mount({
+        libraryName: currentWaveLibraryFile || 'SQLite 波形库',
+        getDocument: async () => Object.assign({}, await resolveInitialTag()),
+        close: () => {
+          window.close();
+          setTimeout(() => {
+            if (!window.closed && window.history.length > 1) window.history.back();
+          }, 160);
+        },
+        log: vwdDebugLog
+      });
+      announcePresenterPresence('visualwavedrom-presenter-ready');
       return true;
     }
 
@@ -14993,6 +15257,74 @@ ${lines.join('\n')}`;
       });
     }
 
+    function applyPresenterDocumentUpdate(message) {
+      if (!presenterWaveViewActive
+          || String(message.waveId || '') !== requestedWaveDocumentName) return false;
+      if (currentWaveLibraryId && message.libraryId
+          && message.libraryId !== currentWaveLibraryId) return false;
+      const presenterView = window.__visualWaveDromPresenterView;
+      if (!presenterView || typeof presenterView.updateDocument !== 'function') return false;
+      void Promise.resolve(presenterView.updateDocument(message.document)).catch((error) => {
+        vwdDebugLog('presenter-view', {
+          phase: 'live-update-error',
+          message: error && error.message ? error.message : String(error)
+        });
+      });
+      return true;
+    }
+
+    function announcePresenterPresence(type) {
+      if (!presenterWaveViewActive || !presenterLiveSyncChannel) return;
+      try {
+        presenterLiveSyncChannel.postMessage({
+          type: type || 'visualwavedrom-presenter-heartbeat',
+          libraryId: currentWaveLibraryId || requestedLibraryId,
+          waveId: requestedWaveDocumentName
+        });
+      } catch (_error) { /* channel may be closing */ }
+    }
+
+    function initPresenterLiveSyncChannel() {
+      if (presenterLiveSyncChannel || typeof BroadcastChannel !== 'function') return;
+      try {
+        presenterLiveSyncChannel = new BroadcastChannel('visualwavedrom-presenter-live-v1');
+        presenterLiveSyncChannel.addEventListener('message', (event) => {
+          const message = event.data || {};
+          if (message.type === 'visualwavedrom-presenter-document-update') {
+            applyPresenterDocumentUpdate(message);
+            return;
+          }
+          if (presenterWaveViewActive) return;
+          if (message.type !== 'visualwavedrom-presenter-ready'
+              && message.type !== 'visualwavedrom-presenter-heartbeat'
+              && message.type !== 'visualwavedrom-presenter-closed') return;
+          if (currentWaveLibraryId && message.libraryId
+              && message.libraryId !== currentWaveLibraryId) return;
+          const waveId = String(message.waveId || '');
+          if (!waveId) return;
+          if (message.type === 'visualwavedrom-presenter-closed') {
+            presenterLiveSubscribers.delete(waveId);
+            return;
+          }
+          presenterLiveSubscribers.set(waveId, Date.now());
+          if (message.type === 'visualwavedrom-presenter-ready') {
+            schedulePresenterDocumentSync(waveId);
+          }
+        });
+        if (presenterWaveViewActive) {
+          presenterLiveHeartbeatTimer = setInterval(() => {
+            announcePresenterPresence('visualwavedrom-presenter-heartbeat');
+          }, 10000);
+          window.addEventListener('beforeunload', () => {
+            announcePresenterPresence('visualwavedrom-presenter-closed');
+            clearInterval(presenterLiveHeartbeatTimer);
+          }, { once: true });
+        }
+      } catch (_error) {
+        presenterLiveSyncChannel = null;
+      }
+    }
+
     function initScopeWindowSync() {
       window.addEventListener('message', (event) => {
         const message = event.data || {};
@@ -15008,6 +15340,34 @@ ${lines.join('\n')}`;
               phase: 'import-apply-error',
               message: error && error.message ? error.message : String(error)
             });
+          });
+          return;
+        }
+        if (message.type === 'visualwavedrom-presenter-document-update') {
+          applyPresenterDocumentUpdate(message);
+          return;
+        }
+        if (message.type === 'visualwavedrom-presenter-source-request') {
+          const state = presenterWindowOpenStates.get(String(message.presenterToken || ''));
+          if (!state || state.documentName !== String(message.waveId || '') || !event.source) return;
+          const sourcePromise = typeof state.getSourcePromise === 'function'
+            ? state.getSourcePromise()
+            : state.promise;
+          if (!sourcePromise) return;
+          sourcePromise.then((documentSnapshot) => {
+            event.source.postMessage({
+              type: 'visualwavedrom-presenter-source-response',
+              presenterToken: message.presenterToken,
+              libraryId: currentWaveLibraryId,
+              libraryFile: currentWaveLibraryFile,
+              document: documentSnapshot
+            }, '*');
+          }).catch((error) => {
+            event.source.postMessage({
+              type: 'visualwavedrom-presenter-source-response',
+              presenterToken: message.presenterToken,
+              error: error && error.message ? error.message : String(error)
+            }, '*');
           });
           return;
         }
@@ -17630,6 +17990,9 @@ ${lines.join('\n')}`;
           renderBigWaveNavigator();
           lastRenderedWaveText = jsonText;
           lastRenderedWaveSource = fullSource;
+          if (editingWaveDocumentName) {
+            schedulePresenterDocumentSync(editingWaveDocumentName);
+          }
           vwdMark('renderWaveform:done');
           if (!isInsertingEdge && !waveformRenderingBusy) {
             setStatus(true, '波形已更新');
@@ -18796,6 +19159,14 @@ ${lines.join('\n')}`;
       scopeButton.addEventListener('click', () => {
         void openWaveDocumentInScopeWindow(documentName);
       });
+      const presenterButton = document.createElement('button');
+      presenterButton.type = 'button';
+      presenterButton.className = 'wave-document-presenter';
+      presenterButton.title = '在独立只读窗口中讲解此波形';
+      presenterButton.textContent = '演讲者模式';
+      presenterButton.addEventListener('click', () => {
+        void openWaveDocumentInPresenterWindow(documentName);
+      });
       const openButton = document.createElement('button');
       openButton.type = 'button';
       openButton.className = 'wave-document-open';
@@ -18842,6 +19213,7 @@ ${lines.join('\n')}`;
       header.appendChild(title);
       header.appendChild(screenshotButton);
       header.appendChild(scopeButton);
+      header.appendChild(presenterButton);
       header.appendChild(openButton);
       if (!singleWaveViewActive) header.appendChild(singleOpenButton);
       header.appendChild(deleteButton);
@@ -21668,6 +22040,7 @@ ${lines.join('\n')}`;
 
     function startScopeWaveViewPage() {
       initScopeWindowSync();
+      initPresenterLiveSyncChannel();
       setStatus(true, '示波器加载中');
       initWaveLibrarySyncChannel();
       let libraryReadyPromise = null;
@@ -21715,8 +22088,54 @@ ${lines.join('\n')}`;
         });
     }
 
+    function startPresenterWaveViewPage() {
+      initScopeWindowSync();
+      initPresenterLiveSyncChannel();
+      setStatus(true, '演讲者模式加载中');
+      initWaveLibrarySyncChannel();
+      let libraryReadyPromise = null;
+      const ensureLibraryReady = () => {
+        if (libraryReadyPromise) return libraryReadyPromise;
+        const bootstrap = window.__visualWaveDromPresenterBootstrap;
+        if (bootstrap && typeof bootstrap.setStage === 'function') {
+          bootstrap.setStage('正在载入波形库...');
+        }
+        libraryReadyPromise = Promise.resolve()
+          .then(() => initializeWaveLibrary())
+          .finally(() => {
+            waveLibraryInitializationPending = false;
+          });
+        return libraryReadyPromise;
+      };
+      vwdDebugLog('presenter-view', {
+        phase: 'bootstrap-start',
+        hasOpenerSource: !!(requestedPresenterToken && window.opener && !window.opener.closed)
+      });
+      void initializePresenterWaveView({ ensureLibraryReady }).catch((error) => {
+        setStatus(false, '演讲者模式加载失败');
+        const bootstrap = window.__visualWaveDromPresenterBootstrap;
+        if (bootstrap && typeof bootstrap.setStage === 'function') {
+          bootstrap.setStage('演讲者模式加载失败：' + (error.message || String(error)));
+        }
+        vwdDebugLog('presenter-view', {
+          phase: 'initialize-error',
+          message: error && error.message ? error.message : String(error)
+        });
+        if (!document.getElementById('presenter-app')
+            && window.VisualWaveDromPresenter
+            && typeof window.VisualWaveDromPresenter.mount === 'function') {
+          return window.VisualWaveDromPresenter.mount({
+            getDocument: async () => { throw error; },
+            log: vwdDebugLog
+          }).catch(() => {});
+        }
+        return null;
+      });
+    }
+
     function startNormalWaveViewPage() {
       initScopeWindowSync();
+      initPresenterLiveSyncChannel();
       migrateSessionStorageToLocal(WAVE_EDIT_MODE_KEY);
       migrateSessionStorageToLocal(BACK_BTN_POS_KEY);
       migrateSessionStorageToLocal(NAV_SIDEBAR_WIDTH_KEY);
@@ -21754,7 +22173,9 @@ ${lines.join('\n')}`;
       });
     }
 
-    if (scopeWaveViewActive) {
+    if (presenterWaveViewActive) {
+      startPresenterWaveViewPage();
+    } else if (scopeWaveViewActive) {
       startScopeWaveViewPage();
     } else if (document.readyState === 'complete') {
       startNormalWaveViewPage();

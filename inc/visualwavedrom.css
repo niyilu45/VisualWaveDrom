@@ -1326,6 +1326,20 @@
       white-space: nowrap;
     }
 
+    .wave-document-presenter {
+      min-width: 74px;
+      height: 26px;
+      flex: 0 0 auto;
+      padding: 0 9px;
+      border: 1px solid #8ab7df;
+      border-radius: 4px;
+      background: #f1f7fc;
+      color: #185f9b;
+      cursor: pointer;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
     .app.text-edit-mode .wave-document-card.focused .wave-document-card-header h2.editable {
       cursor: text;
       border-radius: 3px;
@@ -1359,7 +1373,8 @@
 
     .wave-document-open:hover,
     .wave-document-open-single:hover,
-    .wave-document-scope:hover {
+    .wave-document-scope:hover,
+    .wave-document-presenter:hover {
       border-color: #3b82f6;
       color: #1d4ed8;
     }
@@ -4732,6 +4747,7 @@
     .wave-document-open,
     .wave-document-open-single,
     .wave-document-scope,
+    .wave-document-presenter,
     .wave-document-delete {
       min-height: 28px;
       border-radius: 5px;
@@ -4765,6 +4781,18 @@
       border-color: #35a96d;
       background: #e8f7ee;
       color: #0e5d32;
+    }
+
+    .wave-document-presenter {
+      border-color: #8ab7df;
+      background: #eef6fd;
+      color: #185f9b;
+    }
+
+    .wave-document-presenter:hover {
+      border-color: #3f8fce;
+      background: #e3f1fc;
+      color: #124f81;
     }
 
     .wave-document-canvas {
