@@ -339,6 +339,88 @@ body.presenter-wave-view > .scope-bootstrap {
   overflow: hidden;
 }
 
+.presenter-stage-panes {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  overflow: hidden;
+  background: #bdc9d1;
+}
+
+.presenter-stage-panes.split-rows {
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+  row-gap: 4px;
+}
+
+.presenter-stage-panes.split-columns {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 4px;
+}
+
+.presenter-stage-pane {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  overflow: hidden;
+}
+
+.presenter-stage-pane[hidden] {
+  display: none;
+}
+
+.presenter-stage-panes:is(.split-rows, .split-columns) .presenter-stage-pane.active::after {
+  content: '';
+  position: absolute;
+  z-index: 8;
+  inset: 0;
+  border: 1px solid #2775b8;
+  pointer-events: none;
+}
+
+.presenter-split-options {
+  width: 220px;
+  max-width: calc(100vw - 16px);
+}
+
+.presenter-split-options fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.presenter-split-modes {
+  display: grid;
+  gap: 4px;
+}
+
+.presenter-split-modes label {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+.presenter-split-modes label:hover,
+.presenter-split-modes label:focus-within {
+  background: #e7f1f8;
+}
+
+.presenter-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
 .presenter-stage-viewport {
   position: relative;
   min-width: 0;
@@ -601,6 +683,7 @@ body.presenter-wave-view > .scope-bootstrap {
   left: 0;
   display: none;
   overflow: hidden;
+  contain: layout paint;
   border-right: 1px solid #d1d8de;
   background: rgba(255, 255, 255, 0.97);
   pointer-events: none;
@@ -1495,13 +1578,17 @@ body.presenter-wave-view > .scope-bootstrap {
   .presenter-popover,
   .presenter-laser,
   .presenter-pointer-pulse,
-  .presenter-live-status {
+  .presenter-live-status,
+  .presenter-stage-pane + .presenter-stage-pane,
+  .presenter-stage-pane::after {
     display: none !important;
   }
 
   .presenter-app,
   .presenter-workspace,
   .presenter-stage-shell,
+  .presenter-stage-panes,
+  .presenter-stage-pane,
   .presenter-stage-viewport {
     width: 100%;
     height: auto;

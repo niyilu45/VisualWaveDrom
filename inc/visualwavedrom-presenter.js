@@ -25,6 +25,7 @@
     ['step-next', '下一步', 'd'], ['step-add', '新增步骤', 'f'],
     ['fit', '适应窗口', 'z'], ['notes', '讲解备注', 'x'],
     ['copy-image', '复制图片', 'c'], ['fullscreen', '全屏', 'v'],
+    ['split', '分屏', ''], ['split-close', '关闭分屏选项', ''],
     ['save', '保存演讲步骤', 'Ctrl+s'], ['undo', '撤销标注', 'Ctrl+z'],
     ['redo', '重做标注', 'Ctrl+Shift+z'], ['settings', '设置', 'Shift+1'],
     ['shape-style', '画笔与图形样式', 'Shift+2'], ['clear', '清除标注', 'Shift+3'],
@@ -49,6 +50,7 @@
   ];
 
   const ICONS = {
+    split: '<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 12h18"/>',
     settings: '<path d="M20 7h-9M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/>',
     close: '<path d="M18 6 6 18M6 6l12 12"/>',
     fullscreen: '<path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/>',
@@ -299,6 +301,12 @@
       this.laneBounds = [];
       this.rowKeys = [];
       this.rowKeyIndices = new Map();
+      this.frozenLabelData = [];
+      this.frozenLabelNodes = [];
+      this.frozenLabelView = null;
+      this.frozenLabelsActive = false;
+      this.viewportFrame = 0;
+      this.split = null;
       this.tool = '';
       this.activeCursor = 'A';
       this.annotations = emptyAnnotations();
@@ -423,6 +431,7 @@
         + '    <span class="presenter-save-state" id="presenter-save-state" role="status" aria-live="polite"></span>'
         + buttonMarkup('save', 'save', '保存', '保存演讲步骤')
         + buttonMarkup('fit', 'fit', '适应窗口', '适应窗口')
+        + '    <button type="button" class="presenter-button" data-action="split" title="分屏" aria-haspopup="dialog" aria-controls="presenter-split-options" aria-expanded="false" disabled>' + icon('split') + '<span>分屏</span></button>'
         + '    <button type="button" class="presenter-button" data-action="copy-image" title="复制图片" aria-haspopup="dialog" aria-controls="presenter-copy-options" aria-expanded="false" disabled>' + icon('image') + '<span>复制图片</span></button>'
         + buttonMarkup('notes', 'notes', '讲解备注', '显示或隐藏讲解备注')
         + '    <button type="button" class="presenter-icon-button" data-action="notes-restore" title="恢复备注到当前窗口" aria-label="恢复备注" hidden>' + icon('restore') + '</button>'
@@ -434,6 +443,7 @@
         + '<div class="presenter-workspace" id="presenter-workspace">'
         + '  <main class="presenter-stage-shell">'
         + '    <div class="presenter-live-status" id="presenter-live-status" aria-live="polite" hidden></div>'
+        + '    <div class="presenter-stage-panes" id="presenter-stage-panes"><section class="presenter-stage-pane active" id="presenter-stage-primary" aria-label="波形分区 1">'
         + '    <div class="presenter-stage-viewport" id="presenter-stage-viewport" tabindex="0" aria-label="波形演讲与标注区域">'
         + '      <div class="presenter-stage-content" id="presenter-stage-content">'
         + '        <div class="presenter-wave-surface" id="presenter-wave-surface">'
@@ -451,8 +461,9 @@
         + '          </section>'
         + '        </div>'
         + '      </div>'
-        + '      <div class="presenter-frozen-labels" id="presenter-frozen-labels" aria-hidden="true"></div>'
         + '    </div>'
+        + '    <div class="presenter-frozen-labels" id="presenter-frozen-labels" aria-hidden="true"></div>'
+        + '    </section></div>'
         + '    <div class="presenter-stage-message" id="presenter-stage-message"><div><strong id="presenter-stage-message-title">正在加载</strong><span id="presenter-stage-message-detail"></span></div></div>'
         + '  </main>'
         + '  <aside class="presenter-notes" id="presenter-notes" aria-label="讲解备注">'
@@ -486,6 +497,14 @@
         + '    <span class="presenter-measurement" id="presenter-measure-delta">B-A: --</span>'
         + '  </div>'
         + '</footer>'
+        + '<section class="presenter-popover presenter-split-options" id="presenter-split-options" role="dialog" aria-label="分屏方式" hidden>'
+        + '  <div class="presenter-popover-header"><strong>分屏方式</strong><button type="button" class="presenter-icon-button" data-action="split-close" title="关闭" aria-label="关闭分屏选项">' + icon('close') + '</button></div>'
+        + '  <fieldset><legend class="presenter-visually-hidden">布局</legend><div class="presenter-split-modes">'
+        + '    <label><input type="radio" name="presenter-split-mode" value="none" checked><span>不分屏</span></label>'
+        + '    <label title="上下滚动独立，左右滚动同步"><input type="radio" name="presenter-split-mode" value="rows"><span>上下分屏</span></label>'
+        + '    <label title="左右滚动独立，上下滚动同步"><input type="radio" name="presenter-split-mode" value="columns"><span>左右分屏</span></label>'
+        + '  </div></fieldset>'
+        + '</section>'
         + '<section class="presenter-popover presenter-settings" id="presenter-settings" role="dialog" aria-labelledby="presenter-settings-title" hidden>'
         + '  <div class="presenter-popover-header"><strong id="presenter-settings-title">设置</strong><button type="button" class="presenter-icon-button" data-action="settings-close" title="关闭设置" aria-label="关闭设置">' + icon('close') + '</button></div>'
         + '  <h2>快捷键</h2><div class="presenter-shortcut-list">'
@@ -553,6 +572,8 @@
       this.display = app.querySelector('#presenter-wave-display');
       this.overlay = app.querySelector('#presenter-overlay');
       this.frozenLabels = app.querySelector('#presenter-frozen-labels');
+      this.splitButton = app.querySelector('[data-action="split"]');
+      this.splitOptions = app.querySelector('#presenter-split-options');
       this.stageMessage = app.querySelector('#presenter-stage-message');
       this.stageMessageTitle = app.querySelector('#presenter-stage-message-title');
       this.stageMessageDetail = app.querySelector('#presenter-stage-message-detail');
@@ -600,6 +621,7 @@
       this.textMeasure = app.querySelector('#presenter-text-measure');
       this.textActions = app.querySelector('#presenter-text-actions');
       this.laser = app.querySelector('#presenter-laser');
+      if (root.VisualWaveDromPresenterSplit) this.split = root.VisualWaveDromPresenterSplit.create(this);
       this.libraryEl.textContent = this.adapter.libraryName || 'SQLite 波形库';
       if (document.documentElement.clientWidth < 760) this.workspace.classList.add('notes-collapsed');
       this.updateNotesControls();
@@ -723,33 +745,7 @@
       this.shapeWidthInput.addEventListener('change', () => { this.lastHistoryEdit = null; });
       this.shapeWidthInput.addEventListener('wheel', (event) => this.handleShapeWheel(event), { passive: false });
       this.shapeStyleButton.addEventListener('wheel', (event) => this.handleShapeWheel(event), { passive: false });
-      this.viewport.addEventListener('scroll', () => {
-        this.updateFrozenLabels();
-        if (this.textEdit) this.positionTextEditor();
-      }, { passive: true });
-      this.viewport.addEventListener('wheel', (event) => this.handleWheel(event), { passive: false });
-      this.viewport.addEventListener('pointermove', (event) => this.moveLaser(event), { passive: true });
-      this.viewport.addEventListener('pointerleave', () => this.hideLaser());
-      this.viewport.addEventListener('pointerdown', (event) => {
-        if (this.tool === 'pointer' && event.button === 0 && event.isPrimary !== false && !this.drag) {
-          if (this.pointerClearMode === 'single') this.clearPointerStroke();
-          this.pulseLaser(event);
-        }
-      }, true);
-      this.overlay.addEventListener('pointerdown', (event) => {
-        if (this.tool && this.tool !== 'pointer') this.syncBeforeUnload(true);
-        this.handleOverlayPointerDown(event);
-      });
-      this.viewport.addEventListener('pointerdown', (event) => this.handleViewportPointerDown(event));
-      this.viewport.addEventListener('pointermove', (event) => this.handleOverlayPointerMove(event));
-      this.viewport.addEventListener('pointerup', (event) => this.handleOverlayPointerUp(event));
-      this.viewport.addEventListener('dblclick', (event) => this.handlePointerDoubleClick(event));
-      this.viewport.addEventListener('pointercancel', (event) => {
-        if (this.drag && this.drag.pointerId === event.pointerId) this.finishGesture(true);
-      });
-      this.viewport.addEventListener('lostpointercapture', (event) => {
-        if (this.drag && this.drag.pointerId === event.pointerId) this.finishGesture(false);
-      });
+      this.bindStageEvents(this.viewport, this.overlay);
       document.addEventListener('keydown', this.boundKeydown);
       document.addEventListener('pointerdown', this.boundOutside, true);
       document.addEventListener('fullscreenchange', this.boundFullscreen);
@@ -763,11 +759,14 @@
             this.resizeStepTitle();
           }
           if (this.fitMode && this.svg) this.fitToWindow(false);
-          else this.updateFrozenLabels();
+          else if (this.svg && entries.some(entry => entry.target.classList.contains('presenter-stage-viewport'))) {
+            this.setScale(this.scale, false);
+          } else this.updateFrozenLabels();
           if (!this.focusOptions.hidden) this.positionFocusOptions();
           if (!this.shapeOptions.hidden) this.positionShapeOptions();
           if (!this.copyOptions.hidden) this.positionCopyOptions();
           if (!this.settingsOptions.hidden) this.positionSettings();
+          if (this.split) this.split.positionOptions();
           if (this.textEdit) this.positionTextEditor();
         });
         this.resizeObserver.observe(this.viewport);
@@ -776,11 +775,49 @@
         this.resizeObserver.observe(this.copyOptions);
         this.resizeObserver.observe(this.stepTitleInput);
         this.resizeObserver.observe(this.settingsOptions);
+        if (this.splitOptions) this.resizeObserver.observe(this.splitOptions);
       }
+    }
+
+    bindStageEvents(viewport, overlay) {
+      viewport.addEventListener('pointerdown', (event) => {
+        if (this.split && !this.split.activateViewport(viewport)) return;
+        if (this.tool === 'pointer' && event.button === 0 && event.isPrimary !== false && !this.drag) {
+          if (this.pointerClearMode === 'single') this.clearPointerStroke();
+          this.pulseLaser(event);
+        }
+      }, true);
+      viewport.addEventListener('focusin', () => {
+        if (this.split) this.split.activateViewport(viewport);
+      });
+      viewport.addEventListener('scroll', () => {
+        if (this.split) this.split.syncScroll(viewport);
+        this.scheduleViewportUpdate();
+      }, { passive: true });
+      viewport.addEventListener('wheel', (event) => {
+        if (!this.split || this.split.activateViewport(viewport)) this.handleWheel(event);
+      }, { passive: false });
+      viewport.addEventListener('pointermove', (event) => this.moveLaser(event), { passive: true });
+      viewport.addEventListener('pointerleave', () => this.hideLaser());
+      overlay.addEventListener('pointerdown', (event) => {
+        if (this.tool && this.tool !== 'pointer') this.syncBeforeUnload(true);
+        this.handleOverlayPointerDown(event);
+      });
+      viewport.addEventListener('pointerdown', (event) => this.handleViewportPointerDown(event));
+      viewport.addEventListener('pointermove', (event) => this.handleOverlayPointerMove(event));
+      viewport.addEventListener('pointerup', (event) => this.handleOverlayPointerUp(event));
+      viewport.addEventListener('dblclick', (event) => this.handlePointerDoubleClick(event));
+      viewport.addEventListener('pointercancel', (event) => {
+        if (this.drag && this.drag.pointerId === event.pointerId) this.finishGesture(true);
+      });
+      viewport.addEventListener('lostpointercapture', (event) => {
+        if (this.drag && this.drag.pointerId === event.pointerId) this.finishGesture(false);
+      });
     }
 
     handleAction(action) {
       if (action !== 'text-cancel') this.finishTextEdit(true);
+      if (this.split && action !== 'split' && action !== 'split-close') this.split.close(false);
       if (!['settings', 'settings-close', 'shortcuts-reset'].includes(action)) this.closeSettings(false);
       if (action === 'settings') {
         if (this.settingsOptions.hidden) this.openSettings();
@@ -804,6 +841,11 @@
         void this.toggleFullscreen();
       } else if (action === 'fit') {
         this.fitToWindow(true);
+      } else if (action === 'split') {
+        if (this.split) this.split.toggleOptions();
+        else this.showToast('分屏模块未加载，请刷新页面后重试。', true);
+      } else if (action === 'split-close') {
+        if (this.split) this.split.close(true);
       } else if (action === 'copy-image') {
         this.openCopyOptions();
       } else if (action === 'copy-close') {
@@ -1148,7 +1190,8 @@
         scale: this.scale,
         fitMode: this.fitMode,
         scrollLeft: this.viewport.scrollLeft,
-        scrollTop: this.viewport.scrollTop
+        scrollTop: this.viewport.scrollTop,
+        splitView: this.split ? this.split.snapshot() : null
       } : null;
       this.setStageMessage('正在生成只读波形...', '正在更新演讲画面');
       await new Promise(function (resolve) { requestAnimationFrame(resolve); });
@@ -1181,13 +1224,18 @@
         this.overlay.setAttribute('height', this.svgMetrics.height);
         this.overlay.style.width = this.svgMetrics.width + 'px';
         this.overlay.style.height = this.svgMetrics.height + 'px';
+        if (this.split) this.split.refreshWave();
         this.collectGeometry();
         if (previousView && !previousView.fitMode) {
           this.fitMode = false;
           this.setScale(previousView.scale, false);
           requestAnimationFrame(() => {
-            this.viewport.scrollLeft = previousView.scrollLeft;
-            this.viewport.scrollTop = previousView.scrollTop;
+            if (this.destroyed || sequence !== this.renderSequence) return;
+            if (this.split && previousView.splitView) this.split.restorePositions(previousView.splitView);
+            else {
+              this.viewport.scrollLeft = previousView.scrollLeft;
+              this.viewport.scrollTop = previousView.scrollTop;
+            }
             this.updateFrozenLabels();
           });
         } else {
@@ -1229,46 +1277,109 @@
       this.buildFrozenLabels();
     }
 
+    forEachPane(callback, includeHidden) {
+      if (this.split) this.split.forEachPane(callback, includeHidden);
+      else callback();
+    }
+
     buildFrozenLabels() {
-      this.frozenLabels.innerHTML = '';
-      if (!this.svg) return;
-      const infoTexts = Array.prototype.slice.call(this.svg.querySelectorAll('text.info'));
+      const labels = [];
+      const infoTexts = this.svg ? Array.prototype.slice.call(this.svg.querySelectorAll('text.info')) : [];
       infoTexts.forEach((text) => {
         const bounds = getElementBounds(text);
         if (!bounds || !String(text.textContent || '').trim()) return;
-        const label = document.createElement('span');
-        label.className = 'presenter-frozen-label';
-        label.textContent = text.textContent;
-        label.dataset.svgY = String(bounds.y + bounds.height / 2);
-        this.frozenLabels.appendChild(label);
+        labels.push({ text: text.textContent, y: bounds.y + bounds.height / 2 });
       });
+      this.frozenLabelData = labels.sort((left, right) => left.y - right.y);
+      this.forEachPane(() => {
+        this.frozenLabelNodes = [];
+        this.frozenLabelView = null;
+        this.frozenLabels.innerHTML = '';
+      }, true);
       this.updateFrozenLabels();
       if (this.textEdit) this.positionTextEditor();
     }
 
+    scheduleViewportUpdate() {
+      if (this.viewportFrame || this.destroyed) return;
+      this.viewportFrame = requestAnimationFrame(() => {
+        this.viewportFrame = 0;
+        if (this.destroyed) return;
+        this.flushCanvasPan();
+        this.updateFrozenLabels();
+        if (this.textEdit) this.positionTextEditor();
+      });
+    }
+
     updateFrozenLabels() {
-      if (!this.svg || !this.svgMetrics || !this.plotBounds) return;
-      const horizontalOverflow = this.viewport.scrollWidth > this.viewport.clientWidth + 4;
-      const active = horizontalOverflow && this.viewport.scrollLeft > 4
-        && this.frozenLabels.childElementCount > 0;
-      this.frozenLabels.classList.toggle('active', active);
+      this.forEachPane(() => this.updateFrozenPaneLabels());
+    }
+
+    updateFrozenPaneLabels() {
+      if (!this.frozenLabels || !this.svg || !this.svgMetrics || !this.plotBounds) return;
+      // Read the scrollport once, before changing any label styles.
+      const viewportWidth = this.viewport.clientWidth;
+      const height = this.viewport.clientHeight;
+      const scrollWidth = this.viewport.scrollWidth;
+      const scrollLeft = this.viewport.scrollLeft;
+      const scrollTop = this.viewport.scrollTop;
+      const labels = this.frozenLabelData;
+      const active = scrollWidth > viewportWidth + 4 && scrollLeft > 4 && labels.length > 0;
+      if (active !== this.frozenLabelsActive) {
+        this.frozenLabels.classList.toggle('active', active);
+        this.frozenLabelsActive = active;
+      }
       if (!active) return;
       const offsetY = parseFloat(this.surface.style.top) || 0;
-      const plotPixelX = (this.plotBounds.x - this.svgMetrics.x)
-        / this.svgMetrics.width * this.svgMetrics.width * this.scale;
-      const width = clamp(plotPixelX + 4, 84, 230);
-      this.frozenLabels.style.width = width + 'px';
-      this.frozenLabels.style.height = this.viewport.clientHeight + 'px';
-      Array.prototype.forEach.call(this.frozenLabels.children, (label) => {
-        const svgY = Number(label.dataset.svgY);
-        const y = offsetY + (svgY - this.svgMetrics.y) * this.scale - this.viewport.scrollTop;
-        label.style.top = (y - 9) + 'px';
-        label.hidden = y < -18 || y > this.viewport.clientHeight + 18;
-      });
+      const scale = this.scale;
+      const originY = this.svgMetrics.y;
+      const width = clamp((this.plotBounds.x - this.svgMetrics.x) * scale + 4, 84, 230);
+      const previous = this.frozenLabelView;
+      if (!previous || previous.width !== width) this.frozenLabels.style.width = width + 'px';
+      if (!previous || previous.height !== height) this.frozenLabels.style.height = height + 'px';
+      if (previous && previous.scrollTop === scrollTop && previous.offsetY === offsetY
+          && previous.scale === scale && previous.originY === originY && previous.height === height) return;
+
+      // Only materialize visible names. Horizontal pan reuses the existing layout entirely.
+      const minimumY = originY + (scrollTop - offsetY - 18) / scale;
+      const maximumY = originY + (scrollTop - offsetY + height + 18) / scale;
+      let low = 0;
+      let high = labels.length;
+      while (low < high) {
+        const middle = (low + high) >>> 1;
+        if (labels[middle].y < minimumY) low = middle + 1;
+        else high = middle;
+      }
+      let count = 0;
+      for (let index = low; index < labels.length && labels[index].y <= maximumY; index++) {
+        const entry = labels[index];
+        let label = this.frozenLabelNodes[count];
+        if (!label) {
+          label = document.createElement('span');
+          label.className = 'presenter-frozen-label';
+          this.frozenLabels.appendChild(label);
+          this.frozenLabelNodes.push(label);
+        }
+        if (label.textContent !== entry.text) label.textContent = entry.text;
+        const top = (offsetY + (entry.y - originY) * scale - scrollTop - 9) + 'px';
+        if (label.style.top !== top) label.style.top = top;
+        count++;
+      }
+      while (this.frozenLabelNodes.length > count) this.frozenLabelNodes.pop().remove();
+      this.frozenLabelView = { scrollTop: scrollTop, offsetY: offsetY, scale: scale,
+        originY: originY, height: height, width: width };
     }
 
     setScale(scale, centerContent) {
       this.scale = clamp(scale, MIN_SCALE, MAX_SCALE);
+      this.forEachPane(() => this.setPaneScale(centerContent));
+      if (this.annotations.marks.some((mark) => isShapeKind(mark.kind))) this.scheduleAnnotationDraw();
+      if (this.split) this.split.syncScroll(this.viewport, true);
+      this.updateFrozenLabels();
+      if (this.textEdit) this.positionTextEditor();
+    }
+
+    setPaneScale(centerContent) {
       const scaledWidth = this.svgMetrics.width * this.scale;
       const scaledHeight = this.svgMetrics.height * this.scale;
       const left = Math.max(24, (this.viewport.clientWidth - scaledWidth) / 2);
@@ -1278,13 +1389,10 @@
       this.surface.style.transform = 'scale(' + this.scale + ')';
       this.stageContent.style.width = Math.max(this.viewport.clientWidth, scaledWidth + left + 24) + 'px';
       this.stageContent.style.height = Math.max(this.viewport.clientHeight, scaledHeight + top + 20) + 'px';
-      if (this.annotations.marks.some((mark) => isShapeKind(mark.kind))) this.scheduleAnnotationDraw();
       if (centerContent) {
         this.viewport.scrollLeft = Math.max(0, (this.stageContent.scrollWidth - this.viewport.clientWidth) / 2);
         this.viewport.scrollTop = Math.max(0, (this.stageContent.scrollHeight - this.viewport.clientHeight) / 2);
       }
-      this.updateFrozenLabels();
-      if (this.textEdit) this.positionTextEditor();
     }
 
     fitToWindow(showMessage) {
@@ -1312,6 +1420,7 @@
       const ratio = this.scale / oldScale;
       this.viewport.scrollLeft = Math.max(0, contentX * ratio - anchorX);
       this.viewport.scrollTop = Math.max(0, contentY * ratio - anchorY);
+      if (this.split) this.split.syncScroll(this.viewport, true);
       this.updateFrozenLabels();
     }
 
@@ -1341,6 +1450,7 @@
     }
 
     setTool(tool, force) {
+      if (this.split) this.split.close(false);
       const next = String(tool || '');
       this.finishTextEdit(true);
       this.finishGesture(false);
@@ -1392,9 +1502,11 @@
         button.setAttribute('aria-pressed', active ? 'true' : 'false');
       });
       this.focusOptions.querySelectorAll('input').forEach((input) => { input.checked = input.value === this.focusMode; });
-      this.overlay.classList.remove('tool-pointer', 'tool-focus', 'tool-pen', 'tool-eraser', 'tool-text', 'tool-cursor', 'tool-arrow', 'tool-rectangle');
-      if (this.tool) this.overlay.classList.add('tool-' + this.tool);
-      this.viewport.classList.toggle('can-pan', !this.tool);
+      this.forEachPane(() => {
+        this.overlay.classList.remove('tool-pointer', 'tool-focus', 'tool-pen', 'tool-eraser', 'tool-text', 'tool-cursor', 'tool-arrow', 'tool-rectangle');
+        if (this.tool) this.overlay.classList.add('tool-' + this.tool);
+        this.viewport.classList.toggle('can-pan', !this.tool);
+      });
       this.updateCopyControls();
       this.updateShapeControls();
       this.updateHistoryControls();
@@ -1492,6 +1604,8 @@
     }
 
     handleOutsidePointerDown(event) {
+      if (this.split && !this.splitOptions.hidden && !this.splitOptions.contains(event.target)
+          && !event.target.closest('[data-action="split"]')) this.split.close(false);
       if (this.settingsOptions && !this.settingsOptions.hidden && !this.settingsOptions.contains(event.target)
           && !event.target.closest('[data-action="settings"]')) this.closeSettings(false);
       if (this.textEdit && !this.textEditor.contains(event.target)) this.finishTextEdit(true, false);
@@ -1504,6 +1618,7 @@
     }
 
     updateCopyControls() {
+      if (this.split) this.split.updateControls();
       if (!this.copyOptions) return;
       const ready = !!this.svg && !this.copying && !this.gifController;
       this.copyButton.disabled = !ready;
@@ -2065,12 +2180,31 @@
       const dx = event.clientX - drag.startX;
       const dy = event.clientY - drag.startY;
       if (!drag.moved && Math.hypot(dx, dy) < 4) return;
-      drag.moved = true;
-      this.markPick = null;
-      this.viewport.classList.add('is-panning');
-      // Screen deltas stay stable while scrolling changes the SVG coordinate transform.
-      this.viewport.scrollLeft = clamp(drag.left - dx, 0, Math.max(0, this.viewport.scrollWidth - this.viewport.clientWidth));
-      this.viewport.scrollTop = clamp(drag.top - dy, 0, Math.max(0, this.viewport.scrollHeight - this.viewport.clientHeight));
+      if (!drag.moved) {
+        drag.moved = true;
+        this.markPick = null;
+        this.viewport.classList.add('is-panning');
+      }
+      drag.nextLeft = drag.left - dx;
+      drag.nextTop = drag.top - dy;
+      drag.pending = true;
+      this.scheduleViewportUpdate();
+    }
+
+    flushCanvasPan() {
+      const drag = this.drag;
+      if (!drag || drag.kind !== 'pan' || !drag.pending) return;
+      drag.pending = false;
+      // Keep only the latest screen-space delta; read bounds before either scroll write.
+      const maxLeft = Math.max(0, this.viewport.scrollWidth - this.viewport.clientWidth);
+      const maxTop = Math.max(0, this.viewport.scrollHeight - this.viewport.clientHeight);
+      const currentLeft = this.viewport.scrollLeft;
+      const currentTop = this.viewport.scrollTop;
+      const left = clamp(drag.nextLeft, 0, maxLeft);
+      const top = clamp(drag.nextTop, 0, maxTop);
+      if (left !== currentLeft) this.viewport.scrollLeft = left;
+      if (top !== currentTop) this.viewport.scrollTop = top;
+      if (this.split) this.split.syncScroll(this.viewport, true);
     }
 
     moveMark(point) {
@@ -2259,18 +2393,20 @@
       this.clearPointerStroke();
     }
 
-    discardPointerStroke() {
+    discardPointerStroke(skipSync) {
       cancelAnimationFrame(this.pointerStrokeFrame);
       this.pointerStrokeFrame = 0;
       this.pointerStroke = [];
       if (this.pointerInk) this.pointerInk.remove();
       this.pointerInk = null;
+      if (this.split && !skipSync) this.split.syncAnnotations();
     }
 
     clearPointerStroke() {
-      this.discardPointerStroke();
+      this.discardPointerStroke(true);
       this.pointerStrokes.forEach((stroke) => { if (stroke.ink) stroke.ink.remove(); });
       this.pointerStrokes = [];
+      if (this.split) this.split.syncAnnotations();
     }
 
     schedulePointerStrokeDraw() {
@@ -2281,7 +2417,7 @@
       });
     }
 
-    drawPointerStroke() {
+    drawPointerStroke(skipSync) {
       cancelAnimationFrame(this.pointerStrokeFrame);
       this.pointerStrokeFrame = 0;
       if (!this.overlay || !this.svgMetrics) return;
@@ -2302,12 +2438,16 @@
       this.pointerStrokes.forEach((stroke) => {
         if (!stroke.ink || stroke.ink.parentNode !== this.overlay) stroke.ink = appendInk(stroke.points, stroke.color);
       });
-      if (this.pointerStroke.length < 2) return;
+      if (this.pointerStroke.length < 2) {
+        if (this.split && !skipSync) this.split.syncAnnotations();
+        return;
+      }
       if (!this.pointerInk || this.pointerInk.parentNode !== this.overlay) {
         this.pointerInk = appendInk(this.pointerStroke, this.pointerStrokeColor);
       } else {
         this.pointerInk.setAttribute('d', pathData(this.pointerStroke));
       }
+      if (this.split && !skipSync) this.split.syncAnnotations();
     }
 
     scheduleAnnotationDraw() {
@@ -2494,6 +2634,11 @@
     finishGesture(cancel, completeClick) {
       if (!this.drag) return;
       const drag = this.drag;
+      if (drag.kind === 'pan') {
+        cancelAnimationFrame(this.viewportFrame);
+        this.viewportFrame = 0;
+        if (!cancel) this.flushCanvasPan();
+      }
       this.drag = null;
       const capture = drag.kind === 'pan' ? this.viewport : this.overlay;
       try { capture.releasePointerCapture(drag.pointerId); } catch (_error) { /* already released */ }
@@ -2506,6 +2651,9 @@
           if (drag.point) this.pickMark(drag.point);
           else this.selectMark(null);
         }
+        if (this.split) this.split.syncScroll(this.viewport, true);
+        this.updateFrozenLabels();
+        if (this.textEdit) this.positionTextEditor();
         return;
       }
       if (drag.kind === 'pointer') {
@@ -2734,10 +2882,11 @@
       }
       this.drawCursor('A', this.annotations.cursorA);
       this.drawCursor('B', this.annotations.cursorB);
-      this.drawPointerStroke();
+      this.drawPointerStroke(true);
       this.drawMarkSelection();
       this.updateMeasurements();
       this.updateCopyControls();
+      if (this.split) this.split.syncAnnotations();
     }
 
     drawCursor(name, cycle) {
@@ -2824,7 +2973,7 @@
     }
 
     captureStep() {
-      return {
+      const step = {
         title: DEFAULT_STEP_TITLE,
         notes: this.notesText.value,
         annotations: cloneValue(this.annotations),
@@ -2838,6 +2987,8 @@
         scrollLeft: this.viewport.scrollLeft,
         scrollTop: this.viewport.scrollTop
       };
+      if (this.split) step.splitView = this.split.snapshot();
+      return step;
     }
 
     storeCurrentStep() {
@@ -3029,13 +3180,18 @@
         await this.renderWave({ preserveView: false });
       }
       if (this.destroyed || this.stepIndex !== index) return;
+      if (this.split) this.split.setMode(step.splitView ? step.splitView.mode : 'none', true);
       this.fitMode = !!step.fitMode;
       if (this.fitMode) this.fitToWindow(false);
       else this.setScale(step.scale || 1, false);
       requestAnimationFrame(() => {
         if (this.destroyed || this.stepIndex !== index) return;
-        this.viewport.scrollLeft = step.scrollLeft || 0;
-        this.viewport.scrollTop = step.scrollTop || 0;
+        if (this.split && step.splitView) this.split.restorePositions(step.splitView);
+        else {
+          this.viewport.scrollLeft = step.scrollLeft || 0;
+          this.viewport.scrollTop = step.scrollTop || 0;
+          if (this.split) this.split.syncScroll(this.viewport, true);
+        }
         this.drawAnnotations();
         this.updateFrozenLabels();
       });
@@ -3137,6 +3293,7 @@
         if (document.activeElement === this.notesText || this.stepTitleEdit || this.textEdit || !this.focusOptions.hidden
             || (this.shapeOptions && !this.shapeOptions.hidden) || (this.copyOptions && !this.copyOptions.hidden)
             || (this.settingsOptions && !this.settingsOptions.hidden)
+            || (this.splitOptions && !this.splitOptions.hidden)
             || (this.exitDialog && !this.exitDialog.hidden) || this.drag) return;
         this.app.classList.add('controls-idle');
       }, 2600);
@@ -3171,6 +3328,10 @@
       }
       if (key === 'escape') {
         event.preventDefault();
+        if (this.split && !this.splitOptions.hidden) {
+          this.split.close(true);
+          return;
+        }
         if (this.copyOptions && !this.copyOptions.hidden) {
           if (!this.copying) this.closeCopyOptions();
           return;
@@ -3208,6 +3369,7 @@
 
     destroy() {
       this.destroyed = true;
+      if (this.split) this.split.destroy();
       if (this.gifController) this.gifController.abort();
       this.clearGifResult();
       this.syncBeforeUnload(false);
@@ -3217,6 +3379,8 @@
       clearTimeout(this.controlsTimer);
       clearTimeout(this.closeTimer);
       cancelAnimationFrame(this.annotationFrame);
+      cancelAnimationFrame(this.viewportFrame);
+      this.viewportFrame = 0;
       this.hideLaser();
       this.clearPointerStroke();
       if (this.resizeObserver) this.resizeObserver.disconnect();
