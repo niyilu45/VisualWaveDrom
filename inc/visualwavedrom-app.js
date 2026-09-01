@@ -18928,6 +18928,16 @@ ${lines.join('\n')}`;
         .replace(/>/g, '&gt;');
     }
 
+    function buildLinkedWaveMarkdown(title, dataUrl, deepLink) {
+      const alt = String(title || 'VisualWaveDrom')
+        .replace(/\\/g, '\\\\')
+        .replace(/\[/g, '\\[')
+        .replace(/\]/g, '\\]')
+        .replace(/[\r\n]+/g, ' ');
+      return '[![' + alt + '](<' + String(dataUrl || '') + '>)](<'
+        + String(deepLink || '') + '>)';
+    }
+
     function downloadBlobFile(blob, fileName) {
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
@@ -19169,9 +19179,10 @@ ${lines.join('\n')}`;
         return false;
       }
       const originalTitle = button.title;
-      const deepLink = mode === 'linked-image' ? getWaveDocumentDeepLink(documentName) : '';
-      if (mode === 'linked-image' && !deepLink) {
-        setStatus(false, '带链接截图仅支持服务模式，并且需要已加载波形库');
+      const needsDeepLink = mode === 'linked-image' || mode === 'linked-markdown';
+      const deepLink = needsDeepLink ? getWaveDocumentDeepLink(documentName) : '';
+      if (needsDeepLink && !deepLink) {
+        setStatus(false, '带链接复制仅支持服务模式，并且需要已加载波形库');
         return false;
       }
 
@@ -19205,6 +19216,30 @@ ${lines.join('\n')}`;
         }
         if (!svg) throw new Error('当前波形图未成功渲染，无法截图');
         const renderPromise = renderWaveSvgScreenshot(svg);
+        if (mode === 'linked-markdown') {
+          const result = await renderPromise;
+          const dataUrl = await blobToDataUrl(result.blob);
+          const titleText = getSavedTagTitle(tag) || 'VisualWaveDrom';
+          const markdown = buildLinkedWaveMarkdown(titleText, dataUrl, deepLink);
+          await copyTextWithFallback(markdown);
+          setStatus(true, 'Markdown 带链接图片已复制：' + titleText);
+          button.classList.add('copied');
+          button.title = 'Markdown 已复制';
+          vwdDebugLog('wave-screenshot', {
+            phase: 'markdown-copied',
+            documentName,
+            width: result.width,
+            height: result.height,
+            blobSize: result.blob.size,
+            markdownLength: markdown.length,
+            link: deepLink
+          });
+          window.setTimeout(() => {
+            button.classList.remove('copied');
+            if (button.dataset.copying !== '1') button.title = originalTitle;
+          }, 1500);
+          return true;
+        }
         if (!canWriteImageClipboard) {
           const result = await renderPromise;
           const titleText = getSavedTagTitle(tag) || 'VisualWaveDrom';
@@ -19270,9 +19305,11 @@ ${lines.join('\n')}`;
         return true;
       } catch (error) {
         const message = error && error.message ? error.message : String(error);
-        setStatus(false, canWriteImageClipboard
-          ? '复制波形图截图失败，请检查浏览器剪贴板权限'
-          : '生成波形图 PNG 失败');
+        setStatus(false, mode === 'linked-markdown'
+          ? '复制 Markdown 带链接图片失败，请检查浏览器剪贴板权限'
+          : (canWriteImageClipboard
+            ? '复制波形图截图失败，请检查浏览器剪贴板权限'
+            : '生成波形图 PNG 失败'));
         vwdDebugLog('wave-screenshot', { phase: 'error', documentName, message });
         return false;
       } finally {
