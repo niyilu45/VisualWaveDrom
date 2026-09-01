@@ -14128,6 +14128,7 @@ ${lines.join('\n')}`;
       if (waveLibraryServerMode) {
         const saved = await flushScheduledWaveLibraryServerSave();
         if (!saved) throw new Error('波形库服务保存失败');
+        await commitCurrentWaveLibraryToServer();
       } else {
         const saved = await flushBrowserWaveLibrarySave({ force: true });
         if (!saved) throw new Error('浏览器 SQLite 保存失败');
@@ -15011,6 +15012,23 @@ ${lines.join('\n')}`;
       } catch (_e) {
         return false;
       }
+    }
+
+    async function commitCurrentWaveLibraryToServer() {
+      if (!waveLibraryServerMode || !currentWaveLibraryId) return false;
+      const response = await fetch('/api/wave-library-commit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ libraryId: currentWaveLibraryId })
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.ok) throw new Error(result.error || 'library commit failed');
+      vwdDebugLog('persistence', {
+        phase: 'library-commit',
+        libraryId: currentWaveLibraryId,
+        file: result.file || currentWaveLibraryFile
+      });
+      return true;
     }
 
     async function ensureBrowserWaveLibraryStore() {
@@ -21185,7 +21203,8 @@ ${lines.join('\n')}`;
       if (singleWaveViewActive) {
         try {
           flushPersistEditorJson();
-          return await saveSingleWaveDocumentToServer();
+          const saved = await saveSingleWaveDocumentToServer();
+          return saved && await commitCurrentWaveLibraryToServer();
         } catch (_e) {
           setStatus(false, '波形图同步失败');
           return false;
@@ -21201,6 +21220,7 @@ ${lines.join('\n')}`;
         const pendingMarker = markWaveLibraryServerSavePending();
         const saved = await flushScheduledWaveLibraryServerSave(pendingMarker);
         if (!saved) throw new Error('save failed');
+        await commitCurrentWaveLibraryToServer();
         setStatus(true, '已保存波形库：' + currentWaveLibraryFile);
         return true;
       } catch (_e) {

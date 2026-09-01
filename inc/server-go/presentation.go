@@ -88,9 +88,15 @@ func (s *service) handlePresentation(writer http.ResponseWriter, request *http.R
 		sendJSON(writer, 404, map[string]any{"error": "Wave document not found"})
 		return
 	}
+	s.libraryMu.Lock()
+	defer s.libraryMu.Unlock()
 	status, err := s.store.savePresentation(filePath, payload.WaveID, payload.Expected, payload.Presentation)
 	if err != nil {
 		sendJSON(writer, status, map[string]any{"error": err.Error()})
+		return
+	}
+	if _, err = s.commitWorkingLibraryLocked(payload.LibraryID); err != nil {
+		sendJSON(writer, 500, map[string]any{"error": err.Error()})
 		return
 	}
 	sendJSON(writer, 200, map[string]any{"ok": true, "presentation": payload.Presentation})

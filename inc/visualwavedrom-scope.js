@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260817-formula-cache-v2';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260901-clock-half-cycle-v1';
   const FormulaEngine = global.VisualWaveDromFormula || null;
   const DEFAULT_ROW_HEIGHT = 42;
   const DEFAULT_MULTI_WAVE_ROW_HEIGHT = 68;
@@ -4885,8 +4885,8 @@
         const x = this.xForColumn(column, width);
         context.strokeStyle = '#8f959e';
         context.beginPath();
-        context.moveTo(x + 0.5, height - 8);
-        context.lineTo(x + 0.5, height);
+        context.moveTo(x, height - 8);
+        context.lineTo(x, height);
         context.stroke();
         context.fillText(this.formatTime(column), x, 5);
       }
@@ -4907,8 +4907,8 @@
         const isMajor = Math.abs(column / major - Math.round(column / major)) < 1e-7;
         context.strokeStyle = isMajor ? '#d4d8dd' : '#eef0f2';
         context.beginPath();
-        context.moveTo(Math.round(x) + 0.5, 0);
-        context.lineTo(Math.round(x) + 0.5, height);
+        context.moveTo(x, 0);
+        context.lineTo(x, height);
         context.stroke();
       }
     }

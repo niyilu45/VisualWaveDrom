@@ -738,16 +738,19 @@ func TestWaveDocumentHTTPRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	libraryPath := filepath.Join(root, "Wave", "test-library", "library.sqlite")
+	tempDir := filepath.Join(root, ".tmp")
 	configuration := config{
 		rootDir: root, htmlName: htmlName, htmlPath: filepath.Join(root, htmlName),
 		configuredLibrary: libraryPath, configuredName: "test-library",
-		waveDir: filepath.Join(root, "Wave"), statePath: filepath.Join(root, "Wave", ".visualwavedrom-state.json"),
-		noOpen: true, port: 0,
+		waveDir: filepath.Join(root, "Wave"), tempDir: tempDir,
+		statePath: filepath.Join(tempDir, ".visualwavedrom-state.json"),
+		noOpen:    true, port: 0,
 	}
 	instance, err := newService(configuration)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer instance.cleanupTemporaryFiles()
 	server := httptest.NewServer(instance.routes())
 	defer server.Close()
 
@@ -762,6 +765,10 @@ func TestWaveDocumentHTTPRoundTrip(t *testing.T) {
 	loaded := requestJSON(t, http.MethodGet, server.URL+"/api/wave-document?libraryId="+
 		urlQueryEscape(libraryID)+"&waveId="+urlQueryEscape(waveID), nil)
 	document := loaded["document"].(map[string]any)
+	sourceBefore, err := instance.store.readDocument(libraryPath, waveID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	payload := map[string]any{
 		"libraryId": libraryID, "waveId": waveID,
 		"expectedRevision": document["revision"],
@@ -776,6 +783,97 @@ func TestWaveDocumentHTTPRoundTrip(t *testing.T) {
 	savedDocument := saved["document"].(map[string]any)
 	if savedDocument["hscale"] != 1.5 || intValue(savedDocument["revision"], -1) != 1 {
 		t.Fatalf("document was not updated: %#v", savedDocument)
+	}
+	sourceUnsaved, err := instance.store.readDocument(libraryPath, waveID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sourceUnsaved["hscale"] != sourceBefore["hscale"] ||
+		intValue(sourceUnsaved["revision"], -1) != intValue(sourceBefore["revision"], -1) {
+		t.Fatalf("editing changed the Wave source before explicit save: %#v", sourceUnsaved)
+	}
+	workingPath := instance.libraryPathByID(libraryID)
+	if relative, relativeErr := filepath.Rel(tempDir, workingPath); relativeErr != nil ||
+		strings.HasPrefix(relative, "..") {
+		t.Fatalf("working library is outside .tmp: %q", workingPath)
+	}
+	committed := requestJSON(t, http.MethodPost, server.URL+"/api/wave-library-commit",
+		map[string]any{"libraryId": libraryID})
+	if committed["ok"] != true {
+		t.Fatalf("unexpected commit response: %#v", committed)
+	}
+	sourceSaved, err := instance.store.readDocument(libraryPath, waveID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sourceSaved["hscale"] != 1.5 || intValue(sourceSaved["revision"], -1) != 1 {
+		t.Fatalf("explicit save did not update the Wave source: %#v", sourceSaved)
+	}
+	if _, err = os.Stat(filepath.Join(root, "Wave", ".visualwavedrom-state.json")); !os.IsNotExist(err) {
+		t.Fatalf("runtime state leaked into Wave: %v", err)
+	}
+}
+
+func TestNewLibraryStaysInTemporaryWorkspaceUntilExplicitSave(t *testing.T) {
+	root := t.TempDir()
+	htmlName := "VisualWaveDrom.html"
+	if err := os.WriteFile(filepath.Join(root, htmlName), []byte("<!doctype html><title>test</title>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	libraryPath := filepath.Join(root, "Wave", "new-library", "library.sqlite")
+	tempDir := filepath.Join(root, ".tmp")
+	instance, err := newService(config{
+		rootDir: root, htmlName: htmlName, htmlPath: filepath.Join(root, htmlName),
+		configuredLibrary: libraryPath, configuredName: "new-library",
+		waveDir: filepath.Join(root, "Wave"), tempDir: tempDir,
+		statePath: filepath.Join(tempDir, ".visualwavedrom-state.json"),
+		noOpen:    true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer instance.cleanupTemporaryFiles()
+	if _, err = os.Stat(libraryPath); !os.IsNotExist(err) {
+		t.Fatalf("service startup created a formal Wave library: %v", err)
+	}
+	server := httptest.NewServer(instance.routes())
+	defer server.Close()
+	info := requestJSON(t, http.MethodGet, server.URL+"/api/server-info", nil)
+	libraryID := stringValue(info["currentLibraryId"])
+	if libraryID == "" {
+		t.Fatal("temporary default library has no id")
+	}
+	requestJSON(t, http.MethodGet, server.URL+"/api/wave-library?libraryId="+urlQueryEscape(libraryID), nil)
+	if _, err = os.Stat(libraryPath); !os.IsNotExist(err) {
+		t.Fatalf("reading the temporary library created a formal Wave library: %v", err)
+	}
+	loaded := requestJSON(t, http.MethodGet, server.URL+"/api/wave-library?libraryId="+
+		urlQueryEscape(libraryID), nil)
+	documents, ok := loaded["documents"].([]any)
+	if !ok || len(documents) == 0 {
+		t.Fatalf("temporary default library has no document: %#v", loaded)
+	}
+	document := documents[0].(map[string]any)
+	waveID := stringValue(document["name"])
+	requestJSON(t, http.MethodPatch, server.URL+"/api/wave-document", map[string]any{
+		"libraryId": libraryID, "waveId": waveID,
+		"expectedRevision": document["revision"],
+		"document": map[string]any{
+			"name": waveID, "content": document["content"], "hscale": 2,
+			"waveEditMode": document["waveEditMode"], "savedAt": isoNow(),
+		},
+	})
+	requestJSON(t, http.MethodGet, server.URL+"/api/wave-libraries", nil)
+	reloaded := requestJSON(t, http.MethodGet, server.URL+"/api/wave-document?libraryId="+
+		urlQueryEscape(libraryID)+"&waveId="+urlQueryEscape(waveID), nil)
+	reloadedDocument := reloaded["document"].(map[string]any)
+	if reloadedDocument["hscale"] != 2.0 {
+		t.Fatalf("library listing reset the temporary draft: %#v", reloadedDocument)
+	}
+	committed := requestJSON(t, http.MethodPost, server.URL+"/api/wave-library-commit",
+		map[string]any{"libraryId": libraryID})
+	if committed["ok"] != true || !instance.store.isLibraryFile(libraryPath) {
+		t.Fatalf("explicit save did not create the formal library: %#v", committed)
 	}
 }
 

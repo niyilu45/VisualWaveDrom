@@ -2201,26 +2201,34 @@ function analogRowForFormat(row, requestedFormat, totalColumns) {
   const changePointSamples = !sourceValues && row.changePoints
     ? numericSamplesFromChangePoints(row.changePoints, format)
     : null;
-  const sampleStep = sourceValues || changePointSamples ? rowSampleStep(row) : 1;
+  const clockSamples = !sourceValues && !changePointSamples
+    && Array.isArray(row.clockRanges) && row.clockRanges.length > 0;
+  const sampleStep = sourceValues || changePointSamples
+    ? rowSampleStep(row)
+    : (clockSamples ? 0.5 : 1);
   const samples = changePointSamples || new Float64Array(sourceValues
     ? Math.max(1, sourceValues.length)
-    : Math.max(1, totalColumns));
+    : Math.max(1, Math.ceil(totalColumns / sampleStep)));
   if (!changePointSamples) samples.fill(Number.NaN);
   if (sourceValues) {
     sourceValues.forEach((value, index) => {
       samples[index] = parseAnalogValueNormalized(value, format);
     });
   } else if (!changePointSamples) {
-    const sourceLength = Math.min(samples.length, row.wave.length);
+    const sourceLength = Math.min(
+      samples.length,
+      Math.ceil(row.wave.length / sampleStep)
+    );
     let segmentIndex = 0;
-    for (let column = 0; column < sourceLength; column += 1) {
+    for (let sampleIndex = 0; sampleIndex < sourceLength; sampleIndex += 1) {
+      const column = sampleIndex * sampleStep;
       while (segmentIndex < row.segments.length
           && row.segments[segmentIndex].end <= column + 1e-7) {
         segmentIndex += 1;
       }
       const segment = row.segments[Math.min(segmentIndex, row.segments.length - 1)];
       if (!segment) continue;
-      samples[column] = parseAnalogValueNormalized(
+      samples[sampleIndex] = parseAnalogValueNormalized(
         segment.kind === 'bus' ? segment.value : segment.state,
         format
       );
