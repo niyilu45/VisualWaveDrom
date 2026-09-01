@@ -171,6 +171,11 @@ function rowCursorStep(row) {
   return row && Array.isArray(row.clockRanges) && row.clockRanges.length ? 0.5 : 1;
 }
 
+function sessionCursorStep(session) {
+  const rows = session && Array.isArray(session.rows) ? session.rows : [];
+  return rows.some((row) => rowCursorStep(row) <= 0.5 + 1e-9) ? 0.5 : 1;
+}
+
 function sampleColumn(row, sampleIndex) {
   return Math.max(0, Number(sampleIndex) || 0) * rowSampleStep(row);
 }
@@ -198,7 +203,14 @@ function normalizeAnalogFormat(candidate, fallbackType) {
     0,
     Math.max(0, bitWidth - 1)
   );
-  return { type, bitWidth, fractionalBits };
+  const requestedInterpolation = String(
+    source.interpolation || source.analogInterpolation || 'continuous'
+  ).toLowerCase();
+  const interpolation = requestedInterpolation === 'discrete'
+    || requestedInterpolation === 'step'
+    ? 'discrete'
+    : 'continuous';
+  return { type, bitWidth, fractionalBits, interpolation };
 }
 
 function normalizeBusFormat(candidate) {
@@ -2049,6 +2061,8 @@ function decimatedAnalogPoints(row, startIndex, endIndex, width, totalColumns) {
 function analogWindow(row, start, end, width, totalColumns) {
   const sampleCount = row.samples ? row.samples.length : 0;
   const step = rowSampleStep(row);
+  const interpolation = row.stepInterpolation ? 'step' : 'linear';
+  const sampleEnd = Math.min(end, sampledColumnCount(row), totalColumns);
   const startIndex = clamp(Math.floor(start / step), 0, sampleCount);
   const endIndex = clamp(Math.ceil(end / step), startIndex, sampleCount);
   const sampleSpan = Math.max(0, endIndex - startIndex);
@@ -2070,7 +2084,10 @@ function analogWindow(row, start, end, width, totalColumns) {
       }
     }
     appendAnalogUnknownRange(unknowns, Math.max(start, sampledColumnCount(row)), end);
-    return { kind: 'points', items: points, unknowns, range: row.range };
+    return {
+      kind: 'points', items: points, unknowns, range: row.range,
+      interpolation, sampleEnd
+    };
   }
 
   const decimated = decimatedAnalogPoints(row, startIndex, endIndex, width, totalColumns);
@@ -2084,6 +2101,8 @@ function analogWindow(row, start, end, width, totalColumns) {
     items: decimated.points,
     unknowns: decimated.unknowns,
     range: row.range,
+    interpolation,
+    sampleEnd,
     decimated: true,
     bucketCount: decimated.bucketCount
   };
@@ -2192,17 +2211,23 @@ function segmentAt(row, column) {
 }
 
 function analogRowForFormat(row, requestedFormat, totalColumns) {
-  if (row.samples && row.samples.length) return row;
   const format = normalizeAnalogFormat(requestedFormat || row.analogFormat, 'unsigned');
+  const clockRow = Array.isArray(row.clockRanges) && row.clockRanges.length > 0;
+  const stepInterpolation = clockRow || format.interpolation === 'discrete';
+  if (row.samples && row.samples.length) {
+    return Object.assign({}, row, {
+      stepInterpolation,
+      analogFormat: format
+    });
+  }
   const key = format.type + ':' + format.bitWidth + ':' + format.fractionalBits
-    + ':' + totalColumns;
+    + ':' + format.interpolation + ':' + totalColumns;
   if (row.analogCache && row.analogCache.has(key)) return row.analogCache.get(key);
   const sourceValues = Array.isArray(row.scopeValues) ? row.scopeValues : null;
   const changePointSamples = !sourceValues && row.changePoints
     ? numericSamplesFromChangePoints(row.changePoints, format)
     : null;
-  const clockSamples = !sourceValues && !changePointSamples
-    && Array.isArray(row.clockRanges) && row.clockRanges.length > 0;
+  const clockSamples = !sourceValues && !changePointSamples && clockRow;
   const sampleStep = sourceValues || changePointSamples
     ? rowSampleStep(row)
     : (clockSamples ? 0.5 : 1);
@@ -2237,6 +2262,7 @@ function analogRowForFormat(row, requestedFormat, totalColumns) {
   const derived = Object.assign({}, row, {
     samples,
     sampleStep,
+    stepInterpolation,
     analogLevels: buildAnalogLevels(samples),
     range: analogRange(samples),
     analogFormat: format
@@ -2768,7 +2794,7 @@ function snapCursor(payload) {
     if (transition != null) candidates.push({ column: transition, source: 'transition' });
   }
 
-  const cursorStep = rowCursorStep(row);
+  const cursorStep = sessionCursorStep(activeSession);
   const lastGridColumn = Math.max(
     0,
     Math.floor((maximum + 1e-9) / cursorStep) * cursorStep
@@ -3209,6 +3235,7 @@ function applyRowDisplayConfig(target, row, rowIndex, payload) {
     scope.numericType = format.type;
     scope.bitWidth = format.bitWidth;
     scope.fractionalBits = format.fractionalBits;
+    scope.interpolation = format.interpolation;
   }
   const rowHeight = normalizeRowHeight(
     source.rowHeights && source.rowHeights[rowIndex] != null
@@ -3271,7 +3298,8 @@ function buildSimplifiedContent(model, options) {
         unit: rowMeta.unit || undefined,
         numericType: analogFormat.type,
         bitWidth: analogFormat.bitWidth,
-        fractionalBits: analogFormat.fractionalBits
+        fractionalBits: analogFormat.fractionalBits,
+        interpolation: analogFormat.interpolation
       });
     } else if (target.scope && typeof target.scope === 'object') {
       target.scope.mode = rowModel.mode;
@@ -3279,6 +3307,7 @@ function buildSimplifiedContent(model, options) {
       delete target.scope.numericType;
       delete target.scope.bitWidth;
       delete target.scope.fractionalBits;
+      delete target.scope.interpolation;
     }
     applyRowStyle(
       target,
@@ -3453,6 +3482,7 @@ function prepareResponse() {
     totalColumns: activeSession.totalColumns,
     samplePeriod: activeSession.samplePeriod,
     timeUnit: activeSession.timeUnit,
+    cursorStep: sessionCursorStep(activeSession),
     formulaStats: activeSession.formulaStats || null,
     rows: activeSession.rows.map((row) => ({
       index: row.index,

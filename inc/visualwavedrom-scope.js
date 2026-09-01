@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260901-clock-half-cycle-v1';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260901-analog-interpolation-v5';
   const FormulaEngine = global.VisualWaveDromFormula || null;
   const DEFAULT_ROW_HEIGHT = 42;
   const DEFAULT_MULTI_WAVE_ROW_HEIGHT = 68;
@@ -301,7 +301,14 @@
       0,
       Math.max(0, bitWidth - 1)
     );
-    return { type, bitWidth, fractionalBits };
+    const requestedInterpolation = String(
+      source.interpolation || source.analogInterpolation || 'continuous'
+    ).toLowerCase();
+    const interpolation = requestedInterpolation === 'discrete'
+      || requestedInterpolation === 'step'
+      ? 'discrete'
+      : 'continuous';
+    return { type, bitWidth, fractionalBits, interpolation };
   }
 
   function normalizeBusFormat(candidate) {
@@ -1045,6 +1052,15 @@
                 <option value="float">浮点数</option>
               </select>
             </label>
+            <div class="scope-analog-interpolation-field">
+              <span>绘制方式</span>
+              <div class="scope-display-mode-options scope-analog-interpolation-options"
+                  id="scope-signal-analog-interpolation" role="group"
+                  aria-label="当前信号的模拟波形绘制方式">
+                <button type="button" data-scope-analog-interpolation="continuous">连续</button>
+                <button type="button" data-scope-analog-interpolation="discrete">离散</button>
+              </div>
+            </div>
             <div class="scope-analog-number-fields">
               <label>
                 <span>位宽</span>
@@ -1231,6 +1247,7 @@
       this.signalBusSignedOptions = root.querySelector('#scope-signal-bus-signed');
       this.signalAnalogSettings = root.querySelector('#scope-signal-analog-settings');
       this.signalAnalogTypeSelect = root.querySelector('#scope-signal-analog-type');
+      this.signalAnalogInterpolationOptions = root.querySelector('#scope-signal-analog-interpolation');
       this.signalAnalogWidthInput = root.querySelector('#scope-signal-analog-width');
       this.signalAnalogFractionInput = root.querySelector('#scope-signal-analog-fraction');
       this.multiWaveSettings = root.querySelector('#scope-multi-wave-settings');
@@ -1380,6 +1397,11 @@
       this.signalAnalogTypeSelect.addEventListener('change', () => this.applySignalAnalogFormat());
       this.signalAnalogWidthInput.addEventListener('change', () => this.applySignalAnalogFormat());
       this.signalAnalogFractionInput.addEventListener('change', () => this.applySignalAnalogFormat());
+      this.signalAnalogInterpolationOptions.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-scope-analog-interpolation]');
+        if (!button) return;
+        this.applySignalAnalogFormat(button.dataset.scopeAnalogInterpolation);
+      });
       this.waveColorPresets.addEventListener('click', (event) => {
         const button = event.target.closest('[data-scope-wave-color]');
         if (!button || button.disabled) return;
@@ -3822,6 +3844,13 @@
       this.signalAnalogTypeSelect.value = format.type;
       this.signalAnalogWidthInput.value = String(format.bitWidth);
       this.signalAnalogFractionInput.value = String(format.fractionalBits);
+      this.signalAnalogInterpolationOptions.querySelectorAll('[data-scope-analog-interpolation]')
+        .forEach((button) => {
+          button.classList.toggle(
+            'active',
+            button.dataset.scopeAnalogInterpolation === format.interpolation
+          );
+        });
       const fixedPoint = format.type === 'ufixed' || format.type === 'sfixed';
       this.signalAnalogFractionInput.disabled = !fixedPoint;
       this.signalAnalogFractionInput.max = String(Math.max(0, format.bitWidth - 1));
@@ -3910,7 +3939,7 @@
       );
     }
 
-    applySignalAnalogFormat() {
+    applySignalAnalogFormat(requestedInterpolation) {
       if (!this.meta || this.displayControlRow == null) return;
       const row = this.meta.rows[this.displayControlRow];
       if (row && this.isMultiWaveRow(row.index)) return;
@@ -3922,11 +3951,13 @@
       const next = normalizeAnalogFormat({
         type: this.signalAnalogTypeSelect.value,
         bitWidth: this.signalAnalogWidthInput.value,
-        fractionalBits: this.signalAnalogFractionInput.value
+        fractionalBits: this.signalAnalogFractionInput.value,
+        interpolation: requestedInterpolation || previous.interpolation
       }, previous.type);
       const changed = previous.type !== next.type
         || previous.bitWidth !== next.bitWidth
-        || previous.fractionalBits !== next.fractionalBits;
+        || previous.fractionalBits !== next.fractionalBits
+        || previous.interpolation !== next.interpolation;
       if (changed && this.simplified) this.pushHistory();
       this.analogFormats[row.index] = next;
       this.updateDisplayPopover();
@@ -3941,7 +3972,10 @@
       const typeLabel = this.signalAnalogTypeSelect.options[
         this.signalAnalogTypeSelect.selectedIndex
       ].text;
-      this.setStatus(row.name + ' 已按' + typeLabel + '解析');
+      this.setStatus(
+        row.name + ' 已按' + typeLabel + '解析，'
+        + (next.interpolation === 'discrete' ? '离散保持' : '连续折线')
+      );
     }
 
     rowStyle(rowIndex) {
@@ -5300,6 +5334,7 @@
         context.beginPath();
         let started = false;
         let previousY = null;
+        const stepped = data.interpolation === 'step';
         data.items.forEach((item) => {
           const x = this.xForColumn(item[0], width);
           const value = finiteScopeNumber(item[1]);
@@ -5313,11 +5348,18 @@
           if (!started) {
             context.moveTo(x, y);
             started = true;
+          } else if (stepped) {
+            context.lineTo(x, previousY);
+            context.lineTo(x, y);
           } else {
             context.lineTo(x, y);
           }
           previousY = y;
         });
+        if (stepped && started && previousY != null
+            && Number.isFinite(Number(data.sampleEnd))) {
+          context.lineTo(this.xForColumn(Number(data.sampleEnd), width), previousY);
+        }
         context.stroke();
       }
       if (settings.drawGuide !== false) {
@@ -5675,6 +5717,8 @@
     }
 
     cursorPointStep(rowIndex) {
+      const sessionStep = Number(this.meta && this.meta.cursorStep);
+      if (Number.isFinite(sessionStep) && sessionStep > 0) return sessionStep;
       const row = this.meta && Array.isArray(this.meta.rows)
         ? this.meta.rows[rowIndex]
         : null;

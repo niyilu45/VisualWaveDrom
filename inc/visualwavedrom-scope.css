@@ -1082,6 +1082,7 @@ body.scope-multi-wave-legend-dragging * {
 
 .scope-display-field-label,
 .scope-analog-settings label > span,
+.scope-analog-interpolation-field > span,
 .scope-bus-signed-field > span {
   color: #555b63;
   font-size: 11px;
@@ -1101,6 +1102,16 @@ body.scope-multi-wave-legend-dragging * {
 }
 
 .scope-bus-signed-options {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.scope-analog-interpolation-field {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.scope-analog-interpolation-options {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
