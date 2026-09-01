@@ -216,6 +216,12 @@
     return keys;
   }
 
+  function alignWaveDataToCycleGrid(svg) {
+    const geometry = root.VisualWaveDromWaveGeometry;
+    if (!geometry || typeof geometry.alignDataTransitions !== 'function') return null;
+    return geometry.alignDataTransitions(svg);
+  }
+
   function getSvgMetrics(svg) {
     const viewBox = svg && svg.viewBox && svg.viewBox.baseVal;
     let width = viewBox && viewBox.width > 0 ? viewBox.width : parseFloat(svg && svg.getAttribute('width'));
@@ -1235,6 +1241,7 @@
         root.WaveDrom.RenderWaveForm(0, source, prefix, false);
         const svg = this.display.querySelector('svg');
         if (!svg) throw new Error('WaveDrom 未生成波形 SVG');
+        alignWaveDataToCycleGrid(svg);
         this.svg = svg;
         this.svgMetrics = getSvgMetrics(svg);
         svg.style.width = this.svgMetrics.width + 'px';
@@ -1707,6 +1714,7 @@
           root.WaveDrom.RenderWaveForm(0, cloneValue(request.source), prefix, false);
           svg = display.querySelector('svg');
           if (!svg) throw new Error('missing-waveform');
+          alignWaveDataToCycleGrid(svg);
         } else {
           host.appendChild(svg);
         }

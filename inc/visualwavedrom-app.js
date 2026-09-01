@@ -16837,6 +16837,7 @@ ${lines.join('\n')}`;
         signal: previewSignals,
         config: { hscale: 1 }
       }, 'row-import-preview-display-', false);
+      alignWaveDataToCycleGrid(displayDiv);
       if (!displayDiv.querySelector('svg')) throw new Error('未生成波形预览');
       rowImportPreviewShell.hidden = false;
       if (rowImportPreviewSummary) {
@@ -17884,6 +17885,13 @@ ${lines.join('\n')}`;
         && window.WaveSkin;
     }
 
+    function alignWaveDataToCycleGrid(container) {
+      const geometry = window.VisualWaveDromWaveGeometry;
+      if (!geometry || typeof geometry.alignDataTransitions !== 'function' || !container) return null;
+      const svg = container.localName === 'svg' ? container : container.querySelector('svg');
+      return svg ? geometry.alignDataTransitions(svg) : null;
+    }
+
     function showWaveError(container, message) {
       container.innerHTML = '';
       const errDiv = document.createElement('div');
@@ -18152,6 +18160,7 @@ ${lines.join('\n')}`;
             setStatus(false, '渲染错误');
             return false;
           }
+          alignWaveDataToCycleGrid(displayDiv);
           syncHscaleInputFromJson(jsonText, fullSource);
           attachWaveInteractivity(jsonText, fullSource);
           applyNavVisibilityToWave();
@@ -18928,14 +18937,13 @@ ${lines.join('\n')}`;
         .replace(/>/g, '&gt;');
     }
 
-    function buildLinkedWaveMarkdown(title, dataUrl, deepLink) {
-      const alt = String(title || 'VisualWaveDrom')
+    function buildWaveMarkdownLink(title, deepLink) {
+      const label = String(title || 'VisualWaveDrom')
         .replace(/\\/g, '\\\\')
         .replace(/\[/g, '\\[')
         .replace(/\]/g, '\\]')
         .replace(/[\r\n]+/g, ' ');
-      return '[![' + alt + '](<' + String(dataUrl || '') + '>)](<'
-        + String(deepLink || '') + '>)';
+      return '[打开波形图：' + label + '](<' + String(deepLink || '') + '>)';
     }
 
     function downloadBlobFile(blob, fileName) {
@@ -19128,6 +19136,7 @@ ${lines.join('\n')}`;
         WaveDrom.RenderWaveForm(0, renderWindow.source, prefix, false);
         const svg = display.querySelector('svg');
         if (!svg) throw new Error('所选列范围未生成 SVG');
+        alignWaveDataToCycleGrid(svg);
         return {
           svg,
           start: renderWindow.start,
@@ -19216,30 +19225,6 @@ ${lines.join('\n')}`;
         }
         if (!svg) throw new Error('当前波形图未成功渲染，无法截图');
         const renderPromise = renderWaveSvgScreenshot(svg);
-        if (mode === 'linked-markdown') {
-          const result = await renderPromise;
-          const dataUrl = await blobToDataUrl(result.blob);
-          const titleText = getSavedTagTitle(tag) || 'VisualWaveDrom';
-          const markdown = buildLinkedWaveMarkdown(titleText, dataUrl, deepLink);
-          await copyTextWithFallback(markdown);
-          setStatus(true, 'Markdown 带链接图片已复制：' + titleText);
-          button.classList.add('copied');
-          button.title = 'Markdown 已复制';
-          vwdDebugLog('wave-screenshot', {
-            phase: 'markdown-copied',
-            documentName,
-            width: result.width,
-            height: result.height,
-            blobSize: result.blob.size,
-            markdownLength: markdown.length,
-            link: deepLink
-          });
-          window.setTimeout(() => {
-            button.classList.remove('copied');
-            if (button.dataset.copying !== '1') button.title = originalTitle;
-          }, 1500);
-          return true;
-        }
         if (!canWriteImageClipboard) {
           const result = await renderPromise;
           const titleText = getSavedTagTitle(tag) || 'VisualWaveDrom';
@@ -19248,10 +19233,16 @@ ${lines.join('\n')}`;
             ? '当前 Firefox'
             : '当前浏览器';
           downloadBlobFile(result.blob, safeTitle + '.png');
-          if (mode === 'linked-image' && deepLink) await copyTextWithFallback(deepLink);
-          setStatus(true, mode === 'linked-image'
-            ? (browserName + ' 已下载 PNG，并已复制单图链接')
-            : (browserName + ' 不支持图片剪贴板，PNG 已自动下载'));
+          if (needsDeepLink && deepLink) {
+            await copyTextWithFallback(mode === 'linked-markdown'
+              ? buildWaveMarkdownLink(titleText, deepLink)
+              : deepLink);
+          }
+          setStatus(true, mode === 'linked-markdown'
+            ? (browserName + ' 已下载 PNG，并已复制 Markdown 超链接')
+            : (mode === 'linked-image'
+              ? (browserName + ' 已下载 PNG，并已复制单图链接')
+              : (browserName + ' 不支持图片剪贴板，PNG 已自动下载')));
           vwdDebugLog('wave-screenshot', {
             phase: 'download-fallback',
             documentName,
@@ -19264,27 +19255,50 @@ ${lines.join('\n')}`;
           return true;
         }
         const blobPromise = renderPromise.then((result) => result.blob);
-        const clipboardData = { 'image/png': blobPromise };
-        if (mode === 'linked-image') {
+        let clipboardData = { 'image/png': blobPromise };
+        if (mode === 'linked-image' || mode === 'linked-markdown') {
           const titleText = getSavedTagTitle(tag);
           const htmlPromise = blobPromise
             .then(blobToDataUrl)
-            .then((dataUrl) => new Blob([
-              '<a href="' + escapeHtmlAttribute(deepLink) + '">'
+            .then((dataUrl) => {
+              const linkedImage = '<a href="' + escapeHtmlAttribute(deepLink) + '">'
                 + '<img src="' + escapeHtmlAttribute(dataUrl) + '" alt="'
                 + escapeHtmlAttribute(titleText) + '">'
-                + '</a>'
-            ], { type: 'text/html' }));
-          clipboardData['text/html'] = htmlPromise;
-          clipboardData['text/plain'] = Promise.resolve(new Blob([deepLink], { type: 'text/plain' }));
+                + '</a>';
+              const linkedText = '<a href="' + escapeHtmlAttribute(deepLink) + '">'
+                + '打开波形图：' + escapeHtmlAttribute(titleText) + '</a>';
+              return new Blob([
+                mode === 'linked-markdown'
+                  ? (linkedImage + '<br>' + linkedText)
+                  : linkedImage
+              ], { type: 'text/html' });
+            });
+          const plainText = mode === 'linked-markdown'
+            ? buildWaveMarkdownLink(titleText, deepLink)
+            : deepLink;
+          clipboardData = mode === 'linked-markdown'
+            ? {
+                'text/html': htmlPromise,
+                'image/png': blobPromise,
+                'text/plain': Promise.resolve(new Blob([plainText], { type: 'text/plain' }))
+              }
+            : clipboardData;
+          if (mode === 'linked-image') {
+            clipboardData['text/html'] = htmlPromise;
+            clipboardData['text/plain'] = Promise.resolve(
+              new Blob([plainText], { type: 'text/plain' })
+            );
+          }
         }
         const clipboardItem = new ClipboardItem(clipboardData);
         await navigator.clipboard.write([clipboardItem]);
         const result = await renderPromise;
         const titleText = getSavedTagTitle(tag);
-        setStatus(true, mode === 'linked-image'
-          ? ('带链接截图已复制，可粘贴到 Word：' + titleText)
-          : ('波形图截图已复制，可直接粘贴到 Word：' + titleText));
+        setStatus(true, mode === 'linked-markdown'
+          ? ('Markdown 图片和超链接已复制：' + titleText)
+          : (mode === 'linked-image'
+            ? ('带链接截图已复制，可粘贴到 Word：' + titleText)
+            : ('波形图截图已复制，可直接粘贴到 Word：' + titleText)));
         button.classList.add('copied');
         button.title = '截图已复制';
         vwdDebugLog('wave-screenshot', {
@@ -19662,6 +19676,7 @@ ${lines.join('\n')}`;
         } else {
           WaveDrom.RenderWaveForm(0, meta.renderSource, entry.prefix, false);
           if (!display.querySelector('svg')) throw new Error('未生成 SVG');
+          alignWaveDataToCycleGrid(display);
         }
         syncWaveDocumentDescriptionWidth(display);
         if (!useCanvas) setupFrozenWaveLabels(display);
@@ -19951,6 +19966,7 @@ ${lines.join('\n')}`;
         container.appendChild(displayDiv);
         try {
           WaveDrom.RenderWaveForm(0, item.wave, prefix, false);
+          alignWaveDataToCycleGrid(displayDiv);
         } catch (e) {
           showWaveError(container, '图例渲染失败');
         }
