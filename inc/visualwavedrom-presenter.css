@@ -380,18 +380,6 @@ body.presenter-wave-view > .scope-bootstrap {
   pointer-events: none;
 }
 
-.presenter-split-options {
-  width: 220px;
-  max-width: calc(100vw - 16px);
-}
-
-.presenter-split-options fieldset {
-  min-width: 0;
-  margin: 0;
-  padding: 0;
-  border: 0;
-}
-
 .presenter-split-modes {
   display: grid;
   gap: 4px;
@@ -907,8 +895,11 @@ body.presenter-wave-view > .scope-bootstrap {
 
 .presenter-settings {
   width: min(28rem, calc(100% - 16px));
-  height: min(38rem, calc(100vh - 16px));
   overflow: hidden;
+}
+
+.presenter-settings.show-shortcuts {
+  height: min(38rem, calc(100vh - 16px));
 }
 
 .presenter-settings:not([hidden]) {
@@ -921,9 +912,146 @@ body.presenter-wave-view > .scope-bootstrap {
   flex: 0 0 auto;
 }
 
-.presenter-settings h2 {
-  margin: 0 0 8px;
-  font-size: 0.875rem;
+.presenter-settings-page {
+  min-height: 0;
+}
+
+.presenter-settings-page[hidden] {
+  display: none;
+}
+
+.presenter-settings-main {
+  display: grid;
+  gap: 14px;
+}
+
+.presenter-settings-section {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.presenter-settings-section legend {
+  margin-bottom: 8px;
+  font-weight: 650;
+}
+
+.presenter-settings-split .presenter-split-modes {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid #c7d1d9;
+  border-radius: 6px;
+  background: #f1f4f6;
+}
+
+.presenter-settings-split .presenter-split-modes label {
+  position: relative;
+  min-width: 0;
+  min-height: 34px;
+  padding: 0;
+  background: transparent;
+}
+
+.presenter-settings-split .presenter-split-modes input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.presenter-settings-split .presenter-split-modes span {
+  width: 100%;
+  min-width: 0;
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 5px 7px;
+  border-radius: 4px;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.presenter-settings-split .presenter-split-modes input:checked + span {
+  background: #fff;
+  color: #155d95;
+  box-shadow: 0 1px 3px rgba(31, 48, 64, 0.16);
+}
+
+.presenter-settings-split .presenter-split-modes label:hover span {
+  background: #e7f1f8;
+}
+
+.presenter-settings-split .presenter-split-modes label:hover input:checked + span {
+  background: #fff;
+}
+
+.presenter-settings-split .presenter-split-modes input:focus-visible + span {
+  outline: 2px solid #2775b8;
+  outline-offset: 1px;
+}
+
+.presenter-settings-split .presenter-split-modes input:disabled + span {
+  color: #82909b;
+  cursor: not-allowed;
+}
+
+.presenter-settings-navigation,
+.presenter-settings-back {
+  min-width: 0;
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  background: transparent;
+  color: #243440;
+  font: inherit;
+  cursor: pointer;
+}
+
+.presenter-settings-navigation {
+  width: 100%;
+  justify-content: space-between;
+  padding: 8px 4px 8px 8px;
+  border-top: 1px solid #dce3e8;
+  border-bottom: 1px solid #dce3e8;
+  font-weight: 650;
+  text-align: left;
+}
+
+.presenter-settings-navigation:hover,
+.presenter-settings-navigation:focus-visible,
+.presenter-settings-back:hover,
+.presenter-settings-back:focus-visible {
+  background: #e7f1f8;
+  outline: 0;
+}
+
+.presenter-settings-navigation svg,
+.presenter-settings-back svg {
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+}
+
+.presenter-settings-shortcuts:not([hidden]) {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.presenter-settings-subheader {
+  flex: 0 0 auto;
+  margin-bottom: 6px;
+  border-bottom: 1px solid #dce3e8;
+}
+
+.presenter-settings-back {
+  padding: 4px 8px 4px 2px;
+  font-weight: 650;
 }
 
 .presenter-shortcut-list {

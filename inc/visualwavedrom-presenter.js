@@ -25,7 +25,6 @@
     ['step-next', '下一步', 'd'], ['step-add', '新增步骤', 'f'],
     ['fit', '适应窗口', 'z'], ['notes', '讲解备注', 'x'],
     ['copy-image', '复制图片', 'c'], ['fullscreen', '全屏', 'v'],
-    ['split', '分屏', ''], ['split-close', '关闭分屏选项', ''],
     ['save', '保存演讲步骤', 'Ctrl+s'], ['undo', '撤销标注', 'Ctrl+z'],
     ['redo', '重做标注', 'Ctrl+Shift+z'], ['settings', '设置', 'Shift+1'],
     ['shape-style', '画笔与图形样式', 'Shift+2'], ['clear', '清除标注', 'Shift+3'],
@@ -50,7 +49,6 @@
   ];
 
   const ICONS = {
-    split: '<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 12h18"/>',
     settings: '<path d="M20 7h-9M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/>',
     close: '<path d="M18 6 6 18M6 6l12 12"/>',
     fullscreen: '<path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/>',
@@ -156,6 +154,12 @@
       element.setAttribute(key, String(attributes[key]));
     });
     return element;
+  }
+
+  function pointsPath(points) {
+    return points.map(function (point, index) {
+      return (index ? 'L' : 'M') + point.x.toFixed(2) + ' ' + point.y.toFixed(2);
+    }).join(' ');
   }
 
   function sourceTitle(source, fallback) {
@@ -305,6 +309,7 @@
       this.frozenLabelNodes = [];
       this.frozenLabelView = null;
       this.frozenLabelsActive = false;
+      this.focusLayer = null;
       this.viewportFrame = 0;
       this.split = null;
       this.tool = '';
@@ -431,7 +436,6 @@
         + '    <span class="presenter-save-state" id="presenter-save-state" role="status" aria-live="polite"></span>'
         + buttonMarkup('save', 'save', '保存', '保存演讲步骤')
         + buttonMarkup('fit', 'fit', '适应窗口', '适应窗口')
-        + '    <button type="button" class="presenter-button" data-action="split" title="分屏" aria-haspopup="dialog" aria-controls="presenter-split-options" aria-expanded="false" disabled>' + icon('split') + '<span>分屏</span></button>'
         + '    <button type="button" class="presenter-button" data-action="copy-image" title="复制图片" aria-haspopup="dialog" aria-controls="presenter-copy-options" aria-expanded="false" disabled>' + icon('image') + '<span>复制图片</span></button>'
         + buttonMarkup('notes', 'notes', '讲解备注', '显示或隐藏讲解备注')
         + '    <button type="button" class="presenter-icon-button" data-action="notes-restore" title="恢复备注到当前窗口" aria-label="恢复备注" hidden>' + icon('restore') + '</button>'
@@ -497,22 +501,25 @@
         + '    <span class="presenter-measurement" id="presenter-measure-delta">B-A: --</span>'
         + '  </div>'
         + '</footer>'
-        + '<section class="presenter-popover presenter-split-options" id="presenter-split-options" role="dialog" aria-label="分屏方式" hidden>'
-        + '  <div class="presenter-popover-header"><strong>分屏方式</strong><button type="button" class="presenter-icon-button" data-action="split-close" title="关闭" aria-label="关闭分屏选项">' + icon('close') + '</button></div>'
-        + '  <fieldset><legend class="presenter-visually-hidden">布局</legend><div class="presenter-split-modes">'
-        + '    <label><input type="radio" name="presenter-split-mode" value="none" checked><span>不分屏</span></label>'
-        + '    <label title="上下滚动独立，左右滚动同步"><input type="radio" name="presenter-split-mode" value="rows"><span>上下分屏</span></label>'
-        + '    <label title="左右滚动独立，上下滚动同步"><input type="radio" name="presenter-split-mode" value="columns"><span>左右分屏</span></label>'
-        + '  </div></fieldset>'
-        + '</section>'
         + '<section class="presenter-popover presenter-settings" id="presenter-settings" role="dialog" aria-labelledby="presenter-settings-title" hidden>'
         + '  <div class="presenter-popover-header"><strong id="presenter-settings-title">设置</strong><button type="button" class="presenter-icon-button" data-action="settings-close" title="关闭设置" aria-label="关闭设置">' + icon('close') + '</button></div>'
-        + '  <h2>快捷键</h2><div class="presenter-shortcut-list">'
+        + '  <div class="presenter-settings-page presenter-settings-main" data-settings-page="main" tabindex="-1">'
+        + '    <fieldset class="presenter-settings-section presenter-settings-split" id="presenter-split-options" data-embedded="true"><legend>分屏布局</legend><div class="presenter-split-modes">'
+        + '      <label><input type="radio" name="presenter-split-mode" value="none" checked><span>不分屏</span></label>'
+        + '      <label title="上下滚动独立，左右滚动同步"><input type="radio" name="presenter-split-mode" value="rows"><span>上下分屏</span></label>'
+        + '      <label title="左右滚动独立，上下滚动同步"><input type="radio" name="presenter-split-mode" value="columns"><span>左右分屏</span></label>'
+        + '    </div></fieldset>'
+        + '    <button type="button" class="presenter-settings-navigation" data-action="shortcuts-open" aria-controls="presenter-settings-shortcuts" aria-expanded="false"><span>快捷键配置</span>' + icon('chevronRight') + '</button>'
+        + '  </div>'
+        + '  <div class="presenter-settings-page presenter-settings-shortcuts" id="presenter-settings-shortcuts" data-settings-page="shortcuts" hidden>'
+        + '    <div class="presenter-settings-subheader"><button type="button" class="presenter-settings-back" data-action="shortcuts-back" title="返回设置" aria-label="返回设置">' + icon('chevronLeft') + '<span>快捷键配置</span></button></div>'
+        + '    <div class="presenter-shortcut-list">'
         + SHORTCUT_COMMANDS.map(command => '<div class="presenter-shortcut-row"><label for="presenter-shortcut-' + command.id + '">' + command.label + '</label>'
           + '<input id="presenter-shortcut-' + command.id + '" data-shortcut-input="' + command.id + '" aria-label="' + command.label + '快捷键" aria-describedby="presenter-shortcut-status" type="text" readonly placeholder="未设置" autocomplete="off" spellcheck="false">'
           + '<button type="button" class="presenter-icon-button" data-shortcut-clear="' + command.id + '" title="清除' + command.label + '快捷键" aria-label="清除' + command.label + '快捷键">' + icon('close') + '</button></div>').join('')
-        + '  </div><p id="presenter-shortcut-status" role="status" aria-live="polite"></p>'
-        + '  <div class="presenter-settings-footer">' + buttonMarkup('shortcuts-reset', 'undo', '恢复默认', '恢复默认快捷键') + '</div>'
+        + '    </div><p id="presenter-shortcut-status" role="status" aria-live="polite"></p>'
+        + '    <div class="presenter-settings-footer">' + buttonMarkup('shortcuts-reset', 'undo', '恢复默认', '恢复默认快捷键') + '</div>'
+        + '  </div>'
         + '</section>'
         + '<section class="presenter-popover presenter-copy-options" id="presenter-copy-options" role="dialog" aria-label="复制图片" hidden>'
         + '  <div class="presenter-popover-header"><strong>复制图片</strong><button type="button" class="presenter-icon-button" data-action="copy-close" title="关闭" aria-label="关闭图片复制选项">' + icon('close') + '</button></div>'
@@ -572,7 +579,7 @@
       this.display = app.querySelector('#presenter-wave-display');
       this.overlay = app.querySelector('#presenter-overlay');
       this.frozenLabels = app.querySelector('#presenter-frozen-labels');
-      this.splitButton = app.querySelector('[data-action="split"]');
+      this.splitButton = null;
       this.splitOptions = app.querySelector('#presenter-split-options');
       this.stageMessage = app.querySelector('#presenter-stage-message');
       this.stageMessageTitle = app.querySelector('#presenter-stage-message-title');
@@ -608,6 +615,9 @@
       this.exitMessage = app.querySelector('#presenter-exit-message');
       this.settingsOptions = app.querySelector('#presenter-settings');
       this.settingsButton = app.querySelector('[data-action="settings"]');
+      this.settingsMainPage = app.querySelector('[data-settings-page="main"]');
+      this.settingsShortcutsPage = app.querySelector('[data-settings-page="shortcuts"]');
+      this.shortcutsButton = app.querySelector('[data-action="shortcuts-open"]');
       this.shortcutStatus = app.querySelector('#presenter-shortcut-status');
       this.shapeOptions = app.querySelector('#presenter-shape-options');
       this.shapeStyleButton = app.querySelector('[data-action="shape-style"]');
@@ -766,7 +776,6 @@
           if (!this.shapeOptions.hidden) this.positionShapeOptions();
           if (!this.copyOptions.hidden) this.positionCopyOptions();
           if (!this.settingsOptions.hidden) this.positionSettings();
-          if (this.split) this.split.positionOptions();
           if (this.textEdit) this.positionTextEditor();
         });
         this.resizeObserver.observe(this.viewport);
@@ -775,7 +784,6 @@
         this.resizeObserver.observe(this.copyOptions);
         this.resizeObserver.observe(this.stepTitleInput);
         this.resizeObserver.observe(this.settingsOptions);
-        if (this.splitOptions) this.resizeObserver.observe(this.splitOptions);
       }
     }
 
@@ -817,13 +825,16 @@
 
     handleAction(action) {
       if (action !== 'text-cancel') this.finishTextEdit(true);
-      if (this.split && action !== 'split' && action !== 'split-close') this.split.close(false);
-      if (!['settings', 'settings-close', 'shortcuts-reset'].includes(action)) this.closeSettings(false);
+      if (!['settings', 'settings-close', 'shortcuts-open', 'shortcuts-back', 'shortcuts-reset'].includes(action)) this.closeSettings(false);
       if (action === 'settings') {
         if (this.settingsOptions.hidden) this.openSettings();
         else this.closeSettings();
       } else if (action === 'settings-close') {
         this.closeSettings();
+      } else if (action === 'shortcuts-open') {
+        this.showSettingsPage('shortcuts', true);
+      } else if (action === 'shortcuts-back') {
+        this.showSettingsPage('main', true);
       } else if (action === 'shortcuts-reset') {
         this.shortcutBindings = Object.assign({}, DEFAULT_SHORTCUTS);
         this.persistShortcuts();
@@ -841,11 +852,6 @@
         void this.toggleFullscreen();
       } else if (action === 'fit') {
         this.fitToWindow(true);
-      } else if (action === 'split') {
-        if (this.split) this.split.toggleOptions();
-        else this.showToast('分屏模块未加载，请刷新页面后重试。', true);
-      } else if (action === 'split-close') {
-        if (this.split) this.split.close(true);
       } else if (action === 'copy-image') {
         this.openCopyOptions();
       } else if (action === 'copy-close') {
@@ -971,7 +977,7 @@
       event.stopPropagation();
       if (event.isComposing || event.keyCode === 229) return;
       event.preventDefault();
-      if (event.key === 'Escape') { this.closeSettings(); return; }
+      if (event.key === 'Escape') { this.showSettingsPage('main', true); return; }
       if (event.repeat || ['Control', 'Meta', 'Alt', 'Shift', 'CapsLock'].includes(event.key)) return;
       if ((event.key === 'Backspace' || event.key === 'Delete') && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) {
         this.setShortcut(input.dataset.shortcutInput, '');
@@ -979,7 +985,6 @@
     }
 
     openSettings() {
-      if (!SHORTCUTS) { this.showToast('快捷键模块未加载，请刷新页面后重试', true); return; }
       this.closeFocusOptions();
       this.closeShapeOptions();
       if (!this.copying) this.closeCopyOptions();
@@ -988,9 +993,31 @@
       this.shortcutStatus.classList.remove('error');
       this.settingsOptions.hidden = false;
       this.settingsButton.setAttribute('aria-expanded', 'true');
+      this.showSettingsPage('main', false);
       this.positionSettings();
-      this.settingsOptions.querySelector('[data-shortcut-input]').focus({ preventScroll: true });
+      this.shortcutsButton.focus({ preventScroll: true });
       this.noteActivity();
+    }
+
+    showSettingsPage(page, focus) {
+      if (!this.settingsOptions) return;
+      const shortcuts = page === 'shortcuts' && !!SHORTCUTS;
+      this.settingsMainPage.hidden = shortcuts;
+      this.settingsShortcutsPage.hidden = !shortcuts;
+      this.settingsOptions.classList.toggle('show-shortcuts', shortcuts);
+      this.shortcutsButton.setAttribute('aria-expanded', shortcuts ? 'true' : 'false');
+      if (shortcuts) {
+        this.refreshShortcutUI();
+        this.shortcutStatus.textContent = '';
+        this.shortcutStatus.classList.remove('error');
+      }
+      if (!this.settingsOptions.hidden) this.positionSettings();
+      if (focus !== false) {
+        const target = shortcuts
+          ? this.settingsShortcutsPage.querySelector('[data-shortcut-input]')
+          : this.shortcutsButton;
+        if (target) target.focus({ preventScroll: true });
+      }
     }
 
     positionSettings() {
@@ -1002,6 +1029,7 @@
       if (!this.settingsOptions || this.settingsOptions.hidden) return;
       this.settingsOptions.hidden = true;
       this.settingsButton.setAttribute('aria-expanded', 'false');
+      this.showSettingsPage('main', false);
       if (restoreFocus !== false) this.settingsButton.focus({ preventScroll: true });
     }
 
@@ -1604,8 +1632,6 @@
     }
 
     handleOutsidePointerDown(event) {
-      if (this.split && !this.splitOptions.hidden && !this.splitOptions.contains(event.target)
-          && !event.target.closest('[data-action="split"]')) this.split.close(false);
       if (this.settingsOptions && !this.settingsOptions.hidden && !this.settingsOptions.contains(event.target)
           && !event.target.closest('[data-action="settings"]')) this.closeSettings(false);
       if (this.textEdit && !this.textEditor.contains(event.target)) this.finishTextEdit(true, false);
@@ -2397,23 +2423,25 @@
       cancelAnimationFrame(this.pointerStrokeFrame);
       this.pointerStrokeFrame = 0;
       this.pointerStroke = [];
+      const hadInk = !!this.pointerInk;
       if (this.pointerInk) this.pointerInk.remove();
       this.pointerInk = null;
-      if (this.split && !skipSync) this.split.syncAnnotations();
+      if (this.split && hadInk && !skipSync) this.split.syncAnnotations();
     }
 
     clearPointerStroke() {
+      const hadInk = !!this.pointerInk || this.pointerStrokes.length > 0;
       this.discardPointerStroke(true);
       this.pointerStrokes.forEach((stroke) => { if (stroke.ink) stroke.ink.remove(); });
       this.pointerStrokes = [];
-      if (this.split) this.split.syncAnnotations();
+      if (this.split && hadInk) this.split.syncAnnotations();
     }
 
     schedulePointerStrokeDraw() {
       if (this.pointerStrokeFrame) return;
       this.pointerStrokeFrame = requestAnimationFrame(() => {
         this.pointerStrokeFrame = 0;
-        if (!this.destroyed) this.drawPointerStroke();
+        if (!this.destroyed) this.drawPointerStroke(true);
       });
     }
 
@@ -2447,15 +2475,54 @@
       } else {
         this.pointerInk.setAttribute('d', pathData(this.pointerStroke));
       }
-      if (this.split && !skipSync) this.split.syncAnnotations();
+      if (this.split) {
+        if (skipSync && this.drag) this.split.syncLivePointer(this.drag, this.pointerInk);
+        else if (!skipSync) this.split.syncAnnotations();
+      }
     }
 
     scheduleAnnotationDraw() {
       if (this.annotationFrame) return;
       this.annotationFrame = requestAnimationFrame(() => {
         this.annotationFrame = 0;
-        if (!this.destroyed) this.drawAnnotations();
+        if (!this.destroyed && !this.drawLiveGesture()) this.drawAnnotations(true);
       });
+    }
+
+    drawLiveGesture() {
+      const drag = this.drag;
+      if (!drag) return false;
+      if (drag.kind === 'focus') {
+        this.drawFocusLayer();
+        if (this.split) this.split.syncLiveGesture(drag);
+        return true;
+      }
+      if (drag.kind === 'pen' && drag.mark) {
+        drag.liveInk = drag.liveInk || this.overlay.querySelector(
+          'path.presenter-annotation-ink[data-mark-id="' + drag.mark.id + '"]'
+        );
+        if (!drag.liveInk) return false;
+        const points = drag.mark.points.map((anchor) => this.pointFromAnchor(anchor));
+        drag.liveInk.setAttribute('d', pointsPath(points));
+        this.markGeometry.set(drag.mark.id, { points: points, strokeWidth: 2.5 / this.scale });
+        if (this.split) this.split.syncLiveGesture(drag);
+        return true;
+      }
+      if (isShapeKind(drag.kind) && drag.mark) {
+        const points = this.shapePoints(drag.mark);
+        const path = pointsPath(points);
+        drag.livePaths = drag.livePaths || Array.from(
+          this.overlay.querySelectorAll('path[data-mark-id="' + drag.mark.id + '"]')
+        );
+        if (!drag.livePaths.length) return false;
+        drag.livePaths.forEach((element) => element.setAttribute('d', path));
+        this.markGeometry.set(drag.mark.id, {
+          points: points, strokeWidth: this.shapeStyle(drag.mark).width / this.scale
+        });
+        if (this.split) this.split.syncLiveGesture(drag);
+        return true;
+      }
+      return false;
     }
 
     clientPoint(event) {
@@ -2770,7 +2837,7 @@
     drawShape(layer, mark) {
       const points = this.shapePoints(mark);
       const style = this.shapeStyle(mark);
-      const path = points.map((point, index) => (index ? 'L' : 'M') + point.x.toFixed(2) + ' ' + point.y.toFixed(2)).join(' ');
+      const path = pointsPath(points);
       layer.appendChild(createSvgElement('path', {
         class: 'presenter-shape-hit', d: path, 'stroke-width': Math.max(12, style.width + 8), 'data-mark-id': mark.id
       }));
@@ -2794,9 +2861,7 @@
         if (this.textEdit && mark.id === this.textEdit.id) return;
         if (mark.kind === 'pen') {
           const points = mark.points.map((anchor) => this.pointFromAnchor(anchor));
-          const path = points.map(function (point, index) {
-            return (index ? 'L' : 'M') + point.x.toFixed(2) + ' ' + point.y.toFixed(2);
-          }).join(' ');
+          const path = pointsPath(points);
           layer.appendChild(createSvgElement('path', {
             class: 'presenter-annotation-ink', d: path, 'data-mark-id': mark.id, stroke: this.shapeStyle(mark).color
           }));
@@ -2860,33 +2925,49 @@
       layer.appendChild(handle);
     }
 
-    drawAnnotations() {
+    drawFocusLayer() {
+      let layer = this.focusLayer;
+      if (layer && layer.parentNode !== this.overlay) layer = null;
+      if (!this.annotations.focus) {
+        if (layer) layer.remove();
+        this.focusLayer = null;
+        return;
+      }
+      if (!layer) {
+        layer = createSvgElement('g', { class: 'presenter-focus-layer' });
+        this.overlay.appendChild(layer);
+      }
+      this.focusLayer = layer;
+      layer.replaceChildren();
+      const view = this.svgMetrics;
+      const bounds = this.getFocusBounds();
+      const shadeRects = bounds ? [
+        { x: view.x, y: view.y, width: view.width, height: bounds.y - view.y },
+        { x: view.x, y: bounds.y + bounds.height, width: view.width, height: view.y + view.height - bounds.y - bounds.height },
+        { x: view.x, y: bounds.y, width: bounds.x - view.x, height: bounds.height },
+        { x: bounds.x + bounds.width, y: bounds.y, width: view.x + view.width - bounds.x - bounds.width, height: bounds.height }
+      ] : [view];
+      shadeRects.filter(function (rect) { return rect.width > 0 && rect.height > 0; }).forEach((rect) => {
+        layer.appendChild(createSvgElement('rect', Object.assign({ class: 'presenter-focus-shade' }, rect)));
+      });
+      if (bounds) layer.appendChild(createSvgElement('rect', Object.assign({ class: 'presenter-focus-outline' }, bounds)));
+    }
+
+    drawAnnotations(skipSync) {
       cancelAnimationFrame(this.annotationFrame);
       this.annotationFrame = 0;
       if (!this.overlay || !this.svgMetrics) return;
       while (this.overlay.firstChild) this.overlay.removeChild(this.overlay.firstChild);
+      this.focusLayer = null;
       this.drawMarks();
-      const view = this.svgMetrics;
-      if (this.annotations.focus) {
-        const bounds = this.getFocusBounds();
-        const shadeRects = bounds ? [
-          { x: view.x, y: view.y, width: view.width, height: bounds.y - view.y },
-          { x: view.x, y: bounds.y + bounds.height, width: view.width, height: view.y + view.height - bounds.y - bounds.height },
-          { x: view.x, y: bounds.y, width: bounds.x - view.x, height: bounds.height },
-          { x: bounds.x + bounds.width, y: bounds.y, width: view.x + view.width - bounds.x - bounds.width, height: bounds.height }
-        ] : [view];
-        shadeRects.filter(function (rect) { return rect.width > 0 && rect.height > 0; }).forEach((rect) => {
-          this.overlay.appendChild(createSvgElement('rect', Object.assign({ class: 'presenter-focus-shade' }, rect)));
-        });
-        if (bounds) this.overlay.appendChild(createSvgElement('rect', Object.assign({ class: 'presenter-focus-outline' }, bounds)));
-      }
+      this.drawFocusLayer();
       this.drawCursor('A', this.annotations.cursorA);
       this.drawCursor('B', this.annotations.cursorB);
       this.drawPointerStroke(true);
       this.drawMarkSelection();
       this.updateMeasurements();
       this.updateCopyControls();
-      if (this.split) this.split.syncAnnotations();
+      if (this.split && !skipSync) this.split.syncAnnotations();
     }
 
     drawCursor(name, cycle) {
@@ -3293,7 +3374,6 @@
         if (document.activeElement === this.notesText || this.stepTitleEdit || this.textEdit || !this.focusOptions.hidden
             || (this.shapeOptions && !this.shapeOptions.hidden) || (this.copyOptions && !this.copyOptions.hidden)
             || (this.settingsOptions && !this.settingsOptions.hidden)
-            || (this.splitOptions && !this.splitOptions.hidden)
             || (this.exitDialog && !this.exitDialog.hidden) || this.drag) return;
         this.app.classList.add('controls-idle');
       }, 2600);
@@ -3315,7 +3395,8 @@
         if (key === 'escape') {
           event.preventDefault();
           event.stopPropagation();
-          this.closeSettings();
+          if (!this.settingsShortcutsPage.hidden) this.showSettingsPage('main', true);
+          else this.closeSettings();
         } else this.dispatchShortcut(event, this.settingsOptions);
         return;
       }
@@ -3328,10 +3409,6 @@
       }
       if (key === 'escape') {
         event.preventDefault();
-        if (this.split && !this.splitOptions.hidden) {
-          this.split.close(true);
-          return;
-        }
         if (this.copyOptions && !this.copyOptions.hidden) {
           if (!this.copying) this.closeCopyOptions();
           return;

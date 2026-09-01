@@ -10,7 +10,7 @@
   const XLINK_NS = 'http://www.w3.org/1999/xlink';
   const MODES = { none: '不分屏', rows: '上下分屏', columns: '左右分屏' };
   const PANE_FIELDS = ['viewport', 'stageContent', 'surface', 'overlay', 'frozenLabels',
-    'frozenLabelNodes', 'frozenLabelView', 'frozenLabelsActive', 'markClipId'];
+    'frozenLabelNodes', 'frozenLabelView', 'frozenLabelsActive', 'markClipId', 'focusLayer'];
   const position = (value) => Number.isFinite(Number(value)) ? Math.max(0, Number(value)) : 0;
 
   class SplitView {
@@ -20,6 +20,7 @@
       this.container = view.app.querySelector('#presenter-stage-panes');
       this.button = view.splitButton;
       this.options = view.splitOptions;
+      this.embedded = !!(this.options && this.options.dataset.embedded === 'true');
       this.panes = [{ element: view.app.querySelector('#presenter-stage-primary'),
         display: view.display, index: 0, synced: {} }];
       this.active = this.panes[0];
@@ -67,7 +68,11 @@
       pane.surface.appendChild(this.view.textEditor);
       this.panes.forEach(item => item.element.classList.toggle('active', item === pane));
       this.view.markPick = null;
-      this.view.drawAnnotations();
+      // Mirrored overlays are already current. Only rebuild when transient pointer ink
+      // needs fresh DOM references in the newly active pane.
+      if (this.view.pointerStroke.length > 1 || this.view.pointerStrokes.length) {
+        this.view.drawAnnotations();
+      }
       this.view.updateToolState();
       return true;
     }
@@ -92,7 +97,7 @@
         overlay: element.querySelector('.presenter-overlay'),
         frozenLabels: element.querySelector('.presenter-frozen-labels'),
         frozenLabelNodes: [], frozenLabelView: null, frozenLabelsActive: false,
-        markClipId: 'presenter-mark-clip-1' };
+        markClipId: 'presenter-mark-clip-1', focusLayer: null };
       this.panes.push(pane);
       this.view.bindStageEvents(pane.viewport, pane.overlay);
       if (this.view.resizeObserver) this.view.resizeObserver.observe(pane.viewport);
@@ -132,6 +137,7 @@
 
     syncAnnotations() {
       if (this.mode === 'none' || this.view.destroyed) return;
+      this.storePane(this.active);
       const source = this.view.overlay;
       const sourceClip = this.view.markClipId;
       this.panes.forEach(pane => {
@@ -147,7 +153,56 @@
           }
         });
         pane.overlay.replaceChildren(fragment);
+        pane.focusLayer = pane.overlay.querySelector('.presenter-focus-layer');
       });
+    }
+
+    syncLiveGesture(drag) {
+      if (this.mode === 'none' || !drag) return;
+      const target = this.panes.find(pane => pane !== this.active);
+      if (!target) return;
+      if (drag.kind === 'focus') {
+        const sourceLayer = this.view.focusLayer;
+        const targetLayer = target.focusLayer;
+        if (!sourceLayer || !targetLayer) return;
+        const fragment = sourceLayer.ownerDocument.createDocumentFragment();
+        Array.from(sourceLayer.childNodes).forEach(child => fragment.appendChild(child.cloneNode(true)));
+        targetLayer.replaceChildren(fragment);
+        return;
+      }
+      if (drag.kind === 'pen' && drag.mark) {
+        if (!drag.mirrorInk || drag.mirrorInk.parentNode == null) {
+          drag.mirrorInk = target.overlay.querySelector(
+            'path.presenter-annotation-ink[data-mark-id="' + drag.mark.id + '"]'
+          );
+        }
+        if (drag.liveInk && drag.mirrorInk) drag.mirrorInk.setAttribute('d', drag.liveInk.getAttribute('d'));
+        return;
+      }
+      if ((drag.kind === 'arrow' || drag.kind === 'rectangle') && drag.mark) {
+        if (!drag.mirrorPaths || drag.mirrorPaths.some(element => element.parentNode == null)) {
+          drag.mirrorPaths = Array.from(target.overlay.querySelectorAll('path[data-mark-id="' + drag.mark.id + '"]'));
+        }
+        if (drag.livePaths && drag.mirrorPaths.length === drag.livePaths.length) {
+          drag.mirrorPaths.forEach((element, index) => {
+            element.setAttribute('d', drag.livePaths[index].getAttribute('d'));
+          });
+        }
+      }
+    }
+
+    syncLivePointer(drag, ink) {
+      if (this.mode === 'none' || !drag || !ink) return;
+      const target = this.panes.find(pane => pane !== this.active);
+      if (!target) return;
+      if (!drag.mirrorPointer || drag.mirrorPointer.parentNode == null) {
+        drag.mirrorPointer = ink.cloneNode(true);
+        drag.mirrorPointer.setAttribute('clip-path', 'url(#' + target.markClipId + ')');
+        target.overlay.appendChild(drag.mirrorPointer);
+      } else {
+        drag.mirrorPointer.setAttribute('d', ink.getAttribute('d'));
+        drag.mirrorPointer.setAttribute('stroke', ink.getAttribute('stroke'));
+      }
     }
 
     syncScroll(viewport, force) {
@@ -216,14 +271,21 @@
       view.updateFrozenLabels();
       view.drawAnnotations();
       view.updateToolState();
-      this.close(false);
+      if (!this.embedded) this.close(false);
       this.updateControls();
-      if (!restore) view.viewport.focus({ preventScroll: true });
+      if (!restore && !this.embedded) view.viewport.focus({ preventScroll: true });
       view.log('presenter-split', { phase: 'layout', mode, active: this.active.index });
       return true;
     }
 
     toggleOptions() {
+      if (this.embedded) {
+        if (this.view.settingsOptions.hidden) this.view.openSettings();
+        else this.view.showSettingsPage('main', true);
+        const selected = this.options.querySelector('input:checked');
+        if (selected) selected.focus({ preventScroll: true });
+        return;
+      }
       if (!this.options.hidden) return this.close(true);
       this.view.closeFocusOptions();
       this.view.closeShapeOptions();
@@ -237,24 +299,28 @@
     }
 
     close(focus) {
+      if (this.embedded) return;
       this.options.hidden = true;
       this.button.setAttribute('aria-expanded', 'false');
       if (focus) this.button.focus({ preventScroll: true });
     }
 
     positionOptions() {
-      if (this.options.hidden) return;
+      if (this.embedded || this.options.hidden) return;
       const rect = this.button.getBoundingClientRect();
       this.view.positionPopover(this.options, rect.left, rect.bottom, false);
     }
 
     updateControls() {
-      this.button.disabled = !this.view.svg;
-      this.button.classList.toggle('active', this.mode !== 'none');
-      this.button.dataset.shortcutTitle = '分屏：' + MODES[this.mode];
-      this.button.title = this.button.dataset.shortcutTitle;
+      if (this.button) {
+        this.button.disabled = !this.view.svg;
+        this.button.classList.toggle('active', this.mode !== 'none');
+        this.button.dataset.shortcutTitle = '分屏：' + MODES[this.mode];
+        this.button.title = this.button.dataset.shortcutTitle;
+      }
       this.options.querySelectorAll('input[name="presenter-split-mode"]').forEach(input => {
         input.checked = input.value === this.mode;
+        input.disabled = !this.view.svg;
       });
     }
 
