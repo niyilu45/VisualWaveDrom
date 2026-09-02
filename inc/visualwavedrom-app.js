@@ -802,7 +802,8 @@ if (!window.VWDCodeEditorPairs) {
       const cfg = options || {};
       const minHeight = Number.isFinite(cfg.minHeight) ? cfg.minHeight : 86;
       const maxHeight = Number.isFinite(cfg.maxHeight) ? cfg.maxHeight : 360;
-      const target = Math.max(minHeight, overlay.scrollHeight + 4);
+      const extraHeight = Number.isFinite(cfg.extraHeight) ? cfg.extraHeight : 4;
+      const target = Math.max(minHeight, overlay.scrollHeight + extraHeight);
       overlay.style.height = Math.min(maxHeight, target) + 'px';
       overlay.style.overflowY = target > maxHeight ? 'auto' : 'hidden';
     }
@@ -18616,32 +18617,111 @@ ${lines.join('\n')}`;
       requestAnimationFrame(resizeOverlay);
     }
 
-    function startWaveDocumentDescriptionEdit(tag, descriptionEl) {
+    function getTextOffsetWithinElement(root, node, nodeOffset) {
+      if (!root || !node || (node !== root && !root.contains(node))) return null;
+      let offset = 0;
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      let textNode = walker.nextNode();
+      while (textNode) {
+        if (textNode === node) {
+          const localOffset = Math.max(0, Math.min(Number(nodeOffset) || 0, textNode.nodeValue.length));
+          return offset + localOffset;
+        }
+        offset += textNode.nodeValue.length;
+        textNode = walker.nextNode();
+      }
+      if (node === root) {
+        offset = 0;
+        const childLimit = Math.max(0, Math.min(Number(nodeOffset) || 0, root.childNodes.length));
+        for (let i = 0; i < childLimit; i++) offset += (root.childNodes[i].textContent || '').length;
+        return offset;
+      }
+      return null;
+    }
+
+    function getDescriptionCaretOffsetAtPoint(descriptionEl, point, valueLength) {
+      const fallback = Math.max(0, Number(valueLength) || 0);
+      if (!descriptionEl || !point || !Number.isFinite(point.clientX) || !Number.isFinite(point.clientY)) {
+        return fallback;
+      }
+      let node = null;
+      let nodeOffset = 0;
+      try {
+        if (typeof document.caretPositionFromPoint === 'function') {
+          const position = document.caretPositionFromPoint(point.clientX, point.clientY);
+          if (position) {
+            node = position.offsetNode;
+            nodeOffset = position.offset;
+          }
+        }
+        if (!node && typeof document.caretRangeFromPoint === 'function') {
+          const range = document.caretRangeFromPoint(point.clientX, point.clientY);
+          if (range) {
+            node = range.startContainer;
+            nodeOffset = range.startOffset;
+          }
+        }
+      } catch (_e) {
+        return fallback;
+      }
+      const resolved = getTextOffsetWithinElement(descriptionEl, node, nodeOffset);
+      return resolved == null ? fallback : Math.max(0, Math.min(fallback, resolved));
+    }
+
+    function getDescriptionEditorHeightOptions(descriptionEl) {
+      const rect = descriptionEl.getBoundingClientRect();
+      const style = window.getComputedStyle(descriptionEl);
+      const verticalChrome = [
+        style.paddingTop,
+        style.paddingBottom,
+        style.borderTopWidth,
+        style.borderBottomWidth
+      ].reduce((sum, part) => sum + (Number.parseFloat(part) || 0), 0);
+      const lineHeight = Number.parseFloat(style.lineHeight) || 18;
+      const minHeight = Math.max(lineHeight, Math.round(rect.height - verticalChrome));
+      return {
+        minHeight,
+        maxHeight: Math.max(260, minHeight),
+        extraHeight: 0
+      };
+    }
+
+    function startWaveDocumentDescriptionEdit(tag, descriptionEl, interaction) {
       exitWavePaintMode('wave-description');
       if (!tag || !descriptionEl) return;
+      const oldValue = getWaveDocumentDescription(tag);
+      const requestedCaretOffset = Number.isFinite(interaction && interaction.caretOffset)
+        ? Math.max(0, Math.min(oldValue.length, interaction.caretOffset))
+        : getDescriptionCaretOffsetAtPoint(descriptionEl, interaction, oldValue.length);
       if (tag.name !== editingWaveDocumentName) {
         openWaveDocumentForEditing(tag.name, { immediate: true });
         setTimeout(() => {
           const card = waveLibraryContainer && waveLibraryContainer.querySelector('.wave-document-card.focused');
           const nextDescription = card && card.querySelector('.wave-document-description');
-          if (nextDescription) startWaveDocumentDescriptionEdit(tag, nextDescription);
+          if (nextDescription) startWaveDocumentDescriptionEdit(tag, nextDescription, { caretOffset: requestedCaretOffset });
         }, 0);
         return;
       }
       if (descriptionEl.querySelector('textarea')) return;
 
-      const oldValue = getWaveDocumentDescription(tag);
+      const editorHeightOptions = getDescriptionEditorHeightOptions(descriptionEl);
       const editorBox = document.createElement('textarea');
       editorBox.className = 'wave-document-description-editor';
       editorBox.value = oldValue;
       editorBox.placeholder = '输入波形图说明';
       descriptionEl.innerHTML = '';
       descriptionEl.classList.remove('empty');
+      descriptionEl.classList.add('editing');
       descriptionEl.appendChild(editorBox);
       trackInlineEditorHistoryState(editorBox, oldValue);
-      autoResizeDescriptionOverlay(editorBox, { minHeight: 62, maxHeight: 260 });
-      editorBox.focus();
-      editorBox.select();
+      const resizeEditor = () => autoResizeDescriptionOverlay(editorBox, editorHeightOptions);
+      resizeEditor();
+      try {
+        editorBox.focus({ preventScroll: true });
+      } catch (_e) {
+        editorBox.focus();
+      }
+      editorBox.setSelectionRange(requestedCaretOffset, requestedCaretOffset);
 
       let committed = false;
       let outsidePointerHandler = null;
@@ -18652,6 +18732,7 @@ ${lines.join('\n')}`;
       };
       const closeEditor = (value) => {
         detachOutsidePointerHandler();
+        descriptionEl.classList.remove('editing');
         descriptionEl.textContent = value || '暂无波形图说明';
         descriptionEl.classList.toggle('empty', !value);
         descriptionEl.title = '点击编辑波形图说明';
@@ -18716,7 +18797,7 @@ ${lines.join('\n')}`;
         commit('done-button');
       });
       descriptionEl.appendChild(doneButton);
-      editorBox.addEventListener('input', () => autoResizeDescriptionOverlay(editorBox, { minHeight: 62, maxHeight: 260 }));
+      editorBox.addEventListener('input', resizeEditor);
       editorBox.addEventListener('blur', () => commit('blur'));
       editorBox.addEventListener('wheel', (event) => {
         if (event.ctrlKey || event.metaKey || !event.deltaY) return;
@@ -18736,7 +18817,7 @@ ${lines.join('\n')}`;
           const end = editorBox.selectionEnd;
           editorBox.value = editorBox.value.slice(0, start) + '  ' + editorBox.value.slice(end);
           editorBox.selectionStart = editorBox.selectionEnd = start + 2;
-          autoResizeDescriptionOverlay(editorBox, { minHeight: 62, maxHeight: 260 });
+          resizeEditor();
           return;
         }
         if (event.key === 'Escape') {
@@ -18745,7 +18826,11 @@ ${lines.join('\n')}`;
           closeEditor(oldValue);
         }
       });
-      vwdDebugLog('wave-library', { phase: 'open-description-editor', documentName: tag.name });
+      vwdDebugLog('wave-library', {
+        phase: 'open-description-editor',
+        documentName: tag.name,
+        caretOffset: requestedCaretOffset
+      });
     }
 
     function getWaveScreenshotMetrics(svg) {
@@ -19468,7 +19553,10 @@ ${lines.join('\n')}`;
         });
         if (!isEditingDocument) return;
         const tag = getSavedTagByName(documentName);
-        if (tag) startWaveDocumentDescriptionEdit(tag, description);
+        if (tag) startWaveDocumentDescriptionEdit(tag, description, {
+          clientX: event.clientX,
+          clientY: event.clientY
+        });
       });
 
       canvas.appendChild(previewHost);
