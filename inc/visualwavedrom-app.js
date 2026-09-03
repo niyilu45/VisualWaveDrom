@@ -417,6 +417,10 @@ if (!window.VWDCodeEditorPairs) {
     let copiedWaveRows = [];
     let waveSelectionDrag = null;
     let waveCellTooltip = null;
+    let waveCellTooltipName = null;
+    let waveCellTooltipValue = null;
+    let waveCellTooltipContentKey = '';
+    let waveCellTooltipSize = { width: 0, height: 0 };
     let waveClipboardShortcutActive = false;
     let groupDeleteShortcutActive = false;
     let selectedGroupIndex = -1;
@@ -1040,6 +1044,54 @@ ${lines.join('\n')}`;
     const presenterWaveViewActive = pageQuery.get('view') === 'presenter' && !!requestedWaveDocumentName;
     const focusedWaveViewActive = singleWaveViewActive || scopeWaveViewActive || presenterWaveViewActive;
     const waveLibraryClientId = 'client-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+    const singleWindowStateNamespace = 'vwd-single-window:'
+      + encodeURIComponent(requestedLibraryId || 'browser') + ':'
+      + encodeURIComponent(requestedWaveDocumentName || 'wave');
+
+    function getWindowStateStorage() {
+      try {
+        return singleWaveViewActive ? window.sessionStorage : window.localStorage;
+      } catch (_error) {
+        return null;
+      }
+    }
+
+    function getWindowStateKey(key) {
+      return singleWaveViewActive ? (singleWindowStateNamespace + ':' + key) : key;
+    }
+
+    function readWindowState(key) {
+      const storage = getWindowStateStorage();
+      if (!storage) return null;
+      try {
+        return storage.getItem(getWindowStateKey(key));
+      } catch (_error) {
+        return null;
+      }
+    }
+
+    function writeWindowState(key, value) {
+      const storage = getWindowStateStorage();
+      if (!storage) return false;
+      try {
+        storage.setItem(getWindowStateKey(key), String(value));
+        return true;
+      } catch (_error) {
+        return false;
+      }
+    }
+
+    function removeWindowState(key) {
+      const storage = getWindowStateStorage();
+      if (!storage) return false;
+      try {
+        storage.removeItem(getWindowStateKey(key));
+        return true;
+      } catch (_error) {
+        return false;
+      }
+    }
+
     const WAVE_LIBRARY_CLIENT_HEARTBEAT_MS = 20000;
     let waveLibraryClientEventSource = null;
     let waveLibraryClientHeartbeatTimer = 0;
@@ -1459,13 +1511,29 @@ ${lines.join('\n')}`;
       return normalizeNavSelectedRows(getNavNodeAllRows(node, []), Number.MAX_SAFE_INTEGER);
     }
 
-    function collectNavDocuments(node, output) {
+    function collectNavDocuments(node, output, seenDocuments) {
       const result = output || [];
+      const seen = seenDocuments || new Set(result);
       if (!node) return result;
       (node.documents || []).forEach((name) => {
-        if (name && !result.includes(name)) result.push(name);
+        if (!name || seen.has(name)) return;
+        seen.add(name);
+        result.push(name);
       });
-      (node.children || []).forEach((child) => collectNavDocuments(child, result));
+      (node.children || []).forEach((child) => collectNavDocuments(child, result, seen));
+      return result;
+    }
+
+    function collectNavDocumentEntries(node, output, seenDocuments) {
+      const result = output || [];
+      const seen = seenDocuments || new Set(result.map((entry) => entry.name));
+      if (!node) return result;
+      (node.documents || []).forEach((name) => {
+        if (!name || seen.has(name)) return;
+        seen.add(name);
+        result.push({ name, parent: node });
+      });
+      (node.children || []).forEach((child) => collectNavDocumentEntries(child, result, seen));
       return result;
     }
 
@@ -2510,7 +2578,7 @@ ${lines.join('\n')}`;
         jsonEditorPerformanceState.lineWrapping = lineWrapping;
       }
       if (persist) {
-        try { localStorage.setItem(JSON_COMPACT_MODE_KEY, enabled ? '1' : '0'); } catch (e) { /* ignore */ }
+        writeWindowState(JSON_COMPACT_MODE_KEY, enabled ? '1' : '0');
       }
       refreshJsonEditorLayout(false);
       vwdDebugLog('json-panel', { phase: 'compact-mode', enabled, forceNoWrap });
@@ -2518,7 +2586,7 @@ ${lines.join('\n')}`;
 
     function restoreJsonCompactMode() {
       try {
-        setJsonCompactMode(localStorage.getItem(JSON_COMPACT_MODE_KEY) === '1', false);
+        setJsonCompactMode(readWindowState(JSON_COMPACT_MODE_KEY) === '1', false);
       } catch (e) {
         setJsonCompactMode(false, false);
       }
@@ -2811,7 +2879,7 @@ ${lines.join('\n')}`;
         return 'window';
       }
       try {
-        const saved = localStorage.getItem(JSON_VIEW_MODE_KEY);
+        const saved = readWindowState(JSON_VIEW_MODE_KEY);
         return saved === 'summary' || saved === 'window' || saved === 'full' ? saved : 'full';
       } catch (_e) {
         return 'full';
@@ -2969,7 +3037,7 @@ ${lines.join('\n')}`;
       }
       if (opts.user) {
         jsonViewModeExplicitForDocument = getJsonDocumentIdentity();
-        try { localStorage.setItem(JSON_VIEW_MODE_KEY, nextMode); } catch (_e) { /* ignore */ }
+        writeWindowState(JSON_VIEW_MODE_KEY, nextMode);
       }
       refreshJsonDocumentView({ source: jsonDocumentSource, metrics: jsonDocumentMetrics });
       setStatus(true, nextMode === 'summary'
@@ -3026,13 +3094,13 @@ ${lines.join('\n')}`;
         toggleJsonPanelBtn.setAttribute('aria-pressed', String(shouldHide));
       }
       if (persist) {
-        try { localStorage.setItem(JSON_PANEL_HIDDEN_KEY, shouldHide ? '1' : '0'); } catch (e) { /* ignore */ }
+        writeWindowState(JSON_PANEL_HIDDEN_KEY, shouldHide ? '1' : '0');
       }
     }
 
     function restoreJsonPanelVisibility() {
       try {
-        setJsonPanelHidden(localStorage.getItem(JSON_PANEL_HIDDEN_KEY) === '1', false);
+        setJsonPanelHidden(readWindowState(JSON_PANEL_HIDDEN_KEY) === '1', false);
       } catch (e) {
         setJsonPanelHidden(false, false);
       }
@@ -3047,13 +3115,13 @@ ${lines.join('\n')}`;
         toggleNavSidebarBtn.setAttribute('aria-pressed', String(shouldHide));
       }
       if (persist) {
-        try { localStorage.setItem(NAV_SIDEBAR_HIDDEN_KEY, shouldHide ? '1' : '0'); } catch (e) { /* ignore */ }
+        writeWindowState(NAV_SIDEBAR_HIDDEN_KEY, shouldHide ? '1' : '0');
       }
     }
 
     function restoreNavSidebarVisibility() {
       try {
-        setNavSidebarHidden(localStorage.getItem(NAV_SIDEBAR_HIDDEN_KEY) === '1', false);
+        setNavSidebarHidden(readWindowState(NAV_SIDEBAR_HIDDEN_KEY) === '1', false);
       } catch (e) {
         setNavSidebarHidden(false, false);
       }
@@ -3064,13 +3132,13 @@ ${lines.join('\n')}`;
       const nextWidth = Math.max(180, Math.min(maxWidth, Math.round(Number(width) || 240)));
       document.documentElement.style.setProperty('--nav-sidebar-width', nextWidth + 'px');
       if (persist) {
-        try { localStorage.setItem(NAV_SIDEBAR_WIDTH_KEY, String(nextWidth)); } catch (e) { /* ignore */ }
+        writeWindowState(NAV_SIDEBAR_WIDTH_KEY, String(nextWidth));
       }
     }
 
     function restoreNavSidebarWidth() {
       try {
-        const saved = parseInt(localStorage.getItem(NAV_SIDEBAR_WIDTH_KEY), 10);
+        const saved = parseInt(readWindowState(NAV_SIDEBAR_WIDTH_KEY), 10);
         if (Number.isFinite(saved)) setNavSidebarWidth(saved, false);
       } catch (e) { /* ignore */ }
     }
@@ -3840,19 +3908,13 @@ ${lines.join('\n')}`;
     function saveEditorJsonToStorage(text, knownValid) {
       const source = String(text == null ? '' : text);
       if (source.length > EDITOR_LOCAL_STORAGE_MAX_LENGTH) {
-        try {
-          localStorage.removeItem(EDITOR_JSON_KEY);
-          localStorage.removeItem(EDITOR_JSON_VALID_KEY);
-        } catch (_error) { /* quota / private mode */ }
+        removeWindowState(EDITOR_JSON_KEY);
+        removeWindowState(EDITOR_JSON_VALID_KEY);
         return knownValid === true ? true : null;
       }
       const valid = knownValid === true || isValidJsonText(source);
-      try {
-        localStorage.setItem(EDITOR_JSON_KEY, source);
-        if (valid) {
-          localStorage.setItem(EDITOR_JSON_VALID_KEY, source);
-        }
-      } catch (e) { /* quota / private mode */ }
+      writeWindowState(EDITOR_JSON_KEY, source);
+      if (valid) writeWindowState(EDITOR_JSON_VALID_KEY, source);
       return valid;
     }
 
@@ -3886,10 +3948,10 @@ ${lines.join('\n')}`;
 
     function loadEditorJsonFromStorage() {
       try {
-        const saved = localStorage.getItem(EDITOR_JSON_KEY);
+        const saved = readWindowState(EDITOR_JSON_KEY);
         if (saved != null && saved !== '') {
           if (isValidJsonText(saved)) return saved;
-          const lastValid = localStorage.getItem(EDITOR_JSON_VALID_KEY);
+          const lastValid = readWindowState(EDITOR_JSON_VALID_KEY);
           if (lastValid && isValidJsonText(lastValid)) return lastValid;
           return saved;
         }
@@ -3898,6 +3960,7 @@ ${lines.join('\n')}`;
     }
 
     function migrateSessionStorageToLocal(key) {
+      if (singleWaveViewActive) return;
       try {
         if (localStorage.getItem(key) == null) {
           const fromSession = sessionStorage.getItem(key);
@@ -4043,10 +4106,8 @@ ${lines.join('\n')}`;
 
 
     function saveKnownValidEditorJson(text) {
-      try {
-        localStorage.setItem(EDITOR_JSON_KEY, text);
-        localStorage.setItem(EDITOR_JSON_VALID_KEY, text);
-      } catch (e) { /* quota / private mode */ }
+      writeWindowState(EDITOR_JSON_KEY, text);
+      writeWindowState(EDITOR_JSON_VALID_KEY, text);
     }
 
     function scheduleKnownValidPersist(text) {
@@ -5245,46 +5306,10 @@ ${lines.join('\n')}`;
       return (unitWidth || WAVE_UNIT_WIDTH) * 2;
     }
 
-    function buildVirtualColumnMap(numCols, unitWidth) {
-      const step = getWaveColumnWidth(unitWidth);
-      const cols = [];
-      for (let i = 0; i < numCols; i++) {
-        cols.push({ charIndex: i, char: '', x0: i * step, x1: (i + 1) * step });
-      }
-      return cols;
-    }
-
     function columnIndexFromLocalX(localX, unitWidth) {
       const step = getWaveColumnWidth(unitWidth);
       if (localX < 0) return 0;
       return Math.floor(localX / step);
-    }
-
-    function buildWaveColumnMap(drawGroup, wave, unitWidth) {
-      const columnWidth = getWaveColumnWidth(unitWidth);
-      const n = wave.length;
-      if (n === 0) {
-        return buildVirtualColumnMap(MIN_CONNECTION_PICK_BOUNDARIES, unitWidth);
-      }
-      return [...wave].map((char, i) => ({
-        charIndex: i,
-        char,
-        x0: i * columnWidth,
-        x1: (i + 1) * columnWidth
-      }));
-    }
-
-    function clampPickColumnIndex(colIndex, wave, cols) {
-      const minCol = 0;
-      let maxCol = Math.max((wave || '').length, cols.length);
-      if (!wave.length && cols.length > 0) {
-        maxCol = cols.length;
-      } else if (maxCol > 0) {
-        maxCol += 1;
-      } else {
-        maxCol = 8;
-      }
-      return Math.min(Math.max(minCol, colIndex), maxCol);
     }
 
     function columnIndexFromClick(drawGroup, wave, svgRoot, clientX, unitWidth) {
@@ -5294,50 +5319,20 @@ ${lines.join('\n')}`;
       const ctm = drawGroup.getScreenCTM();
       if (!ctm) return 0;
       const local = pt.matrixTransform(ctm.inverse());
-      const cols = buildWaveColumnMap(drawGroup, wave, unitWidth);
-      if (!cols.length) {
-        return clampPickColumnIndex(columnIndexFromLocalX(local.x, unitWidth), wave, cols);
-      }
-
-      for (const col of cols) {
-        if (col.x1 <= col.x0) continue;
-        if (local.x >= col.x0 && local.x < col.x1) {
-          return clampPickColumnIndex(col.charIndex, wave, cols);
-        }
-      }
-
-      if (local.x >= cols[cols.length - 1].x1) {
-        return clampPickColumnIndex(columnIndexFromLocalX(local.x, unitWidth), wave, cols);
-      }
-
-      let best = cols[0].charIndex;
-      let bestDist = Infinity;
-      cols.forEach((col) => {
-        const mid = col.x1 > col.x0 ? (col.x0 + col.x1) / 2 : col.x0;
-        const d = Math.abs(local.x - mid);
-        if (d < bestDist) {
-          bestDist = d;
-          best = col.charIndex;
-        }
-      });
-      return clampPickColumnIndex(best, wave, cols);
+      const rawIndex = columnIndexFromLocalX(local.x, unitWidth);
+      const maxIndex = wave.length ? wave.length + 1 : MIN_CONNECTION_PICK_BOUNDARIES;
+      return Math.min(Math.max(0, rawIndex), maxIndex);
     }
 
     function paintColumnIndexFromClick(drawGroup, wave, svgRoot, clientX, unitWidth, maxColumnCount) {
-      const regularIndex = columnIndexFromClick(drawGroup, wave, svgRoot, clientX, unitWidth);
       const ctm = drawGroup.getScreenCTM();
-      if (!ctm) return regularIndex;
+      if (!ctm) return 0;
 
       const pt = svgRoot.createSVGPoint();
       pt.x = clientX;
       pt.y = 0;
       const local = pt.matrixTransform(ctm.inverse());
-      const cols = buildWaveColumnMap(drawGroup, wave, unitWidth);
-      const last = cols.length ? cols[cols.length - 1] : null;
-      const contentEnd = last && last.x1 > last.x0 ? last.x1 : 0;
-      const rawIndex = (!wave.length || local.x >= contentEnd)
-        ? columnIndexFromLocalX(local.x, unitWidth)
-        : regularIndex;
+      const rawIndex = columnIndexFromLocalX(local.x, unitWidth);
       const maxIndex = Math.max(0, Math.max(1, maxColumnCount || 1) - 1);
       return Math.min(Math.max(0, rawIndex), maxIndex);
     }
@@ -5353,32 +5348,6 @@ ${lines.join('\n')}`;
       return Math.max(MIN_CONNECTION_PICK_BOUNDARIES, getMaxWaveBoundaryIndex(sourceMap));
     }
 
-    function getWaveBoundaryPositions(drawGroup, wave, unitWidth, maxBoundaryIndex) {
-      const step = getWaveColumnWidth(unitWidth);
-      const cols = buildWaveColumnMap(drawGroup, wave || '', unitWidth);
-      const targetIndex = Math.max(0, maxBoundaryIndex || 0, (wave || '').length, cols.length);
-      if (!cols.length) {
-        const boundaries = [];
-        for (let i = 0; i <= Math.max(1, targetIndex); i++) {
-          boundaries.push({ index: i, x: i * step });
-        }
-        return boundaries;
-      }
-      const boundaries = [];
-      cols.forEach((col) => {
-        if (col.x1 <= col.x0) return;
-        boundaries.push({ index: col.charIndex, x: col.x0 });
-      });
-      const last = cols[cols.length - 1];
-      const lastIndex = Math.max((wave || '').length, cols.length);
-      const lastX = last && last.x1 > last.x0 ? last.x1 : lastIndex * step;
-      boundaries.push({ index: lastIndex, x: lastX });
-      for (let i = lastIndex + 1; i <= targetIndex; i++) {
-        boundaries.push({ index: i, x: lastX + (i - lastIndex) * step });
-      }
-      return boundaries;
-    }
-
     function boundaryIndexFromClick(drawGroup, wave, svgRoot, clientX, unitWidth, maxBoundaryIndex) {
       const pt = svgRoot.createSVGPoint();
       pt.x = clientX;
@@ -5386,17 +5355,14 @@ ${lines.join('\n')}`;
       const ctm = drawGroup.getScreenCTM();
       if (!ctm) return 0;
       const local = pt.matrixTransform(ctm.inverse());
-      const boundaries = getWaveBoundaryPositions(drawGroup, wave, unitWidth, maxBoundaryIndex);
-      let best = boundaries[0] || { index: 0, x: 0 };
-      let bestDist = Infinity;
-      boundaries.forEach((boundary) => {
-        const d = Math.abs(local.x - boundary.x);
-        if (d < bestDist) {
-          bestDist = d;
-          best = boundary;
-        }
-      });
-      return Math.max(0, best.index);
+      const maximum = Math.max(
+        0,
+        maxBoundaryIndex || 0,
+        (wave || '').length,
+        (wave || '').length || MIN_CONNECTION_PICK_BOUNDARIES
+      );
+      const index = Math.round(Math.max(0, local.x) / getWaveColumnWidth(unitWidth));
+      return Math.min(maximum, index);
     }
 
     function virtualLaneIndexFromClick(lane, svgRoot, clientX, unitWidth, maxCount, isBoundary) {
@@ -5417,9 +5383,6 @@ ${lines.join('\n')}`;
     }
 
     function getBoundaryXForColumn(drawGroup, wave, colIndex, unitWidth, maxBoundaryIndex) {
-      const boundaries = getWaveBoundaryPositions(drawGroup, wave, unitWidth, maxBoundaryIndex);
-      const exact = boundaries.find((boundary) => boundary.index === colIndex);
-      if (exact) return exact.x;
       const step = getWaveColumnWidth(unitWidth);
       return Math.max(0, colIndex) * step;
     }
@@ -5883,9 +5846,7 @@ ${lines.join('\n')}`;
         return false;
       }
       waveEditMode = mode;
-      try {
-        localStorage.setItem(WAVE_EDIT_MODE_KEY, mode);
-      } catch (e) { /* ignore */ }
+      writeWindowState(WAVE_EDIT_MODE_KEY, mode);
       updateWaveEditModeUI();
       clearActiveTagIfModified();
       setStatus(true, waveEditModeLabel());
@@ -5894,7 +5855,7 @@ ${lines.join('\n')}`;
 
     function loadWaveEditMode() {
       try {
-        const saved = localStorage.getItem(WAVE_EDIT_MODE_KEY);
+        const saved = readWindowState(WAVE_EDIT_MODE_KEY);
         if (saved === 'modify' || saved === 'insert') waveEditMode = saved;
       } catch (e) { /* ignore */ }
       updateWaveEditModeUI();
@@ -6721,7 +6682,7 @@ ${lines.join('\n')}`;
     function setSelectedWaveBlock(anchorRowIndex, headRowIndex, startCol, endCol, options) {
       const opts = options || {};
       const hasFilter = isNavFilteringActive();
-      const visibleSet = getNavVisibleRowSet();
+      const visibleSet = hasFilter ? getNavVisibleRowSet() : null;
       if (hasFilter && Number.isFinite(headRowIndex) && headRowIndex >= 0 && !visibleSet.has(headRowIndex)) {
         headRowIndex = -1;
       }
@@ -6752,7 +6713,7 @@ ${lines.join('\n')}`;
 
     function setSelectedSignal(rowIndex, colIndex) {
       const hasFilter = isNavFilteringActive();
-      const visibleSet = getNavVisibleRowSet();
+      const visibleSet = hasFilter ? getNavVisibleRowSet() : null;
       if (hasFilter && Number.isFinite(rowIndex) && rowIndex >= 0 && !visibleSet.has(rowIndex)) {
         rowIndex = -1;
         colIndex = -1;
@@ -6803,15 +6764,8 @@ ${lines.join('\n')}`;
         x0 = x - 1.5;
         x1 = x + 1.5;
       } else {
-        const cols = buildWaveColumnMap(drawGroup, wave || '', unitWidth);
-        const col = cols[colIndex];
-        if (col && col.x1 > col.x0) {
-          x0 = col.x0;
-          x1 = col.x1;
-        } else {
-          x0 = colIndex * step;
-          x1 = (colIndex + 1) * step;
-        }
+        x0 = colIndex * step;
+        x1 = (colIndex + 1) * step;
       }
 
       let height = 24;
@@ -6853,11 +6807,8 @@ ${lines.join('\n')}`;
       const first = Math.min(startCol, endCol);
       const last = Math.max(startCol, endCol);
       const step = getWaveColumnWidth(unitWidth);
-      const cols = buildWaveColumnMap(drawGroup, wave || '', unitWidth);
-      const firstCol = cols[first];
-      const lastCol = cols[last];
-      const x0 = firstCol && firstCol.x1 > firstCol.x0 ? firstCol.x0 : first * step;
-      const x1 = lastCol && lastCol.x1 > lastCol.x0 ? lastCol.x1 : (last + 1) * step;
+      const x0 = first * step;
+      const x1 = (last + 1) * step;
       let height = 24;
       try {
         height = Math.max(20, drawGroup.getBBox().height + 4);
@@ -7350,54 +7301,66 @@ ${lines.join('\n')}`;
         const isTo = connectionToPoint && connectionToPoint.rowIndex === idx;
         const selectedRange = getSelectedWaveRange(idx);
         const isSelected = !!selectedRange;
+        const localFromColumn = isFrom
+          ? getBigWaveVisibleBoundaryColumn(connectionFromPoint.colIndex)
+          : null;
+        const localToColumn = isTo
+          ? getBigWaveVisibleBoundaryColumn(connectionToPoint.colIndex)
+          : null;
+        const localRange = isSelected && selectedRange && !isFrom && !isTo
+          ? getBigWaveVisibleRange(selectedRange.start, selectedRange.end)
+          : null;
 
         const highlightRoot = drawGroup || lane;
+        const highlightSignature = [
+          localFromColumn == null ? '' : localFromColumn,
+          localToColumn == null ? '' : localToColumn,
+          localRange ? localRange.start : '',
+          localRange ? localRange.end : '',
+          renderContext.start,
+          wave.length,
+          unitWidth,
+          renderedBoundaryIndex
+        ].join('|');
+        if (highlightRoot.getAttribute('data-vwd-highlight-signature') === highlightSignature) return;
+        highlightRoot.setAttribute('data-vwd-highlight-signature', highlightSignature);
         highlightRoot.querySelectorAll('.wave-col-highlight, .wave-col-highlight-from, .wave-col-highlight-to')
           .forEach(el => el.remove());
 
-        if (isFrom) {
-          const localColumn = getBigWaveVisibleBoundaryColumn(connectionFromPoint.colIndex);
-          if (localColumn !== null) {
+        if (localFromColumn !== null) {
             if (drawGroup) {
               appendColumnHighlight(
                 drawGroup,
                 wave,
-                localColumn,
+                localFromColumn,
                 unitWidth,
                 'wave-col-highlight-from',
                 renderedBoundaryIndex
               );
             } else {
-              appendVirtualLaneHighlight(lane, localColumn, unitWidth, 'wave-col-highlight-from');
+              appendVirtualLaneHighlight(lane, localFromColumn, unitWidth, 'wave-col-highlight-from');
             }
-          }
         }
-        if (isTo) {
-          const localColumn = getBigWaveVisibleBoundaryColumn(connectionToPoint.colIndex);
-          if (localColumn !== null) {
+        if (localToColumn !== null) {
             if (drawGroup) {
               appendColumnHighlight(
                 drawGroup,
                 wave,
-                localColumn,
+                localToColumn,
                 unitWidth,
                 'wave-col-highlight-to',
                 renderedBoundaryIndex
               );
             } else {
-              appendVirtualLaneHighlight(lane, localColumn, unitWidth, 'wave-col-highlight-to');
+              appendVirtualLaneHighlight(lane, localToColumn, unitWidth, 'wave-col-highlight-to');
             }
-          }
         }
-        if (isSelected && selectedRange && !isFrom && !isTo) {
-          const localRange = getBigWaveVisibleRange(selectedRange.start, selectedRange.end);
-          if (localRange) {
+        if (localRange) {
             if (drawGroup) {
               appendColumnRangeHighlight(drawGroup, wave, localRange.start, localRange.end, unitWidth);
             } else {
               appendVirtualLaneRangeHighlight(lane, localRange.start, localRange.end, unitWidth);
             }
-          }
         }
       });
     }
@@ -7408,8 +7371,8 @@ ${lines.join('\n')}`;
           && vimVisualRowAnchor < 0
           && !connectionFromPoint
           && !connectionToPoint) return;
-      const visibleSet = getNavVisibleRowSet();
       const hasFilter = isNavFilteringActive();
+      const visibleSet = hasFilter ? getNavVisibleRowSet() : null;
       if (selectedSignalIndex >= lanes.length || (selectedSignalIndex >= 0 && !sourceMap[selectedSignalIndex])) {
         setSelectedSignal(-1, -1);
       } else if (hasFilter && !visibleSet.has(selectedSignalIndex)) {
@@ -7443,8 +7406,8 @@ ${lines.join('\n')}`;
       const svg = waveContainer.querySelector('svg');
       if (!svg) return;
       const lanes = getWaveLaneGroups(svg);
-      const visibleSet = getNavVisibleRowSet();
       const hasFilter = isNavFilteringActive();
+      const visibleSet = hasFilter ? getNavVisibleRowSet() : null;
       lanes.forEach((lane, idx) => {
         const visible = !hasFilter || visibleSet.has(idx);
         lane.classList.toggle('wave-lane-hidden', !visible);
@@ -8764,6 +8727,21 @@ ${lines.join('\n')}`;
       updateConnectionPresetDisabledState();
       highlightSelectedEdgeInSvg();
       updateLegendAvailability();
+    }
+
+    function clearConnectionSelectionContext(reason) {
+      const previousIndex = selectedEdgeIndex;
+      const wasSelectActive = connectionSelectActive;
+      if (!wasSelectActive && previousIndex < 0) return false;
+      if (wasSelectActive) setConnectionSelectActive(false);
+      else clearEdgeSelection();
+      vwdDebugLog('connection-label', {
+        phase: 'selection-context-cleared',
+        reason: reason || 'text-target-change',
+        previousIndex,
+        wasSelectActive
+      });
+      return true;
     }
 
     function clearEdgeSelectionBlink(svg) {
@@ -10825,6 +10803,11 @@ ${lines.join('\n')}`;
       waveCellTooltip.className = 'wave-cell-tooltip';
       waveCellTooltip.hidden = true;
       waveCellTooltip.setAttribute('role', 'tooltip');
+      waveCellTooltipName = document.createElement('strong');
+      waveCellTooltipValue = document.createElement('span');
+      waveCellTooltip.replaceChildren(waveCellTooltipName, waveCellTooltipValue);
+      waveCellTooltipContentKey = '';
+      waveCellTooltipSize = { width: 0, height: 0 };
       document.body.appendChild(waveCellTooltip);
       return waveCellTooltip;
     }
@@ -10837,11 +10820,14 @@ ${lines.join('\n')}`;
       const tooltip = ensureWaveCellTooltip();
       const name = String(signal && signal.name || '').trim() || '未命名信号';
       const value = getWaveCellHoverValue(signal, columnIndex);
-      const nameEl = document.createElement('strong');
-      const valueEl = document.createElement('span');
-      nameEl.textContent = name;
-      valueEl.textContent = '第 ' + (columnIndex + 1) + ' 列 · ' + value;
-      tooltip.replaceChildren(nameEl, valueEl);
+      const valueText = '第 ' + (columnIndex + 1) + ' 列 · ' + value;
+      const contentKey = name + '\u0000' + valueText;
+      const contentChanged = contentKey !== waveCellTooltipContentKey;
+      if (contentChanged) {
+        waveCellTooltipName.textContent = name;
+        waveCellTooltipValue.textContent = valueText;
+        waveCellTooltipContentKey = contentKey;
+      }
       tooltip.hidden = false;
 
       const gap = 14;
@@ -10850,12 +10836,15 @@ ${lines.join('\n')}`;
       let top = event.clientY + gap;
       tooltip.style.left = left + 'px';
       tooltip.style.top = top + 'px';
-      const rect = tooltip.getBoundingClientRect();
-      if (left + rect.width > window.innerWidth - margin) {
-        left = Math.max(margin, event.clientX - rect.width - gap);
+      if (contentChanged || !waveCellTooltipSize.width || !waveCellTooltipSize.height) {
+        const rect = tooltip.getBoundingClientRect();
+        waveCellTooltipSize = { width: rect.width, height: rect.height };
       }
-      if (top + rect.height > window.innerHeight - margin) {
-        top = Math.max(margin, event.clientY - rect.height - gap);
+      if (left + waveCellTooltipSize.width > window.innerWidth - margin) {
+        left = Math.max(margin, event.clientX - waveCellTooltipSize.width - gap);
+      }
+      if (top + waveCellTooltipSize.height > window.innerHeight - margin) {
+        top = Math.max(margin, event.clientY - waveCellTooltipSize.height - gap);
       }
       tooltip.style.left = Math.round(left) + 'px';
       tooltip.style.top = Math.round(top) + 'px';
@@ -11329,6 +11318,7 @@ ${lines.join('\n')}`;
         });
         return;
       }
+      clearConnectionSelectionContext('group-label-edit');
       if (!group) {
         vwdDebugLog('group-label', {
           phase: 'inline-open-blocked',
@@ -12123,6 +12113,7 @@ ${lines.join('\n')}`;
       if (!isTextEditModeActive()) return;
       exitWavePaintMode(field === 'description' ? 'wave-description' : 'inline-edit');
       if (inlineEditActive) return;
+      clearConnectionSelectionContext('inline-' + String(field || 'text') + '-edit');
       inlineEditActive = true;
       setActiveInlineEditState({
         kind: 'inline',
@@ -12338,6 +12329,7 @@ ${lines.join('\n')}`;
       if (!isTextEditModeActive()) return;
       exitWavePaintMode('head-foot');
       if (inlineEditActive) return;
+      clearConnectionSelectionContext('head-foot-edit');
       inlineEditActive = true;
 
       let parsed;
@@ -12449,6 +12441,7 @@ ${lines.join('\n')}`;
       if (!isTextEditModeActive()) return;
       exitWavePaintMode('wave-description');
       if (inlineEditActive) return;
+      clearConnectionSelectionContext('global-description-edit');
       inlineEditActive = true;
       setActiveInlineEditState({
         kind: 'global-description'
@@ -12619,8 +12612,8 @@ ${lines.join('\n')}`;
       const renderedWaveColumnCount = bigWaveViewportState.enabled && bigWaveViewportState.window
         ? Math.max(1, bigWaveViewportState.window.size)
         : maxWaveColumnCount;
-      const visibleSet = getNavVisibleRowSet();
       const hasFilter = isNavFilteringActive();
+      const visibleSet = hasFilter ? getNavVisibleRowSet() : null;
 
       lanes.forEach((lane, idx) => {
         const entry = sourceMap[idx];
@@ -12635,15 +12628,15 @@ ${lines.join('\n')}`;
         const fullWave = entry.signal.wave || '';
         const renderContext = getBigWaveRowRenderContext(idx, fullWave);
         const renderedWave = renderContext.wave;
+        const laneDrawGroup = lane.querySelector('[id^="wavelane_draw_"]');
 
         function resolveLaneColumnIndex(clientX, inPickFlow) {
-          const drawGroup = lane.querySelector('[id^="wavelane_draw_"]');
           const localPickMaxBoundaryIndex = inPickFlow ? renderedBoundaryIndex : 0;
           let localIndex;
-          if (drawGroup) {
+          if (laneDrawGroup) {
             localIndex = inPickFlow
               ? boundaryIndexFromClick(
-                drawGroup,
+                laneDrawGroup,
                 renderedWave,
                 svg,
                 clientX,
@@ -12651,7 +12644,7 @@ ${lines.join('\n')}`;
                 localPickMaxBoundaryIndex
               )
               : paintColumnIndexFromClick(
-                drawGroup,
+                laneDrawGroup,
                 renderedWave,
                 svg,
                 clientX,
@@ -12699,7 +12692,7 @@ ${lines.join('\n')}`;
             return;
           }
 
-          const drawGroup = lane.querySelector('[id^="wavelane_draw_"]');
+          const drawGroup = laneDrawGroup;
           const wave = fullWave;
           const inPickFlow = isConnectionPickFlow();
           const colIndex = resolveLaneColumnIndex(e.clientX, inPickFlow);
@@ -12779,25 +12772,26 @@ ${lines.join('\n')}`;
           };
 
           const resolveWaveSelectionRowIndex = (clientY) => {
-            let resolvedIndex = idx;
-            let nearestDistance = Number.POSITIVE_INFINITY;
-            lanes.forEach((candidateLane, laneIndex) => {
-              if (!sourceMap[laneIndex]) return;
-              const rect = candidateLane.getBoundingClientRect();
-              if (rect.height <= 0 || rect.width <= 0) return;
-              if (clientY >= rect.top && clientY <= rect.bottom) {
-                resolvedIndex = laneIndex;
-                nearestDistance = -1;
-                return;
-              }
-              if (nearestDistance < 0) return;
-              const distance = Math.abs(clientY - (rect.top + rect.bottom) / 2);
-              if (distance < nearestDistance) {
-                nearestDistance = distance;
-                resolvedIndex = laneIndex;
-              }
-            });
-            return resolvedIndex;
+            const laneRects = waveSelectionDrag && waveSelectionDrag.laneRects || [];
+            if (!laneRects.length) return idx;
+            let low = 0;
+            let high = laneRects.length - 1;
+            while (low <= high) {
+              const middle = (low + high) >> 1;
+              const item = laneRects[middle];
+              if (clientY < item.rect.top) high = middle - 1;
+              else if (clientY > item.rect.bottom) low = middle + 1;
+              else return item.index;
+            }
+            const before = high >= 0 ? laneRects[high] : null;
+            const after = low < laneRects.length ? laneRects[low] : null;
+            if (!before) return after ? after.index : idx;
+            if (!after) return before.index;
+            const beforeCenter = (before.rect.top + before.rect.bottom) / 2;
+            const afterCenter = (after.rect.top + after.rect.bottom) / 2;
+            return Math.abs(clientY - beforeCenter) <= Math.abs(clientY - afterCenter)
+              ? before.index
+              : after.index;
           };
 
           const moveWaveRangeSelection = (e) => {
@@ -12808,6 +12802,7 @@ ${lines.join('\n')}`;
             const rowIndex = resolveWaveSelectionRowIndex(e.clientY);
             if (colIndex === waveSelectionDrag.currentCol
                 && rowIndex === waveSelectionDrag.currentRow) return;
+            const previousRow = waveSelectionDrag.currentRow;
             waveSelectionDrag.currentCol = colIndex;
             waveSelectionDrag.currentRow = rowIndex;
             waveSelectionDrag.moved = true;
@@ -12820,12 +12815,18 @@ ${lines.join('\n')}`;
             );
             const firstRow = Math.min(waveSelectionDrag.anchorRow, rowIndex);
             const lastRow = Math.max(waveSelectionDrag.anchorRow, rowIndex);
-            lanes.forEach((currentLane, laneIndex) => {
+            const previousFirst = Math.min(waveSelectionDrag.anchorRow, previousRow);
+            const previousLast = Math.max(waveSelectionDrag.anchorRow, previousRow);
+            const updateFirst = Math.min(firstRow, previousFirst);
+            const updateLast = Math.max(lastRow, previousLast);
+            for (let laneIndex = updateFirst; laneIndex <= updateLast; laneIndex++) {
+              const currentLane = lanes[laneIndex];
+              if (!currentLane) continue;
               currentLane.classList.toggle(
                 'wave-lane-selected',
                 laneIndex >= firstRow && laneIndex <= lastRow
               );
-            });
+            }
             scheduleConnectionHighlightUpdate(lanes, sourceMap);
             e.preventDefault();
           };
@@ -12884,28 +12885,56 @@ ${lines.join('\n')}`;
             finishWaveRangeSelection(e, e.buttons !== 0);
           };
 
-          const updateWaveCellHover = (e) => {
-            if ((e.pointerType && e.pointerType !== 'mouse') || e.buttons !== 0
+          let waveCellHoverFrame = 0;
+          let pendingWaveCellHover = null;
+          const cancelWaveCellHover = () => {
+            pendingWaveCellHover = null;
+            if (waveCellHoverFrame) {
+              cancelAnimationFrame(waveCellHoverFrame);
+              waveCellHoverFrame = 0;
+            }
+            hideWaveCellTooltip();
+          };
+          const flushWaveCellHover = () => {
+            waveCellHoverFrame = 0;
+            const hover = pendingWaveCellHover;
+            pendingWaveCellHover = null;
+            if (!hover || (hover.pointerType && hover.pointerType !== 'mouse') || hover.buttons !== 0
                 || waveSelectionDrag || inlineEditActive) {
               hideWaveCellTooltip();
               return;
             }
-            const target = getEventTargetElement(e);
+            const target = hover.target;
             if (target && target.closest(
               'text.info, .wave-name-click-zone, .wave-describe-text, .wave-text-edit-overlay'
             )) {
               hideWaveCellTooltip();
               return;
             }
-            const drawGroup = lane.querySelector('[id^="wavelane_draw_"]');
-            if (drawGroup) {
-              const drawRect = drawGroup.getBoundingClientRect();
-              if (e.clientX < drawRect.left - 1 || e.clientX > drawRect.right + 1) {
+            if (laneDrawGroup) {
+              const drawRect = laneDrawGroup.getBoundingClientRect();
+              if (hover.clientX < drawRect.left - 1 || hover.clientX > drawRect.right + 1) {
                 hideWaveCellTooltip();
                 return;
               }
             }
-            showWaveCellTooltip(entry.signal, resolveLaneColumnIndex(e.clientX, false), e);
+            showWaveCellTooltip(
+              entry.signal,
+              resolveLaneColumnIndex(hover.clientX, false),
+              hover
+            );
+          };
+          const updateWaveCellHover = (e) => {
+            pendingWaveCellHover = {
+              pointerType: e.pointerType,
+              buttons: e.buttons,
+              clientX: e.clientX,
+              clientY: e.clientY,
+              target: getEventTargetElement(e)
+            };
+            if (!waveCellHoverFrame) {
+              waveCellHoverFrame = requestAnimationFrame(flushWaveCellHover);
+            }
           };
 
           lane.addEventListener('pointerdown', (e) => {
@@ -12914,12 +12943,20 @@ ${lines.join('\n')}`;
             setWaveClipboardShortcutActive(true, 'wave-pointerdown');
             setGroupDeleteShortcutActive(false, 'wave-selected');
             const colIndex = resolveLaneColumnIndex(e.clientX, false);
+            const laneRects = [];
+            lanes.forEach((candidateLane, laneIndex) => {
+              if (!sourceMap[laneIndex]) return;
+              const rect = candidateLane.getBoundingClientRect();
+              if (rect.height <= 0 || rect.width <= 0) return;
+              laneRects.push({ index: laneIndex, rect });
+            });
             waveSelectionDrag = {
               pointerId: e.pointerId,
               anchorRow: idx,
               currentRow: idx,
               anchorCol: colIndex,
               currentCol: colIndex,
+              laneRects,
               moved: false
             };
             setSelectedWaveRange(idx, colIndex, colIndex);
@@ -12935,9 +12972,8 @@ ${lines.join('\n')}`;
             vwdDebugLog('wave-selection', { phase: 'drag-start', rowIndex: idx, colIndex });
           });
 
-          lane.addEventListener('pointermove', moveWaveRangeSelection);
           lane.addEventListener('pointermove', updateWaveCellHover, { passive: true });
-          lane.addEventListener('pointerleave', hideWaveCellTooltip);
+          lane.addEventListener('pointerleave', cancelWaveCellHover);
           lane.addEventListener('pointerup', completeWaveRangeSelection);
           lane.addEventListener('pointercancel', cancelWaveRangeSelection);
           lane.addEventListener('lostpointercapture', loseWaveRangePointerCapture);
@@ -12953,7 +12989,7 @@ ${lines.join('\n')}`;
         attachSignalNameEdit(lane, entry, handleLanePointSelect);
         attachSignalDescribeInteractivity(lane, entry, handleLanePointSelect);
 
-        const drawGroup = lane.querySelector('[id^="wavelane_draw_"]');
+        const drawGroup = laneDrawGroup;
         if (drawGroup) {
           const dataTexts = drawGroup.querySelectorAll('text');
           dataTexts.forEach((textEl, dataIdx) => {
@@ -13005,7 +13041,7 @@ ${lines.join('\n')}`;
 
     function restoreBackBtnPosition() {
       try {
-        const saved = localStorage.getItem(BACK_BTN_POS_KEY);
+        const saved = readWindowState(BACK_BTN_POS_KEY);
         if (saved) {
           const { left, top } = JSON.parse(saved);
           backBtn.style.left = left + 'px';
@@ -13021,7 +13057,7 @@ ${lines.join('\n')}`;
     }
 
     function saveBackBtnPosition() {
-      localStorage.setItem(BACK_BTN_POS_KEY, JSON.stringify({
+      writeWindowState(BACK_BTN_POS_KEY, JSON.stringify({
         left: parseFloat(backBtn.style.left) || 16,
         top: parseFloat(backBtn.style.top) || 16
       }));
@@ -13559,6 +13595,7 @@ ${lines.join('\n')}`;
     }
 
     function loadSavedTagsFromStorage() {
+      if (singleWaveViewActive && waveLibraryServerMode) return [];
       try {
         const raw = localStorage.getItem(WAVE_DOCUMENTS_KEY);
         if (!raw) return [];
@@ -13582,6 +13619,10 @@ ${lines.join('\n')}`;
         savedTagsPersistIdleHandle = null;
       }
       if (applyingWaveLibraryBundle) return;
+      if (singleWaveViewActive && waveLibraryServerMode) {
+        scheduleWaveLibraryServerSave();
+        return;
+      }
       if (!waveLibraryServerMode && browserWaveLibraryReady && browserWaveLibraryStore) {
         scheduleBrowserWaveLibrarySave(true);
         return;
@@ -13680,11 +13721,13 @@ ${lines.join('\n')}`;
       });
       const payload = {
         libraryId: currentWaveLibraryId,
-        activeDocumentName: editingWaveDocumentName || '',
-        selectedDirectoryId: selectedNavNodeId || 'nav-root',
         documents,
         deletedDocuments: Array.from(deletedWaveDocumentNames)
       };
+      if (!singleWaveViewActive) {
+        payload.activeDocumentName = editingWaveDocumentName || '';
+        payload.selectedDirectoryId = selectedNavNodeId || 'nav-root';
+      }
       if (opts.includeStructure || waveLibraryStructureDirty) {
         payload.directories = collectCustomNavNodes(navTreeState || { children: [] });
         payload.rootDocuments = navTreeState && Array.isArray(navTreeState.documents)
@@ -13696,7 +13739,7 @@ ${lines.join('\n')}`;
 
     function readPendingWaveLibrarySave() {
       try {
-        const raw = localStorage.getItem(WAVE_LIBRARY_PENDING_SAVE_KEY);
+        const raw = readWindowState(WAVE_LIBRARY_PENDING_SAVE_KEY);
         if (!raw) return null;
         const pending = JSON.parse(raw);
         if (!pending || !pending.file || !pending.libraryId || !pending.token) return null;
@@ -13718,12 +13761,9 @@ ${lines.join('\n')}`;
         markedAt: new Date().toISOString(),
         state: buildWaveLibraryStatePayload({ includeStructure: waveLibraryStructureDirty })
       };
-      try {
-        localStorage.setItem(WAVE_LIBRARY_PENDING_SAVE_KEY, JSON.stringify(pending));
-        return pending;
-      } catch (_e) {
-        return null;
-      }
+      return writeWindowState(WAVE_LIBRARY_PENDING_SAVE_KEY, JSON.stringify(pending))
+        ? pending
+        : null;
     }
 
     function clearPendingWaveLibrarySave(expected) {
@@ -13731,7 +13771,7 @@ ${lines.join('\n')}`;
         const current = readPendingWaveLibrarySave();
         if (!current) return;
         if (expected && current.token !== expected.token) return;
-        localStorage.removeItem(WAVE_LIBRARY_PENDING_SAVE_KEY);
+        removeWindowState(WAVE_LIBRARY_PENDING_SAVE_KEY);
       } catch (_e) { /* ignore */ }
     }
 
@@ -14710,6 +14750,7 @@ ${lines.join('\n')}`;
       try {
         waveLibrarySyncChannel.postMessage({
           type: 'wave-document-saved',
+          sourceClientId: waveLibraryClientId,
           libraryId: currentWaveLibraryId,
           waveId: document.name,
           revision: document.revision
@@ -15052,6 +15093,9 @@ ${lines.join('\n')}`;
       }
       const hasChanges = waveLibraryStructureDirty || dirtyWaveDocumentNames.size > 0
         || deletedWaveDocumentNames.size > 0;
+      // A forced flush from a standalone window must not rewrite the shared
+      // browser snapshot when that window has no changes of its own.
+      if (singleWaveViewActive && !hasChanges) return true;
       if (!hasChanges && !opts.force) return true;
       const structureRevision = waveLibraryStructureRevision;
       try {
@@ -15060,6 +15104,14 @@ ${lines.join('\n')}`;
           currentWaveLibraryId = summary.libraryId;
         } else if (hasChanges) {
           const payload = buildWaveLibraryStatePayload({ includeStructure: waveLibraryStructureDirty });
+          if (singleWaveViewActive) {
+            const restored = await browserWaveLibraryStore.loadPersisted();
+            if (!restored) throw new Error('浏览器 SQLite 波形库不存在');
+            const latestLibrary = browserWaveLibraryStore.libraryRow();
+            if (latestLibrary.libraryId !== currentWaveLibraryId) {
+              throw new Error('浏览器 SQLite 波形库已被替换');
+            }
+          }
           const signatures = new Map(payload.documents.map((document) => [
             document.name,
             singleWaveSyncSignature(document)
@@ -15368,16 +15420,27 @@ ${lines.join('\n')}`;
       waveLibrarySyncChannel.addEventListener('message', async (event) => {
         const message = event.data || {};
         if (message.type !== 'wave-document-saved'
+            || message.sourceClientId === waveLibraryClientId
             || !currentWaveLibraryId
             || message.libraryId !== currentWaveLibraryId
             || !message.waveId) return;
-        const local = getSavedTagByName(message.waveId);
-        if (local && message.waveId === editingWaveDocumentName && !currentStateMatchesTag(local)) {
+        const messageWaveId = String(message.waveId);
+        if (singleWaveViewActive && messageWaveId !== requestedWaveDocumentName) {
+          vwdDebugLog('wave-library', {
+            phase: 'cross-page-sync-ignored',
+            reason: 'different-standalone-document',
+            documentName: messageWaveId,
+            currentDocumentName: requestedWaveDocumentName
+          });
+          return;
+        }
+        const local = getSavedTagByName(messageWaveId);
+        if (local && messageWaveId === editingWaveDocumentName && !currentStateMatchesTag(local)) {
           setStatus(false, '同步冲突：另一个页面修改了当前波形图');
           return;
         }
         try {
-          const query = new URLSearchParams({ libraryId: currentWaveLibraryId, waveId: message.waveId });
+          const query = new URLSearchParams({ libraryId: currentWaveLibraryId, waveId: messageWaveId });
           const response = await fetch('/api/wave-document?' + query.toString());
           if (!response.ok) return;
           const result = await response.json();
@@ -15390,7 +15453,6 @@ ${lines.join('\n')}`;
           if (singleWaveViewActive && remote.name === requestedWaveDocumentName) {
             lastSingleWaveSyncedSignature = singleWaveSyncSignature(remote);
           }
-          persistSavedTags();
           if (remote.name === editingWaveDocumentName) loadSavedTag(remote.name);
           else {
             refreshWaveDocumentCard(remote.name);
@@ -17375,12 +17437,15 @@ ${lines.join('\n')}`;
     }
 
     function getCurrentStateSnapshot() {
-      return {
+      const snapshot = {
         content: editor.value,
         hscale: hscaleInput ? clampHscale(hscaleInput.value) : 1,
-        waveEditMode: waveEditMode,
         savedAt: new Date().toISOString()
       };
+      // Edit/insert mode is window UI state in a standalone editor. Keeping it
+      // out of the document prevents one standalone window changing another.
+      if (!singleWaveViewActive) snapshot.waveEditMode = waveEditMode;
+      return snapshot;
     }
 
     function findSavedTagIndex(name) {
@@ -17581,7 +17646,7 @@ ${lines.join('\n')}`;
     function currentStateMatchesTag(tag) {
       if (!tag || tag.deferred) return false;
       if (editor.value !== tag.content) return false;
-      if (tag.waveEditMode && tag.waveEditMode !== waveEditMode) return false;
+      if (!singleWaveViewActive && tag.waveEditMode && tag.waveEditMode !== waveEditMode) return false;
       return true;
     }
 
@@ -17748,6 +17813,8 @@ ${lines.join('\n')}`;
         focusWaveDocument(name);
         return;
       }
+      commitOpenTextEditors('before-wave-document-switch');
+      clearConnectionSelectionContext('wave-document-switch');
       if (!saveCurrentWaveDocumentBeforeSwitch()) {
         setStatus(false, '当前波形图自动保存失败');
         return;
@@ -17796,7 +17863,7 @@ ${lines.join('\n')}`;
       renderWaveform(tag.content);
       debouncedPersistEditorJson();
 
-      if (tag.waveEditMode === 'modify' || tag.waveEditMode === 'insert') {
+      if (!singleWaveViewActive && (tag.waveEditMode === 'modify' || tag.waveEditMode === 'insert')) {
         setWaveEditMode(tag.waveEditMode);
       }
 
@@ -18465,6 +18532,7 @@ ${lines.join('\n')}`;
       if (!isTextEditModeActive() || !tag || !titleEl) return;
       if (tag.name !== editingWaveDocumentName || inlineEditActive) return;
       exitWavePaintMode('wave-title');
+      clearConnectionSelectionContext('wave-title-edit');
 
       let parsed;
       try {
@@ -18703,6 +18771,7 @@ ${lines.join('\n')}`;
         return;
       }
       if (descriptionEl.querySelector('textarea')) return;
+      clearConnectionSelectionContext('wave-document-description-edit');
 
       const editorHeightOptions = getDescriptionEditorHeightOptions(descriptionEl);
       const editorBox = document.createElement('textarea');
@@ -19577,6 +19646,7 @@ ${lines.join('\n')}`;
         renderedContent: null,
         queuedContent: null,
         previewQueued: false,
+        previewObserved: false,
         analysisPending: false,
         previewHeight: 0,
         lastPreviewUse: 0
@@ -19891,37 +19961,56 @@ ${lines.join('\n')}`;
       }
     }
 
-    function updateWaveDocumentCard(entry, tag, isEditingDocument) {
-      const parent = findNavDocumentParent(navTreeState, tag.name);
-      entry.title.textContent = getNavDocumentDisplayName(tag, parent);
+    function updateWaveDocumentCard(entry, tag, isEditingDocument, parentNode) {
+      const parent = parentNode || findNavDocumentParent(navTreeState, tag.name);
+      const displayName = getNavDocumentDisplayName(tag, parent);
+      if (entry.title.textContent !== displayName) entry.title.textContent = displayName;
       entry.card.classList.toggle('focused', isEditingDocument);
       const titleEditable = isEditingDocument && isTextEditModeActive();
       entry.title.classList.toggle('editable', titleEditable);
-      entry.title.title = titleEditable ? '单击编辑波形图标题' : '';
-      if (titleEditable) entry.title.setAttribute('tabindex', '0');
-      else entry.title.removeAttribute('tabindex');
+      const titleHint = titleEditable ? '单击编辑波形图标题' : '';
+      if (entry.title.title !== titleHint) entry.title.title = titleHint;
+      if (titleEditable && entry.title.getAttribute('tabindex') !== '0') {
+        entry.title.setAttribute('tabindex', '0');
+      } else if (!titleEditable && entry.title.hasAttribute('tabindex')) {
+        entry.title.removeAttribute('tabindex');
+      }
 
       const descriptionText = getWaveDocumentDescription(tag);
       if (!entry.description.querySelector('textarea')) {
-        entry.description.textContent = descriptionText || '暂无波形图说明';
+        const nextDescription = descriptionText || '暂无波形图说明';
+        if (entry.description.textContent !== nextDescription) {
+          entry.description.textContent = nextDescription;
+        }
       }
       entry.description.classList.toggle('empty', !descriptionText);
       const descriptionEditable = isEditingDocument;
       entry.description.classList.toggle('editable', descriptionEditable);
-      entry.description.title = descriptionEditable ? '点击编辑波形图说明' : '';
+      const descriptionHint = descriptionEditable ? '点击编辑波形图说明' : '';
+      if (entry.description.title !== descriptionHint) entry.description.title = descriptionHint;
 
       const observer = ensureWaveLibraryPreviewObserver();
       if (isEditingDocument) {
-        if (observer) observer.unobserve(entry.card);
+        if (observer && entry.previewObserved) {
+          observer.unobserve(entry.card);
+          entry.previewObserved = false;
+        }
         entry.previewQueued = false;
         waveContainer.hidden = false;
-        entry.previewHost.replaceChildren(waveContainer);
-        if (bigWaveViewportState.enabled && bigWaveViewportState.navigator) {
-          placeBigWaveNavigator(bigWaveViewportState.navigator);
+        const hostChanged = waveContainer.parentNode !== entry.previewHost
+          || entry.previewHost.childNodes.length !== 1
+          || entry.previewHost.firstChild !== waveContainer;
+        if (hostChanged) {
+          entry.previewHost.replaceChildren(waveContainer);
+          if (bigWaveViewportState.enabled && bigWaveViewportState.navigator) {
+            placeBigWaveNavigator(bigWaveViewportState.navigator);
+          }
+          syncWaveDocumentDescriptionWidth(waveContainer);
+          setupFrozenWaveLabels(waveContainer);
         }
-        setWavePreviewLoadingState(entry, false);
-        syncWaveDocumentDescriptionWidth(waveContainer);
-        setupFrozenWaveLabels(waveContainer);
+        if (hostChanged || entry.previewHost.classList.contains('preview-unloaded')) {
+          setWavePreviewLoadingState(entry, false);
+        }
         return;
       }
 
@@ -19935,8 +20024,14 @@ ${lines.join('\n')}`;
         setWavePreviewLoadingState(entry, true);
       }
       if (observer) {
-        if (contentChanged) observer.unobserve(entry.card);
-        observer.observe(entry.card);
+        if (contentChanged && entry.previewObserved) {
+          observer.unobserve(entry.card);
+          entry.previewObserved = false;
+        }
+        if (!entry.previewObserved) {
+          observer.observe(entry.card);
+          entry.previewObserved = true;
+        }
       }
       else queueWaveLibraryPreview(entry, tag, false);
     }
@@ -19953,6 +20048,7 @@ ${lines.join('\n')}`;
       waveLibraryCardCache.forEach((entry, name) => {
         if (savedTagByName.has(name)) return;
         if (waveLibraryPreviewObserver) waveLibraryPreviewObserver.unobserve(entry.card);
+        entry.previewObserved = false;
         entry.card.remove();
         waveLibraryCardCache.delete(name);
       });
@@ -19983,9 +20079,13 @@ ${lines.join('\n')}`;
         waveLibraryContainer.hidden = false;
         return;
       }
-      const documentNames = singleWaveViewActive
-        ? [requestedWaveDocumentName]
-        : collectNavDocuments(selected, []).filter((name) => savedTagByName.has(name));
+      const documentEntries = singleWaveViewActive
+        ? [{
+          name: requestedWaveDocumentName,
+          parent: findNavDocumentParent(navTreeState, requestedWaveDocumentName)
+        }]
+        : collectNavDocumentEntries(selected, []).filter((entry) => savedTagByName.has(entry.name));
+      const documentNames = documentEntries.map((entry) => entry.name);
       const activeName = documentNames.includes(editingWaveDocumentName) ? editingWaveDocumentName : null;
       const showStandaloneWave = !singleWaveViewActive
         && selected.id === 'nav-root'
@@ -19998,13 +20098,19 @@ ${lines.join('\n')}`;
         waveContainer.hidden = false;
       }
 
-      const entries = documentNames.map((documentName) => {
+      const entries = documentEntries.map((documentEntry) => {
+        const documentName = documentEntry.name;
         let entry = waveLibraryCardCache.get(documentName);
         if (!entry) {
           entry = createWaveDocumentCard(documentName);
           waveLibraryCardCache.set(documentName, entry);
         }
-        updateWaveDocumentCard(entry, getSavedTagByName(documentName), documentName === activeName);
+        updateWaveDocumentCard(
+          entry,
+          getSavedTagByName(documentName),
+          documentName === activeName,
+          documentEntry.parent
+        );
         return entry;
       });
 
@@ -20017,6 +20123,8 @@ ${lines.join('\n')}`;
       currentCards.forEach((card) => {
         if (!expectedCardSet.has(card) && waveLibraryPreviewObserver) {
           waveLibraryPreviewObserver.unobserve(card);
+          const entry = waveLibraryCardCache.get(card.dataset.documentName || '');
+          if (entry) entry.previewObserved = false;
         }
       });
       const sequenceMatches = currentCards.length === expectedCards.length
@@ -20088,16 +20196,14 @@ ${lines.join('\n')}`;
 
     function loadVimModePreference() {
       try {
-        return normalizeBool(localStorage.getItem(VIM_MODE_FLAG_KEY));
+        return normalizeBool(readWindowState(VIM_MODE_FLAG_KEY));
       } catch (_e) {
         return false;
       }
     }
 
     function saveVimModePreference(enabled) {
-      try {
-        localStorage.setItem(VIM_MODE_FLAG_KEY, enabled ? '1' : '0');
-      } catch (_e) { /* ignore */ }
+      writeWindowState(VIM_MODE_FLAG_KEY, enabled ? '1' : '0');
     }
 
     function setVimWaveAreaActive(active, reason) {
@@ -20308,14 +20414,6 @@ ${lines.join('\n')}`;
       const step = getWaveColumnWidth(unitWidth);
       let x0 = renderedCursorColumn * step;
       let x1 = (renderedCursorColumn + 1) * step;
-      if (drawGroup) {
-        const columns = buildWaveColumnMap(drawGroup, renderContext.wave, unitWidth);
-        const column = columns[renderedCursorColumn];
-        if (column && column.x1 > column.x0) {
-          x0 = column.x0;
-          x1 = column.x1;
-        }
-      }
 
       const startPoint = svg.createSVGPoint();
       startPoint.x = x0;
@@ -21999,6 +22097,11 @@ ${lines.join('\n')}`;
         enabled: vwdDebugEnabled,
         sessionStartedAt: vwdDebugSessionStartedAt,
         totalLogs: vwdDebugLogEntries.length,
+        clientId: waveLibraryClientId,
+        singleWaveViewActive,
+        requestedWaveDocumentName,
+        windowStateStorage: singleWaveViewActive ? 'sessionStorage' : 'localStorage',
+        windowStateNamespace: singleWaveViewActive ? singleWindowStateNamespace : '',
         textEditModeActive,
         inlineEditState: activeInlineEditState,
         browser: getBrowserCompatibilityState()
@@ -22454,6 +22557,13 @@ ${lines.join('\n')}`;
     function startNormalWaveViewPage() {
       initScopeWindowSync();
       initPresenterLiveSyncChannel();
+      vwdDebugLog('window-state', {
+        phase: 'initialized',
+        clientId: waveLibraryClientId,
+        singleWaveViewActive,
+        documentName: requestedWaveDocumentName,
+        storage: singleWaveViewActive ? 'sessionStorage' : 'localStorage'
+      });
       migrateSessionStorageToLocal(WAVE_EDIT_MODE_KEY);
       migrateSessionStorageToLocal(BACK_BTN_POS_KEY);
       migrateSessionStorageToLocal(NAV_SIDEBAR_WIDTH_KEY);

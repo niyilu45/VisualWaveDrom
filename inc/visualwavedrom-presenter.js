@@ -317,6 +317,8 @@
       this.frozenLabelsActive = false;
       this.focusLayer = null;
       this.viewportFrame = 0;
+      this.wheelZoomFrame = 0;
+      this.pendingWheelZoom = null;
       this.split = null;
       this.tool = '';
       this.activeCursor = 'A';
@@ -1405,12 +1407,15 @@
         originY: originY, height: height, width: width };
     }
 
-    setScale(scale, centerContent) {
+    setScale(scale, centerContent, options) {
+      const settings = options || {};
       this.scale = clamp(scale, MIN_SCALE, MAX_SCALE);
       this.forEachPane(() => this.setPaneScale(centerContent));
       if (this.annotations.marks.some((mark) => isShapeKind(mark.kind))) this.scheduleAnnotationDraw();
-      if (this.split) this.split.syncScroll(this.viewport, true);
-      this.updateFrozenLabels();
+      if (!settings.deferViewportSync) {
+        if (this.split) this.split.syncScroll(this.viewport, true);
+        this.updateFrozenLabels();
+      }
       if (this.textEdit) this.positionTextEditor();
     }
 
@@ -1443,20 +1448,40 @@
       if (this.handleShapeWheel(event)) return;
       if (!event.ctrlKey || !this.svg) return;
       event.preventDefault();
-      const rect = this.viewport.getBoundingClientRect();
-      const anchorX = event.clientX - rect.left;
-      const anchorY = event.clientY - rect.top;
-      const contentX = this.viewport.scrollLeft + anchorX;
-      const contentY = this.viewport.scrollTop + anchorY;
-      const oldScale = this.scale;
+      const viewport = event.currentTarget || this.viewport;
       const factor = Math.exp(-event.deltaY * 0.0016);
       this.fitMode = false;
-      this.setScale(oldScale * factor, false);
-      const ratio = this.scale / oldScale;
-      this.viewport.scrollLeft = Math.max(0, contentX * ratio - anchorX);
-      this.viewport.scrollTop = Math.max(0, contentY * ratio - anchorY);
-      if (this.split) this.split.syncScroll(this.viewport, true);
-      this.updateFrozenLabels();
+      if (!this.pendingWheelZoom || this.pendingWheelZoom.viewport !== viewport) {
+        this.pendingWheelZoom = {
+          viewport,
+          factor: 1,
+          clientX: event.clientX,
+          clientY: event.clientY
+        };
+      }
+      this.pendingWheelZoom.factor *= factor;
+      this.pendingWheelZoom.clientX = event.clientX;
+      this.pendingWheelZoom.clientY = event.clientY;
+      if (this.wheelZoomFrame) return;
+      this.wheelZoomFrame = requestAnimationFrame(() => {
+        this.wheelZoomFrame = 0;
+        const pending = this.pendingWheelZoom;
+        this.pendingWheelZoom = null;
+        if (!pending || this.destroyed || !this.svg) return;
+        const activeViewport = pending.viewport;
+        const rect = activeViewport.getBoundingClientRect();
+        const anchorX = pending.clientX - rect.left;
+        const anchorY = pending.clientY - rect.top;
+        const contentX = activeViewport.scrollLeft + anchorX;
+        const contentY = activeViewport.scrollTop + anchorY;
+        const previousScale = this.scale;
+        this.setScale(previousScale * pending.factor, false, { deferViewportSync: true });
+        const ratio = this.scale / previousScale;
+        activeViewport.scrollLeft = Math.max(0, contentX * ratio - anchorX);
+        activeViewport.scrollTop = Math.max(0, contentY * ratio - anchorY);
+        if (this.split) this.split.syncScroll(activeViewport, true);
+        this.scheduleViewportUpdate();
+      });
     }
 
     updateWindowControls() {
@@ -3465,7 +3490,10 @@
       clearTimeout(this.closeTimer);
       cancelAnimationFrame(this.annotationFrame);
       cancelAnimationFrame(this.viewportFrame);
+      cancelAnimationFrame(this.wheelZoomFrame);
       this.viewportFrame = 0;
+      this.wheelZoomFrame = 0;
+      this.pendingWheelZoom = null;
       this.hideLaser();
       this.clearPointerStroke();
       if (this.resizeObserver) this.resizeObserver.disconnect();

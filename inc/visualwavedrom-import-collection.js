@@ -2341,7 +2341,7 @@
       const entries = Array.from(searchEntriesByIndex(payload).values())
         .sort((left, right) => Number(left.index) - Number(right.index));
       if (payload && typeof payload === 'object') payload.entries = entries;
-      resultsHost.innerHTML = '';
+      const resultFragment = document.createDocumentFragment();
       entries.forEach((entry) => {
         const matches = Array.isArray(entry.matches) ? entry.matches : [];
         const importError = String(entry.importError || '');
@@ -2925,8 +2925,9 @@
           config.appendChild(columnsHost);
           row.appendChild(config);
         }
-        resultsHost.appendChild(row);
+        resultFragment.appendChild(row);
       });
+      resultsHost.replaceChildren(resultFragment);
       if (!entries.length) setEmptyResults('预设中没有搜索规则');
       renderSearchMarkers(payload);
       const multipleCount = entries.filter((entry) => entry.status === 'multiple').length;

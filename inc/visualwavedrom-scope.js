@@ -607,6 +607,7 @@
       this.rowHeights = [];
       this.collapsedRows = new Set();
       this.signalNames = [];
+      this.signalRowTargets = new Map();
       this.signalNameEditor = null;
       this.rowOffsets = [0];
       this.windowData = null;
@@ -631,6 +632,9 @@
       this.cursorReadoutFrame = 0;
       this.cursorReadoutInFlight = false;
       this.cursorReadoutQueued = false;
+      this.cursorValueTargets = new Map();
+      this.measurementFrame = 0;
+      this.measurementSignature = '';
       this.selectedPoint = null;
       this.columnSelection = null;
       this.transientStatusTimer = 0;
@@ -674,6 +678,7 @@
       this.overviewWindowRequestInFlight = false;
       this.overviewWindowRequestQueued = false;
       this.rowResize = null;
+      this.rowResizeFrame = 0;
       this.presentationDraftDirty = false;
       this.dataDraftDirty = false;
       this.saveInFlight = false;
@@ -1604,6 +1609,7 @@
       this.plotViewport.addEventListener('scroll', () => {
         this.closeDisplayPopover();
         this.closeStylePopover();
+        this.syncVerticalScrollPosition();
         this.scheduleVerticalScrollSync();
       }, { passive: true });
       this.signalScroll.addEventListener('wheel', (event) => {
@@ -1733,6 +1739,8 @@
       global.addEventListener('pagehide', () => {
         if (this.transientStatusTimer) global.clearTimeout(this.transientStatusTimer);
         if (this.cursorReadoutFrame) global.cancelAnimationFrame(this.cursorReadoutFrame);
+        if (this.measurementFrame) global.cancelAnimationFrame(this.measurementFrame);
+        if (this.rowResizeFrame) global.cancelAnimationFrame(this.rowResizeFrame);
         if (this.drawFrame) global.cancelAnimationFrame(this.drawFrame);
         if (this.overviewWindowRequestFrame) {
           global.cancelAnimationFrame(this.overviewWindowRequestFrame);
@@ -3234,26 +3242,29 @@
     }
 
     signalRowDropLocation(clientY) {
-      const rowElements = Array.from(
-        this.signalList.querySelectorAll('[data-scope-signal-row]')
-      );
-      if (!rowElements.length) return null;
+      if (!this.signalRowTargets.size || !this.meta.rows.length) return null;
       const numericY = Number(clientY);
       const y = Number.isFinite(numericY) ? numericY : 0;
-      let target = rowElements[rowElements.length - 1];
-      let position = 'after';
-      for (let index = 0; index < rowElements.length; index += 1) {
-        const candidate = rowElements[index];
-        const rect = candidate.getBoundingClientRect();
-        if (y > rect.bottom && index < rowElements.length - 1) continue;
-        target = candidate;
-        position = y < rect.top + rect.height / 2 ? 'before' : 'after';
-        break;
-      }
+      const drag = this.signalRowDrag;
+      const viewportTop = drag && Number.isFinite(drag.signalViewportTop)
+        ? drag.signalViewportTop
+        : this.signalScroll.getBoundingClientRect().top;
+      const contentHeight = this.rowOffsets[this.rowOffsets.length - 1] || 0;
+      const absoluteY = clamp(y - viewportTop + this.signalScroll.scrollTop, 0, contentHeight);
+      const logicalIndex = clamp(
+        this.rowIndexAtOffset(absoluteY),
+        0,
+        Math.max(0, this.meta.rows.length - 1)
+      );
+      const target = this.signalRowTargets.get(logicalIndex);
+      if (!target) return null;
       const start = Math.max(0, Number(target.dataset.scopeRowStart
         || target.dataset.scopeSignalRow) || 0);
       const end = Math.max(start, Number(target.dataset.scopeRowEnd
         || target.dataset.scopeSignalRow) || start);
+      const targetTop = this.rowTop(start);
+      const targetHeight = Math.max(1, this.rowOffsets[end + 1] - targetTop);
+      const position = absoluteY < targetTop + targetHeight / 2 ? 'before' : 'after';
       return {
         element: target,
         position,
@@ -3261,25 +3272,31 @@
       };
     }
 
-    clearSignalRowDropIndicator() {
-      this.signalList.querySelectorAll(
-        '.scope-row-drop-before, .scope-row-drop-after'
-      ).forEach((element) => {
-        element.classList.remove('scope-row-drop-before', 'scope-row-drop-after');
-      });
+    clearSignalRowDropIndicator(dragState) {
+      const drag = dragState || this.signalRowDrag;
+      if (drag && drag.dropElement) {
+        drag.dropElement.classList.remove('scope-row-drop-before', 'scope-row-drop-after');
+        drag.dropElement = null;
+        return;
+      }
+      this.signalList.querySelectorAll('.scope-row-drop-before, .scope-row-drop-after')
+        .forEach((element) => {
+          element.classList.remove('scope-row-drop-before', 'scope-row-drop-after');
+        });
     }
 
     updateSignalRowDropTarget(clientY) {
       const drag = this.signalRowDrag;
       if (!drag || !drag.active) return;
       const location = this.signalRowDropLocation(clientY);
-      this.clearSignalRowDropIndicator();
+      this.clearSignalRowDropIndicator(drag);
       if (!location) return;
       let targetIndex = location.insertionIndex;
       if (targetIndex > drag.sourceIndex) targetIndex -= 1;
       targetIndex = clamp(targetIndex, 0, Math.max(0, this.meta.rows.length - 1));
       drag.targetIndex = targetIndex;
       if (targetIndex === drag.sourceIndex) return;
+      drag.dropElement = location.element;
       location.element.classList.add(
         location.position === 'before' ? 'scope-row-drop-before' : 'scope-row-drop-after'
       );
@@ -3341,6 +3358,8 @@
         startX: event.clientX,
         startY: event.clientY,
         clientY: event.clientY,
+        signalViewportTop: this.signalScroll.getBoundingClientRect().top,
+        dropElement: null,
         active: false
       };
       try { captureTarget.setPointerCapture(event.pointerId); } catch (_error) {}
@@ -3380,7 +3399,7 @@
         global.cancelAnimationFrame(this.signalRowDragAutoScrollFrame);
         this.signalRowDragAutoScrollFrame = 0;
       }
-      this.clearSignalRowDropIndicator();
+      this.clearSignalRowDropIndicator(drag);
       if (drag && drag.rowElement) {
         drag.rowElement.classList.remove('scope-row-drag-source');
         drag.rowElement.removeAttribute('aria-grabbed');
@@ -3631,6 +3650,11 @@
       this.closeDisplayPopover();
       this.closeStylePopover();
       this.rebuildRowOffsets();
+      const sourceRowsByName = new Map();
+      this.meta.rows.forEach((row) => {
+        const name = this.signalDisplayName(row.index);
+        if (!sourceRowsByName.has(name)) sourceRowsByName.set(name, row);
+      });
       this.signalList.innerHTML = this.meta.rows.map((row) => {
         const group = row.groups && row.groups.length ? row.groups.join(' / ') : '';
         const rowHeight = this.rowHeight(row.index);
@@ -3640,9 +3664,12 @@
         const rawMultiWaveSources = row.multiWave && Array.isArray(row.multiWave.sources)
           ? row.multiWave.sources
           : this.multiWaveDefinition(row.index).map((name) => {
-            const source = this.meta.rows.find((candidate) => (
-              candidate.index !== row.index && this.signalDisplayName(candidate.index) === name
-            ));
+            let source = sourceRowsByName.get(name);
+            if (source && source.index === row.index) {
+              source = this.meta.rows.find((candidate) => (
+                candidate.index !== row.index && this.signalDisplayName(candidate.index) === name
+              ));
+            }
             return source ? { name, rowIndex: source.index } : { name, rowIndex: -1 };
           });
         const multiWaveSources = this.orderedMultiWaveEntries(row.index, rawMultiWaveSources);
@@ -3742,6 +3769,20 @@
           </div>
         `;
       }).join('');
+      this.signalRowTargets = new Map();
+      this.signalList.querySelectorAll('[data-scope-signal-row]').forEach((target) => {
+        const start = Math.max(0, Number(target.dataset.scopeRowStart
+          || target.dataset.scopeSignalRow) || 0);
+        const end = Math.max(start, Number(target.dataset.scopeRowEnd
+          || target.dataset.scopeSignalRow) || start);
+        for (let index = start; index <= end; index += 1) {
+          this.signalRowTargets.set(index, target);
+        }
+      });
+      this.cursorValueTargets = new Map();
+      this.signalList.querySelectorAll('[data-scope-cursor-value-row]').forEach((target) => {
+        this.cursorValueTargets.set(Number(target.dataset.scopeCursorValueRow), target);
+      });
       if (this.cursorAButton) {
         this.updateCollapsedRowControls();
         this.updateCursorControls();
@@ -4407,7 +4448,10 @@
     }
 
     positionPlotCanvas() {
-      this.plotCanvas.style.transform = 'translateY(' + this.plotViewport.scrollTop + 'px)';
+      const transform = 'translateY(' + this.plotViewport.scrollTop + 'px)';
+      if (this.plotCanvas.style.transform !== transform) {
+        this.plotCanvas.style.transform = transform;
+      }
     }
 
     resetWindowCache() {
@@ -4434,11 +4478,12 @@
       const now = global.performance && typeof global.performance.now === 'function'
         ? global.performance.now()
         : Date.now();
+      const interactionAlreadyActive = this.backgroundWindowPausedUntil > now;
       this.backgroundWindowPausedUntil = Math.max(
         this.backgroundWindowPausedUntil,
         now + Math.max(40, Number(duration) || 140)
       );
-      if (this.worker) this.worker.cancelWindowWork();
+      if (this.worker && !interactionAlreadyActive) this.worker.cancelWindowWork();
     }
 
     async waitForBackgroundWindowWork(sequence, key) {
@@ -4468,16 +4513,22 @@
       });
     }
 
-    syncVerticalScroll(options) {
-      if (!this.plotViewport || !this.signalScroll) return;
-      const settings = options || {};
+    syncVerticalScrollPosition() {
+      if (!this.plotViewport || !this.signalScroll) return 0;
       const scrollTop = Math.max(0, this.plotViewport.scrollTop);
-      const changed = !Number.isFinite(this.lastSynchronizedScrollTop)
-        || Math.abs(scrollTop - this.lastSynchronizedScrollTop) > 0.01;
       if (Math.abs(this.signalScroll.scrollTop - scrollTop) > 0.01) {
         this.signalScroll.scrollTop = scrollTop;
       }
       this.positionPlotCanvas();
+      return scrollTop;
+    }
+
+    syncVerticalScroll(options) {
+      if (!this.plotViewport || !this.signalScroll) return;
+      const settings = options || {};
+      const scrollTop = this.syncVerticalScrollPosition();
+      const changed = !Number.isFinite(this.lastSynchronizedScrollTop)
+        || Math.abs(scrollTop - this.lastSynchronizedScrollTop) > 0.01;
       if (!changed && !settings.force) return;
       this.lastSynchronizedScrollTop = scrollTop;
       if (settings.redraw !== false) {
@@ -4491,6 +4542,7 @@
     setVerticalScrollTop(scrollTop, options) {
       if (!this.plotViewport) return;
       this.plotViewport.scrollTop = Math.max(0, Number(scrollTop) || 0);
+      this.syncVerticalScrollPosition();
       this.scheduleVerticalScrollSync(options);
     }
 
@@ -4514,9 +4566,7 @@
       );
       if (this.rowHeight(rowIndex) === nextHeight) return false;
       this.rowHeights[rowIndex] = nextHeight;
-      const row = this.signalList.querySelector(
-        '[data-scope-signal-row="' + rowIndex + '"]'
-      );
+      const row = this.signalRowTargets.get(rowIndex) || null;
       if (row) row.style.height = nextHeight + 'px';
       const resizeHandle = handle || (row && row.querySelector('[data-scope-row-resize]'));
       if (resizeHandle) resizeHandle.setAttribute('aria-valuenow', String(nextHeight));
@@ -4537,6 +4587,7 @@
         rowIndex,
         startY: event.clientY,
         startHeight: this.rowHeight(rowIndex),
+        pendingHeight: null,
         historySnapshot: this.snapshot(),
         handle
       };
@@ -4554,13 +4605,29 @@
     moveRowResize(event) {
       if (!this.rowResize || this.rowResize.pointerId !== event.pointerId) return;
       event.preventDefault();
-      const nextHeight = this.rowResize.startHeight + event.clientY - this.rowResize.startY;
-      this.setAnalogRowHeight(this.rowResize.rowIndex, nextHeight, this.rowResize.handle);
+      this.rowResize.pendingHeight = this.rowResize.startHeight + event.clientY - this.rowResize.startY;
+      if (this.rowResizeFrame) return;
+      this.rowResizeFrame = global.requestAnimationFrame(() => {
+        this.rowResizeFrame = 0;
+        const resize = this.rowResize;
+        if (!resize || resize.pendingHeight == null) return;
+        const nextHeight = resize.pendingHeight;
+        resize.pendingHeight = null;
+        this.setAnalogRowHeight(resize.rowIndex, nextHeight, resize.handle);
+      });
     }
 
     finishRowResize(event) {
       if (!this.rowResize || this.rowResize.pointerId !== event.pointerId) return;
       const resize = this.rowResize;
+      if (this.rowResizeFrame) {
+        global.cancelAnimationFrame(this.rowResizeFrame);
+        this.rowResizeFrame = 0;
+      }
+      if (resize.pendingHeight != null) {
+        this.setAnalogRowHeight(resize.rowIndex, resize.pendingHeight, resize.handle);
+        resize.pendingHeight = null;
+      }
       try { resize.handle.releasePointerCapture(event.pointerId); } catch (_error) {}
       resize.handle.classList.remove('active');
       document.body.classList.remove('scope-row-resizing');
@@ -6611,7 +6678,7 @@
       }
       this.updateColumnBackgroundAvailability();
       this.updateCursorJumpAvailability();
-      this.updateMeasurements();
+      this.scheduleMeasurementUpdate();
       this.scheduleCursorReadout();
     }
 
@@ -6656,6 +6723,7 @@
           kind: 'cursor',
           pointerId: event.pointerId,
           startX: event.clientX,
+          canvasRect: { left: rect.left, top: rect.top, width: rect.width },
           rowIndex: cursorRowIndex,
           column: hitCursor.column,
           cursorName: hitCursor.name,
@@ -6678,6 +6746,7 @@
           kind: 'selection-cursor',
           pointerId: event.pointerId,
           startX: event.clientX,
+          canvasRect: { left: rect.left, top: rect.top, width: rect.width },
           rowIndex: selection.rowIndex,
           moved: false
         };
@@ -6740,6 +6809,7 @@
         kind: 'columns',
         pointerId: event.pointerId,
         startX: event.clientX,
+        canvasRect: { left: rect.left, top: rect.top, width: rect.width },
         rowIndex,
         anchorColumn: columnIndex,
         moved: false,
@@ -6775,7 +6845,9 @@
         this.draw();
         return;
       }
-      const rect = this.plotCanvas.getBoundingClientRect();
+      const rect = this.drag && this.drag.canvasRect
+        ? this.drag.canvasRect
+        : this.plotCanvas.getBoundingClientRect();
       const x = event.clientX - rect.left;
       if (!this.drag) {
         const y = event.clientY - rect.top;
@@ -7177,7 +7249,7 @@
       if (this.styleColumnsInput) this.styleColumnsInput.value = String(start + 1);
       this.updateColumnBackgroundAvailability();
       this.updateCursorJumpAvailability();
-      this.updateMeasurements();
+      this.scheduleMeasurementUpdate();
       if (realtimeReadout) this.scheduleCursorReadout();
       else void this.updateCursorReadout();
       this.draw({ overlayOnly: true });
@@ -7275,7 +7347,7 @@
       );
       if (this.activeCursor === 'B') this.cursorB = value;
       else this.cursorA = value;
-      this.updateMeasurements();
+      this.scheduleMeasurementUpdate();
       if (realtimeReadout) this.scheduleCursorReadout();
       else void this.updateCursorReadout();
       this.draw({ overlayOnly: true });
@@ -7441,7 +7513,7 @@
       const sequence = ++this.cursorInspectSequence;
       const reference = this.readoutReference();
       if (!reference) {
-        this.signalList.querySelectorAll('[data-scope-cursor-value-row]').forEach((target) => {
+        this.cursorValueTargets.forEach((target) => {
           target.textContent = '游标：--';
           target.title = '请选择 A/B 游标或波形列';
         });
@@ -7456,9 +7528,7 @@
         });
         if (sequence !== this.cursorInspectSequence) return;
         result.rows.forEach((row) => {
-          const target = this.signalList.querySelector(
-            '[data-scope-cursor-value-row="' + row.index + '"]'
-          );
+          const target = this.cursorValueTargets.get(Number(row.index));
           if (!target) return;
           target.textContent = reference.label + '：' + this.formatCursorValue(row.value);
           target.title = reference.title + ' @ ' + this.formatTime(result.column)
@@ -7608,6 +7678,14 @@
       return (normalized > 0 ? '+' : '') + normalized + ' ' + this.meta.timeUnit;
     }
 
+    scheduleMeasurementUpdate() {
+      if (this.measurementFrame) return;
+      this.measurementFrame = global.requestAnimationFrame(() => {
+        this.measurementFrame = 0;
+        this.updateMeasurements();
+      });
+    }
+
     updateMeasurements() {
       const aText = this.cursorA == null ? 'A：未设置' : 'A：' + this.formatTime(this.cursorA);
       const bText = this.cursorB == null ? 'B：未设置' : 'B：' + this.formatTime(this.cursorB);
@@ -7621,6 +7699,16 @@
       const currentMinusB = currentColumn == null || this.cursorB == null
         ? '--'
         : this.formatSignedMeasurement(currentColumn - this.cursorB);
+      const signature = [
+        this.activeCursor,
+        aText,
+        bText,
+        bMinusA,
+        currentMinusA,
+        currentMinusB
+      ].join('\u0000');
+      if (signature === this.measurementSignature) return;
+      this.measurementSignature = signature;
       this.measurementsEl.innerHTML = `
         <span class="${this.activeCursor === 'A' ? 'active' : ''}">${escapeHtml(aText)}</span>
         <span class="${this.activeCursor === 'B' ? 'active' : ''}">${escapeHtml(bText)}</span>
