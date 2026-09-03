@@ -657,23 +657,23 @@
 
   <div class="modal-overlay" id="wave-copy-modal" hidden>
     <div class="modal-dialog wave-copy-dialog" role="dialog" aria-modal="true" aria-labelledby="wave-copy-modal-title">
-      <div class="modal-header" id="wave-copy-modal-title">复制图片到剪贴板</div>
+      <div class="modal-header" id="wave-copy-modal-title">选择复制格式（Word / Markdown）</div>
       <div class="modal-body wave-copy-options">
         <button type="button" class="wave-copy-option" data-copy-mode="image">
-          <strong>仅复制图片</strong>
-          <span>粘贴普通 PNG 图片，不附带链接</span>
+          <strong>Word：仅复制图片</strong>
+          <span>粘贴为普通 PNG 图片，不附带波形链接</span>
         </button>
         <button type="button" class="wave-copy-option" data-copy-mode="linked-image">
-          <strong>复制带链接截图</strong>
-          <span>粘贴到 Word 后，点击图片打开这张波形图</span>
+          <strong>Word：复制带链接图片</strong>
+          <span>粘贴到 Word 后，可点击图片打开对应波形图</span>
         </button>
         <button type="button" class="wave-copy-option" data-copy-mode="linked-markdown">
-          <strong>复制 Markdown 带链接图片</strong>
-          <span>由 Markdown 编辑器生成图片文件，并附加波形超链接文字</span>
+          <strong>Markdown：复制图片与链接</strong>
+          <span>粘贴到支持图片粘贴的 Markdown 编辑器，生成图片文件并附加波形链接</span>
         </button>
         <button type="button" class="wave-copy-option" data-copy-mode="link">
-          <strong>仅复制链接</strong>
-          <span>复制可自动启动 VisualWaveDrom 的单图链接</span>
+          <strong>Word / Markdown：仅复制链接</strong>
+          <span>只复制可自动启动 VisualWaveDrom 的单图链接，不包含图片</span>
         </button>
       </div>
       <div class="modal-footer">

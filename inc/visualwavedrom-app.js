@@ -2784,10 +2784,17 @@ ${lines.join('\n')}`;
       }, 140);
     }
 
+    function getWavePreviewScroller(element) {
+      if (!element || typeof element.closest !== 'function') return wavePanel;
+      return element.closest('.wave-document-preview-scroll')
+        || element.closest('.wave-document-canvas')
+        || wavePanel;
+    }
+
     function bindJsonWindowScroller(host) {
       if (!host || !host.querySelector) return;
       const svg = host.querySelector('svg');
-      const scroller = host.closest('.wave-document-canvas') || wavePanel;
+      const scroller = getWavePreviewScroller(host);
       if (!svg || !scroller) return;
       let waveStartX = 0;
       try {
@@ -10369,7 +10376,7 @@ ${lines.join('\n')}`;
         svgController.dispose();
         return;
       }
-      const scroller = renderHost.closest('.wave-document-canvas') || wavePanel;
+      const scroller = getWavePreviewScroller(renderHost);
       const controller = scroller && scroller.__vwdFrozenLabelController;
       if (!controller || !controller.svg || !renderHost.contains(controller.svg)) return;
       controller.dispose();
@@ -10378,7 +10385,7 @@ ${lines.join('\n')}`;
     function setupFrozenWaveLabels(renderHost) {
       const svg = renderHost && renderHost.querySelector ? renderHost.querySelector('svg') : null;
       if (!svg) return false;
-      const scroller = svg.closest('.wave-document-canvas') || wavePanel;
+      const scroller = getWavePreviewScroller(svg);
       if (!scroller) return false;
 
       const existingController = svg.__vwdFrozenLabelController;
@@ -10600,7 +10607,9 @@ ${lines.join('\n')}`;
         clearance: Math.round(waveformClearance * 100) / 100,
         laneCount: lanes.length,
         hasGroups: !!groupRoot,
-        scroller: scroller.classList.contains('wave-document-canvas') ? 'document-canvas' : 'wave-panel'
+        scroller: scroller.classList.contains('wave-document-preview-scroll')
+          ? 'document-preview'
+          : (scroller.classList.contains('wave-document-canvas') ? 'document-canvas' : 'wave-panel')
       });
       return true;
     }
@@ -11259,7 +11268,9 @@ ${lines.join('\n')}`;
         return true;
       }
 
-      const horizontalScroller = target.closest('.wave-document-canvas') || wavePanel;
+      const horizontalScroller = target.closest(
+        '.wave-document-preview-scroll, .wave-document-description-scroll, .wave-document-canvas'
+      ) || wavePanel;
       const maxLeft = Math.max(0, horizontalScroller.scrollWidth - horizontalScroller.clientWidth);
       if (maxLeft <= 4) return false;
 
@@ -12565,9 +12576,13 @@ ${lines.join('\n')}`;
       const existing = svg.querySelector('#vwd-global-describe');
       if (existing) existing.remove();
 
-      // Wave-document cards render the description below the SVG. Single-wave
-      // startup can render before its card is mounted, so also check the view.
-      if (singleWaveViewActive || waveContainer.closest('.wave-document-card')) return;
+      // Saved documents render the description in a dedicated card region. The
+      // active SVG can be rendered just before that card is mounted, so use the
+      // document identity as well as the current DOM ancestry to avoid a brief
+      // duplicate description over the waveform.
+      if (editingWaveDocumentName
+          || singleWaveViewActive
+          || waveContainer.closest('.wave-document-card')) return;
 
       let parsed = parsedSource;
       try {
@@ -12600,6 +12615,10 @@ ${lines.join('\n')}`;
       hideWaveCellTooltip();
       const svg = waveContainer.querySelector('svg');
       if (!svg) return;
+
+      // Descriptions belong to the card's dedicated scroll region. Remove any
+      // legacy per-signal nodes left on a reused WaveDrom SVG before binding it.
+      svg.querySelectorAll('text.wave-describe-text').forEach((element) => element.remove());
 
       const sourceMap = buildSignalSourceMap(jsonText);
       const lanes = getWaveLaneGroups(svg);
@@ -12987,7 +13006,6 @@ ${lines.join('\n')}`;
         }
 
         attachSignalNameEdit(lane, entry, handleLanePointSelect);
-        attachSignalDescribeInteractivity(lane, entry, handleLanePointSelect);
 
         const drawGroup = laneDrawGroup;
         if (drawGroup) {
@@ -18093,9 +18111,16 @@ ${lines.join('\n')}`;
 
     function captureActiveWaveScrollState() {
       const canvas = waveContainer.closest('.wave-document-canvas');
+      const previewScroller = getWavePreviewScroller(waveContainer);
+      const descriptionScroller = canvas
+        ? canvas.querySelector('.wave-document-description-scroll')
+        : null;
       return {
         canvas,
-        canvasScrollLeft: canvas ? canvas.scrollLeft : 0,
+        previewScroller,
+        previewScrollLeft: previewScroller ? previewScroller.scrollLeft : 0,
+        descriptionScroller,
+        descriptionScrollLeft: descriptionScroller ? descriptionScroller.scrollLeft : 0,
         canvasScrollTop: canvas ? canvas.scrollTop : 0,
         panelScrollTop: wavePanel ? wavePanel.scrollTop : 0
       };
@@ -18105,14 +18130,24 @@ ${lines.join('\n')}`;
       if (!state) return;
       const currentCanvas = waveContainer.closest('.wave-document-canvas');
       if (state.canvas && state.canvas.isConnected && currentCanvas === state.canvas) {
-        state.canvas.scrollLeft = state.canvasScrollLeft;
         state.canvas.scrollTop = state.canvasScrollTop;
       }
+      const currentPreviewScroller = getWavePreviewScroller(waveContainer);
+      if (state.previewScroller && state.previewScroller.isConnected
+          && currentPreviewScroller === state.previewScroller) {
+        state.previewScroller.scrollLeft = state.previewScrollLeft;
+      }
+      if (state.descriptionScroller && state.descriptionScroller.isConnected) {
+        state.descriptionScroller.scrollLeft = state.descriptionScrollLeft;
+      }
       if (wavePanel) wavePanel.scrollTop = state.panelScrollTop;
-      updateFrozenWaveLabelsForScroller(currentCanvas || wavePanel);
+      updateFrozenWaveLabelsForScroller(currentPreviewScroller || wavePanel);
       vwdDebugLog('wave-scroll', {
         phase: 'restore-after-render',
-        scrollLeft: currentCanvas ? Math.round(currentCanvas.scrollLeft) : 0,
+        previewScrollLeft: currentPreviewScroller ? Math.round(currentPreviewScroller.scrollLeft) : 0,
+        descriptionScrollLeft: state.descriptionScroller
+          ? Math.round(state.descriptionScroller.scrollLeft)
+          : 0,
         scrollTop: wavePanel ? Math.round(wavePanel.scrollTop) : 0
       });
     }
@@ -18794,6 +18829,7 @@ ${lines.join('\n')}`;
 
       let committed = false;
       let outsidePointerHandler = null;
+      let doneButton = null;
       const detachOutsidePointerHandler = () => {
         if (!outsidePointerHandler) return;
         document.removeEventListener('pointerdown', outsidePointerHandler, true);
@@ -18801,6 +18837,7 @@ ${lines.join('\n')}`;
       };
       const closeEditor = (value) => {
         detachOutsidePointerHandler();
+        if (doneButton && doneButton.isConnected) doneButton.remove();
         descriptionEl.classList.remove('editing');
         descriptionEl.textContent = value || '暂无波形图说明';
         descriptionEl.classList.toggle('empty', !value);
@@ -18848,11 +18885,12 @@ ${lines.join('\n')}`;
       editorBox.__vwdCommit = commit;
       outsidePointerHandler = (event) => {
         const target = event && event.target;
-        if (target && descriptionEl.contains(target)) return;
+        if (target && (descriptionEl.contains(target)
+            || (doneButton && doneButton.contains(target)))) return;
         commit('outside-pointer');
       };
       document.addEventListener('pointerdown', outsidePointerHandler, true);
-      const doneButton = document.createElement('button');
+      doneButton = document.createElement('button');
       doneButton.type = 'button';
       doneButton.className = 'wave-document-description-done';
       doneButton.textContent = '完成';
@@ -18865,7 +18903,8 @@ ${lines.join('\n')}`;
         event.stopPropagation();
         commit('done-button');
       });
-      descriptionEl.appendChild(doneButton);
+      const doneHost = descriptionEl.closest('.wave-document-description-shell') || descriptionEl;
+      doneHost.appendChild(doneButton);
       editorBox.addEventListener('input', resizeEditor);
       editorBox.addEventListener('blur', () => commit('blur'));
       editorBox.addEventListener('wheel', (event) => {
@@ -19188,7 +19227,7 @@ ${lines.join('\n')}`;
       const entry = waveLibraryCardCache.get(documentName);
       const svg = entry && entry.previewHost ? entry.previewHost.querySelector('svg') : null;
       const drawGroup = svg && svg.querySelector('[id^="wavelane_draw_"]');
-      const host = entry && entry.canvas;
+      const host = entry && (entry.previewScroller || entry.canvas);
       if (!svg || !drawGroup || !host || typeof svg.createSVGPoint !== 'function') return null;
       const matrix = drawGroup.getScreenCTM && drawGroup.getScreenCTM();
       if (!matrix) return null;
@@ -19600,13 +19639,24 @@ ${lines.join('\n')}`;
       canvas.addEventListener('pointerdown', () => {
         if (documentName !== editingWaveDocumentName) exitWavePaintMode('other-wave-document');
       });
+      const previewScroller = document.createElement('div');
+      previewScroller.className = 'wave-document-preview-scroll';
+      previewScroller.setAttribute('role', 'region');
+      previewScroller.setAttribute('aria-label', '波形横向滚动区域');
       const previewHost = document.createElement('div');
       previewHost.className = 'wave-document-preview';
       const previewDisplay = document.createElement('div');
       const prefix = 'wave-library-display-' + sequence + '-';
       previewDisplay.id = prefix + '0';
       previewHost.appendChild(previewDisplay);
+      previewScroller.appendChild(previewHost);
 
+      const descriptionShell = document.createElement('div');
+      descriptionShell.className = 'wave-document-description-shell';
+      const descriptionScroller = document.createElement('div');
+      descriptionScroller.className = 'wave-document-description-scroll';
+      descriptionScroller.setAttribute('role', 'region');
+      descriptionScroller.setAttribute('aria-label', '波形说明横向滚动区域');
       const description = document.createElement('div');
       description.className = 'wave-document-description';
       description.addEventListener('click', (event) => {
@@ -19627,9 +19677,11 @@ ${lines.join('\n')}`;
           clientY: event.clientY
         });
       });
+      descriptionScroller.appendChild(description);
+      descriptionShell.appendChild(descriptionScroller);
 
-      canvas.appendChild(previewHost);
-      canvas.appendChild(description);
+      canvas.appendChild(previewScroller);
+      canvas.appendChild(descriptionShell);
       card.appendChild(header);
       card.appendChild(canvas);
 
@@ -19639,8 +19691,11 @@ ${lines.join('\n')}`;
         title,
         screenshotButton,
         canvas,
+        previewScroller,
         previewHost,
         previewDisplay,
+        descriptionShell,
+        descriptionScroller,
         description,
         prefix,
         renderedContent: null,
@@ -19991,6 +20046,8 @@ ${lines.join('\n')}`;
 
       const observer = ensureWaveLibraryPreviewObserver();
       if (isEditingDocument) {
+        waveContainer.querySelectorAll('#vwd-global-describe, text.wave-describe-text')
+          .forEach((element) => element.remove());
         if (observer && entry.previewObserved) {
           observer.unobserve(entry.card);
           entry.previewObserved = false;
@@ -20451,7 +20508,7 @@ ${lines.join('\n')}`;
         const cursorBounds = getVimWaveCursorClientBounds(lane, sourceMap[selectedSignalIndex]);
         if (!cursorBounds) return;
 
-        const horizontalScroller = lane.closest('.wave-document-canvas') || wavePanel;
+        const horizontalScroller = getWavePreviewScroller(lane);
         const horizontalRect = horizontalScroller.getBoundingClientRect();
         const panelRect = wavePanel.getBoundingClientRect();
         const horizontalMargin = Math.min(24, Math.max(8, horizontalScroller.clientWidth * 0.05));
@@ -22239,7 +22296,7 @@ ${lines.join('\n')}`;
       wavePanel.addEventListener('scroll', function (event) {
         const scroller = event.target;
         if (!scroller || !scroller.classList
-            || !scroller.classList.contains('wave-document-canvas')
+            || !scroller.classList.contains('wave-document-preview-scroll')
             || !scroller.contains(waveContainer)) return;
         bindJsonWindowScroller(waveContainer);
         const context = scroller.__vwdJsonWindowContext;
