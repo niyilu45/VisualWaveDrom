@@ -426,6 +426,11 @@ if (!window.VWDCodeEditorPairs) {
     let selectedGroupIndex = -1;
     let selectedNavNodeId = 'nav-root';
     let selectedNavDocumentName = null;
+    let waveDocumentClipboardActive = false;
+    let copiedWaveDocumentPromise = null;
+    let pastingWaveDocument = false;
+    let navDirectoryDragState = null;
+    let navSuppressClickUntil = 0;
     let navTreeState = null;
     let navTreeSignalCount = 0;
     let navVisibleRows = [];
@@ -1924,6 +1929,7 @@ ${lines.join('\n')}`;
         if (tag.name === selectedNavDocumentName) button.classList.add('active');
         button.title = '打开波形图: ' + getNavDocumentDisplayName(tag, parentNode);
         button.textContent = getNavDocumentDisplayName(tag, parentNode);
+        button.setAttribute('aria-keyshortcuts', 'Control+c Control+v Meta+c Meta+v');
         button.addEventListener('click', () => {
           openWaveDocumentForEditing(tag.name);
         });
@@ -1951,6 +1957,11 @@ ${lines.join('\n')}`;
         labelBtn.className = 'nav-tree-node-label';
         if (!selectedNavDocumentName && node.id === selectedNavNodeId) labelBtn.classList.add('active');
         if (node.isCustom) labelBtn.classList.add('nav-tree-node-custom');
+        if (node.isCustom) {
+          labelBtn.title = '拖动调整目录位置；Tab 降一级；Shift+Tab 升一级';
+          labelBtn.setAttribute('aria-keyshortcuts', 'Tab Shift+Tab');
+        }
+        bindNavDirectoryDrag(labelBtn, node, !!node.isCustom);
 
         const toggle = document.createElement('span');
         toggle.className = 'toggle';
@@ -2003,7 +2014,9 @@ ${lines.join('\n')}`;
         }
 
         labelBtn.addEventListener('click', () => {
+          if (Date.now() < navSuppressClickUntil) return;
           setSelectedNavNode(node.id);
+          focusNavDirectoryLabel(node.id);
         });
 
         const children = document.createElement('div');
@@ -2047,6 +2060,8 @@ ${lines.join('\n')}`;
       const rootLabel = document.createElement('button');
       rootLabel.type = 'button';
       rootLabel.className = 'nav-tree-node-label';
+      rootLabel.title = '根目录：可接收拖入的目录';
+      bindNavDirectoryDrag(rootLabel, rootNode, false);
       if (!selectedNavDocumentName && selectedNavNodeId === 'nav-root') rootLabel.classList.add('active');
 
       const rootToggle = document.createElement('span');
@@ -2084,7 +2099,9 @@ ${lines.join('\n')}`;
       rootLabel.appendChild(rootCount);
       rootLabel.appendChild(rootActions);
       rootLabel.addEventListener('click', () => {
+        if (Date.now() < navSuppressClickUntil) return;
         setSelectedNavNode('nav-root');
+        focusNavDirectoryLabel('nav-root');
       });
       rootListItem.appendChild(rootLabel);
 
@@ -2244,6 +2261,110 @@ ${lines.join('\n')}`;
         targetId: target.id,
         signalCount: 2
       });
+    }
+
+    async function copySelectedWaveDocument(documentName) {
+      const libraryId = currentWaveLibraryId;
+      try {
+        flushCodeMirrorToTextarea('copy-wave-document');
+        let tag = getSavedTagByName(documentName);
+        if (tag && tag.deferred) {
+          setStatus(true, '正在读取要复制的波形图');
+          tag = await ensureWaveDocumentLoaded(documentName);
+        }
+        if (!tag || libraryId !== currentWaveLibraryId) return null;
+        // Keep the copy independent of subsequent edits, without cloning large JSON strings.
+        const snapshot = documentName === editingWaveDocumentName
+          ? Object.assign({}, tag, getCurrentStateSnapshot())
+          : tag;
+        const copy = {
+          content: snapshot.content,
+          hscale: snapshot.hscale,
+          waveEditMode: snapshot.waveEditMode,
+          presentation: snapshot.presentation
+        };
+        setStatus(true, '已复制整张波形图，可在目录中按 Ctrl+V 粘贴');
+        vwdDebugLog('wave-library', { phase: 'copy-document', documentName, contentLength: copy.content.length });
+        return copy;
+      } catch (error) {
+        setStatus(false, '复制波形图失败');
+        vwdDebugLog('wave-library', { phase: 'copy-document-error', message: String(error) });
+        return null;
+      }
+    }
+
+    async function pasteCopiedWaveDocument(sourcePromise, targetId, afterName) {
+      if (pastingWaveDocument) return;
+      pastingWaveDocument = true;
+      const libraryId = currentWaveLibraryId;
+      try {
+        const source = await sourcePromise;
+        if (!source || libraryId !== currentWaveLibraryId) return;
+        const target = getNavNodeById(navTreeState, targetId);
+        if (!target) {
+          setStatus(false, '粘贴目标目录已不存在，请重新选择目录');
+          return;
+        }
+        commitOpenTextEditors('paste-wave-document');
+        flushCodeMirrorToTextarea('paste-wave-document');
+        cancelPendingWaveDocumentOpen();
+        if (!saveCurrentWaveDocumentBeforeSwitch()) {
+          setStatus(false, '当前波形图自动保存失败，未粘贴副本');
+          return;
+        }
+        const before = captureWaveLibrarySnapshot();
+        let documentName;
+        do {
+          documentName = 'wave-document-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+        } while (getSavedTagByName(documentName));
+        upsertSavedTag(documentName, Object.assign({}, source, {
+          revision: 0,
+          savedAt: new Date().toISOString()
+        }), { skipListRefresh: true, skipSort: true });
+        target.documents = Array.isArray(target.documents) ? target.documents : [];
+        const index = afterName ? target.documents.indexOf(afterName) : -1;
+        target.documents.splice(index < 0 ? target.documents.length : index + 1, 0, documentName);
+        target.expanded = true;
+        saveNavCustomNodesFromTree();
+        rebuildNavTreeStateFromJson(editor.value || '');
+        setSelectedNavNode(target.id);
+        openWaveDocumentForEditing(documentName, { immediate: true });
+        pushWaveLibraryHistory(before, captureWaveLibrarySnapshot());
+        const selected = navTreeEl && navTreeEl.querySelector('.nav-tree-document-label.active');
+        if (selected) selected.focus({ preventScroll: true });
+        setStatus(true, '已粘贴独立波形图副本');
+        vwdDebugLog('wave-library', { phase: 'paste-document', documentName, targetId, afterName });
+      } catch (error) {
+        setStatus(false, '粘贴波形图失败');
+        vwdDebugLog('wave-library', { phase: 'paste-document-error', message: String(error) });
+      } finally {
+        pastingWaveDocument = false;
+      }
+    }
+
+    function handleWaveDocumentClipboardShortcut(event) {
+      if (!waveDocumentClipboardActive || singleWaveViewActive || inlineEditActive || isVisibleModalOpen()) return false;
+      const clipboardEvent = event.type === 'copy' || event.type === 'paste';
+      if (!clipboardEvent && (!isModKey(event) || event.altKey || event.shiftKey)) return false;
+      const target = event.target;
+      if (target && target.closest && target.closest('input, textarea, select, [contenteditable="true"], .CodeMirror')) return false;
+      const key = clipboardEvent ? (event.type === 'copy' ? 'c' : 'v') : String(event.key || '').toLowerCase();
+      if (key !== 'c' && key !== 'v') return false;
+      if (key === 'c' && !selectedNavDocumentName) return false;
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.repeat) return true;
+      if (key === 'c') {
+        copiedWaveDocumentPromise = copySelectedWaveDocument(selectedNavDocumentName);
+      } else if (copiedWaveDocumentPromise) {
+        const parent = selectedNavDocumentName
+          ? findNavDocumentParent(navTreeState, selectedNavDocumentName)
+          : getNavNodeById(navTreeState, selectedNavNodeId);
+        if (parent) void pasteCopiedWaveDocument(copiedWaveDocumentPromise, parent.id, selectedNavDocumentName);
+      } else {
+        setStatus(false, '请先在目录中选中并复制一张波形图');
+      }
+      return true;
     }
 
     function findNavDirectoryByLabel(node, label) {
@@ -12429,8 +12550,8 @@ ${lines.join('\n')}`;
         const y = parseFloat(textEl.getAttribute('y') || '0');
         const field = y < 0 ? 'head' : 'foot';
         const usesTitleAsHead = field === 'head'
-          && !parsed.head
-          && typeof parsed.title === 'string';
+          && typeof parsed.title === 'string' && !!parsed.title.trim()
+          && !(parsed.head && typeof parsed.head.text === 'string' && parsed.head.text.trim());
         if (!parsed[field] && !usesTitleAsHead) return;
 
         textEl.classList.add('wave-headfoot-text');
@@ -12611,7 +12732,7 @@ ${lines.join('\n')}`;
       svg.appendChild(textEl);
     }
 
-    function attachWaveInteractivity(jsonText, parsedSource) {
+    function attachWaveInteractivity(jsonText, parsedSource, documentSource) {
       hideWaveCellTooltip();
       const svg = waveContainer.querySelector('svg');
       if (!svg) return;
@@ -13033,7 +13154,8 @@ ${lines.join('\n')}`;
       restoreWaveSelection(lanes, sourceMap);
       attachGroupInteractivity(jsonText);
       attachEdgeInteractivity(jsonText, parsedSource);
-      attachHeadFootInteractivity(jsonText, parsedSource);
+      // Rendering may synthesize head.text from title; edits must target the original JSON.
+      attachHeadFootInteractivity(jsonText, documentSource || parsedSource);
       attachGlobalDescribeInteractivity(jsonText, parsedSource);
 
       if (pendingNameEditSignalIndex >= 0
@@ -17736,14 +17858,20 @@ ${lines.join('\n')}`;
     function activateWaveDocumentForEditing(name, previousName, startedAt) {
       const tag = getSavedTagByName(name);
       if (!tag) return false;
-      snapshotActiveWavePreview(name);
-      editingWaveDocumentName = name;
-      activeTagName = name;
-      const targetEntry = waveLibraryCardCache.get(name);
-      if (!targetEntry || !targetEntry.card.isConnected) renderWaveLibrary();
-      if (previousName && previousName !== name) refreshWaveDocumentCard(previousName);
-      refreshWaveDocumentCard(name);
-      loadSavedTag(name);
+      // Capture at activation time so a pending load cannot undo the user's scrolling.
+      const viewport = captureWaveDocumentViewport(name);
+      try {
+        snapshotActiveWavePreview(name);
+        editingWaveDocumentName = name;
+        activeTagName = name;
+        const targetEntry = waveLibraryCardCache.get(name);
+        if (!targetEntry || !targetEntry.card.isConnected) renderWaveLibrary();
+        if (previousName && previousName !== name) refreshWaveDocumentCard(previousName);
+        refreshWaveDocumentCard(name);
+        loadSavedTag(name);
+      } finally {
+        restoreWaveDocumentViewport(viewport);
+      }
       const now = window.performance && typeof window.performance.now === 'function'
         ? window.performance.now()
         : Date.now();
@@ -17828,7 +17956,7 @@ ${lines.join('\n')}`;
       exitWavePaintMode('switch-wave-document');
       if (editingWaveDocumentName === name) {
         selectNavDocumentInTree(name);
-        focusWaveDocument(name);
+        focusWaveDocument(name, opts);
         return;
       }
       commitOpenTextEditors('before-wave-document-switch');
@@ -17839,7 +17967,7 @@ ${lines.join('\n')}`;
       }
       const previousName = editingWaveDocumentName;
       selectNavDocumentInTree(name);
-      focusWaveDocument(name);
+      focusWaveDocument(name, opts);
       const requestedTag = getSavedTagByName(name);
       setStatus(true, '正在打开波形图: ' + getSavedTagTitle(requestedTag || { name: name, content: '{}' }));
       vwdDebugLog('performance', {
@@ -18265,7 +18393,7 @@ ${lines.join('\n')}`;
           }
           alignWaveDataToCycleGrid(displayDiv);
           syncHscaleInputFromJson(jsonText, fullSource);
-          attachWaveInteractivity(jsonText, fullSource);
+          attachWaveInteractivity(jsonText, fullSource, documentSource);
           applyNavVisibilityToWave();
           renderConnectionEdgeList(fullSource);
           fitWaveSvgToContent();
@@ -18550,14 +18678,50 @@ ${lines.join('\n')}`;
       return div;
     }
 
-    function focusWaveDocument(documentName) {
+    function captureWaveDocumentViewport(documentName, visibleOnly) {
+      const entry = waveLibraryCardCache.get(documentName);
+      if (!wavePanel || !entry || !entry.card.isConnected) return null;
+      const cardRect = entry.card.getBoundingClientRect();
+      const panelRect = wavePanel.getBoundingClientRect();
+      if (visibleOnly && (cardRect.bottom <= panelRect.top || cardRect.top >= panelRect.bottom)) return null;
+      return {
+        entry,
+        top: cardRect.top - panelRect.top,
+        panelLeft: wavePanel.scrollLeft,
+        previewLeft: entry.previewScroller.scrollLeft,
+        descriptionLeft: entry.descriptionScroller.scrollLeft
+      };
+    }
+
+    function restoreWaveDocumentViewport(viewport) {
+      if (!viewport || !wavePanel || !viewport.entry.card.isConnected) return;
+      const entry = viewport.entry;
+      const currentTop = entry.card.getBoundingClientRect().top - wavePanel.getBoundingClientRect().top;
+      // The previous card can change height when its editor becomes a preview.
+      // Keep the clicked card anchored, rather than restoring an obsolete scrollTop.
+      wavePanel.scrollTop += currentTop - viewport.top;
+      wavePanel.scrollLeft = viewport.panelLeft;
+      entry.previewScroller.scrollLeft = viewport.previewLeft;
+      entry.descriptionScroller.scrollLeft = viewport.descriptionLeft;
+      updateFrozenWaveLabelsForScroller(entry.previewScroller);
+      vwdDebugLog('wave-scroll', {
+        phase: 'restore-after-document-activation',
+        documentName: entry.documentName,
+        beforeTop: viewport.top,
+        afterTop: entry.card.getBoundingClientRect().top - wavePanel.getBoundingClientRect().top,
+        previewScrollLeft: entry.previewScroller.scrollLeft
+      });
+    }
+
+    function focusWaveDocument(documentName, options) {
       if (!waveLibraryContainer) return;
       const entry = waveLibraryCardCache.get(documentName);
       const target = entry && entry.card.isConnected ? entry.card : null;
       const previous = waveLibraryContainer.querySelector('.wave-document-card.focused');
       if (previous && previous !== target) previous.classList.remove('focused');
       if (target) target.classList.add('focused');
-      if (target && typeof target.scrollIntoView === 'function') {
+      if (target && (!options || options.scrollIntoView !== false)
+          && typeof target.scrollIntoView === 'function') {
         target.scrollIntoView({ behavior: 'auto', block: 'start' });
       }
       vwdDebugLog('wave-library', { phase: 'focus-document', documentName: documentName, found: !!target });
@@ -18740,6 +18904,224 @@ ${lines.join('\n')}`;
         return offset;
       }
       return null;
+    }
+
+    function navNodeContains(node, targetId) {
+      if (!node || !targetId) return false;
+      if (node.id === targetId) return true;
+      return (node.children || []).some((child) => navNodeContains(child, targetId));
+    }
+
+    function clearNavDirectoryDropIndicator(includeDragging) {
+      if (!navTreeEl) return;
+      navTreeEl.querySelectorAll('.nav-drop-before, .nav-drop-inside, .nav-drop-after')
+        .forEach((element) => {
+          element.classList.remove('nav-drop-before', 'nav-drop-inside', 'nav-drop-after');
+        });
+      if (!includeDragging) return;
+      navTreeEl.querySelectorAll('.nav-directory-dragging').forEach((element) => {
+          element.classList.remove('nav-directory-dragging');
+          element.setAttribute('aria-grabbed', 'false');
+      });
+    }
+
+    function focusNavDirectoryLabel(nodeId) {
+      if (!navTreeEl || !nodeId) return;
+      requestAnimationFrame(() => {
+        const target = Array.from(navTreeEl.querySelectorAll('.nav-tree-node-label'))
+          .find((element) => element.dataset.navNodeId === nodeId);
+        if (!target) return;
+        try { target.focus({ preventScroll: true }); } catch (_e) { target.focus(); }
+        if (typeof target.scrollIntoView === 'function') {
+          target.scrollIntoView({ behavior: 'auto', block: 'nearest' });
+        }
+      });
+    }
+
+    function getNavDirectoryDropPosition(event, labelButton, node) {
+      if (!node || node.id === 'nav-root') return 'inside';
+      const rect = labelButton.getBoundingClientRect();
+      const ratio = rect.height > 0 ? (event.clientY - rect.top) / rect.height : 0.5;
+      if (ratio < 0.28) return 'before';
+      if (ratio > 0.72) return 'after';
+      return 'inside';
+    }
+
+    function moveNavDirectoryNode(sourceId, targetId, position, reason) {
+      if (!navTreeState) return false;
+      const source = getNavNodeById(navTreeState, sourceId);
+      const target = getNavNodeById(navTreeState, targetId);
+      if (!source || !source.isCustom || !target) return false;
+      if (source === target || navNodeContains(source, target.id)) {
+        setStatus(false, '目录不能移动到自身或自己的子目录中');
+        return false;
+      }
+
+      const sourceParent = findNavNodeParent(navTreeState, source.id);
+      const sourceItems = sourceParent && Array.isArray(sourceParent.children) ? sourceParent.children : [];
+      const sourceIndex = sourceItems.findIndex((item) => item && item.id === source.id);
+      if (!sourceParent || sourceIndex < 0) return false;
+
+      let destinationParent = target;
+      let destinationItems = target.children;
+      let insertionIndex = Array.isArray(destinationItems) ? destinationItems.length : 0;
+      let normalizedPosition = position === 'before' || position === 'after' ? position : 'inside';
+      if (target.id === 'nav-root') normalizedPosition = 'inside';
+      if (normalizedPosition !== 'inside') {
+        destinationParent = findNavNodeParent(navTreeState, target.id);
+        destinationItems = destinationParent && destinationParent.children;
+        if (!destinationParent || !Array.isArray(destinationItems)) return false;
+        const targetIndex = destinationItems.findIndex((item) => item && item.id === target.id);
+        if (targetIndex < 0) return false;
+        insertionIndex = targetIndex + (normalizedPosition === 'after' ? 1 : 0);
+      }
+      if (!Array.isArray(destinationItems)) {
+        destinationParent.children = [];
+        destinationItems = destinationParent.children;
+        insertionIndex = 0;
+      }
+
+      const sameParent = sourceParent === destinationParent;
+      const adjustedInsertionIndex = sameParent && sourceIndex < insertionIndex
+        ? insertionIndex - 1
+        : insertionIndex;
+      if (sameParent && adjustedInsertionIndex === sourceIndex) {
+        setStatus(true, '目录已经在该位置');
+        return false;
+      }
+
+      const before = captureWaveLibrarySnapshot();
+      sourceItems.splice(sourceIndex, 1);
+      const safeInsertionIndex = Math.max(0, Math.min(destinationItems.length, adjustedInsertionIndex));
+      destinationItems.splice(safeInsertionIndex, 0, source);
+      destinationParent.expanded = true;
+      if (normalizedPosition === 'inside') target.expanded = true;
+      const saved = saveNavCustomNodesFromTree();
+      setSelectedNavNode(source.id, { skipFilter: true });
+      pushWaveLibraryHistory(before, captureWaveLibrarySnapshot());
+      focusNavDirectoryLabel(source.id);
+
+      const actionText = reason === 'indent'
+        ? '已将目录降一级'
+        : (reason === 'outdent' ? '已将目录升一级' : '已移动目录');
+      setStatus(true, actionText + '：' + (getNavDirectoryDisplayName(source) || source.label));
+      vwdDebugLog('nav-tree', {
+        phase: 'move-directory',
+        reason: reason || 'drag',
+        sourceId: source.id,
+        fromParentId: sourceParent.id,
+        toParentId: destinationParent.id,
+        targetId: target.id,
+        position: normalizedPosition,
+        fromIndex: sourceIndex,
+        toIndex: safeInsertionIndex,
+        childCount: (source.children || []).length,
+        documentCount: getNavDocumentCount(source),
+        saved
+      });
+      return true;
+    }
+
+    function changeSelectedNavDirectoryLevel(outdent) {
+      if (!navTreeState || selectedNavDocumentName) return false;
+      const node = getNavNodeById(navTreeState, selectedNavNodeId);
+      if (!node || !node.isCustom) return false;
+      const parent = findNavNodeParent(navTreeState, node.id);
+      if (!parent) return false;
+
+      if (outdent) {
+        if (parent.id === 'nav-root') {
+          setStatus(false, '选中目录已经位于最上层');
+          return false;
+        }
+        return moveNavDirectoryNode(node.id, parent.id, 'after', 'outdent');
+      }
+
+      const siblings = Array.isArray(parent.children) ? parent.children : [];
+      const index = siblings.findIndex((item) => item && item.id === node.id);
+      const previous = index > 0 ? siblings[index - 1] : null;
+      if (!previous || !previous.isCustom) {
+        setStatus(false, '前面没有可接收该目录的同级标题');
+        return false;
+      }
+      return moveNavDirectoryNode(node.id, previous.id, 'inside', 'indent');
+    }
+
+    function handleNavDirectoryKeydown(event) {
+      if (event.key !== 'Tab' || event.ctrlKey || event.metaKey || event.altKey) return;
+      const nodeId = event.currentTarget && event.currentTarget.dataset
+        ? event.currentTarget.dataset.navNodeId
+        : '';
+      const node = getNavNodeById(navTreeState, nodeId);
+      if (!node || !node.isCustom) return;
+      event.preventDefault();
+      event.stopPropagation();
+      selectedNavNodeId = node.id;
+      selectedNavDocumentName = null;
+      changeSelectedNavDirectoryLevel(event.shiftKey);
+    }
+
+    function bindNavDirectoryDrag(labelButton, node, canDrag) {
+      if (!labelButton || !node) return;
+      labelButton.dataset.navNodeId = node.id || 'nav-root';
+      labelButton.addEventListener('keydown', handleNavDirectoryKeydown);
+      if (canDrag) {
+        labelButton.draggable = true;
+        labelButton.setAttribute('aria-grabbed', 'false');
+        labelButton.addEventListener('dragstart', (event) => {
+          if (event.target && event.target.closest && event.target.closest('.toggle, .nav-tree-actions')) {
+            event.preventDefault();
+            return;
+          }
+          navDirectoryDragState = { nodeId: node.id };
+          selectedNavNodeId = node.id;
+          selectedNavDocumentName = null;
+          refreshNavDocumentSelection(null);
+          labelButton.classList.add('nav-directory-dragging', 'active');
+          labelButton.setAttribute('aria-grabbed', 'true');
+          if (event.dataTransfer) {
+            event.dataTransfer.effectAllowed = 'move';
+            event.dataTransfer.setData('text/plain', node.id);
+          }
+          vwdDebugLog('nav-tree', {
+            phase: 'drag-start',
+            sourceId: node.id,
+            childCount: (node.children || []).length,
+            documentCount: getNavDocumentCount(node)
+          });
+        });
+        labelButton.addEventListener('dragend', () => {
+          navDirectoryDragState = null;
+          navSuppressClickUntil = Date.now() + 180;
+          clearNavDirectoryDropIndicator(true);
+          vwdDebugLog('nav-tree', { phase: 'drag-end', sourceId: node.id });
+        });
+      }
+
+      labelButton.addEventListener('dragover', (event) => {
+        const source = navDirectoryDragState && getNavNodeById(navTreeState, navDirectoryDragState.nodeId);
+        if (!source || source === node || navNodeContains(source, node.id)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+        const position = getNavDirectoryDropPosition(event, labelButton, node);
+        clearNavDirectoryDropIndicator();
+        labelButton.classList.add('nav-drop-' + position);
+      });
+      labelButton.addEventListener('dragleave', (event) => {
+        if (event.relatedTarget && labelButton.contains(event.relatedTarget)) return;
+        labelButton.classList.remove('nav-drop-before', 'nav-drop-inside', 'nav-drop-after');
+      });
+      labelButton.addEventListener('drop', (event) => {
+        const sourceId = navDirectoryDragState && navDirectoryDragState.nodeId;
+        if (!sourceId) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const position = getNavDirectoryDropPosition(event, labelButton, node);
+        navSuppressClickUntil = Date.now() + 250;
+        clearNavDirectoryDropIndicator();
+        moveNavDirectoryNode(sourceId, node.id, position, 'drag');
+      });
     }
 
     function getDescriptionCaretOffsetAtPoint(descriptionEl, point, valueLength) {
@@ -19130,13 +19512,16 @@ ${lines.join('\n')}`;
         .replace(/>/g, '&gt;');
     }
 
+    const WAVE_LINK_HOVER_HINT = '首次在此电脑使用，请先运行 VisualWaveDrom.bat';
+
     function buildWaveMarkdownLink(title, deepLink) {
       const label = String(title || 'VisualWaveDrom')
         .replace(/\\/g, '\\\\')
         .replace(/\[/g, '\\[')
         .replace(/\]/g, '\\]')
         .replace(/[\r\n]+/g, ' ');
-      return '[打开波形图：' + label + '](<' + String(deepLink || '') + '>)';
+      const hoverHint = WAVE_LINK_HOVER_HINT.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      return '[打开波形图：' + label + '](<' + String(deepLink || '') + '> "' + hoverHint + '")';
     }
 
     function downloadBlobFile(blob, fileName) {
@@ -19454,11 +19839,14 @@ ${lines.join('\n')}`;
           const htmlPromise = blobPromise
             .then(blobToDataUrl)
             .then((dataUrl) => {
-              const linkedImage = '<a href="' + escapeHtmlAttribute(deepLink) + '">'
+              const escapedHoverHint = escapeHtmlAttribute(WAVE_LINK_HOVER_HINT);
+              const linkedImage = '<a href="' + escapeHtmlAttribute(deepLink)
+                + '" title="' + escapedHoverHint + '">'
                 + '<img src="' + escapeHtmlAttribute(dataUrl) + '" alt="'
-                + escapeHtmlAttribute(titleText) + '">'
+                + escapeHtmlAttribute(titleText) + '" title="' + escapedHoverHint + '">'
                 + '</a>';
-              const linkedText = '<a href="' + escapeHtmlAttribute(deepLink) + '">'
+              const linkedText = '<a href="' + escapeHtmlAttribute(deepLink)
+                + '" title="' + escapedHoverHint + '">'
                 + '打开波形图：' + escapeHtmlAttribute(titleText) + '</a>';
               return new Blob([
                 mode === 'linked-markdown'
@@ -19595,7 +19983,7 @@ ${lines.join('\n')}`;
           window.location.href = '/open' + (params.toString() ? ('?' + params.toString()) : '');
           return;
         }
-        openWaveDocumentForEditing(documentName);
+        openWaveDocumentForEditing(documentName, { scrollIntoView: false });
       });
       const singleOpenButton = document.createElement('button');
       singleOpenButton.type = 'button';
@@ -19861,6 +20249,7 @@ ${lines.join('\n')}`;
         return true;
       }
 
+      const viewport = captureWaveDocumentViewport(editingWaveDocumentName, true);
       clearFrozenWaveLabelsForHost(display);
       display.innerHTML = '';
       syncWaveDocumentDescriptionWidth(display);
@@ -19876,6 +20265,7 @@ ${lines.join('\n')}`;
         entry.lastPreviewUse = ++waveLibraryPreviewUseSequence;
         setWavePreviewLoadingState(entry, false);
         trimRenderedWavePreviews(entry);
+        restoreWaveDocumentViewport(viewport);
         return false;
       }
       try {
@@ -19912,6 +20302,8 @@ ${lines.join('\n')}`;
         trimRenderedWavePreviews(entry);
         vwdDebugLog('wave-library', { phase: 'document-render-error', documentName: tag.name, message: error && error.message ? error.message : String(error) });
         return false;
+      } finally {
+        restoreWaveDocumentViewport(viewport);
       }
     }
 
@@ -21725,6 +22117,7 @@ ${lines.join('\n')}`;
 
     document.addEventListener('pointerdown', (e) => {
       const target = e.target && e.target.closest ? e.target : null;
+      waveDocumentClipboardActive = !!(target && target.closest('#nav-tree'));
       const insideJsonEditor = isJsonEditorTarget(target);
       if (!insideJsonEditor) {
         flushCodeMirrorToTextarea('pointer-leave-json');
@@ -21769,6 +22162,7 @@ ${lines.join('\n')}`;
 
     document.addEventListener('focusin', (e) => {
       const target = e.target && e.target.closest ? e.target : null;
+      waveDocumentClipboardActive = !!(target && target.closest('#nav-tree'));
       if (isJsonEditorTarget(target)) {
         setKeyboardInputScope('json', 'json-focusin');
       } else if (target === wavePanel) {
@@ -21788,6 +22182,7 @@ ${lines.join('\n')}`;
       if (presenterWaveViewActive) return;
       if (e.target && e.target.closest && e.target.closest('.vwd-big-wave-jump')) return;
       if (e.target && e.target.closest && e.target.closest('#wave-collection-import-modal')) return;
+      if (handleWaveDocumentClipboardShortcut(e)) return;
       if (vimController && vimController.handleKeydown(e)) return;
       if (handleUndoRedoShortcut(e)) return;
       if (handleWaveClipboardShortcut(e)) return;
@@ -21803,8 +22198,11 @@ ${lines.join('\n')}`;
         });
       }
     }, true);
-    document.addEventListener('copy', handleWaveClipboardEvent, true);
-    document.addEventListener('paste', handleWaveClipboardEvent, true);
+    ['copy', 'paste'].forEach((type) => {
+      document.addEventListener(type, (event) => {
+        if (!handleWaveDocumentClipboardShortcut(event)) handleWaveClipboardEvent(event);
+      }, true);
+    });
     document.addEventListener('click', cancelConnectionSelectionForOtherButton, true);
 
     editor.addEventListener('keydown', (e) => {
