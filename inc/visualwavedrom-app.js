@@ -315,8 +315,6 @@ if (!window.VWDCodeEditorPairs) {
     const columnNumberState = document.getElementById('column-number-state');
     const navSidebar = document.getElementById('nav-sidebar');
     const navTreeEl = document.getElementById('nav-tree');
-    const navMoveUpBtn = document.getElementById('btn-nav-move-up');
-    const navMoveDownBtn = document.getElementById('btn-nav-move-down');
     const navResizeHandle = document.getElementById('nav-resize-handle');
     const toggleNavSidebarBtn = document.getElementById('btn-toggle-nav-sidebar');
     const toggleNavSidebarLabel = document.getElementById('toggle-nav-sidebar-label');
@@ -429,8 +427,11 @@ if (!window.VWDCodeEditorPairs) {
     let waveDocumentClipboardActive = false;
     let copiedWaveDocumentPromise = null;
     let pastingWaveDocument = false;
-    let navDirectoryDragState = null;
+    let navTreeDragState = null;
     let navSuppressClickUntil = 0;
+    let navDropLine = null;
+    let navDropTarget = null;
+    let navDropPosition = '';
     let navTreeState = null;
     let navTreeSignalCount = 0;
     let navVisibleRows = [];
@@ -1761,41 +1762,6 @@ ${lines.join('\n')}`;
       return saveNavCustomTreeToStorage(nodes, rootDocuments);
     }
 
-    function getSelectedNavOrderTarget() {
-      if (!navTreeState) return null;
-      if (selectedNavDocumentName) {
-        const parent = findNavDocumentParent(navTreeState, selectedNavDocumentName);
-        const items = parent && Array.isArray(parent.documents) ? parent.documents : [];
-        const index = items.indexOf(selectedNavDocumentName);
-        return index >= 0
-          ? { kind: 'document', item: selectedNavDocumentName, parent, items, index }
-          : null;
-      }
-
-      const node = getNavNodeById(navTreeState, selectedNavNodeId);
-      if (!node || node.id === 'nav-root' || !node.isCustom) return null;
-      const parent = findNavNodeParent(navTreeState, node.id);
-      const items = parent && Array.isArray(parent.children) ? parent.children : [];
-      const index = items.findIndex((item) => item && item.id === node.id);
-      return index >= 0 ? { kind: 'directory', item: node, parent, items, index } : null;
-    }
-
-    function updateNavOrderButtons() {
-      const target = getSelectedNavOrderTarget();
-      if (navMoveUpBtn) {
-        navMoveUpBtn.disabled = !target || target.index <= 0;
-        navMoveUpBtn.title = target && target.index > 0
-          ? '输入数量后，在当前标题下上移选中项'
-          : '请先选择可上移的波形图或标题';
-      }
-      if (navMoveDownBtn) {
-        navMoveDownBtn.disabled = !target || target.index >= target.items.length - 1;
-        navMoveDownBtn.title = target && target.index < target.items.length - 1
-          ? '输入数量后，在当前标题下下移选中项'
-          : '请先选择可下移的波形图或标题';
-      }
-    }
-
     function refreshNavDocumentSelection(documentName) {
       if (!navTreeEl) return;
       navTreeEl.querySelectorAll('.nav-tree-node-label.active').forEach((button) => {
@@ -1804,7 +1770,6 @@ ${lines.join('\n')}`;
       navTreeEl.querySelectorAll('.nav-tree-document-label').forEach((button) => {
         button.classList.toggle('active', button.dataset.documentName === documentName);
       });
-      updateNavOrderButtons();
     }
 
     function selectNavDocumentInTree(documentName) {
@@ -1835,80 +1800,14 @@ ${lines.join('\n')}`;
       return parent;
     }
 
-    async function moveSelectedNavItem(direction, explicitCount) {
-      const delta = direction === 'up' ? -1 : 1;
-      const target = getSelectedNavOrderTarget();
-      if (!target) {
-        setStatus(false, '请先选择需要移动的波形图或标题');
-        updateNavOrderButtons();
-        return false;
-      }
-
-      const boundaryIndex = direction === 'up' ? 0 : target.items.length - 1;
-      if (target.index === boundaryIndex) {
-        setStatus(false, direction === 'up' ? '选中项已在最上方' : '选中项已在最下方');
-        updateNavOrderButtons();
-        return false;
-      }
-
-      const moveCount = Number.isFinite(explicitCount)
-        ? Math.max(1, Math.floor(explicitCount))
-        : await requestMoveDistance(direction, '项');
-      if (moveCount === null) return false;
-      const nextIndex = delta < 0
-        ? Math.max(0, target.index - moveCount)
-        : Math.min(target.items.length - 1, target.index + moveCount);
-
-      const before = captureWaveLibrarySnapshot();
-      const fromIndex = target.index;
-      const actualMoveCount = Math.abs(nextIndex - fromIndex);
-      const affectedItems = target.items.slice(
-        Math.min(fromIndex, nextIndex),
-        Math.max(fromIndex, nextIndex) + 1
-      );
-      target.items.splice(fromIndex, 1);
-      target.items.splice(nextIndex, 0, target.item);
-      const saved = saveNavCustomNodesFromTree();
-
-      let displayName = '';
-      if (target.kind === 'document') {
-        selectedNavDocumentName = target.item;
-        setSelectedNavNode(target.parent.id, { skipFilter: true, keepDocumentSelection: true });
-        const tag = getSavedTagByName(target.item);
-        displayName = tag ? getNavDocumentDisplayName(tag, target.parent) : target.item;
-      } else {
-        setSelectedNavNode(target.item.id, { skipFilter: true });
-        displayName = getNavDirectoryDisplayName(target.item) || target.item.label;
-      }
-
-      pushWaveLibraryHistory(before, captureWaveLibrarySnapshot());
-      setStatus(true, (direction === 'up' ? '已上移 ' : '已下移 ') + actualMoveCount + ' 项：' + displayName);
-      vwdDebugLog('nav-tree', {
-        phase: 'reorder',
-        kind: target.kind,
-        direction,
-        parentId: target.parent && target.parent.id,
-        requestedCount: moveCount,
-        actualMoveCount,
-        fromIndex,
-        toIndex: nextIndex,
-        item: target.kind === 'document' ? target.item : target.item.id,
-        affectedCount: affectedItems.length,
-        saved
-      });
-      return true;
-    }
-
     function renderNavTree() {
       if (!navTreeEl) {
         vwdDebugLog('nav-tree', { phase: 'render', ok: false, reason: 'missing-container' });
-        updateNavOrderButtons();
         return;
       }
       navTreeEl.innerHTML = '';
       if (!navTreeState) {
         vwdDebugLog('nav-tree', { phase: 'render', ok: false, reason: 'missing-state' });
-        updateNavOrderButtons();
         return;
       }
 
@@ -1930,7 +1829,9 @@ ${lines.join('\n')}`;
         button.title = '打开波形图: ' + getNavDocumentDisplayName(tag, parentNode);
         button.textContent = getNavDocumentDisplayName(tag, parentNode);
         button.setAttribute('aria-keyshortcuts', 'Control+c Control+v Meta+c Meta+v');
+        bindNavDocumentDrag(button, tag.name);
         button.addEventListener('click', () => {
+          if (Date.now() < navSuppressClickUntil) return;
           openWaveDocumentForEditing(tag.name);
         });
         const moveBtn = document.createElement('button');
@@ -2133,7 +2034,6 @@ ${lines.join('\n')}`;
         renderedDocumentCount: navTreeEl.querySelectorAll('.nav-tree-document').length,
         expandedNodeCount: navTreeEl.querySelectorAll('.nav-tree-node.expanded').length
       });
-      updateNavOrderButtons();
       return;
     }
 
@@ -2433,27 +2333,43 @@ ${lines.join('\n')}`;
       navMoveModal.hidden = false;
     }
 
-    function moveNavDocumentToDirectory(documentName, fromNode, target, targetLabel) {
+    function moveNavDocumentToDirectory(documentName, fromNode, target, targetLabel, options) {
       if (!navTreeState || !documentName || !fromNode || !target) return;
-      if (target.id === fromNode.id) return;
+      const opts = options || {};
+      const sameDirectory = target.id === fromNode.id;
+      const documents = Array.isArray(target.documents) ? target.documents : [];
+      const sourceIndex = (fromNode.documents || []).indexOf(documentName);
+      const relativeIndex = opts.relativeName ? documents.indexOf(opts.relativeName) : -1;
+      if (sourceIndex < 0 || opts.relativeName === documentName) return false;
+      if (opts.relativeName && relativeIndex < 0) return false;
+      let insertionIndex = relativeIndex >= 0
+        ? relativeIndex + (opts.position === 'after' ? 1 : 0)
+        : documents.length;
+      if (sameDirectory && sourceIndex < insertionIndex) insertionIndex -= 1;
+      if (sameDirectory && (!opts.reorder || sourceIndex === insertionIndex)) return false;
+      cancelPendingWaveDocumentOpen();
       const before = captureWaveLibrarySnapshot();
       const removedAssignments = removeNavDocumentAssignments(navTreeState, documentName);
       target.documents = Array.isArray(target.documents) ? target.documents : [];
-      target.documents.push(documentName);
+      target.documents.splice(insertionIndex, 0, documentName);
       target.expanded = true;
       const saved = saveNavCustomNodesFromTree();
       selectedNavDocumentName = documentName;
       setSelectedNavNode(target.id, { skipFilter: true, keepDocumentSelection: true });
       pushWaveLibraryHistory(before, captureWaveLibrarySnapshot());
-      setStatus(true, '已移动波形图到：' + (targetLabel || getNavDirectoryDisplayName(target)));
+      setStatus(true, sameDirectory ? '已调整波形图顺序' : '已移动波形图到：' + (targetLabel || getNavDirectoryDisplayName(target)));
       vwdDebugLog('nav-tree', {
         phase: 'move-document',
         documentName: documentName,
         fromId: fromNode.id,
         toId: target.id,
+        fromIndex: sourceIndex,
+        toIndex: insertionIndex,
+        reason: opts.reorder ? 'drag' : 'menu',
         removedAssignments,
         saved: saved
       });
+      return true;
     }
 
     function seedRequestedWaveCopies() {
@@ -2496,7 +2412,7 @@ ${lines.join('\n')}`;
       const navAddRowsBtn = document.getElementById('btn-nav-add-rows');
       const navAddDocumentBtn = document.getElementById('btn-nav-add-document');
       const navAddWaveDocumentBtn = document.getElementById('btn-nav-add-wave-document');
-      if (!navAddRootBtn && !navAddRowsBtn && !navAddDocumentBtn && !navAddWaveDocumentBtn && !navMoveUpBtn && !navMoveDownBtn) {
+      if (!navAddRootBtn && !navAddRowsBtn && !navAddDocumentBtn && !navAddWaveDocumentBtn) {
         vwdDebugLog('nav-tree', { phase: 'buttons-bound', ok: false, reason: 'buttons-not-found' });
         return;
       }
@@ -2545,19 +2461,14 @@ ${lines.join('\n')}`;
           }
         });
       }
-      if (navMoveUpBtn) navMoveUpBtn.addEventListener('click', () => { void moveSelectedNavItem('up'); });
-      if (navMoveDownBtn) navMoveDownBtn.addEventListener('click', () => { void moveSelectedNavItem('down'); });
       navControlButtonsBound = true;
-      updateNavOrderButtons();
       vwdDebugLog('nav-tree', {
         phase: 'buttons-bound',
         ok: true,
         addRoot: !!navAddRootBtn,
         addChild: !!navAddRowsBtn,
         addDocument: !!navAddDocumentBtn,
-        addWaveDocument: !!navAddWaveDocumentBtn,
-        moveUp: !!navMoveUpBtn,
-        moveDown: !!navMoveDownBtn
+        addWaveDocument: !!navAddWaveDocumentBtn
       });
     }
 
@@ -18913,15 +18824,111 @@ ${lines.join('\n')}`;
     }
 
     function clearNavDirectoryDropIndicator(includeDragging) {
+      if (navDropLine) navDropLine.hidden = true;
+      navDropTarget = null;
+      navDropPosition = '';
       if (!navTreeEl) return;
       navTreeEl.querySelectorAll('.nav-drop-before, .nav-drop-inside, .nav-drop-after')
         .forEach((element) => {
           element.classList.remove('nav-drop-before', 'nav-drop-inside', 'nav-drop-after');
         });
       if (!includeDragging) return;
-      navTreeEl.querySelectorAll('.nav-directory-dragging').forEach((element) => {
-          element.classList.remove('nav-directory-dragging');
+      navTreeEl.querySelectorAll('.nav-tree-dragging').forEach((element) => {
+          element.classList.remove('nav-tree-dragging');
           element.setAttribute('aria-grabbed', 'false');
+      });
+    }
+
+    function updateNavDropLine() {
+      if (!navDropLine || !navDropTarget || navDropPosition === 'inside') return;
+      if (!navDropTarget.isConnected || !navTreeEl) {
+        clearNavDirectoryDropIndicator();
+        return;
+      }
+      const rect = navDropTarget.getBoundingClientRect();
+      const viewport = navTreeEl.getBoundingClientRect();
+      const left = Math.max(rect.left, viewport.left);
+      const right = Math.min(rect.right, viewport.right);
+      const y = navDropPosition === 'before' ? rect.top : rect.bottom;
+      navDropLine.hidden = right <= left || y < viewport.top || y > viewport.bottom;
+      if (navDropLine.hidden) return;
+      navDropLine.style.left = Math.round(left) + 'px';
+      navDropLine.style.top = Math.round(y - 1.5) + 'px';
+      navDropLine.style.width = Math.round(right - left) + 'px';
+    }
+
+    function showNavDropIndicator(target, position) {
+      if (navDropTarget !== target || navDropPosition !== position) {
+        clearNavDirectoryDropIndicator();
+        navDropTarget = target;
+        navDropPosition = position;
+        target.classList.add('nav-drop-' + position);
+      }
+      if (position === 'inside') return;
+      if (!navDropLine) {
+        // Keep the insertion line outside labels whose overflow clips text and decorations.
+        navDropLine = document.createElement('div');
+        navDropLine.className = 'nav-tree-drop-line';
+        navDropLine.setAttribute('aria-hidden', 'true');
+        document.body.appendChild(navDropLine);
+        document.addEventListener('scroll', updateNavDropLine, true);
+        window.addEventListener('resize', updateNavDropLine);
+      }
+      updateNavDropLine();
+    }
+
+    function finishNavTreeDrag() {
+      navTreeDragState = null;
+      navSuppressClickUntil = Date.now() + 250;
+      clearNavDirectoryDropIndicator(true);
+    }
+
+    function bindNavDocumentDrag(button, documentName) {
+      button.draggable = true;
+      button.setAttribute('aria-grabbed', 'false');
+      button.addEventListener('dragstart', (event) => {
+        navTreeDragState = { documentName };
+        selectedNavDocumentName = documentName;
+        refreshNavDocumentSelection(documentName);
+        button.classList.add('nav-tree-dragging');
+        button.setAttribute('aria-grabbed', 'true');
+        if (event.dataTransfer) {
+          event.dataTransfer.effectAllowed = 'move';
+          event.dataTransfer.setData('text/plain', documentName);
+        }
+        vwdDebugLog('nav-document-drag-start', { documentName });
+      });
+      button.addEventListener('dragend', finishNavTreeDrag);
+      const dropPosition = (event) => {
+        const rect = button.getBoundingClientRect();
+        return event.clientY < rect.top + rect.height / 2 ? 'before' : 'after';
+      };
+      button.addEventListener('dragover', (event) => {
+        const sourceName = navTreeDragState && navTreeDragState.documentName;
+        if (!sourceName || sourceName === documentName) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+        showNavDropIndicator(button, dropPosition(event));
+      });
+      button.addEventListener('dragleave', (event) => {
+        if (event.relatedTarget && button.contains(event.relatedTarget)) return;
+        if (navDropTarget === button) clearNavDirectoryDropIndicator();
+      });
+      button.addEventListener('drop', (event) => {
+        const sourceName = navTreeDragState && navTreeDragState.documentName;
+        if (!sourceName) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const fromNode = findNavDocumentParent(navTreeState, sourceName);
+        const target = findNavDocumentParent(navTreeState, documentName);
+        const position = dropPosition(event);
+        vwdDebugLog('nav-document-drop', { sourceName, targetName: documentName, position });
+        // A drop can rebuild and detach the source before dragend is delivered.
+        finishNavTreeDrag();
+        moveNavDocumentToDirectory(sourceName, fromNode, target, '', {
+          reorder: true, relativeName: documentName, position
+        });
       });
     }
 
@@ -19073,11 +19080,11 @@ ${lines.join('\n')}`;
             event.preventDefault();
             return;
           }
-          navDirectoryDragState = { nodeId: node.id };
+          navTreeDragState = { nodeId: node.id };
           selectedNavNodeId = node.id;
           selectedNavDocumentName = null;
           refreshNavDocumentSelection(null);
-          labelButton.classList.add('nav-directory-dragging', 'active');
+          labelButton.classList.add('nav-tree-dragging', 'active');
           labelButton.setAttribute('aria-grabbed', 'true');
           if (event.dataTransfer) {
             event.dataTransfer.effectAllowed = 'move';
@@ -19091,36 +19098,40 @@ ${lines.join('\n')}`;
           });
         });
         labelButton.addEventListener('dragend', () => {
-          navDirectoryDragState = null;
-          navSuppressClickUntil = Date.now() + 180;
-          clearNavDirectoryDropIndicator(true);
+          finishNavTreeDrag();
           vwdDebugLog('nav-tree', { phase: 'drag-end', sourceId: node.id });
         });
       }
 
       labelButton.addEventListener('dragover', (event) => {
-        const source = navDirectoryDragState && getNavNodeById(navTreeState, navDirectoryDragState.nodeId);
-        if (!source || source === node || navNodeContains(source, node.id)) return;
+        const sourceName = navTreeDragState && navTreeDragState.documentName;
+        const source = navTreeDragState && getNavNodeById(navTreeState, navTreeDragState.nodeId);
+        if (!sourceName && (!source || source === node || navNodeContains(source, node.id))) return;
         event.preventDefault();
         event.stopPropagation();
         if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
-        const position = getNavDirectoryDropPosition(event, labelButton, node);
-        clearNavDirectoryDropIndicator();
-        labelButton.classList.add('nav-drop-' + position);
+        const position = sourceName ? 'inside' : getNavDirectoryDropPosition(event, labelButton, node);
+        showNavDropIndicator(labelButton, position);
       });
       labelButton.addEventListener('dragleave', (event) => {
         if (event.relatedTarget && labelButton.contains(event.relatedTarget)) return;
-        labelButton.classList.remove('nav-drop-before', 'nav-drop-inside', 'nav-drop-after');
+        if (navDropTarget === labelButton) clearNavDirectoryDropIndicator();
       });
       labelButton.addEventListener('drop', (event) => {
-        const sourceId = navDirectoryDragState && navDirectoryDragState.nodeId;
-        if (!sourceId) return;
+        const sourceName = navTreeDragState && navTreeDragState.documentName;
+        const sourceId = navTreeDragState && navTreeDragState.nodeId;
+        if (!sourceId && !sourceName) return;
         event.preventDefault();
         event.stopPropagation();
         const position = getNavDirectoryDropPosition(event, labelButton, node);
-        navSuppressClickUntil = Date.now() + 250;
-        clearNavDirectoryDropIndicator();
-        moveNavDirectoryNode(sourceId, node.id, position, 'drag');
+        vwdDebugLog('nav-directory-drop', { sourceName, sourceId, targetId: node.id, position });
+        finishNavTreeDrag();
+        if (sourceName) {
+          const fromNode = findNavDocumentParent(navTreeState, sourceName);
+          moveNavDocumentToDirectory(sourceName, fromNode, node, '', { reorder: true });
+        } else {
+          moveNavDirectoryNode(sourceId, node.id, position, 'drag');
+        }
       });
     }
 
