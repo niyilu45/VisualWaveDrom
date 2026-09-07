@@ -1800,6 +1800,16 @@
       padding-block: 18px 20px;
     }
 
+    #wave-library-restart-actions[hidden] {
+      display: none;
+    }
+
+    .wave-library-save-overlay[data-state="confirm-restart"] .wave-library-save-progress span {
+      animation: none;
+      width: 100%;
+      left: 0;
+    }
+
     .wave-library-save-body p {
       margin: 0;
       color: var(--text-muted);

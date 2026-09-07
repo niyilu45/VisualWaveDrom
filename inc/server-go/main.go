@@ -28,7 +28,7 @@ import (
 const (
 	appID                      = "VisualWaveDrom"
 	protocolScheme             = "visualwavedrom"
-	serviceAPIVersion          = 20
+	serviceAPIVersion          = 21
 	defaultPort                = 4173
 	maxWaveLibraryRequestBytes = 256 * 1024 * 1024
 	importMaxUploadBytes       = 128 * 1024 * 1024
@@ -118,6 +118,7 @@ type config struct {
 	noOpen              bool
 	port                int
 	checkRuntime        bool
+	resumeSession       string
 }
 
 type libraryListItem struct {
@@ -141,6 +142,7 @@ type service struct {
 	libraryMu              sync.Mutex
 	draftMu                sync.Mutex
 	workingDir             string
+	preserveWorkingFiles   bool
 	workingLibraries       map[string]string
 	librarySources         map[string]string
 	collectionSearchMu     sync.Mutex
@@ -255,6 +257,10 @@ func newService(configuration config) (*service, error) {
 	if configuration.statePath == "" {
 		configuration.statePath = filepath.Join(configuration.tempDir, ".visualwavedrom-state.json")
 	}
+	restart, err := loadServerRestart(&configuration)
+	if err != nil {
+		return nil, err
+	}
 	info, err := os.Stat(configuration.htmlPath)
 	if err != nil || info.IsDir() {
 		return nil, fmt.Errorf("HTML file not found: %s", configuration.htmlPath)
@@ -273,6 +279,12 @@ func newService(configuration config) (*service, error) {
 		collectionSearchCache:  make(map[string]collectionSearchCacheEntry),
 		collectionPreviewCache: make(map[string]collectionSinglePreviewIndex),
 		collectionImportJobs:   make(map[string]collectionImportProgress),
+	}
+	if restart != nil {
+		instance.workingDir = filepath.Join(configuration.tempDir, "sessions", configuration.resumeSession)
+		instance.workingLibraries = restart.WorkingLibraries
+		instance.librarySources = restart.LibrarySources
+		instance.preserveWorkingFiles = true
 	}
 	if err = instance.ensureWaveDirectory(); err != nil {
 		return nil, err
@@ -463,7 +475,11 @@ func (s *service) registerLibrarySource(id, sourcePath string) {
 	if s.librarySources == nil {
 		s.librarySources = make(map[string]string)
 	}
+	if s.librarySources[id] == sourcePath {
+		return
+	}
 	s.librarySources[id] = sourcePath
+	s.persistRestartStateLocked()
 }
 
 func (s *service) sourceLibraryPathByID(id string) string {
@@ -550,6 +566,7 @@ func (s *service) ensureWorkingLibrary(sourcePath string) (string, error) {
 		return "", err
 	}
 	s.workingLibraries[key] = workingPath
+	s.persistRestartStateLocked()
 	return workingPath, nil
 }
 
@@ -622,6 +639,13 @@ func (s *service) commitWorkingLibrary(id string) (string, error) {
 }
 
 func (s *service) cleanupTemporaryFiles() {
+	s.clientMu.Lock()
+	s.pruneExpiredClientsLocked(time.Now())
+	keep := s.preserveWorkingFiles || len(s.clients) > 0
+	s.clientMu.Unlock()
+	if keep {
+		return
+	}
 	if s.workingDir != "" {
 		_ = os.RemoveAll(s.workingDir)
 	}
@@ -695,7 +719,7 @@ func (s *service) registerWindowsProtocol(handler string) {
 		return
 	}
 	command := fmt.Sprintf(`"%s" "%%1"`, handler)
-	schemes := []string{s.activeScheme}
+	schemes := []string{s.activeScheme, recoveryProtocolScheme(s.config)}
 	if s.activeScheme != protocolScheme {
 		schemes = append(schemes, protocolScheme)
 	}
@@ -750,7 +774,7 @@ func (s *service) registerLinuxProtocol(handler string) {
 		}
 		return '-'
 	}, s.activeScheme) + ".desktop"
-	schemes := []string{s.activeScheme}
+	schemes := []string{s.activeScheme, recoveryProtocolScheme(s.config)}
 	if s.activeScheme != protocolScheme {
 		schemes = append(schemes, protocolScheme)
 	}
@@ -951,6 +975,7 @@ func (s *service) handleServerInfo(writer http.ResponseWriter, _ *http.Request) 
 		"sqliteVersion":     s.sqliteVersion, "protocolScheme": s.activeScheme,
 		"libraryDir": s.config.waveDir, "currentLibrary": s.config.configuredName,
 		"currentLibraryId": library.LibraryID,
+		"recovery":         s.recoveryDetails(), "sessionId": filepath.Base(s.workingDir),
 	})
 }
 
@@ -1298,6 +1323,7 @@ func (s *service) handleLibraries(writer http.ResponseWriter, _ *http.Request) {
 	sendJSON(writer, 200, map[string]any{
 		"files": files, "libraries": libraries, "current": currentName,
 		"currentLibraryId": currentID, "protocolScheme": s.activeScheme,
+		"recovery": s.recoveryDetails(),
 	})
 }
 
@@ -1677,11 +1703,15 @@ func (s *service) run() error {
 	s.registerProtocolHandler()
 	listener, err := listenLocal(s.config.port)
 	if err != nil {
-		if info := probeServer(s.config.port); s.sameRunningService(info) {
+		if info := probeServer(s.config.port); s.sameRunningService(info) &&
+			(s.config.resumeSession == "" || stringValue(info["sessionId"]) == s.config.resumeSession) {
 			address := s.pageAddress(s.config.port)
 			fmt.Printf("VisualWaveDrom is already running at %s\n", address)
 			openBrowser(address, s.config.noOpen)
 			return nil
+		}
+		if s.config.resumeSession != "" {
+			return fmt.Errorf("cannot recover port %d: it is occupied by another service", s.config.port)
 		}
 		listener, err = listenLocal(0)
 		if err != nil {
@@ -1690,6 +1720,11 @@ func (s *service) run() error {
 		fmt.Printf("Port %d is already in use; using an available port.\n", s.config.port)
 	}
 	activePort := listener.Addr().(*net.TCPAddr).Port
+	s.config.port = activePort
+	s.preserveWorkingFiles = false
+	s.draftMu.Lock()
+	s.persistRestartStateLocked()
+	s.draftMu.Unlock()
 	address := s.pageAddress(activePort)
 	s.httpServer = &http.Server{
 		Handler:           s.routes(),
@@ -1700,7 +1735,7 @@ func (s *service) run() error {
 	fmt.Printf("Runtime: %s/%s / Go %s / SQLite %s\n",
 		runtime.GOOS, runtime.GOARCH, runtime.Version(), s.sqliteVersion)
 	fmt.Printf("VisualWaveDrom is running at %s\n", address)
-	if !s.config.noOpen {
+	if !s.config.noOpen || s.config.resumeSession != "" {
 		s.clientMu.Lock()
 		s.scheduleClientShutdownLocked(clientStartupGracePeriod)
 		s.clientMu.Unlock()

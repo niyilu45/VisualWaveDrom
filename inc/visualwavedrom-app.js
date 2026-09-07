@@ -315,6 +315,7 @@ if (!window.VWDCodeEditorPairs) {
     const columnNumberState = document.getElementById('column-number-state');
     const navSidebar = document.getElementById('nav-sidebar');
     const navTreeEl = document.getElementById('nav-tree');
+    const navToggleAllBtn = document.getElementById('btn-nav-toggle-all');
     const navResizeHandle = document.getElementById('nav-resize-handle');
     const toggleNavSidebarBtn = document.getElementById('btn-toggle-nav-sidebar');
     const toggleNavSidebarLabel = document.getElementById('toggle-nav-sidebar-label');
@@ -1120,6 +1121,8 @@ ${lines.join('\n')}`;
     let waveLibrarySaveOperation = null;
     let waveLibrarySaveModalCloseTimer = null;
     let waveLibrarySaveReturnFocus = null;
+    let waveLibraryServerRecovery = null;
+    let waveLibrarySaveErrorMessage = '';
     let applyingWaveLibraryBundle = false;
     let pendingWaveCopyDocumentName = '';
     let pendingWaveCopyButton = null;
@@ -1800,7 +1803,41 @@ ${lines.join('\n')}`;
       return parent;
     }
 
+    function getNavExpansionState() {
+      const nodes = [];
+      const pending = navTreeState ? [navTreeState] : [];
+      let allExpanded = !!navTreeState;
+      while (pending.length) {
+        const node = pending.pop();
+        nodes.push(node);
+        const children = Array.isArray(node.children) ? node.children : [];
+        const hasContents = children.length || (Array.isArray(node.documents) && node.documents.length);
+        if ((node === navTreeState || hasContents) && !node.expanded) allExpanded = false;
+        for (const child of children) pending.push(child);
+      }
+      return { nodes, allExpanded };
+    }
+
+    function updateNavToggleAllButton() {
+      if (!navToggleAllBtn) return;
+      const { allExpanded } = getNavExpansionState();
+      navToggleAllBtn.disabled = !navTreeState;
+      navToggleAllBtn.querySelector('span').textContent = allExpanded ? '全部收起' : '全部展开';
+      navToggleAllBtn.title = allExpanded ? '收起所有层级的目录' : '展开所有层级的目录';
+    }
+
+    function toggleAllNavDirectories() {
+      if (!navTreeState) return;
+      const { nodes, allExpanded } = getNavExpansionState();
+      for (const node of nodes) node.expanded = !allExpanded;
+      renderNavTree();
+      vwdDebugLog('nav-tree', {
+        phase: 'toggle-all', expanded: !allExpanded, nodeCount: nodes.length
+      });
+    }
+
     function renderNavTree() {
+      updateNavToggleAllButton();
       if (!navTreeEl) {
         vwdDebugLog('nav-tree', { phase: 'render', ok: false, reason: 'missing-container' });
         return;
@@ -2412,7 +2449,7 @@ ${lines.join('\n')}`;
       const navAddRowsBtn = document.getElementById('btn-nav-add-rows');
       const navAddDocumentBtn = document.getElementById('btn-nav-add-document');
       const navAddWaveDocumentBtn = document.getElementById('btn-nav-add-wave-document');
-      if (!navAddRootBtn && !navAddRowsBtn && !navAddDocumentBtn && !navAddWaveDocumentBtn) {
+      if (!navAddRootBtn && !navAddRowsBtn && !navAddDocumentBtn && !navAddWaveDocumentBtn && !navToggleAllBtn) {
         vwdDebugLog('nav-tree', { phase: 'buttons-bound', ok: false, reason: 'buttons-not-found' });
         return;
       }
@@ -2461,6 +2498,9 @@ ${lines.join('\n')}`;
           }
         });
       }
+      if (navToggleAllBtn) {
+        navToggleAllBtn.addEventListener('click', toggleAllNavDirectories);
+      }
       navControlButtonsBound = true;
       vwdDebugLog('nav-tree', {
         phase: 'buttons-bound',
@@ -2468,7 +2508,8 @@ ${lines.join('\n')}`;
         addRoot: !!navAddRootBtn,
         addChild: !!navAddRowsBtn,
         addDocument: !!navAddDocumentBtn,
-        addWaveDocument: !!navAddWaveDocumentBtn
+        addWaveDocument: !!navAddWaveDocumentBtn,
+        toggleAll: !!navToggleAllBtn
       });
     }
 
@@ -5484,6 +5525,27 @@ ${lines.join('\n')}`;
       return wave.slice(0, pos) + char + wave.slice(pos);
     }
 
+    function mergePastedBinaryLevels(wave, startCol, length) {
+      const start = Math.max(0, Math.floor(startCol));
+      const end = Math.min(wave.length, start + Math.max(0, Math.floor(length)));
+      if (end <= start) return wave;
+      const segment = wave.slice(start, end).split('');
+      let previous = getWaveContinuationSourceChar(wave, start - 1);
+      segment.forEach((char, index) => {
+        if ((char === '0' || char === '1') && char === previous) segment[index] = '.';
+        if (char !== '.' && char !== '|') previous = char;
+      });
+
+      // Compare logical levels across continuations, including the right-hand boundary.
+      let next = end;
+      while (next < wave.length && (wave[next] === '.' || wave[next] === '|')) next++;
+      const nextChar = wave[next];
+      const suffix = (nextChar === '0' || nextChar === '1') && nextChar === previous
+        ? wave.slice(end, next) + '.' + wave.slice(next + 1)
+        : wave.slice(end);
+      return wave.slice(0, start) + segment.join('') + suffix;
+    }
+
     function preserveWaveDataLabelsAfterInsert(signal, originalWave, insertCol, insertion) {
       const insertionText = String(insertion || '');
       if (!signal || !insertionText) return signal;
@@ -6109,7 +6171,10 @@ ${lines.join('\n')}`;
       const text = editor.value;
       const wave = entry.signal.wave || '';
       const safeStart = Math.max(0, Math.floor(startCol));
-      const newWave = replaceWaveRangePreservingContinuation(wave, safeStart, replacement);
+      let newWave = replaceWaveRangePreservingContinuation(wave, safeStart, replacement);
+      if (options && options.mergeBinaryLevels) {
+        newWave = mergePastedBinaryLevels(newWave, safeStart, replacement.length);
+      }
       const endCol = safeStart + replacement.length - 1;
       setSelectedWaveRange(rowIndex, safeStart, endCol);
       let updatedSignal = Object.assign({}, entry.signal, { wave: newWave });
@@ -6191,11 +6256,14 @@ ${lines.join('\n')}`;
         if (!location) return;
         const originalSignal = location.signal || {};
         const originalWave = originalSignal.wave || '';
-        const newWave = replaceWaveRangePreservingContinuation(
+        let newWave = replaceWaveRangePreservingContinuation(
           originalWave,
           safeStartCol,
           replacement.text
         );
+        if (options && options.mergeBinaryLevels) {
+          newWave = mergePastedBinaryLevels(newWave, safeStartCol, replacement.text.length);
+        }
         let updatedSignal = Object.assign({}, originalSignal, { wave: newWave });
         updatedSignal = applyWaveDataLabelsAfterReplacement(
           updatedSignal,
@@ -6337,7 +6405,7 @@ ${lines.join('\n')}`;
             block.start,
             Array.from({ length: targetRowCount }, () => repeatedRow),
             '单格填充粘贴',
-            { includeDataLabels: true }
+            { includeDataLabels: true, mergeBinaryLevels: true }
           );
         }
         return applyWaveRangeReplacement(
@@ -6346,6 +6414,7 @@ ${lines.join('\n')}`;
           repeatedRow.text,
           '单格填充粘贴',
           {
+            mergeBinaryLevels: true,
             includeDataLabels: true,
             dataSlots: repeatedRow.dataSlots
           }
@@ -6357,7 +6426,7 @@ ${lines.join('\n')}`;
           block.start,
           rows,
           '多行覆盖粘贴',
-          { includeDataLabels: true }
+          { includeDataLabels: true, mergeBinaryLevels: true }
         );
       }
       return applyWaveRangeReplacement(
@@ -6366,6 +6435,7 @@ ${lines.join('\n')}`;
         rows[0].text,
         '覆盖粘贴',
         {
+          mergeBinaryLevels: true,
           includeDataLabels: true,
           dataSlots: cloneWaveClipboardDataSlots(rows[0].dataSlots)
         }
@@ -7459,6 +7529,14 @@ ${lines.join('\n')}`;
       updateConnectionPointStatusUI();
     }
 
+    function buildWaveSelectionReplacement(char, count) {
+      const token = String(char);
+      const length = Math.max(1, Math.floor(count));
+      return /^[2-9=]$/.test(token)
+        ? token + '.'.repeat(length - 1)
+        : token.repeat(length);
+    }
+
     function applyLegendCharToSelection(char) {
       if (selectedSignalIndex < 0) {
         setStatus(false, '请先在波形区点击选中一行');
@@ -7474,7 +7552,7 @@ ${lines.join('\n')}`;
           selectedBlock.startRow,
           selectedBlock.start,
           Array.from({ length: rowCount }, () => ({
-            text: char.repeat(columnCount),
+            text: buildWaveSelectionReplacement(char, columnCount),
             dataSlots: []
           })),
           '多行批量替换'
@@ -7486,7 +7564,7 @@ ${lines.join('\n')}`;
         applyWaveRangeReplacement(
           selectedSignalIndex,
           selectedRange.start,
-          char.repeat(count),
+          buildWaveSelectionReplacement(char, count),
           '批量替换'
         );
         return;
@@ -13431,7 +13509,7 @@ ${lines.join('\n')}`;
       if (waveLibrarySaveMessage) {
         waveLibrarySaveMessage.textContent = ok
           ? ('波形库已保存：' + (currentWaveLibraryFile || '浏览器 SQLite'))
-          : '波形库未能保存，请查看页面底部状态后重试。';
+          : (waveLibrarySaveErrorMessage || '波形库未能保存，请查看页面底部状态后重试。');
       }
       waveLibrarySaveModalCloseTimer = setTimeout(() => {
         waveLibrarySaveModalCloseTimer = null;
@@ -13579,8 +13657,34 @@ ${lines.join('\n')}`;
       }
     }
 
+    function prepareEmptyWaveRowsForRender(signals) {
+      if (!Array.isArray(signals)) return signals;
+      let changed = false;
+      const prepared = signals.map((signal) => {
+        let row = signal;
+        if (Array.isArray(signal)) {
+          row = prepareEmptyWaveRowsForRender(signal);
+        } else if (signal && typeof signal === 'object') {
+          // WaveDrom renders wave: '' as one unknown cell; an omitted wave is a blank row.
+          if (signal.wave === '') {
+            row = Object.assign({}, signal);
+            delete row.wave;
+          }
+          if (Array.isArray(signal.children)) {
+            const children = prepareEmptyWaveRowsForRender(signal.children);
+            if (children !== signal.children) row = Object.assign({}, row, { children });
+          }
+        }
+        if (row !== signal) changed = true;
+        return row;
+      });
+      return changed ? prepared : signals;
+    }
+
     function getWaveRenderSource(source) {
       if (!source || typeof source !== 'object') return source;
+      const signal = prepareEmptyWaveRowsForRender(source.signal);
+      if (signal !== source.signal) source = Object.assign({}, source, { signal });
       const title = typeof source.title === 'string' ? source.title.trim() : '';
       const head = source.head && typeof source.head.text === 'string' ? source.head.text.trim() : '';
       if (!title || head) return source;
@@ -14846,12 +14950,14 @@ ${lines.join('\n')}`;
           })
         });
         const result = await response.json().catch(() => ({}));
-        if (response.status === 409) {
+        const alreadySaved = response.status === 409 && result.document
+          && singleWaveSyncSignature(result.document) === snapshotSignature;
+        if (response.status === 409 && !alreadySaved) {
           setStatus(false, '同步冲突：波形库中的这张图已被其他页面修改');
           vwdDebugLog('wave-library', { phase: 'single-save-conflict', documentName: name });
           return false;
         }
-        if (!response.ok || !result.document) throw new Error(result.error || 'save failed');
+        if ((!response.ok && !alreadySaved) || !result.document) throw new Error(result.error || 'save failed');
         const current = getSavedTagByName(name);
         if (current) {
           current.revision = result.document.revision;
@@ -14902,12 +15008,14 @@ ${lines.join('\n')}`;
         })
       });
       const result = await response.json().catch(() => ({}));
-      if (response.status === 409) {
+      const alreadySaved = response.status === 409 && result.document
+        && singleWaveSyncSignature(result.document) === snapshotSignature;
+      if (response.status === 409 && !alreadySaved) {
         setStatus(false, '同步冲突：波形库中的这张图已被其他页面修改');
         vwdDebugLog('wave-library', { phase: 'incremental-save-conflict', documentName });
         return false;
       }
-      if (!response.ok || !result.document) throw new Error(result.error || 'document save failed');
+      if ((!response.ok && !alreadySaved) || !result.document) throw new Error(result.error || 'document save failed');
       const current = getSavedTagByName(documentName);
       if (current) {
         current.revision = result.document.revision;
@@ -15442,6 +15550,7 @@ ${lines.join('\n')}`;
         const response = await fetch('/api/wave-libraries');
         const catalog = await response.json();
         waveLinkProtocolScheme = catalog.protocolScheme || waveLinkProtocolScheme;
+        waveLibraryServerRecovery = getValidatedServerRecovery(catalog.recovery);
         const requestedLibrary = requestedLibraryId && Array.isArray(catalog.libraries)
           ? catalog.libraries.find((item) => item.libraryId === requestedLibraryId)
           : null;
@@ -18283,7 +18392,7 @@ ${lines.join('\n')}`;
             clearHistory: false
           });
         }
-        const renderSource = bigWaveWindow ? bigWaveWindow.source : fullSource;
+        const renderSource = bigWaveWindow ? getWaveRenderSource(bigWaveWindow.source) : fullSource;
 
         const displayDiv = document.createElement('div');
         displayDiv.id = 'wave-display-0';
@@ -19722,7 +19831,7 @@ ${lines.join('\n')}`;
       host.appendChild(display);
       document.body.appendChild(host);
       try {
-        WaveDrom.RenderWaveForm(0, renderWindow.source, prefix, false);
+        WaveDrom.RenderWaveForm(0, getWaveRenderSource(renderWindow.source), prefix, false);
         const svg = display.querySelector('svg');
         if (!svg) throw new Error('所选列范围未生成 SVG');
         alignWaveDataToCycleGrid(svg);
@@ -21212,7 +21321,7 @@ ${lines.join('\n')}`;
           targetRow,
           start,
           Array.from({ length: rowCount }, () => ({
-            text: String(char).repeat(length),
+            text: buildWaveSelectionReplacement(char, length),
             dataSlots: []
           })),
           actionLabel
@@ -21220,7 +21329,7 @@ ${lines.join('\n')}`;
         : applyWaveRangeReplacement(
           targetRow,
           start,
-          String(char).repeat(length),
+          buildWaveSelectionReplacement(char, length),
           actionLabel
         );
       if (state.mode === 'visual' && state.visualKind === 'cell') {
@@ -21455,7 +21564,7 @@ ${lines.join('\n')}`;
           selectedWaveColumnIndex,
           rows,
           'Vim 多行覆盖粘贴',
-          { includeDataLabels: true }
+          { includeDataLabels: true, mergeBinaryLevels: true }
         );
       }
       return applyWaveRangeReplacement(
@@ -21464,6 +21573,7 @@ ${lines.join('\n')}`;
         rows[0].text,
         'Vim 覆盖粘贴',
         {
+          mergeBinaryLevels: true,
           includeDataLabels: true,
           dataSlots: cloneWaveClipboardDataSlots(rows[0].dataSlots)
         }
@@ -21888,6 +21998,149 @@ ${lines.join('\n')}`;
       return true;
     }
 
+    function getValidatedServerRecovery(value) {
+      if (!waveLibraryServerMode || !['127.0.0.1', 'localhost', '[::1]'].includes(window.location.hostname)
+          || !value || !/^server-[0-9a-f-]{36}$/.test(value.sessionId || '')) return null;
+      try {
+        const url = new URL(value.url);
+        if (!/^visualwavedrom-recover-[0-9a-f]{24}:$/.test(url.protocol)
+            || url.hostname !== 'resume' || url.pathname || url.username || url.password
+            || url.searchParams.get('session') !== value.sessionId) return null;
+        return { url: url.href, sessionId: value.sessionId };
+      } catch (_error) { return null; }
+    }
+
+    async function probeWaveLibraryService() {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 1800);
+      try {
+        const response = await fetch('/api/server-info', { cache: 'no-store', signal: controller.signal });
+        return { reachable: true, info: response.ok ? await response.json().catch(() => null) : null };
+      } catch (_error) {
+        return { reachable: false, info: null };
+      } finally { clearTimeout(timer); }
+    }
+
+    function isOriginalWaveLibraryService(result) {
+      return !!(result.info && result.info.app === 'VisualWaveDrom'
+        && waveLibraryServerRecovery && result.info.sessionId === waveLibraryServerRecovery.sessionId);
+    }
+
+    function setWaveLibraryRecoveryError(message) {
+      waveLibrarySaveErrorMessage = message;
+      setStatus(false, message);
+      vwdDebugLog('persistence', { phase: 'service-recovery-failed', message });
+      return false;
+    }
+
+    function requestWaveLibraryServiceRestart() {
+      const actions = document.getElementById('wave-library-restart-actions');
+      const confirm = document.getElementById('wave-library-restart-confirm');
+      const cancel = document.getElementById('wave-library-restart-cancel');
+      if (!actions || !confirm || !cancel || !waveLibrarySaveModal) return Promise.resolve(false);
+      waveLibrarySaveModal.dataset.state = 'confirm-restart';
+      waveLibrarySaveDialog.setAttribute('aria-busy', 'false');
+      waveLibrarySaveTitle.textContent = '本地服务已关闭';
+      waveLibrarySaveMessage.textContent = '当前编辑内容仍保留在此页面。是否重新打开本工程的 BAT / SH 启动程序，并继续保存？';
+      actions.hidden = false;
+      confirm.hidden = false;
+      cancel.textContent = '取消';
+      confirm.focus();
+      return new Promise((resolve) => {
+        let cancelled = false;
+        let launching = false;
+        let frame = null;
+        let elapsedTimer = null;
+        const finish = (ok) => {
+          clearInterval(elapsedTimer);
+          actions.hidden = true;
+          confirm.hidden = false;
+          confirm.onclick = null;
+          cancel.onclick = null;
+          waveLibrarySaveDialog.removeEventListener('keydown', onKeyDown, true);
+          if (frame) frame.remove();
+          resolve(ok);
+        };
+        const cancelRestart = () => {
+          cancelled = true;
+          setWaveLibraryRecoveryError('已取消保存，编辑内容仍在当前页面，请勿刷新或关闭页面。');
+          if (!launching) finish(false);
+        };
+        const onKeyDown = (event) => {
+          if (event.key === 'Escape') {
+            event.preventDefault();
+            event.stopPropagation();
+            cancelRestart();
+          } else if (event.key === 'Tab') {
+            event.preventDefault();
+            (launching || document.activeElement === confirm ? cancel : confirm).focus();
+          }
+        };
+        waveLibrarySaveDialog.addEventListener('keydown', onKeyDown, true);
+        cancel.onclick = cancelRestart;
+        confirm.onclick = async () => {
+          if (launching) return;
+          launching = true;
+          confirm.hidden = true;
+          cancel.textContent = '停止等待';
+          cancel.focus();
+          waveLibrarySaveModal.dataset.state = 'saving';
+          waveLibrarySaveTitle.textContent = '正在重新启动服务';
+          const startedAt = Date.now();
+          const updateElapsed = () => {
+            waveLibrarySaveMessage.textContent = '请在浏览器提示中允许打开启动程序。已等待 '
+              + Math.floor((Date.now() - startedAt) / 1000) + ' 秒，恢复后自动保存。';
+          };
+          updateElapsed();
+          elapsedTimer = setInterval(updateElapsed, 250);
+          let recovered = false;
+          try {
+            // Launch only from this explicit user click; never reload the editing page.
+            frame = document.createElement('iframe');
+            frame.hidden = true;
+            frame.src = waveLibraryServerRecovery.url;
+            document.body.appendChild(frame);
+            vwdDebugLog('persistence', { phase: 'service-recovery-launch', sessionId: waveLibraryServerRecovery.sessionId });
+            while (!cancelled && Date.now() - startedAt < 60000) {
+              const result = await probeWaveLibraryService();
+              if (isOriginalWaveLibraryService(result)) { recovered = true; break; }
+              if (result.reachable) {
+                setWaveLibraryRecoveryError('原端口被其他服务占用，未保存。编辑内容仍在当前页面，请勿刷新。');
+                break;
+              }
+              await new Promise((done) => setTimeout(done, 500));
+            }
+            if (cancelled) recovered = false;
+            else if (!recovered && !waveLibrarySaveErrorMessage) {
+              setWaveLibraryRecoveryError('服务未能恢复。请检查浏览器是否允许启动 BAT / SH；编辑内容仍在当前页面，请勿刷新。');
+            }
+          } catch (error) {
+            setWaveLibraryRecoveryError('启动服务失败，编辑内容仍在当前页面：' + error.message);
+          } finally { finish(recovered); }
+        };
+      });
+    }
+
+    async function ensureWaveLibraryServiceForSave() {
+      const recover = async () => {
+        const result = await probeWaveLibraryService();
+        if (isOriginalWaveLibraryService(result)) return true;
+        if (result.reachable) {
+          return setWaveLibraryRecoveryError('当前端口不是原来的编辑会话，未覆盖其他数据。请保留当前页面并恢复原服务。');
+        }
+        const resumed = await requestWaveLibraryServiceRestart();
+        if (resumed) {
+          startWaveLibraryClientSession();
+          showWaveLibrarySaveModal();
+          vwdDebugLog('persistence', { phase: 'service-recovery-ready' });
+        }
+        return resumed;
+      };
+      return navigator.locks && typeof navigator.locks.request === 'function'
+        ? navigator.locks.request('visualwavedrom-service-recovery:' + window.location.origin, recover)
+        : recover();
+    }
+
     async function performCurrentWaveLibrarySave() {
       if (!waveLibraryServerMode) {
         try {
@@ -21934,11 +22187,21 @@ ${lines.join('\n')}`;
         return waveLibrarySaveOperation;
       }
       showWaveLibrarySaveModal();
+      waveLibrarySaveErrorMessage = '';
       const startedAt = Date.now();
       const operation = (async () => {
         let saved = false;
         try {
-          saved = await performCurrentWaveLibrarySave();
+          let ready = !waveLibraryServerMode || !waveLibraryServerRecovery
+            || await ensureWaveLibraryServiceForSave();
+          if (ready) saved = await performCurrentWaveLibrarySave();
+          if (!saved && ready && waveLibraryServerMode && waveLibraryServerRecovery) {
+            const result = await probeWaveLibraryService();
+            if (!result.reachable) {
+              ready = await ensureWaveLibraryServiceForSave();
+              if (ready) saved = await performCurrentWaveLibrarySave();
+            }
+          }
         } catch (error) {
           setStatus(false, '波形库保存失败');
           vwdDebugLog('persistence', {

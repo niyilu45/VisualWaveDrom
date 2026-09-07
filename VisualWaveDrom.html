@@ -28,7 +28,7 @@
   </script>
   <script src="inc/visualwavedrom-settings.js?v=20260831-font-settings-v1"></script>
   <link rel="stylesheet" href="inc/codemirror.css?v=5.65.21">
-  <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260907-nav-drop-line-v1">
+  <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260908-service-recovery-v1">
   <link rel="stylesheet" href="inc/visualwavedrom-scope.css?v=20260817-legend-drag-v1">
   <link rel="stylesheet" href="inc/visualwavedrom-presenter.css?v=20260901-presenter-settings-nav-v1">
   <link rel="stylesheet" href="inc/visualwavedrom-settings.css?v=20260831-font-settings-v1">
@@ -91,6 +91,9 @@
         <div class="nav-toolbar">
           <button class="menu-btn nav-btn" id="btn-nav-add-wave-document" type="button" title="在当前标题下新建带初始模板的波形图">
             <span>新增波形图</span>
+          </button>
+          <button class="menu-btn nav-btn" id="btn-nav-toggle-all" type="button" title="展开所有层级的目录" aria-controls="nav-tree" disabled>
+            <span>全部展开</span>
           </button>
         </div>
         <div class="nav-tree" id="nav-tree"></div>
@@ -591,6 +594,10 @@
         <div class="wave-library-save-progress" aria-hidden="true"><span></span></div>
         <p id="wave-library-save-message" role="status" aria-live="polite">正在写入波形和目录数据，请稍候…</p>
       </div>
+      <div class="modal-footer" id="wave-library-restart-actions" hidden>
+        <button type="button" class="modal-btn" id="wave-library-restart-cancel">取消</button>
+        <button type="button" class="modal-btn modal-btn-primary" id="wave-library-restart-confirm">重新启动并保存</button>
+      </div>
     </div>
   </div>
 
@@ -895,6 +902,6 @@
     <script src="inc/visualwavedrom-presenter-split.js?v=20260901-presenter-settings-nav-v1"></script>
     <script src="inc/visualwavedrom-presenter.js?v=20260901-data-cycle-align-v2"></script>
     <script src="inc/visualwavedrom-import-collection.js?v=20260831-inc-layout-v1"></script>
-    <script src="inc/visualwavedrom-app.js?v=20260907-nav-drop-line-v1"></script>
+    <script src="inc/visualwavedrom-app.js?v=20260908-service-recovery-v1"></script>
 </body>
 </html>
