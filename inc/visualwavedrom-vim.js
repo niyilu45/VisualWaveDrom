@@ -250,6 +250,15 @@
         return true;
       }
       if (this.mode === 'command') return false;
+      // Modified keys belong to shortcuts, not waveform character input.
+      if (event.ctrlKey || event.metaKey || event.altKey) {
+        if (key === '<C-r>') {
+          this.execute('redo', {}, { noRepeat: true });
+          event.preventDefault();
+          return true;
+        }
+        return false;
+      }
       if (this.mode === 'insert') {
         const handled = this.handleInsertMode(key);
         if (handled) event.preventDefault();
@@ -260,15 +269,6 @@
         if (handled) event.preventDefault();
         return !!handled;
       }
-      if (event.ctrlKey || event.metaKey || event.altKey) {
-        if (key === '<C-r>') {
-          this.execute('redo', {}, { noRepeat: true });
-          event.preventDefault();
-          return true;
-        }
-        return false;
-      }
-
       if (this.pending) {
         const handled = this.handlePendingKey(key, context);
         if (handled) event.preventDefault();

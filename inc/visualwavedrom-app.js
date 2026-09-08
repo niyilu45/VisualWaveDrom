@@ -6563,6 +6563,23 @@ ${lines.join('\n')}`;
       setTextEditMode(!textEditModeActive);
     }
 
+    function handleTextEditModeEscape(event) {
+      if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing
+          || event.keyCode === 229 || !textEditModeActive
+          || isJsonEditorTarget(event.target) || isVisibleModalOpen()) return false;
+      event.preventDefault();
+      if (inlineEditActive) {
+        // Let the field cancel its draft before mode updates can remove or blur it.
+        setTimeout(() => {
+          if (textEditModeActive) setTextEditMode(false);
+        }, 0);
+      } else {
+        event.stopPropagation();
+        setTextEditMode(false);
+      }
+      return true;
+    }
+
     function updateWavePaintModeUI() {
       const btn = document.getElementById('btn-wave-paint-mode');
       if (btn) {
@@ -22456,6 +22473,7 @@ ${lines.join('\n')}`;
       if (presenterWaveViewActive) return;
       if (e.target && e.target.closest && e.target.closest('.vwd-big-wave-jump')) return;
       if (e.target && e.target.closest && e.target.closest('#wave-collection-import-modal')) return;
+      if (handleTextEditModeEscape(e)) return;
       if (handleWaveDocumentClipboardShortcut(e)) return;
       if (vimController && vimController.handleKeydown(e)) return;
       if (handleUndoRedoShortcut(e)) return;
