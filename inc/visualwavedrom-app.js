@@ -332,6 +332,13 @@ if (!window.VWDCodeEditorPairs) {
     const waveLibrarySaveMessage = document.getElementById('wave-library-save-message');
     const waveLibraryImportInput = document.getElementById('wave-library-import-input');
     const vimModeBtn = document.getElementById('btn-vim-mode');
+    const waveShortcutsCheckbox = document.getElementById('wave-shortcuts-enabled');
+    const waveformShortcuts = window.VisualWaveDromShortcuts.create(LEGEND_ITEMS, () => {
+      updateLegendAvailability();
+      updateTextEditModeUI();
+      refreshWaveShortcutHints();
+    });
+    window.visualWaveDromShortcuts = waveformShortcuts;
     const vimHelpBtn = document.getElementById('btn-vim-help');
     const vimModeButtonState = document.getElementById('vim-mode-button-state');
     const vimStatusBar = document.getElementById('vim-status-bar');
@@ -1865,7 +1872,8 @@ ${lines.join('\n')}`;
         if (tag.name === selectedNavDocumentName) button.classList.add('active');
         button.title = '打开波形图: ' + getNavDocumentDisplayName(tag, parentNode);
         button.textContent = getNavDocumentDisplayName(tag, parentNode);
-        button.setAttribute('aria-keyshortcuts', 'Control+c Control+v Meta+c Meta+v');
+        button.setAttribute('aria-keyshortcuts', (waveShortcutHint('copy') + waveShortcutHint('paste'))
+          .replace(/[()]/g, '').replace(/ \/ /g, ' ').trim().replace(/Ctrl\+/g, 'Control+'));
         bindNavDocumentDrag(button, tag.name);
         button.addEventListener('click', () => {
           if (Date.now() < navSuppressClickUntil) return;
@@ -1897,7 +1905,8 @@ ${lines.join('\n')}`;
         if (node.isCustom) labelBtn.classList.add('nav-tree-node-custom');
         if (node.isCustom) {
           labelBtn.title = '拖动调整目录位置；Tab 降一级；Shift+Tab 升一级';
-          labelBtn.setAttribute('aria-keyshortcuts', 'Tab Shift+Tab');
+          labelBtn.setAttribute('aria-keyshortcuts', (waveShortcutHint('indent') + waveShortcutHint('outdent'))
+            .replace(/[()]/g, '').replace(/ \/ /g, ' ').trim().replace(/Ctrl\+/g, 'Control+'));
         }
         bindNavDirectoryDrag(labelBtn, node, !!node.isCustom);
 
@@ -2220,7 +2229,7 @@ ${lines.join('\n')}`;
           waveEditMode: snapshot.waveEditMode,
           presentation: snapshot.presentation
         };
-        setStatus(true, '已复制整张波形图，可在目录中按 Ctrl+V 粘贴');
+        setStatus(true, '已复制整张波形图，可在目录中粘贴' + waveShortcutHint('paste'));
         vwdDebugLog('wave-library', { phase: 'copy-document', documentName, contentLength: copy.content.length });
         return copy;
       } catch (error) {
@@ -2282,10 +2291,10 @@ ${lines.join('\n')}`;
     function handleWaveDocumentClipboardShortcut(event) {
       if (!waveDocumentClipboardActive || singleWaveViewActive || inlineEditActive || isVisibleModalOpen()) return false;
       const clipboardEvent = event.type === 'copy' || event.type === 'paste';
-      if (!clipboardEvent && (!isModKey(event) || event.altKey || event.shiftKey)) return false;
       const target = event.target;
       if (target && target.closest && target.closest('input, textarea, select, [contenteditable="true"], .CodeMirror')) return false;
-      const key = clipboardEvent ? (event.type === 'copy' ? 'c' : 'v') : String(event.key || '').toLowerCase();
+      const key = clipboardEvent ? (event.type === 'copy' ? 'c' : 'v')
+        : (matchesWaveActionShortcut('copy', event) ? 'c' : (matchesWaveActionShortcut('paste', event) ? 'v' : ''));
       if (key !== 'c' && key !== 'v') return false;
       if (key === 'c' && !selectedNavDocumentName) return false;
       event.preventDefault();
@@ -3180,9 +3189,9 @@ ${lines.join('\n')}`;
 
     function restoreJsonPanelVisibility() {
       try {
-        setJsonPanelHidden(readWindowState(JSON_PANEL_HIDDEN_KEY) === '1', false);
+        setJsonPanelHidden(readWindowState(JSON_PANEL_HIDDEN_KEY) !== '0', false);
       } catch (e) {
-        setJsonPanelHidden(false, false);
+        setJsonPanelHidden(true, false);
       }
     }
 
@@ -5999,6 +6008,8 @@ ${lines.join('\n')}`;
         btn.title = textEditModeActive
           ? '退出文本编辑模式'
           : (canActivate ? '开启后，单击波形中的文本进行编辑' : '仅修改模式下可用');
+        const shortcut = waveformShortcuts.label('textEdit');
+        if (shortcut) btn.title += ' (' + shortcut + ')';
         if (labelEl) labelEl.textContent = textEditModeActive ? '退出文本编辑' : '文本编辑';
       }
       if (waveModeBtn) waveModeBtn.disabled = textEditModeActive;
@@ -6454,8 +6465,8 @@ ${lines.join('\n')}`;
     }
 
     function handleWaveClipboardShortcut(e) {
-      const key = String(e.key || '').toLowerCase();
-      if ((key === 'c' || key === 'v') && isModKey(e)) {
+      const key = matchesWaveActionShortcut('copy', e) ? 'c' : (matchesWaveActionShortcut('paste', e) ? 'v' : '');
+      if (key) {
         vwdDebugLog('wave-selection', {
           phase: 'clipboard-keydown',
           key,
@@ -6468,7 +6479,7 @@ ${lines.join('\n')}`;
           hasRange: !!getSelectedWaveRange()
         });
       }
-      if (!waveClipboardShortcutActive || !isModKey(e) || e.altKey || e.shiftKey) return false;
+      if (!waveClipboardShortcutActive) return false;
       if (key !== 'c' && key !== 'v') return false;
       if (!getSelectedWaveRange()) return false;
 
@@ -6536,7 +6547,7 @@ ${lines.join('\n')}`;
     }
 
     function handleSelectionDeleteShortcut(e) {
-      if (e.key !== 'Delete' || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return false;
+      if (!matchesWaveActionShortcut('delete', e)) return false;
       if (!canUseWaveClipboardForTarget(e.target) || inlineEditActive) return false;
 
       let action = '';
@@ -6721,16 +6732,16 @@ ${lines.join('\n')}`;
       if (copyWaveBtn) {
         copyWaveBtn.disabled = !hasRow || !selectedRange;
         copyWaveBtn.title = selectedRange
-          ? '复制当前选中的 ' + selectedRowCount + ' 行 × ' + selectedColumnCount + ' 格 (Ctrl+C)'
+          ? '复制当前选中的 ' + selectedRowCount + ' 行 × ' + selectedColumnCount + ' 格' + waveShortcutHint('copy')
           : '请先点击或拖动选择波形格';
       }
       const pasteWaveBtn = document.getElementById('btn-paste-wave-selection');
       if (pasteWaveBtn) {
         pasteWaveBtn.disabled = !hasRow || !selectedRange || !copiedWaveSelection;
         pasteWaveBtn.title = !copiedWaveSelection
-          ? '请先复制波形 (Ctrl+C)'
+          ? '请先复制波形' + waveShortcutHint('copy')
           : (selectedRange
-            ? '从所选起点覆盖粘贴 ' + (copiedWaveRows.length || 1) + ' 行 × ' + copiedWaveSelection.length + ' 格 (Ctrl+V)'
+            ? '从所选起点覆盖粘贴 ' + (copiedWaveRows.length || 1) + ' 行 × ' + copiedWaveSelection.length + ' 格' + waveShortcutHint('paste')
             : '请先选择粘贴起点');
       }
 
@@ -6772,7 +6783,8 @@ ${lines.join('\n')}`;
           'paint-selected',
           wavePaintModeActive && !!wavePaintChar && item.dataset.waveChar === wavePaintChar
         );
-        item.title = canUseLegend ? actionHint : '请先在波形区点击选中一行';
+        item.title = (canUseLegend ? actionHint : '请先在波形区点击选中一行')
+          + waveShortcutHint('wave:' + item.dataset.waveChar);
       });
     }
 
@@ -18281,6 +18293,7 @@ ${lines.join('\n')}`;
         ? canvas.querySelector('.wave-document-description-scroll')
         : null;
       return {
+        viewport: captureWaveLibraryViewport(),
         canvas,
         previewScroller,
         previewScrollLeft: previewScroller ? previewScroller.scrollLeft : 0,
@@ -18305,7 +18318,10 @@ ${lines.join('\n')}`;
       if (state.descriptionScroller && state.descriptionScroller.isConnected) {
         state.descriptionScroller.scrollLeft = state.descriptionScrollLeft;
       }
-      if (wavePanel) wavePanel.scrollTop = state.panelScrollTop;
+      if (state.viewport) restoreWaveDocumentViewport(state.viewport);
+      else if (wavePanel && Math.abs(wavePanel.scrollTop - state.panelScrollTop) > 0.5) {
+        wavePanel.scrollTop = state.panelScrollTop;
+      }
       updateFrozenWaveLabelsForScroller(currentPreviewScroller || wavePanel);
       vwdDebugLog('wave-scroll', {
         phase: 'restore-after-render',
@@ -18499,19 +18515,12 @@ ${lines.join('\n')}`;
         || (redoStack.length === 0 && waveLibraryRedoStack.length === 0);
     }
 
-    function isModKey(e) {
-      return e.ctrlKey || e.metaKey;
-    }
-
     function isUndoShortcut(e) {
-      if (!isModKey(e) || e.altKey) return false;
-      return e.key.toLowerCase() === 'z' && !e.shiftKey;
+      return matchesWaveActionShortcut('undo', e);
     }
 
     function isRedoShortcut(e) {
-      if (!isModKey(e) || e.altKey) return false;
-      const key = e.key.toLowerCase();
-      return (key === 'z' && e.shiftKey) || key === 'y';
+      return matchesWaveActionShortcut('redo', e);
     }
 
     const handledUndoRedoShortcutEvents = new WeakSet();
@@ -18674,21 +18683,103 @@ ${lines.join('\n')}`;
       startDirectJsonEditMonitor();
     }
 
+    function activateWaveLegendItem(char) {
+      if (wavePaintModeActive) {
+        selectWavePaintChar(char);
+        return;
+      }
+      applyLegendCharToSelection(char);
+    }
+
+    function matchesWaveActionShortcut(id, event) {
+      const target = event.target;
+      const textTarget = isJsonEditorTarget(target) || !!(target && target.closest
+        && target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])'));
+      const useDefaults = textTarget || inlineEditActive || !!(vimController && vimController.getState().enabled);
+      return waveformShortcuts.matches(id, event, useDefaults);
+    }
+
+    function waveShortcutHint(id) {
+      const vimEnabled = vimController && vimController.getState().enabled;
+      const value = vimEnabled && id !== 'textEdit'
+        ? (waveformShortcuts.defaults[id] || []).map(window.VisualWaveDromShortcuts.display).join(' / ')
+        : waveformShortcuts.label(id);
+      return value ? ' (' + value + ')' : '';
+    }
+
+    function refreshWaveShortcutHints() {
+      const buttons = { undo: 'btn-undo', redo: 'btn-redo', copy: 'btn-copy-wave-selection',
+        paste: 'btn-paste-wave-selection', delete: 'btn-delete-wave-col', textEdit: 'btn-wave-text-edit-mode' };
+      Object.entries(buttons).forEach(([id, buttonId]) => {
+        const button = document.getElementById(buttonId);
+        if (!button) return;
+        const hint = waveShortcutHint(id).trim().replace(/^\(|\)$/g, '');
+        button.setAttribute('aria-keyshortcuts', hint.replace(/ \/ /g, ' ').replace(/Ctrl\+/g, 'Control+'));
+        const badge = button.querySelector('.shortcut');
+        if (badge) badge.textContent = hint;
+        if (id === 'undo' || id === 'redo') button.title = (id === 'undo' ? '撤销' : '重做') + waveShortcutHint(id);
+      });
+    }
+
+    function handleTextEditToggleShortcut(event) {
+      if (!waveformShortcuts.matches('textEdit', event) || event.defaultPrevented
+          || keyboardInputScope !== 'wave' || inlineEditActive || isVisibleModalOpen()
+          || app.classList.contains('reading-mode')) return false;
+      if (vimController && vimController.getState().enabled
+          && !event.ctrlKey && !event.metaKey && !event.altKey && !/^F\d+$/.test(event.key)) return false;
+      const target = event.target;
+      if (!target || !target.closest || isJsonEditorTarget(target)
+          || target.closest('input, textarea, select, button, [contenteditable]:not([contenteditable="false"])')) return false;
+      event.preventDefault();
+      event.stopPropagation();
+      if (!event.repeat) {
+        const button = document.getElementById('btn-wave-text-edit-mode');
+        if (!button.disabled) button.click();
+        else setStatus(false, '文本编辑模式仅可在修改模式下使用');
+      }
+      return true;
+    }
+
+    function blockRemappedNativeClipboardShortcut(event) {
+      if ((!waveClipboardShortcutActive && !waveDocumentClipboardActive)
+          || inlineEditActive || isVisibleModalOpen() || (vimController && vimController.getState().enabled)) return false;
+      const target = event.target;
+      if (!target || !target.closest || isJsonEditorTarget(target)
+          || target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) return false;
+      if (!['copy', 'paste'].some(id => waveformShortcuts.matches(id, event, true)
+          && !waveformShortcuts.matches(id, event))) return false;
+      event.preventDefault();
+      event.stopPropagation();
+      return true;
+    }
+
+    function handleWaveSymbolShortcut(event) {
+      if (!waveShortcutsCheckbox || !waveShortcutsCheckbox.checked || waveShortcutsCheckbox.disabled
+          || (vimController && vimController.getState().enabled)
+          || keyboardInputScope !== 'wave' || event.defaultPrevented
+          || event.isComposing || event.keyCode === 229
+          || inlineEditActive || isVisibleModalOpen() || app.classList.contains('reading-mode')
+          || groupPickActive || isConnectionPickFlow() || connectionSelectActive
+          || selectedSignalIndex < 0) return false;
+      const target = event.target;
+      if (!target || !target.closest || isJsonEditorTarget(target)
+          || target.closest('input, textarea, select, button, [contenteditable]:not([contenteditable="false"])')) return false;
+      const item = LEGEND_ITEMS.find((item) => waveformShortcuts.matches('wave:' + item.char, event));
+      if (!item) return false;
+      event.preventDefault();
+      event.stopPropagation();
+      activateWaveLegendItem(item.char);
+      vwdDebugLog('wave-shortcuts', { phase: 'apply', char: item.char, key: event.key, mode: waveEditMode, paint: wavePaintModeActive });
+      return true;
+    }
+
     function renderLegendItem(item, index) {
       const div = document.createElement('div');
       div.className = 'legend-item legend-disabled';
       div.dataset.waveChar = item.char;
       div.title = item.label + ' (' + item.char + ') — ' + item.desc;
       div.addEventListener('click', () => {
-        if (wavePaintModeActive) {
-          selectWavePaintChar(item.char);
-          return;
-        }
-        if (selectedSignalIndex < 0) {
-          setStatus(false, '请先在波形区点击选中一行');
-          return;
-        }
-        applyLegendCharToSelection(item.char);
+        activateWaveLegendItem(item.char);
       });
 
       const label = document.createElement('div');
@@ -18730,19 +18821,42 @@ ${lines.join('\n')}`;
       };
     }
 
+    function captureWaveLibraryViewport() {
+      if (!wavePanel || !waveLibraryContainer || waveLibraryContainer.hidden) return null;
+      const rect = wavePanel.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return null;
+      const x = rect.left + Math.min(80, rect.width / 2);
+      for (const y of [rect.top + rect.height / 2, rect.top + 24, rect.bottom - 24]) {
+        const target = document.elementFromPoint(x, y);
+        const card = target && target.closest('.wave-document-card');
+        if (card && waveLibraryContainer.contains(card)) {
+          const viewport = captureWaveDocumentViewport(card.dataset.documentName, true);
+          if (viewport) viewport.reason = 'preview-layout';
+          return viewport;
+        }
+      }
+      return null;
+    }
+
     function restoreWaveDocumentViewport(viewport) {
       if (!viewport || !wavePanel || !viewport.entry.card.isConnected) return;
       const entry = viewport.entry;
       const currentTop = entry.card.getBoundingClientRect().top - wavePanel.getBoundingClientRect().top;
       // The previous card can change height when its editor becomes a preview.
       // Keep the clicked card anchored, rather than restoring an obsolete scrollTop.
-      wavePanel.scrollTop += currentTop - viewport.top;
-      wavePanel.scrollLeft = viewport.panelLeft;
-      entry.previewScroller.scrollLeft = viewport.previewLeft;
-      entry.descriptionScroller.scrollLeft = viewport.descriptionLeft;
+      const adjustment = currentTop - viewport.top;
+      if (Math.abs(adjustment) <= 0.5 && wavePanel.scrollLeft === viewport.panelLeft
+          && entry.previewScroller.scrollLeft === viewport.previewLeft
+          && entry.descriptionScroller.scrollLeft === viewport.descriptionLeft) return;
+      // Even assigning the current scrollTop interrupts a native smooth scroll.
+      if (Math.abs(adjustment) > 0.5) wavePanel.scrollTop += adjustment;
+      if (wavePanel.scrollLeft !== viewport.panelLeft) wavePanel.scrollLeft = viewport.panelLeft;
+      if (entry.previewScroller.scrollLeft !== viewport.previewLeft) entry.previewScroller.scrollLeft = viewport.previewLeft;
+      if (entry.descriptionScroller.scrollLeft !== viewport.descriptionLeft) entry.descriptionScroller.scrollLeft = viewport.descriptionLeft;
       updateFrozenWaveLabelsForScroller(entry.previewScroller);
       vwdDebugLog('wave-scroll', {
-        phase: 'restore-after-document-activation',
+        phase: viewport.reason === 'preview-layout' ? 'restore-after-preview-layout' : 'restore-after-document-activation',
+        adjustment,
         documentName: entry.documentName,
         beforeTop: viewport.top,
         afterTop: entry.card.getBoundingClientRect().top - wavePanel.getBoundingClientRect().top,
@@ -19181,7 +19295,8 @@ ${lines.join('\n')}`;
     }
 
     function handleNavDirectoryKeydown(event) {
-      if (event.key !== 'Tab' || event.ctrlKey || event.metaKey || event.altKey) return;
+      const outdent = matchesWaveActionShortcut('outdent', event);
+      if (!outdent && !matchesWaveActionShortcut('indent', event)) return;
       const nodeId = event.currentTarget && event.currentTarget.dataset
         ? event.currentTarget.dataset.navNodeId
         : '';
@@ -19191,7 +19306,7 @@ ${lines.join('\n')}`;
       event.stopPropagation();
       selectedNavNodeId = node.id;
       selectedNavDocumentName = null;
-      changeSelectedNavDirectoryLevel(event.shiftKey);
+      changeSelectedNavDirectoryLevel(outdent);
     }
 
     function bindNavDirectoryDrag(labelButton, node, canDrag) {
@@ -20227,8 +20342,10 @@ ${lines.join('\n')}`;
         queuedContent: null,
         previewQueued: false,
         previewObserved: false,
+        previewNearViewport: false,
         analysisPending: false,
         previewHeight: 0,
+        previewScrollerHeight: 0,
         lastPreviewUse: 0
       };
     }
@@ -20251,7 +20368,11 @@ ${lines.join('\n')}`;
         height = target.getBoundingClientRect().height;
       }
       if (!(height > 0) && target) height = target.scrollHeight || target.offsetHeight || 0;
-      if (height > 0) entry.previewHeight = Math.ceil(height);
+      if (height > 0) {
+        entry.previewHeight = Math.ceil(height);
+        const scrollerHeight = entry.previewScroller.getBoundingClientRect().height;
+        if (scrollerHeight > 0) entry.previewScrollerHeight = Math.ceil(scrollerHeight);
+      }
       return entry.previewHeight || WAVE_PREVIEW_FALLBACK_HEIGHT;
     }
 
@@ -20260,8 +20381,10 @@ ${lines.join('\n')}`;
       entry.previewHost.classList.toggle('preview-unloaded', !!loading);
       if (loading) {
         entry.previewHost.style.minHeight = rememberWavePreviewHeight(entry) + 'px';
+        entry.previewScroller.style.minHeight = entry.previewScrollerHeight + 'px';
       } else {
         entry.previewHost.style.minHeight = '';
+        entry.previewScroller.style.minHeight = '';
       }
     }
 
@@ -20271,11 +20394,11 @@ ${lines.join('\n')}`;
       const hasRenderedPreview = !!display.querySelector('svg, .wave-fast-preview, .wave-error');
       if (!hasRenderedPreview && entry.renderedContent === null) return false;
       rememberWavePreviewHeight(entry, display);
+      setWavePreviewLoadingState(entry, true);
       clearFrozenWaveLabelsForHost(display);
       display.replaceChildren();
       entry.renderedContent = null;
       entry.queuedContent = null;
-      setWavePreviewLoadingState(entry, true);
       vwdDebugLog('performance', {
         phase: 'preview-release',
         documentName: entry.documentName,
@@ -20293,10 +20416,11 @@ ${lines.join('\n')}`;
           rendered.push(candidate);
         }
       });
-      rendered.sort((a, b) => b.lastPreviewUse - a.lastPreviewUse);
-      rendered.slice(Math.max(0, WAVE_PREVIEW_MAX_RENDERED - 1)).forEach((candidate) => {
-        releaseWaveDocumentPreview(candidate, 'preview-lru');
-      });
+      rendered.sort((a, b) => a.lastPreviewUse - b.lastPreviewUse);
+      rendered.filter((candidate) => !candidate.previewNearViewport)
+        .slice(0, Math.max(0, rendered.length - WAVE_PREVIEW_MAX_RENDERED + 1)).forEach((candidate) => {
+          releaseWaveDocumentPreview(candidate, 'preview-lru');
+        });
     }
 
     function flattenWavePreviewSignals(signals, result) {
@@ -20379,6 +20503,7 @@ ${lines.join('\n')}`;
     function renderWaveDocumentPreview(entry, tag, preparedAnalysis, options) {
       const opts = options || {};
       if (!entry || !tag || tag.deferred || tag.name === editingWaveDocumentName || !entry.card.isConnected) return false;
+      if (!opts.forceSvg && entry.previewObserved && !entry.previewNearViewport) return false;
       const display = ensureWavePreviewDisplay(entry);
       if (entry.renderedContent === tag.content
           && (display.querySelector('svg') || (!opts.forceSvg && display.querySelector('.wave-fast-preview, .wave-error')))) {
@@ -20386,7 +20511,7 @@ ${lines.join('\n')}`;
         return true;
       }
 
-      const viewport = captureWaveDocumentViewport(editingWaveDocumentName, true);
+      const viewport = captureWaveLibraryViewport();
       clearFrozenWaveLabelsForHost(display);
       display.innerHTML = '';
       syncWaveDocumentDescriptionWidth(display);
@@ -20422,8 +20547,8 @@ ${lines.join('\n')}`;
         if (!useCanvas) setupFrozenWaveLabels(display);
         entry.renderedContent = tag.content;
         entry.lastPreviewUse = ++waveLibraryPreviewUseSequence;
-        rememberWavePreviewHeight(entry, display);
         setWavePreviewLoadingState(entry, false);
+        rememberWavePreviewHeight(entry, display);
         trimRenderedWavePreviews(entry);
         vwdDebugLog('performance', {
           phase: useCanvas ? 'preview-render-canvas' : 'preview-render-svg',
@@ -20489,6 +20614,7 @@ ${lines.join('\n')}`;
 
     function queueWaveLibraryPreview(entry, tag, priority) {
       if (!entry || !tag || tag.name === editingWaveDocumentName) return;
+      if (entry.previewObserved && !entry.previewNearViewport) return;
       entry.queuedContent = tag.deferred ? ('deferred:' + tag.revision) : tag.content;
       if (!entry.previewQueued) {
         entry.previewQueued = true;
@@ -20507,6 +20633,7 @@ ${lines.join('\n')}`;
           const entry = waveLibraryCardCache.get(item.target.dataset.documentName || '');
           const tag = entry && getSavedTagByName(entry.documentName);
           if (!entry) return;
+          entry.previewNearViewport = item.isIntersecting;
           if (item.isIntersecting) {
             if (tag) queueWaveLibraryPreview(entry, tag, true);
           } else {
@@ -20515,7 +20642,7 @@ ${lines.join('\n')}`;
             releaseWaveDocumentPreview(entry, 'intersection-exit');
           }
         });
-      }, { root: null, rootMargin: WAVE_PREVIEW_ROOT_MARGIN, threshold: 0 });
+      }, { root: wavePanel, rootMargin: WAVE_PREVIEW_ROOT_MARGIN, threshold: 0 });
       return waveLibraryPreviewObserver;
     }
 
@@ -20580,6 +20707,7 @@ ${lines.join('\n')}`;
         if (observer && entry.previewObserved) {
           observer.unobserve(entry.card);
           entry.previewObserved = false;
+          entry.previewNearViewport = false;
         }
         entry.previewQueued = false;
         waveContainer.hidden = false;
@@ -20626,7 +20754,12 @@ ${lines.join('\n')}`;
       const entry = waveLibraryCardCache.get(documentName);
       const tag = getSavedTagByName(documentName);
       if (!entry || !tag || !entry.card.isConnected) return false;
-      updateWaveDocumentCard(entry, tag, documentName === editingWaveDocumentName);
+      const viewport = captureWaveLibraryViewport();
+      try {
+        updateWaveDocumentCard(entry, tag, documentName === editingWaveDocumentName);
+      } finally {
+        restoreWaveDocumentViewport(viewport);
+      }
       return true;
     }
 
@@ -20710,7 +20843,10 @@ ${lines.join('\n')}`;
         if (!expectedCardSet.has(card) && waveLibraryPreviewObserver) {
           waveLibraryPreviewObserver.unobserve(card);
           const entry = waveLibraryCardCache.get(card.dataset.documentName || '');
-          if (entry) entry.previewObserved = false;
+          if (entry) {
+            entry.previewObserved = false;
+            entry.previewNearViewport = false;
+          }
         }
       });
       const sequenceMatches = currentCards.length === expectedCards.length
@@ -20823,6 +20959,13 @@ ${lines.join('\n')}`;
         vimModeBtn.title = current.enabled ? '关闭 Vim 模式' : '开启 Vim 模式';
       }
       if (vimModeButtonState) vimModeButtonState.textContent = current.enabled ? 'On' : 'Off';
+      if (reason === 'init' || reason === 'toggle') refreshWaveShortcutHints();
+      if (waveShortcutsCheckbox) {
+        waveShortcutsCheckbox.disabled = !!current.enabled;
+        const label = waveShortcutsCheckbox.closest('label');
+        label.classList.toggle('is-disabled', !!current.enabled);
+        label.title = current.enabled ? 'Vim 模式下禁用波形快捷键' : '在波形区按波形按钮标注的字符执行对应操作';
+      }
       if (vimStatusBar) vimStatusBar.hidden = !current.enabled;
       const jsonScopeActive = !!current.enabled && keyboardInputScope === 'json';
       const waveScopeActive = !!current.enabled && keyboardInputScope === 'wave' && vimWaveAreaActive;
@@ -22471,14 +22614,18 @@ ${lines.join('\n')}`;
 
     document.addEventListener('keydown', (e) => {
       if (presenterWaveViewActive) return;
+      if (e.target && e.target.closest && e.target.closest('#ui-settings-modal, #wave-shortcut-modal')) return;
       if (e.target && e.target.closest && e.target.closest('.vwd-big-wave-jump')) return;
       if (e.target && e.target.closest && e.target.closest('#wave-collection-import-modal')) return;
       if (handleTextEditModeEscape(e)) return;
+      if (handleTextEditToggleShortcut(e)) return;
       if (handleWaveDocumentClipboardShortcut(e)) return;
       if (vimController && vimController.handleKeydown(e)) return;
       if (handleUndoRedoShortcut(e)) return;
       if (handleWaveClipboardShortcut(e)) return;
       if (handleSelectionDeleteShortcut(e)) return;
+      if (handleWaveSymbolShortcut(e)) return;
+      if (blockRemappedNativeClipboardShortcut(e)) return;
       if (keyboardInputScope !== 'json' && isJsonEditorTarget(e.target)) {
         e.preventDefault();
         e.stopImmediatePropagation();
@@ -22973,6 +23120,11 @@ ${lines.join('\n')}`;
     document.getElementById('btn-wave-edit-mode').addEventListener('click', toggleWaveEditMode);
     document.getElementById('btn-wave-paint-mode').addEventListener('click', toggleWavePaintMode);
     document.getElementById('btn-wave-text-edit-mode').addEventListener('click', toggleTextEditMode);
+    if (waveShortcutsCheckbox) {
+      waveShortcutsCheckbox.addEventListener('change', () => {
+        vwdDebugLog('wave-shortcuts', { phase: 'mode', enabled: waveShortcutsCheckbox.checked });
+      });
+    }
     document.getElementById('btn-delete-wave-col').addEventListener('click', () => {
       if (selectedEdgeIndex >= 0) {
         deleteSelectedEdge('toolbar');

@@ -172,6 +172,15 @@
         percentInput.value = String(settings.scale);
       });
       document.getElementById('ui-settings-done').addEventListener('click', close);
+      const shortcutsButton = document.getElementById('ui-settings-shortcuts');
+      if (shortcutsButton) shortcutsButton.addEventListener('click', () => {
+        if (!window.visualWaveDromShortcuts) return;
+        modal.hidden = true;
+        window.visualWaveDromShortcuts.open(() => {
+          modal.hidden = false;
+          shortcutsButton.focus({ preventScroll: true });
+        });
+      });
       document.getElementById('ui-settings-reset').addEventListener('click', () => {
         settings = Object.assign({}, defaults);
         percentInput.value = String(settings.scale);

@@ -519,6 +519,32 @@
       flex-wrap: wrap;
     }
 
+    .wave-shortcuts-toggle {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 32px;
+      margin: 0 12px 8px;
+      color: var(--text);
+      font-size: 0.8125rem;
+      cursor: pointer;
+    }
+
+    .wave-shortcuts-toggle input {
+      width: 16px;
+      height: 16px;
+      margin: 0;
+      flex-shrink: 0;
+      accent-color: var(--accent);
+      cursor: inherit;
+    }
+
+    .wave-shortcuts-toggle.is-disabled {
+      color: var(--text-muted);
+      cursor: not-allowed;
+      opacity: 0.6;
+    }
+
     .wave-add-delete-row .legend-add-btn,
     .wave-add-delete-row .wave-delete-signal-btn,
     .wave-copy-row .wave-copy-signal-btn,
@@ -1070,6 +1096,7 @@
       min-height: 0;
       background: #ffffff;
       overflow: auto;
+      overflow-anchor: none;
       display: flex;
       flex-direction: column;
       align-items: flex-start;
@@ -1242,8 +1269,8 @@
       background: #fff;
       overflow: hidden;
       scroll-margin-top: 16px;
-      content-visibility: auto;
-      contain-intrinsic-size: auto 260px;
+      /* Offscreen previews are released in JS without replacing card heights. */
+      contain: layout paint;
     }
 
     .wave-document-card.focused {

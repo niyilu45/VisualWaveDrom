@@ -26,12 +26,12 @@
       if (presenterActive) document.documentElement.classList.add('presenter-bootstrap-document');
     })();
   </script>
-  <script src="inc/visualwavedrom-settings.js?v=20260831-font-settings-v1"></script>
+  <script src="inc/visualwavedrom-settings.js?v=20260908-shortcut-settings-v1"></script>
   <link rel="stylesheet" href="inc/codemirror.css?v=5.65.21">
-  <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260908-service-recovery-v1">
+  <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260908-wave-shortcuts-v1">
   <link rel="stylesheet" href="inc/visualwavedrom-scope.css?v=20260817-legend-drag-v1">
   <link rel="stylesheet" href="inc/visualwavedrom-presenter.css?v=20260901-presenter-settings-nav-v1">
-  <link rel="stylesheet" href="inc/visualwavedrom-settings.css?v=20260831-font-settings-v1">
+  <link rel="stylesheet" href="inc/visualwavedrom-settings.css?v=20260908-shortcut-settings-v1">
 </head>
 <body>
   <div class="scope-bootstrap" id="scope-bootstrap" role="status" aria-live="polite" hidden>
@@ -78,7 +78,7 @@
       };
     })();
   </script>
-  <div class="app" id="app">
+  <div class="app json-panel-hidden" id="app">
     <!-- Nav Sidebar -->
     <aside class="nav-sidebar" id="nav-sidebar" tabindex="-1">
       <div class="sidebar-header">
@@ -119,14 +119,14 @@
           </svg>
           <span>设置</span>
         </button>
-        <button class="menu-btn" id="btn-toggle-json-panel" type="button" title="隐藏 WaveDrom JSON 窗口">
+        <button class="menu-btn" id="btn-toggle-json-panel" type="button" title="显示 WaveDrom JSON 窗口" aria-pressed="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <path d="M4 4l16 16"/>
             <path d="M9.9 4.2A10.7 10.7 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-3.2 4.2"/>
             <path d="M6.6 6.6C3.9 8.4 1 12 1 12s4 8 11 8a10.7 10.7 0 0 0 3.4-.6"/>
             <circle cx="12" cy="12" r="3"/>
           </svg>
-          <span id="toggle-json-panel-label">隐藏 JSON</span>
+          <span id="toggle-json-panel-label">显示 JSON</span>
         </button>
         <button class="menu-btn" id="btn-toggle-nav-sidebar" type="button" title="隐藏波形目录">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
@@ -343,6 +343,10 @@
             删除
           </button>
         </div>
+        <label class="wave-shortcuts-toggle" title="在波形区按波形按钮标注的字符执行对应操作">
+          <input type="checkbox" id="wave-shortcuts-enabled" autocomplete="off">
+          <span>波形快捷键</span>
+        </label>
         <div class="legend-list" id="legend-list"></div>
       </div>
 
@@ -854,10 +858,30 @@
           </label>
         </div>
         <div id="ui-settings-status" class="ui-settings-status" role="status" hidden></div>
+        <button type="button" class="modal-btn ui-settings-shortcuts" id="ui-settings-shortcuts" aria-haspopup="dialog" aria-controls="wave-shortcut-modal">快捷键</button>
       </div>
       <div class="modal-footer">
         <button type="button" class="modal-btn" id="ui-settings-reset">恢复默认</button>
         <button type="button" class="modal-btn modal-btn-primary" id="ui-settings-done">完成</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="wave-shortcut-modal" hidden>
+    <div class="modal-dialog wave-shortcut-dialog" role="dialog" aria-modal="true" aria-labelledby="wave-shortcut-title">
+      <div class="modal-header" id="wave-shortcut-title">波形图快捷键</div>
+      <div class="modal-body">
+        <div class="wave-shortcut-columns" aria-hidden="true"><span>操作</span><span>主要快捷键</span><span>备用快捷键</span></div>
+        <div id="wave-shortcut-list"></div>
+      </div>
+      <div class="wave-shortcut-feedback">
+        <div id="wave-shortcut-warning" class="ui-settings-status" role="status"></div>
+        <div id="wave-shortcut-status" role="alert"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="modal-btn" id="wave-shortcut-reset">恢复默认</button>
+        <button type="button" class="modal-btn" id="wave-shortcut-cancel">取消</button>
+        <button type="button" class="modal-btn modal-btn-primary" id="wave-shortcut-save">保存</button>
       </div>
     </div>
   </div>
@@ -902,6 +926,7 @@
     <script src="inc/visualwavedrom-presenter-split.js?v=20260901-presenter-settings-nav-v1"></script>
     <script src="inc/visualwavedrom-presenter.js?v=20260901-data-cycle-align-v2"></script>
     <script src="inc/visualwavedrom-import-collection.js?v=20260831-inc-layout-v1"></script>
-    <script src="inc/visualwavedrom-app.js?v=20260908-text-edit-escape-v1"></script>
+    <script src="inc/visualwavedrom-shortcuts.js?v=20260908-shortcut-settings-v1"></script>
+    <script src="inc/visualwavedrom-app.js?v=20260908-shortcut-settings-v1"></script>
 </body>
 </html>

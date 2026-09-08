@@ -111,6 +111,92 @@
   font-size: 0.75rem;
 }
 
+.ui-settings-shortcuts {
+  align-self: stretch;
+}
+
+.wave-shortcut-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(100%, 43rem);
+  max-height: calc(100vh - 32px);
+  font-size: 0.875rem;
+}
+
+.wave-shortcut-dialog .modal-body {
+  display: block;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.wave-shortcut-dialog .modal-header,
+.wave-shortcut-dialog .modal-footer,
+.wave-shortcut-feedback {
+  flex-shrink: 0;
+}
+
+.wave-shortcut-columns,
+.wave-shortcut-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) repeat(2, minmax(0, 1fr));
+  align-items: center;
+  gap: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+.wave-shortcut-columns {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.wave-shortcut-group {
+  margin: 1.2rem 0 0.5rem;
+  font-size: 0.875rem;
+  color: var(--text);
+}
+
+.wave-shortcut-row {
+  padding: 0.35rem 0;
+}
+
+.wave-shortcut-row .modal-input {
+  min-width: 0;
+  width: 100%;
+  padding: 0.4rem;
+  font-size: 0.8125rem;
+  min-height: 2.2rem;
+}
+
+.wave-shortcut-row input[aria-invalid="true"] {
+  border-color: var(--error, #ef4444);
+}
+
+.wave-shortcut-row input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.wave-shortcut-feedback {
+  padding: 0.5rem 1.5rem;
+  overflow-wrap: anywhere;
+}
+
+#wave-shortcut-status {
+  color: var(--error, #ef4444);
+  font-size: 0.8125rem;
+}
+
+@media (max-width: 560px) {
+  .wave-shortcut-columns,
+  .wave-shortcut-row {
+    grid-template-columns: minmax(0, 1fr) repeat(2, minmax(0, 1fr));
+    gap: 0.35rem;
+  }
+}
+
 .sidebar {
   overflow-x: hidden;
 }
