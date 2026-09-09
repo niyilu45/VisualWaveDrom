@@ -421,6 +421,8 @@ if (!window.VWDCodeEditorPairs) {
     let copiedWaveSelection = '';
     let copiedWaveDataSlots = [];
     let copiedWaveRows = [];
+    let waveClipboardReadRequest = 0;
+    const waveSelectionClipboard = window.VisualWaveDromWaveClipboard.create(receiveWaveClipboardSelection);
     let waveSelectionDrag = null;
     let waveCellTooltip = null;
     let waveCellTooltipName = null;
@@ -6104,6 +6106,38 @@ ${lines.join('\n')}`;
         : [];
     }
 
+    function receiveWaveClipboardSelection(payload) {
+      waveClipboardReadRequest++;
+      copiedWaveRows = cloneWaveClipboardRows(payload.rows);
+      copiedWaveSelection = copiedWaveRows[0].text;
+      copiedWaveDataSlots = cloneWaveClipboardDataSlots(copiedWaveRows[0].dataSlots);
+      updateLegendAvailability();
+      vwdDebugLog('wave-selection', { phase: 'clipboard-received', rows: copiedWaveRows.length, columns: payload.columns });
+    }
+
+    function writeWaveSelectionClipboard(payload, event) {
+      const text = JSON.stringify(payload);
+      if (event && event.clipboardData) {
+        event.clipboardData.setData('text/plain', text);
+        try { event.clipboardData.setData(window.VisualWaveDromWaveClipboard.mime, text); } catch (_error) { /* Plain JSON is portable. */ }
+        return;
+      }
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        navigator.clipboard.writeText(text).catch(error => {
+          vwdDebugLog('wave-selection', { phase: 'clipboard-write-failed', message: error.message });
+        });
+        return;
+      }
+      const focus = document.activeElement;
+      const scope = keyboardInputScope;
+      try { copyTextWithExecCommand(text); }
+      catch (error) { vwdDebugLog('wave-selection', { phase: 'clipboard-write-failed', message: error.message }); }
+      finally {
+        if (focus && focus.isConnected) focus.focus({ preventScroll: true });
+        setKeyboardInputScope(scope, 'wave-clipboard-copy');
+      }
+    }
+
     function collectWaveClipboardDataSlots(signal, wave, copiedWave, startCol) {
       const data = normalizeWaveDataValues(signal && signal.data);
       return getWaveDataSlots(copiedWave).map((slot) => {
@@ -6233,7 +6267,7 @@ ${lines.join('\n')}`;
     }
 
     function applyWaveRowsReplacement(startRow, startCol, rows, actionLabel, options) {
-      const replacements = cloneWaveClipboardRows(rows).filter((row) => row.text);
+      const replacements = cloneWaveClipboardRows(rows);
       if (startRow < 0 || startCol < 0 || !replacements.length) {
         setStatus(false, '请先选择多行波形的粘贴起点');
         return false;
@@ -6254,6 +6288,20 @@ ${lines.join('\n')}`;
       const locations = collectSignalLocations(parsed.signal);
       const safeStartRow = Math.max(0, Math.floor(startRow));
       const safeStartCol = Math.max(0, Math.floor(startCol));
+      if (safeStartRow >= locations.length) {
+        setStatus(false, '未找到粘贴起点的信号行');
+        return false;
+      }
+      let addedRows = 0;
+      if (options && options.appendMissingRows) {
+        const parent = locations[locations.length - 1].parent;
+        while (locations.length < safeStartRow + replacements.length) {
+          const signal = {};
+          parent.push(signal);
+          locations.push({ signal, parent, index: parent.length - 1 });
+          addedRows++;
+        }
+      }
       const availableCount = Math.max(0, locations.length - safeStartRow);
       const targetRows = replacements.slice(0, availableCount);
       if (!targetRows.length) {
@@ -6263,6 +6311,7 @@ ${lines.join('\n')}`;
 
       let changedCount = 0;
       targetRows.forEach((replacement, offset) => {
+        if (!replacement.text) return;
         const location = locations[safeStartRow + offset];
         if (!location) return;
         const originalSignal = location.signal || {};
@@ -6297,7 +6346,7 @@ ${lines.join('\n')}`;
         safeStartCol,
         safeStartCol + maxLength - 1
       );
-      if (!changedCount) {
+      if (!changedCount && !addedRows) {
         setStatus(true, (actionLabel || '多行修改') + '完成，波形内容未变化');
         return false;
       }
@@ -6325,12 +6374,13 @@ ${lines.join('\n')}`;
       setStatus(
         true,
         (actionLabel || '多行修改') + '：已覆盖 ' + targetRows.length + ' 行 × ' + maxLength + ' 格'
+          + (addedRows ? '（新增 ' + addedRows + ' 个无名行）' : '')
           + (targetRows.length < replacements.length ? '（目标剩余行不足）' : '')
       );
       return true;
     }
 
-    function copySelectedWaveRange() {
+    function copySelectedWaveRange(event) {
       const block = getSelectedWaveBlock();
       if (!block) {
         setStatus(false, '请先点击或拖动选择波形格');
@@ -6348,7 +6398,11 @@ ${lines.join('\n')}`;
       }
 
       const columnCount = block.end - block.start + 1;
-      copiedWaveRows = entries.map((entry) => {
+      if (entries.length > 4096 || entries.length * columnCount > window.VisualWaveDromWaveClipboard.maxSize) {
+        setStatus(false, '复制选区过大，请缩小选区后重试');
+        return false;
+      }
+      const rows = entries.map((entry) => {
         const wave = entry.signal.wave || '';
         let copied = wave.padEnd(block.end + 1, EMPTY_WAVE_FILL_CHAR)
           .slice(block.start, block.end + 1);
@@ -6360,8 +6414,13 @@ ${lines.join('\n')}`;
           dataSlots: collectWaveClipboardDataSlots(entry.signal, wave, copied, block.start)
         };
       });
-      copiedWaveSelection = copiedWaveRows[0].text;
-      copiedWaveDataSlots = cloneWaveClipboardDataSlots(copiedWaveRows[0].dataSlots);
+      const payload = waveSelectionClipboard.publish(rows);
+      if (!payload) {
+        setStatus(false, '复制选区过大或数据格式不受支持，请缩小选区后重试');
+        return false;
+      }
+      receiveWaveClipboardSelection(payload);
+      writeWaveSelectionClipboard(payload, event);
       waveClipboardShortcutActive = true;
       updateLegendAvailability();
       vwdDebugLog('wave-selection', {
@@ -6371,8 +6430,7 @@ ${lines.join('\n')}`;
         startCol: block.start,
         endCol: block.end,
         rowCount: copiedWaveRows.length,
-        columnCount,
-        rows: cloneWaveClipboardRows(copiedWaveRows)
+        columnCount
       });
       const copiedTextCount = copiedWaveRows
         .flatMap((row) => row.dataSlots)
@@ -6386,14 +6444,14 @@ ${lines.join('\n')}`;
     }
 
     function pasteCopiedWaveRange() {
+      if (inlineEditActive || isVisibleModalOpen() || app.classList.contains('reading-mode')) return false;
       const block = getSelectedWaveBlock();
       if (!block) {
         setStatus(false, '请先选择粘贴起点');
         return false;
       }
       if (!copiedWaveSelection) {
-        setStatus(false, '请先复制波形');
-        return false;
+        return readExternalWaveClipboard(block);
       }
       waveClipboardShortcutActive = true;
       const rows = copiedWaveRows.length
@@ -6437,7 +6495,7 @@ ${lines.join('\n')}`;
           block.start,
           rows,
           '多行覆盖粘贴',
-          { includeDataLabels: true, mergeBinaryLevels: true }
+          { includeDataLabels: true, mergeBinaryLevels: true, appendMissingRows: true }
         );
       }
       return applyWaveRangeReplacement(
@@ -6451,6 +6509,33 @@ ${lines.join('\n')}`;
           dataSlots: cloneWaveClipboardDataSlots(rows[0].dataSlots)
         }
       );
+    }
+
+    async function readExternalWaveClipboard(block) {
+      if (!navigator.clipboard || typeof navigator.clipboard.readText !== 'function') {
+        setStatus(false, '请先在其他波形图中复制选区，再按 Ctrl+V 粘贴');
+        return false;
+      }
+      const request = ++waveClipboardReadRequest;
+      const documentName = editingWaveDocumentName;
+      const sourceText = editor.value;
+      const selection = JSON.stringify(block);
+      try {
+        const payload = window.VisualWaveDromWaveClipboard.parse(await navigator.clipboard.readText());
+        if (request !== waveClipboardReadRequest || documentName !== editingWaveDocumentName
+            || editor.value !== sourceText || selection !== JSON.stringify(getSelectedWaveBlock())
+            || inlineEditActive || isVisibleModalOpen()) return false;
+        if (!payload) {
+          setStatus(false, '剪贴板中没有波形选区，请在波形图中重新复制');
+          return false;
+        }
+        receiveWaveClipboardSelection(payload);
+        return pasteCopiedWaveRange();
+      } catch (error) {
+        setStatus(false, '浏览器未允许读取剪贴板，请使用 Ctrl+V 粘贴');
+        vwdDebugLog('wave-selection', { phase: 'clipboard-read-failed', message: error.message });
+        return false;
+      }
     }
 
     function setWaveClipboardShortcutActive(active, reason) {
@@ -6485,6 +6570,9 @@ ${lines.join('\n')}`;
 
       if (!canUseWaveClipboardForTarget(e.target)) return false;
 
+      // Native clipboard events carry the structured selection across origins without read permission.
+      if (waveformShortcuts.matches(key === 'c' ? 'copy' : 'paste', e, true)) return false;
+
       e.preventDefault();
       e.stopPropagation();
       const handled = key === 'c' ? copySelectedWaveRange() : pasteCopiedWaveRange();
@@ -6505,6 +6593,7 @@ ${lines.join('\n')}`;
     }
 
     function handleWaveClipboardEvent(e) {
+      if (inlineEditActive || isVisibleModalOpen() || app.classList.contains('reading-mode')) return false;
       if (!waveClipboardShortcutActive || !getSelectedWaveRange()) return false;
       if (!canUseWaveClipboardForTarget(e.target)) return false;
       if (e.type !== 'copy' && e.type !== 'paste') return false;
@@ -6513,17 +6602,17 @@ ${lines.join('\n')}`;
       e.stopPropagation();
       let handled = false;
       if (e.type === 'copy') {
-        handled = copySelectedWaveRange();
-        if (handled && e.clipboardData && copiedWaveSelection) {
-          e.clipboardData.setData(
-            'text/plain',
-            (copiedWaveRows.length ? copiedWaveRows : [{ text: copiedWaveSelection }])
-              .map((row) => row.text)
-              .join('\n')
-          );
-        }
+        handled = copySelectedWaveRange(e);
       } else {
-        handled = pasteCopiedWaveRange();
+        const data = e.clipboardData;
+        const payload = data && (window.VisualWaveDromWaveClipboard.parse(data.getData(window.VisualWaveDromWaveClipboard.mime))
+          || window.VisualWaveDromWaveClipboard.parse(data.getData('text/plain')));
+        if (payload) {
+          receiveWaveClipboardSelection(payload);
+          handled = pasteCopiedWaveRange();
+        } else {
+          setStatus(false, '剪贴板中没有波形选区，请在波形图中重新复制');
+        }
       }
       vwdDebugLog('wave-selection', {
         phase: 'clipboard-event',
@@ -6737,7 +6826,8 @@ ${lines.join('\n')}`;
       }
       const pasteWaveBtn = document.getElementById('btn-paste-wave-selection');
       if (pasteWaveBtn) {
-        pasteWaveBtn.disabled = !hasRow || !selectedRange || !copiedWaveSelection;
+        pasteWaveBtn.disabled = !hasRow || !selectedRange || (!copiedWaveSelection
+          && !(navigator.clipboard && typeof navigator.clipboard.readText === 'function'));
         pasteWaveBtn.title = !copiedWaveSelection
           ? '请先复制波形' + waveShortcutHint('copy')
           : (selectedRange
@@ -21724,7 +21814,7 @@ ${lines.join('\n')}`;
           selectedWaveColumnIndex,
           rows,
           'Vim 多行覆盖粘贴',
-          { includeDataLabels: true, mergeBinaryLevels: true }
+          { includeDataLabels: true, mergeBinaryLevels: true, appendMissingRows: true }
         );
       }
       return applyWaveRangeReplacement(

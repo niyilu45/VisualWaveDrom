@@ -6,6 +6,7 @@
 }(typeof globalThis !== 'undefined' ? globalThis : this, function (root) {
   'use strict';
   const storageKey = 'visualwavedrom.wave.shortcuts.v1';
+  const settingsVersion = 2;
   const modifiers = ['Ctrl', 'Alt', 'Shift'];
   const namedKeys = ['Space', 'Tab', 'Enter', 'Escape', 'Delete', 'Backspace', 'Insert',
     'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'];
@@ -57,7 +58,7 @@
 
   function create(waveItems, onChange) {
     const definitions = [
-      { id: 'textEdit', label: '文本编辑模式', keys: ['Ctrl+t', 'F2'], group: '编辑操作' },
+      { id: 'textEdit', label: '文本编辑模式', keys: ['t'], group: '编辑操作' },
       { id: 'undo', label: '撤销', keys: ['Ctrl+z'], group: '编辑操作' },
       { id: 'redo', label: '重做', keys: ['Ctrl+Shift+z', 'Ctrl+y'], group: '编辑操作' },
       { id: 'copy', label: '复制波形 / 波形图', keys: ['Ctrl+c'], group: '编辑操作' },
@@ -100,10 +101,30 @@
 
     try {
       const stored = JSON.parse(root.localStorage.getItem(storageKey));
-      if (stored && stored.version === 1 && stored.bindings) {
+      if (stored && (stored.version === 1 || stored.version === settingsVersion) && stored.bindings) {
         const candidate = Object.assign({}, defaults, stored.bindings);
+        let migrated = false;
+        if (stored.version === 1 && Array.isArray(candidate.textEdit)) {
+          const retained = candidate.textEdit.filter(key => !['Ctrl+t', 'F2'].includes(normalize(key)));
+          if (retained.length !== candidate.textEdit.length) {
+            candidate.textEdit = retained.some(key => normalize(key)) ? retained : ['t'];
+            migrated = true;
+          }
+        }
+        if ((migrated || !Object.prototype.hasOwnProperty.call(stored.bindings, 'textEdit'))
+            && candidate.textEdit.includes('t')) {
+          // Keep unrelated custom bindings when the new default claims t.
+          for (const item of definitions) {
+            if (item.id !== 'textEdit' && Array.isArray(candidate[item.id])) {
+              candidate[item.id] = candidate[item.id].map(key => normalize(key) === 't' ? '' : key);
+            }
+          }
+        }
         const result = validate(candidate);
-        if (result.bindings) bindings = result.bindings;
+        if (result.bindings) {
+          bindings = result.bindings;
+          if (stored.version === 1) root.localStorage.setItem(storageKey, JSON.stringify({ version: settingsVersion, bindings }));
+        }
       }
     } catch (_error) { /* A fresh or storage-restricted browser uses the defaults. */ }
 
@@ -119,7 +140,7 @@
       if (!result.bindings) return result;
       bindings = result.bindings;
       let persisted = true;
-      try { root.localStorage.setItem(storageKey, JSON.stringify({ version: 1, bindings })); }
+      try { root.localStorage.setItem(storageKey, JSON.stringify({ version: settingsVersion, bindings })); }
       catch (_error) { persisted = false; }
       if (onChange) onChange();
       return { bindings, persisted };
@@ -161,7 +182,7 @@
           input.spellcheck = false;
           input.maxLength = 50;
           input.setAttribute('aria-label', item.label + (index ? '备用快捷键' : '主要快捷键'));
-          input.title = '输入键名，例如 Ctrl+G、F2、Shift+Tab；留空取消绑定';
+          input.title = '输入键名，例如 T、Ctrl+G、Shift+Tab；留空取消绑定';
           input.addEventListener('input', () => {
             draft[item.id][index] = input.value;
             input.removeAttribute('aria-invalid');
