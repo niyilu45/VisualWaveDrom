@@ -1,0 +1,33 @@
+.sidebar-header .tool-version-label {
+  display: block;
+  padding: 4px 0 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.75rem;
+  text-align: left;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.tool-version-label:hover { color: var(--accent); }
+.tool-version-dialog { display: flex; flex-direction: column; width: min(100%, 580px); max-height: calc(100dvh - 32px); }
+.tool-version-dialog .modal-body { flex: 1 1 auto; overflow: auto; min-height: 0; }
+.tool-version-dialog .modal-header, .tool-version-dialog .modal-footer, .tool-version-dialog .modal-body > * { flex-shrink: 0; }
+.tool-version-summary { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px 16px; margin: 0 0 16px; }
+.tool-version-summary dt { color: var(--text-muted); }
+.tool-version-summary dd { margin: 0; overflow-wrap: anywhere; }
+.tool-version-directory { display: flex; flex-direction: column; gap: 8px; }
+.tool-version-directory input { box-sizing: border-box; width: 100%; min-width: 0; padding: 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-2); color: var(--text); font: inherit; }
+.tool-version-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+#tool-version-status { margin: 12px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
+.tool-version-label:focus-visible, .tool-version-dialog input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+#tool-version-history { margin-top: 16px; }
+#tool-version-history summary { padding: 6px 0; cursor: pointer; overflow-wrap: anywhere; }
+#tool-version-history-range { color: var(--text-muted); }
+#tool-version-history-body { max-height: 42vh; overflow-y: auto; overflow-wrap: anywhere; }
+#tool-version-history-body section { padding: 8px 0 12px; border-bottom: 1px solid var(--border); }
+#tool-version-history-body h3 { font-size: 0.9rem; margin: 4px 0 8px; }
+#tool-version-history-body p { white-space: pre-wrap; font-size: 0.8rem; line-height: 1.5; }
+#tool-version-history-body ul { margin: 8px 0; padding-left: 20px; }
+#tool-version-history-body summary { font-size: 0.8rem; }

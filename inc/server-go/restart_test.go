@@ -153,7 +153,7 @@ func TestRestartDoesNotSwitchPortsOrDeleteBusyDrafts(t *testing.T) {
 		t.Fatal("recovery must fail when the original port is unavailable")
 	}
 	instance.cleanupTemporaryFiles()
-	if _, err = os.Stat(instance.workingDir); err != nil {
+	if _, err = readRestartRecord(instance.config, filepath.Base(instance.workingDir)); err != nil {
 		t.Fatal("failed recovery deleted the original drafts")
 	}
 }

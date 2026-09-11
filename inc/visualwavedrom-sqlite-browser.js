@@ -13,6 +13,9 @@
 
   const schemaSql = `
     PRAGMA foreign_keys=ON;
+    CREATE TABLE IF NOT EXISTS vwd_parameters (
+      singleton INTEGER PRIMARY KEY CHECK(singleton=1), content TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS vwd_library (
       singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
       kind TEXT NOT NULL,
@@ -149,6 +152,7 @@
     const head = source.head && typeof source.head.text === 'string' ? source.head.text.trim() : '';
     return {
       titleCache: title || head || fallbackName || '',
+      parameterTables: Array.isArray(source.parameterTables) ? source.parameterTables : [],
       descriptionCache: typeof source.description === 'string' ? source.description : ''
     };
   }
@@ -196,6 +200,7 @@
     Object.keys(document).forEach((key) => {
       if (!knownDocumentFields.has(key) && document[key] !== undefined) extra[key] = document[key];
     });
+    extra.parameterTables = metadata.parameterTables;
     return {
       name,
       sortOrder: Number.isInteger(sortOrder) ? sortOrder : Number(document.sortOrder || 0),
@@ -224,6 +229,7 @@
       updatedAt: typeof bundle.updatedAt === 'string' ? bundle.updatedAt : new Date().toISOString(),
       directories: Array.isArray(bundle.directories) ? bundle.directories : [],
       rootDocuments: Array.isArray(bundle.rootDocuments) ? bundle.rootDocuments : [],
+      parameters: bundle.parameters || { revision: 0, directories: [], tables: [], presets: [] },
       activeDocumentName: typeof bundle.activeDocumentName === 'string' ? bundle.activeDocumentName : '',
       selectedDirectoryId: typeof bundle.selectedDirectoryId === 'string' ? bundle.selectedDirectoryId : 'nav-root',
       documents: bundle.documents.map((document, index) => prepareDocument(document, index))
@@ -291,6 +297,7 @@
         updatedAt: String(row.updated_at || ''),
         directories: parseJson(row.directories_json, []),
         rootDocuments: parseJson(row.root_documents_json, []),
+        parameters: this.readParameters(),
         activeDocumentName: String(row.active_document_name || ''),
         selectedDirectoryId: String(row.selected_directory_id || 'nav-root')
       };
@@ -355,9 +362,33 @@
       this.transaction(() => {
         this.db.exec('DELETE FROM vwd_documents; DELETE FROM vwd_library;');
         this.writeLibraryRow(library);
+        this.writeParameters(library.parameters);
         library.documents.forEach((document) => this.writeDocument(document));
       });
       return this.readSummary();
+    }
+
+    readParameters() {
+      const row = this.query('SELECT content FROM vwd_parameters WHERE singleton=1')[0];
+      return row ? parseJson(row.content, {}) : { revision: 0, directories: [], tables: [], presets: [] };
+    }
+
+    writeParameters(parameters) {
+      this.db.exec({ sql: 'INSERT INTO vwd_parameters(singleton,content) VALUES(1,?) ON CONFLICT(singleton) DO UPDATE SET content=excluded.content',
+        bind: [JSON.stringify(parameters)] });
+    }
+
+    updateParameters(parameters, expectedRevision) {
+      return this.transaction(() => {
+        const current = this.readParameters();
+        if (Number(current.revision || 0) !== expectedRevision) {
+          throw new Error('参数目录已被其他窗口修改，请重新加载后再修改');
+        }
+        const next = Object.assign({}, parameters, { revision: expectedRevision + 1 });
+        this.writeParameters(next);
+        this.db.exec({ sql: 'UPDATE vwd_library SET updated_at=? WHERE singleton=1', bind: [new Date().toISOString()] });
+        return next;
+      });
     }
 
     documentFromRow(row, summaryOnly, chunkContent) {

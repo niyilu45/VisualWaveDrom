@@ -12,7 +12,7 @@ import (
 
 func pickLocalPathNative(kind, initialPath string) (string, bool, error) {
 	switch kind {
-	case "folder", "preset", "save-preset":
+	case "folder", "tool-folder", "preset", "save-preset":
 	default:
 		return "", false, fmt.Errorf("unsupported path picker kind %q", kind)
 	}
@@ -51,9 +51,10 @@ $owner.Activate()
 
 $selected = ''
 try {
-    if ($kind -eq 'folder') {
+    if ($kind -eq 'folder' -or $kind -eq 'tool-folder') {
         $dialog = [System.Windows.Forms.FolderBrowserDialog]::new()
         $dialog.Description = '选择波形数据文件夹'
+        if ($kind -eq 'tool-folder') { $dialog.Description = '选择最新版本存放目录' }
         $dialog.ShowNewFolderButton = $false
         $dialog.SelectedPath = $initialDirectory
         if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) {

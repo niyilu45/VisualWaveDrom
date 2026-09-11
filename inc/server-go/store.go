@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -68,6 +69,7 @@ PRAGMA user_version=2;
 `
 
 type waveLibrary struct {
+	Parameters          map[string]any   `json:"parameters,omitempty"`
 	Kind                string           `json:"kind"`
 	Version             int              `json:"version"`
 	LibraryID           string           `json:"libraryId"`
@@ -161,23 +163,33 @@ func cloneJSONValue(value any, fallback any) any {
 	return cloned
 }
 
-func (s *sqliteStore) open(filePath string, create bool) (*sql.DB, error) {
+func (s *sqliteStore) open(filePath string, create bool) (*libraryDB, error) {
+	filePath, prefix := libraryLocation(filePath)
 	if create {
 		if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
 			return nil, err
 		}
 	}
-	db, err := sql.Open("sqlite", filePath)
+	absolute, err := filepath.Abs(filePath)
+	if err != nil {
+		return nil, err
+	}
+	uriPath := filepath.ToSlash(absolute)
+	if !strings.HasPrefix(uriPath, "/") {
+		uriPath = "/" + uriPath
+	}
+	uri := url.URL{Scheme: "file", Path: uriPath, RawQuery: "_txlock=immediate"}
+	db, err := sql.Open("sqlite", uri.String())
 	if err != nil {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	if _, err = db.Exec("PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;"); err != nil {
+	if _, err = db.Exec("PRAGMA busy_timeout=15000; PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;"); err != nil {
 		db.Close()
 		return nil, err
 	}
-	return db, nil
+	return &libraryDB{DB: db, prefix: prefix}, nil
 }
 
 func (s *sqliteStore) ensureSchema(filePath string) error {
@@ -188,7 +200,8 @@ func (s *sqliteStore) ensureSchema(filePath string) error {
 	if _, ready := s.prepared.Load(resolved); ready {
 		return nil
 	}
-	if hasSQLiteHeader(filePath) {
+	_, prefix := libraryLocation(filePath)
+	if prefix == "" && hasSQLiteHeader(filePath) {
 		db, openErr := s.open(filePath, false)
 		if openErr == nil {
 			var version int
@@ -205,7 +218,11 @@ func (s *sqliteStore) ensureSchema(filePath string) error {
 		return err
 	}
 	defer db.Close()
-	if _, err = db.Exec(schemaSQL); err != nil {
+	schema := schemaSQL
+	if prefix != "" {
+		schema = strings.ReplaceAll(schema, "synchronous=NORMAL", "synchronous=FULL")
+	}
+	if _, err = db.Exec(schema); err != nil {
 		return err
 	}
 	s.prepared.Store(resolved, true)
@@ -226,7 +243,8 @@ func hasSQLiteHeader(filePath string) bool {
 }
 
 func (s *sqliteStore) isLibraryFile(filePath string) bool {
-	if !hasSQLiteHeader(filePath) {
+	physicalPath, _ := libraryLocation(filePath)
+	if !hasSQLiteHeader(physicalPath) {
 		return false
 	}
 	db, err := s.open(filePath, false)
@@ -326,13 +344,13 @@ func integerValue(value any) (int, bool) {
 	return 0, false
 }
 
-func documentMetadata(content, fallbackName string) (string, string, error) {
+func documentMetadata(content, fallbackName string) (string, string, any, error) {
 	var source map[string]any
 	if err := json.Unmarshal([]byte(content), &source); err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
 	if source == nil {
-		return "", "", errors.New("wave document root must be an object")
+		return "", "", nil, errors.New("wave document root must be an object")
 	}
 	title, _ := source["title"].(string)
 	title = strings.TrimSpace(title)
@@ -349,7 +367,7 @@ func documentMetadata(content, fallbackName string) (string, string, error) {
 	if title == "" {
 		title = fallbackName
 	}
-	return title, description, nil
+	return title, description, source["parameterTables"], nil
 }
 
 func prepareDocument(document map[string]any, sortOrder int) (preparedDocument, error) {
@@ -358,7 +376,7 @@ func prepareDocument(document map[string]any, sortOrder int) (preparedDocument, 
 	if name == "" || !contentOK {
 		return preparedDocument{}, errors.New("invalid wave document")
 	}
-	titleCache, descriptionCache, err := documentMetadata(content, name)
+	titleCache, descriptionCache, parameterTables, err := documentMetadata(content, name)
 	if err != nil {
 		return preparedDocument{}, err
 	}
@@ -382,6 +400,7 @@ func prepareDocument(document map[string]any, sortOrder int) (preparedDocument, 
 			extra[key] = value
 		}
 	}
+	extra["parameterTables"] = parameterTables
 	extraBytes, err := json.Marshal(extra)
 	if err != nil {
 		return preparedDocument{}, err
@@ -403,7 +422,7 @@ func prepareDocument(document map[string]any, sortOrder int) (preparedDocument, 
 	}, nil
 }
 
-func writeLibraryRow(tx *sql.Tx, library waveLibrary) error {
+func writeLibraryRow(tx *libraryTx, library waveLibrary) error {
 	directories, err := json.Marshal(library.Directories)
 	if err != nil {
 		return err
@@ -429,7 +448,7 @@ ON CONFLICT(singleton) DO UPDATE SET
 	return err
 }
 
-func writePreparedDocument(tx *sql.Tx, document preparedDocument, insertOnly bool) error {
+func writePreparedDocument(tx *libraryTx, document preparedDocument, insertOnly bool) error {
 	query := `
 INSERT INTO vwd_documents (
  name, sort_order, content, hscale, wave_edit_mode, revision, saved_at,
@@ -504,6 +523,9 @@ func (s *sqliteStore) writeLibrary(filePath string, library waveLibrary) error {
 		return err
 	}
 	defer db.Close()
+	if _, err = db.Exec(parameterSchemaSQL); err != nil {
+		return err
+	}
 	tx, err := db.Begin()
 	if err != nil {
 		return err
@@ -516,6 +538,9 @@ func (s *sqliteStore) writeLibrary(filePath string, library waveLibrary) error {
 		return err
 	}
 	if err = writeLibraryRow(tx, library); err != nil {
+		return err
+	}
+	if err = writeParameters(tx, library.Parameters); err != nil {
 		return err
 	}
 	for index, raw := range library.Documents {
@@ -566,6 +591,10 @@ func (s *sqliteStore) readLibraryRow(filePath string) (waveLibrary, error) {
 	if library.SelectedDirectoryID == "" {
 		library.SelectedDirectoryID = "nav-root"
 	}
+	library.Parameters, err = readParameters(db)
+	if err != nil {
+		return waveLibrary{}, err
+	}
 	return library, nil
 }
 
@@ -603,7 +632,7 @@ func scanDocument(scanner interface{ Scan(...any) error }, withContent bool) (do
 	return row, err
 }
 
-func readChunkContent(db *sql.DB, documentName string) (string, bool, error) {
+func readChunkContent(db *libraryDB, documentName string) (string, bool, error) {
 	rows, err := db.Query(`SELECT content_chunk FROM vwd_document_chunks
 		WHERE document_name=? ORDER BY chunk_index`, documentName)
 	if err != nil {
@@ -706,7 +735,7 @@ func (s *sqliteStore) readDocument(filePath, waveID string) (map[string]any, err
 	return documentFromRow(row, false, content), nil
 }
 
-func (s *sqliteStore) nextSortOrder(tx *sql.Tx) (int, error) {
+func (s *sqliteStore) nextSortOrder(tx *libraryTx) (int, error) {
 	var next int
 	err := tx.QueryRow("SELECT COALESCE(MAX(sort_order), -1) + 1 FROM vwd_documents").Scan(&next)
 	return next, err

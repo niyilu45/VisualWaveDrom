@@ -1,13 +1,29 @@
 [CmdletBinding()]
 param(
     [string]$GoExecutable = $env:VWD_GO_EXE,
-    [string]$Version = "dev"
+    [string]$Version = "",
+    [string]$ReleaseNotes = ""
 )
 
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $sourceDirectory = Join-Path $projectRoot "inc/server-go"
 $outputDirectory = Join-Path $projectRoot "bin"
+$manifestPath = Join-Path $projectRoot "inc/visualwavedrom-release.json"
+if (-not $Version) {
+    $datePrefix = Get-Date -Format 'yyyy.M.d'
+    $revision = 1
+    if (Test-Path -LiteralPath $manifestPath) {
+        $previous = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+        if ($previous.version.StartsWith("$datePrefix.")) {
+            $revision = [int]($previous.version.Split('.')[-1]) + 1
+        }
+    }
+    $Version = "$datePrefix.$revision"
+}
+if ($Version -notmatch '^\d{1,6}\.\d{1,6}\.\d{1,6}\.\d{1,6}$') {
+    throw 'Version must have four numeric components, e.g. 2026.9.12.1.'
+}
 
 if (-not $GoExecutable) {
     $goCommand = Get-Command go -ErrorAction SilentlyContinue
@@ -79,6 +95,11 @@ try {
         }
     Set-Content -LiteralPath (Join-Path $outputDirectory "SHA256SUMS.txt") `
         -Value $checksumLines -Encoding ascii
+    $releaseArgs = @('--root', $projectRoot, '--make-release', $Version)
+    if ($ReleaseNotes) { $releaseArgs += @('--release-notes', $ReleaseNotes) }
+    & (Join-Path $outputDirectory "VisualWaveDrom-server.exe") @releaseArgs
+    if ($LASTEXITCODE -ne 0) { throw 'Release manifest generation failed.' }
+    Write-Host "VisualWaveDrom version $Version is ready."
 } finally {
     $env:GOOS = $originalGoOS
     $env:GOARCH = $originalGoArch

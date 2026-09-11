@@ -21,7 +21,7 @@ func graphicalPickerCommand(kind, initialPath string) (string, []string, bool) {
 		}
 		if program == "kdialog" {
 			switch kind {
-			case "folder":
+			case "folder", "tool-folder":
 				return executable, []string{
 					"--getexistingdirectory", initial, "--title", "选择波形数据文件夹",
 				}, true
@@ -39,7 +39,7 @@ func graphicalPickerCommand(kind, initialPath string) (string, []string, bool) {
 		}
 		args := []string{"--file-selection"}
 		switch kind {
-		case "folder":
+		case "folder", "tool-folder":
 			args = append(args, "--directory", "--title=选择波形数据文件夹")
 			if initial != "" {
 				args = append(args, "--filename="+filepath.Clean(initial)+string(os.PathSeparator))
@@ -72,7 +72,7 @@ func graphicalPickerCommand(kind, initialPath string) (string, []string, bool) {
 
 func pickLocalPathNative(kind, initialPath string) (string, bool, error) {
 	switch kind {
-	case "folder", "preset", "save-preset":
+	case "folder", "tool-folder", "preset", "save-preset":
 	default:
 		return "", false, fmt.Errorf("unsupported path picker kind %q", kind)
 	}

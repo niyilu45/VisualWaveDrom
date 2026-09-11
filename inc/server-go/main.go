@@ -28,7 +28,7 @@ import (
 const (
 	appID                      = "VisualWaveDrom"
 	protocolScheme             = "visualwavedrom"
-	serviceAPIVersion          = 21
+	serviceAPIVersion          = 24
 	defaultPort                = 4173
 	maxWaveLibraryRequestBytes = 256 * 1024 * 1024
 	importMaxUploadBytes       = 128 * 1024 * 1024
@@ -119,6 +119,9 @@ type config struct {
 	port                int
 	checkRuntime        bool
 	resumeSession       string
+	checkToolUpdates    bool
+	releaseVersion      string
+	releaseNotes        string
 }
 
 type libraryListItem struct {
@@ -151,6 +154,7 @@ type service struct {
 	collectionPreviewCache map[string]collectionSinglePreviewIndex
 	collectionImportMu     sync.Mutex
 	collectionImportJobs   map[string]collectionImportProgress
+	versionToken           string
 }
 
 type clientLease struct {
@@ -191,6 +195,9 @@ func defaultRootDir() string {
 func parseConfig() (config, error) {
 	var root, html, library, protocolHandler, openURL string
 	var noOpen, checkRuntime bool
+	var checkToolUpdates bool
+	var releaseVersion string
+	var releaseNotes string
 	flag.StringVar(&root, "root", "", "project root directory")
 	flag.StringVar(&html, "html", "VisualWaveDrom.html", "HTML file name")
 	flag.StringVar(&library, "library", "Wave/VisualWaveDrom-library/library.sqlite", "wave library path")
@@ -198,6 +205,9 @@ func parseConfig() (config, error) {
 	flag.StringVar(&openURL, "open-url", "", "VisualWaveDrom URL to open")
 	flag.BoolVar(&noOpen, "no-open", false, "do not open a browser")
 	flag.BoolVar(&checkRuntime, "check-runtime", false, "print runtime information and exit")
+	flag.BoolVar(&checkToolUpdates, "check-tool-updates", false, "check local tool versions before launching")
+	flag.StringVar(&releaseVersion, "make-release", "", "generate program release manifest and version display")
+	flag.StringVar(&releaseNotes, "release-notes", "", "release feature notes, separated by newlines")
 	flag.Parse()
 
 	if root == "" {
@@ -242,6 +252,8 @@ func parseConfig() (config, error) {
 	}
 	return config{
 		rootDir: root, htmlName: html, htmlPath: htmlPath,
+		checkToolUpdates: checkToolUpdates, releaseVersion: releaseVersion,
+		releaseNotes:      releaseNotes,
 		configuredLibrary: libraryPath, configuredName: configuredName,
 		waveDir: waveDir, tempDir: filepath.Join(root, ".tmp"),
 		statePath:           filepath.Join(root, ".tmp", ".visualwavedrom-state.json"),
@@ -256,6 +268,9 @@ func newService(configuration config) (*service, error) {
 	}
 	if configuration.statePath == "" {
 		configuration.statePath = filepath.Join(configuration.tempDir, ".visualwavedrom-state.json")
+	}
+	if err := migrateLegacyOperations(configuration); err != nil {
+		return nil, fmt.Errorf("temporary operation database: %w", err)
 	}
 	restart, err := loadServerRestart(&configuration)
 	if err != nil {
@@ -279,6 +294,7 @@ func newService(configuration config) (*service, error) {
 		collectionSearchCache:  make(map[string]collectionSearchCacheEntry),
 		collectionPreviewCache: make(map[string]collectionSinglePreviewIndex),
 		collectionImportJobs:   make(map[string]collectionImportProgress),
+		versionToken:           stableID("version"),
 	}
 	if restart != nil {
 		instance.workingDir = filepath.Join(configuration.tempDir, "sessions", configuration.resumeSession)
@@ -287,9 +303,6 @@ func newService(configuration config) (*service, error) {
 		instance.preserveWorkingFiles = true
 	}
 	if err = instance.ensureWaveDirectory(); err != nil {
-		return nil, err
-	}
-	if err = os.MkdirAll(instance.workingDir, 0o755); err != nil {
 		return nil, err
 	}
 	instance.refreshActiveScheme()
@@ -337,12 +350,8 @@ func (s *service) ensureWaveDirectory() error {
 func (s *service) readRecentLibraryName() string {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
-	data, err := os.ReadFile(s.config.statePath)
-	if err != nil {
-		return ""
-	}
 	var state map[string]any
-	if json.Unmarshal(data, &state) != nil {
+	if readOperationRecord(s.config.tempDir, "recent-library", &state) != nil {
 		return ""
 	}
 	name := stringValue(state["recentLibrary"])
@@ -388,9 +397,11 @@ func (s *service) rememberLibraryName(name string) {
 	}
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
-	_ = writeJSONAtomically(s.config.statePath, map[string]any{
+	if err := writeOperationRecord(s.config.tempDir, "recent-library", map[string]any{
 		"version": 1, "recentLibrary": name, "updatedAt": isoNow(),
-	})
+	}); err != nil {
+		log.Printf("Could not remember the current library: %v", err)
+	}
 }
 
 func (s *service) libraryNameFromPath(filePath string) string {
@@ -553,17 +564,16 @@ func (s *service) ensureWorkingLibrary(sourcePath string) (string, error) {
 	if s.workingDir == "" {
 		s.workingDir = filepath.Join(s.config.tempDir, "sessions", stableID("server"))
 	}
-	workingPath := filepath.Join(s.workingDir,
-		fmt.Sprintf("library-%04d", len(s.workingLibraries)+1), "library.sqlite")
-	if s.store.isLibraryFile(sourcePath) {
-		if err := copyFile(sourcePath, workingPath); err != nil {
+	workingPath := draftLibraryPath(s.config.tempDir, filepath.Base(s.workingDir), sourcePath)
+	if !s.store.isLibraryFile(workingPath) && s.store.isLibraryFile(sourcePath) {
+		if err := s.store.copyLibrary(sourcePath, workingPath); err != nil {
 			return "", err
 		}
+	}
+	if s.store.isLibraryFile(workingPath) {
 		if info, err := s.store.getLibraryInfo(workingPath); err == nil {
 			s.librarySources[info.LibraryID] = sourcePath
 		}
-	} else if err := os.MkdirAll(filepath.Dir(workingPath), 0o755); err != nil {
-		return "", err
 	}
 	s.workingLibraries[key] = workingPath
 	s.persistRestartStateLocked()
@@ -588,44 +598,12 @@ func (s *service) commitWorkingLibraryLocked(id string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	library, err := s.store.readLibrary(workingPath, false)
+	library, err := s.store.getLibraryInfo(workingPath)
 	if err != nil {
 		return "", err
 	}
-	commitDir := filepath.Join(s.workingDir, "commits", stableID("commit"))
-	candidatePath := filepath.Join(commitDir, "library.sqlite")
-	defer os.RemoveAll(commitDir)
-	if err = s.store.writeLibrary(candidatePath, library); err != nil {
+	if err = s.store.copyLibrary(workingPath, sourcePath); err != nil {
 		return "", err
-	}
-	if err = os.MkdirAll(filepath.Dir(sourcePath), 0o755); err != nil {
-		return "", err
-	}
-	backupDir := filepath.Join(s.workingDir, "backups")
-	backupPath := filepath.Join(backupDir, stableID("library")+".sqlite")
-	hasSource := s.store.isLibraryFile(sourcePath)
-	if hasSource {
-		if err = os.MkdirAll(backupDir, 0o755); err != nil {
-			return "", err
-		}
-		if err = os.Rename(sourcePath, backupPath); err != nil {
-			return "", err
-		}
-	}
-	restore := func() {
-		_ = os.Remove(sourcePath)
-		if hasSource {
-			_ = os.Rename(backupPath, sourcePath)
-		}
-	}
-	if err = os.Rename(candidatePath, sourcePath); err != nil {
-		if copyErr := copyFile(candidatePath, sourcePath); copyErr != nil {
-			restore()
-			return "", copyErr
-		}
-	}
-	if hasSource {
-		_ = os.Remove(backupPath)
 	}
 	s.registerLibrarySource(library.LibraryID, sourcePath)
 	s.rememberLibraryName(s.libraryNameFromPath(sourcePath))
@@ -647,7 +625,11 @@ func (s *service) cleanupTemporaryFiles() {
 		return
 	}
 	if s.workingDir != "" {
-		_ = os.RemoveAll(s.workingDir)
+		s.draftMu.Lock()
+		defer s.draftMu.Unlock()
+		if err := s.deleteOperationSession(); err != nil {
+			log.Printf("Could not clean temporary session: %v", err)
+		}
 	}
 }
 
@@ -1398,6 +1380,11 @@ func (s *service) handleWaveLibrary(writer http.ResponseWriter, request *http.Re
 		if incoming.LibraryID == "" && existing != nil {
 			incoming.LibraryID = existing.LibraryID
 		}
+		if existing != nil {
+			// Parameter edits have their own revision-checked endpoint. A wave
+			// snapshot from another window must not overwrite this catalog.
+			incoming.Parameters = existing.Parameters
+		}
 		if existing != nil && incoming.LibraryID != existing.LibraryID {
 			sendJSON(writer, 409, map[string]any{
 				"error": "Library identity conflict", "libraryId": existing.LibraryID,
@@ -1597,7 +1584,8 @@ func (s *service) serveStatic(writer http.ResponseWriter, request *http.Request)
 		return
 	}
 	realTarget := canonicalExistingPath(target)
-	if !pathInside(canonicalExistingPath(s.config.rootDir), realTarget) {
+	if !pathInside(canonicalExistingPath(s.config.rootDir), realTarget) ||
+		pathInside(canonicalExistingPath(s.config.tempDir), realTarget) {
 		http.NotFound(writer, request)
 		return
 	}
@@ -1632,6 +1620,8 @@ func (s *service) routes() http.Handler {
 			http.StatusFound)
 	})
 	mux.HandleFunc("/api/server-info", method(http.MethodGet, s.handleServerInfo))
+	mux.HandleFunc("/api/tool-version", s.handleToolVersion)
+	mux.HandleFunc("/api/wave-parameters", s.handleWaveParameters)
 	mux.HandleFunc("/api/client-connect", method(http.MethodPost, s.handleClientConnect))
 	mux.HandleFunc("/api/client-disconnect", method(http.MethodPost, s.handleClientDisconnect))
 	mux.HandleFunc("/api/client-session", method(http.MethodGet, s.handleClientSession))
@@ -1700,6 +1690,11 @@ func listenLocal(port int) (net.Listener, error) {
 }
 
 func (s *service) run() error {
+	unlock, lockErr := toolInstallationLock(s.config.rootDir, false)
+	if lockErr != nil {
+		return lockErr
+	}
+	defer unlock()
 	s.registerProtocolHandler()
 	listener, err := listenLocal(s.config.port)
 	if err != nil {
@@ -1753,6 +1748,21 @@ func main() {
 	configuration, err := parseConfig()
 	if err != nil {
 		log.Fatalf("VisualWaveDrom startup failed: %v", err)
+	}
+	if configuration.releaseVersion != "" {
+		if _, err = makeToolHistory(configuration.rootDir, configuration.releaseVersion, configuration.releaseNotes); err != nil {
+			log.Fatal(err)
+		}
+		if err = makeToolRelease(configuration.rootDir, configuration.htmlName, configuration.releaseVersion); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	if configuration.checkToolUpdates {
+		if err = checkToolVersionBeforeLaunch(configuration); err != nil {
+			log.Fatal(err)
+		}
+		return
 	}
 	instance, err := newService(configuration)
 	if err != nil {

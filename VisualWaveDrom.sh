@@ -68,6 +68,13 @@ if (( $# > 0 )) && [[ "$1" != --* ]]; then
   set -- --open-url "$OPEN_URL" "$@"
 fi
 cd -- "$SCRIPT_DIR" || exit 1
+mkdir -p -- "$SCRIPT_DIR/.tmp" || exit 1
+UPDATER_EXE="$(mktemp "$SCRIPT_DIR/.tmp/version-check-XXXXXX")" || exit 1
+trap 'rm -f -- "$UPDATER_EXE"' EXIT
+cp -- "$SERVER_EXE" "$UPDATER_EXE" && chmod +x "$UPDATER_EXE" || exit 1
+"$UPDATER_EXE" --root "$SCRIPT_DIR" --html "$HTML_FILE_NAME" --check-tool-updates || exit 1
+rm -f -- "$UPDATER_EXE"
+trap - EXIT
 exec "$SERVER_EXE" \
   --root "$SCRIPT_DIR" \
   --html "$HTML_FILE_NAME" \

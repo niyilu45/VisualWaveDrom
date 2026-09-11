@@ -18,6 +18,16 @@ if /i "%~1"=="--check-runtime" (
   exit /b %ERRORLEVEL%
 )
 
+rem Run the updater outside bin so Windows can replace the server executable.
+if not exist "%PROJECT_ROOT%\.tmp" mkdir "%PROJECT_ROOT%\.tmp"
+set "UPDATER_EXE=%PROJECT_ROOT%\.tmp\version-check-%RANDOM%-%RANDOM%.exe"
+copy /b "%SERVER_EXE%" "%UPDATER_EXE%" >nul
+if errorlevel 1 goto :update_failed
+"%UPDATER_EXE%" --root "%PROJECT_ROOT%" --html "%HTML_FILE_NAME%" --check-tool-updates
+set "UPDATE_EXIT_CODE=%ERRORLEVEL%"
+del /q "%UPDATER_EXE%" >nul 2>&1
+if not "%UPDATE_EXIT_CODE%"=="0" goto :update_failed
+
 if "%~1"=="" (
   "%SERVER_EXE%" --root "%PROJECT_ROOT%" --html "%HTML_FILE_NAME%" --library "%WAVE_LIBRARY_PATH%" --protocol-handler "%~f0"
 ) else (
@@ -26,6 +36,11 @@ if "%~1"=="" (
 set "VWD_EXIT_CODE=%ERRORLEVEL%"
 if not "%VWD_EXIT_CODE%"=="0" pause
 exit /b %VWD_EXIT_CODE%
+
+:update_failed
+echo [ERROR] Tool version check or update failed. No wave libraries were changed.
+pause
+exit /b 1
 
 :server_missing
 echo.

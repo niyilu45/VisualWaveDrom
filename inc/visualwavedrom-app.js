@@ -1135,6 +1135,7 @@ ${lines.join('\n')}`;
     let applyingWaveLibraryBundle = false;
     let pendingWaveCopyDocumentName = '';
     let pendingWaveCopyButton = null;
+    let pendingWaveCopyCompatibility = null;
     let waveLibrarySyncChannel = null;
     const scopeWindowOpenStates = new Map();
     const scopeWindowRefs = new Map();
@@ -11932,6 +11933,8 @@ ${lines.join('\n')}`;
       });
 
       const groupMap = buildGroupSourceMap(jsonText);
+      let parameterGroupSource = null;
+      try { parameterGroupSource = JSON.parse(jsonText); } catch (_) { /* Source mapping handles invalid JSON. */ }
       const lanes = getWaveLaneGroups(svg);
       if (!groupMap.length) {
         refreshGroupSelection(svg, groupMap);
@@ -12211,7 +12214,7 @@ ${lines.join('\n')}`;
       const allGroupLabelTargets = [];
 
       groupMap.forEach((group, index) => {
-        const label = String(group.label || '').trim();
+        const label = window.VisualWaveDromParameters.text(String(group.label || '').trim(), parameterGroupSource);
         if (!label) return;
 
         const rows = laneBoxes
@@ -12292,6 +12295,7 @@ ${lines.join('\n')}`;
           hasFallback: !!fallbackRect
         });
         labelTargets.forEach((targetEl) => {
+          targetEl.dataset.parameterHint = window.VisualWaveDromParameters.details(group.label, parameterGroupSource);
           targetEl.dataset.vwdGroupIndex = String(index);
           targetEl.dataset.vwdGroupLabel = '1';
           if (Number.isFinite(group.labelStart)) {
@@ -12663,6 +12667,9 @@ ${lines.join('\n')}`;
         if (!parsed[field] && !usesTitleAsHead) return;
 
         textEl.classList.add('wave-headfoot-text');
+        textEl.dataset.parameterHint = window.VisualWaveDromParameters.details(
+          usesTitleAsHead ? parsed.title : parsed[field].text, parsed
+        );
         if (usesTitleAsHead) textEl.classList.add('wave-title-text');
         textEl.addEventListener('click', (e) => {
           if (!isTextEditModeActive()) return;
@@ -13235,10 +13242,15 @@ ${lines.join('\n')}`;
         }
 
         attachSignalNameEdit(lane, entry, handleLanePointSelect);
+        const parameterNameText = lane.querySelector('text.info');
+        if (parameterNameText) parameterNameText.dataset.parameterHint = window.VisualWaveDromParameters.details(
+          entry.signal.name, documentSource || parsedSource
+        );
 
         const drawGroup = laneDrawGroup;
         if (drawGroup) {
           const dataTexts = drawGroup.querySelectorAll('text');
+          const parameterData = Array.isArray(entry.signal.data) ? entry.signal.data : normalizeWaveDataValues(entry.signal.data);
           dataTexts.forEach((textEl, dataIdx) => {
             if (textEl.dataset.vwdDataBound === '1') return;
             textEl.dataset.vwdDataBound = '1';
@@ -13247,6 +13259,9 @@ ${lines.join('\n')}`;
               ? renderContext.dataIndices[dataIdx]
               : dataIdx;
             textEl.dataset.vwdDataIndex = String(fullDataIndex);
+            textEl.dataset.parameterHint = window.VisualWaveDromParameters.details(
+              parameterData[fullDataIndex], documentSource || parsedSource
+            );
             textEl.classList.add('wave-data-text');
             textEl.addEventListener('click', (e) => {
               if (isTextEditModeActive()) return;
@@ -13262,6 +13277,14 @@ ${lines.join('\n')}`;
       restoreWaveSelection(lanes, sourceMap);
       attachGroupInteractivity(jsonText);
       attachEdgeInteractivity(jsonText, parsedSource);
+      let parameterEdgeSource = documentSource;
+      if (!parameterEdgeSource) {
+        try { parameterEdgeSource = JSON.parse(jsonText); } catch (_) { /* Keep malformed JSON editable. */ }
+      }
+      svg.querySelectorAll('.wave-edge-label-text').forEach((node) => {
+        const edge = parameterEdgeSource && (parameterEdgeSource.edge || [])[Number(node.dataset.vwdEdgeIndex)];
+        node.dataset.parameterHint = window.VisualWaveDromParameters.details(edge, parameterEdgeSource);
+      });
       // Rendering may synthesize head.text from title; edits must target the original JSON.
       attachHeadFootInteractivity(jsonText, documentSource || parsedSource);
       attachGlobalDescribeInteractivity(jsonText, parsedSource);
@@ -13469,6 +13492,12 @@ ${lines.join('\n')}`;
         maxHighlightLength: 10000,
         crudeMeasuringFrom: 10000
       });
+      codeMirrorEditor.addOverlay({ token(stream) {
+        if (stream.match(/\{\$[^{}\s]+\}/)) return 'parameter';
+        if (stream.match('{$', false)) { stream.next(); return null; }
+        while (!stream.eol() && !stream.match(/\{\$/, false)) stream.next();
+        return null;
+      } });
       codeMirrorEditor.setOption(
         'cursorScrollMargin',
         Math.max(0, codeMirrorEditor.defaultTextHeight() * 2)
@@ -13699,6 +13728,7 @@ ${lines.join('\n')}`;
         hscale: raw.hscale,
         waveEditMode: raw.waveEditMode,
         presentation: typeof raw.presentation === 'string' ? raw.presentation : undefined,
+        parameterTables: Array.isArray(raw.parameterTables) ? raw.parameterTables.slice() : [],
         revision: Number.isInteger(raw.revision) && raw.revision >= 0 ? raw.revision : 0,
         savedAt: raw.savedAt || new Date().toISOString(),
         deferred,
@@ -13800,8 +13830,9 @@ ${lines.join('\n')}`;
       return changed ? prepared : signals;
     }
 
-    function getWaveRenderSource(source) {
+    function getWaveRenderSource(source, parametersResolved) {
       if (!source || typeof source !== 'object') return source;
+      if (!parametersResolved) source = window.VisualWaveDromParameters.resolve(source);
       const signal = prepareEmptyWaveRowsForRender(source.signal);
       if (signal !== source.signal) source = Object.assign({}, source, { signal });
       const title = typeof source.title === 'string' ? source.title.trim() : '';
@@ -13814,8 +13845,10 @@ ${lines.join('\n')}`;
 
     function getSavedTagTitle(tag) {
       if (!tag) return '';
-      if (tag.name !== editingWaveDocumentName && tag.titleCache) return tag.titleCache;
-      return getWaveDocumentMeta(tag, true).title || tag.name || '未命名波形图';
+      const raw = tag.name !== editingWaveDocumentName && tag.titleCache
+        ? tag.titleCache : getWaveDocumentMeta(tag, true).title || tag.name || '未命名波形图';
+      const source = tag.deferred ? tag : getWaveDocumentMeta(tag, true).source;
+      return window.VisualWaveDromParameters.text(raw, source);
     }
 
     function getWaveDocumentDescription(tag) {
@@ -13832,10 +13865,10 @@ ${lines.join('\n')}`;
       if (!documentName || !navTreeState) return false;
       const tag = getSavedTagByName(documentName);
       if (!tag) return false;
-      const meta = documentName === editingWaveDocumentName ? getWaveDocumentMeta(tag, true) : null;
+      const meta = getWaveDocumentMeta(tag, documentName === editingWaveDocumentName);
       if (meta && meta.error) return false;
-      const title = (meta && meta.title) || getSavedTagTitle(tag) || tag.name || '未命名波形图';
-      tag.titleCache = title;
+      tag.titleCache = (meta && meta.title) || tag.titleCache || tag.name || '未命名波形图';
+      const title = getSavedTagTitle(tag);
       if (!force && navDocumentTitleCache.get(documentName) === title) return false;
       navDocumentTitleCache.set(documentName, title);
       const parent = findNavDocumentParent(navTreeState, documentName);
@@ -13971,6 +14004,7 @@ ${lines.join('\n')}`;
       return {
         kind: WAVE_LIBRARY_KIND,
         version: 2,
+        parameters: window.VisualWaveDromParameters.getCatalog(),
         libraryId: currentWaveLibraryId || undefined,
         updatedAt: new Date().toISOString(),
         documents,
@@ -15382,7 +15416,7 @@ ${lines.join('\n')}`;
           currentWaveLibraryId = summary.libraryId;
         } else if (hasChanges) {
           const payload = buildWaveLibraryStatePayload({ includeStructure: waveLibraryStructureDirty });
-          if (singleWaveViewActive) {
+          if (currentWaveLibraryId) {
             const restored = await browserWaveLibraryStore.loadPersisted();
             if (!restored) throw new Error('浏览器 SQLite 波形库不存在');
             const latestLibrary = browserWaveLibraryStore.libraryRow();
@@ -15455,6 +15489,7 @@ ${lines.join('\n')}`;
         }
         currentWaveLibraryFile = fileName || currentWaveLibraryFile;
         currentWaveLibraryId = String(bundle.libraryId || currentWaveLibraryId || '');
+        window.VisualWaveDromParameters.setCatalog(bundle.parameters, currentWaveLibraryId);
         savedTags = bundle.documents.map(normalizeSavedTag).filter(Boolean);
         rebuildSavedTagIndex();
         persistSavedTags({ immediate: true });
@@ -15528,6 +15563,7 @@ ${lines.join('\n')}`;
     async function importWaveLibraryFile(file) {
       if (!file) return;
       try {
+        await window.VisualWaveDromParameters.flush();
         const store = await ensureBrowserWaveLibraryStore();
         const bytes = new Uint8Array(await file.arrayBuffer());
         const sqliteHeader = 'SQLite format 3\0';
@@ -15554,6 +15590,7 @@ ${lines.join('\n')}`;
     }
 
     async function loadServerWaveLibrary(fileName) {
+      await window.VisualWaveDromParameters.flush();
       const response = await fetch('/api/wave-library?summary=1&file=' + encodeURIComponent(fileName));
       if (!response.ok) throw new Error('load failed');
       const bundle = await response.json();
@@ -18515,7 +18552,7 @@ ${lines.join('\n')}`;
             clearHistory: false
           });
         }
-        const renderSource = bigWaveWindow ? getWaveRenderSource(bigWaveWindow.source) : fullSource;
+        const renderSource = bigWaveWindow ? getWaveRenderSource(bigWaveWindow.source, true) : fullSource;
 
         const displayDiv = document.createElement('div');
         displayDiv.id = 'wave-display-0';
@@ -18541,11 +18578,13 @@ ${lines.join('\n')}`;
           renderConnectionEdgeList(fullSource);
           fitWaveSvgToContent();
           setupFrozenWaveLabels(waveContainer);
+          window.VisualWaveDromParameters.decorate(waveContainer, documentSource);
           bindJsonWindowScroller(waveContainer);
           renderBigWaveNavigator();
           lastRenderedWaveText = jsonText;
           lastRenderedWaveSource = fullSource;
           if (editingWaveDocumentName) {
+            refreshWaveDocumentCard(editingWaveDocumentName);
             schedulePresenterDocumentSync(editingWaveDocumentName);
           }
           vwdMark('renderWaveform:done');
@@ -19563,7 +19602,9 @@ ${lines.join('\n')}`;
         detachOutsidePointerHandler();
         if (doneButton && doneButton.isConnected) doneButton.remove();
         descriptionEl.classList.remove('editing');
-        descriptionEl.textContent = value || '暂无波形图说明';
+        const parameterSource = getWaveDocumentMeta(tag, true).source;
+        descriptionEl.textContent = window.VisualWaveDromParameters.text(value, parameterSource) || '暂无波形图说明';
+        descriptionEl.dataset.parameterHint = window.VisualWaveDromParameters.details(value, parameterSource);
         descriptionEl.classList.toggle('empty', !value);
         descriptionEl.title = '点击编辑波形图说明';
         updateUndoRedoButtons();
@@ -19904,16 +19945,54 @@ ${lines.join('\n')}`;
       if (waveCopyModal) waveCopyModal.hidden = true;
       pendingWaveCopyDocumentName = '';
       pendingWaveCopyButton = null;
+      pendingWaveCopyCompatibility = null;
     }
 
     function openWaveCopyModal(documentName, button) {
       if (!waveCopyModal || !documentName) return;
       pendingWaveCopyDocumentName = documentName;
       pendingWaveCopyButton = button || null;
+      pendingWaveCopyCompatibility = null;
+      document.getElementById('wave-copy-standard').hidden = false;
+      document.getElementById('wave-copy-compatibility').hidden = true;
+      document.getElementById('wave-copy-modal-title').textContent = '选择复制格式（Word / Markdown）';
       waveCopyModal.hidden = false;
       const first = waveCopyModal.querySelector('[data-copy-mode]');
       if (first) requestAnimationFrame(() => first.focus());
       vwdDebugLog('wave-screenshot', { phase: 'chooser-open', documentName });
+    }
+
+    function openWaveCopyCompatibility(documentName, html, plainText) {
+      pendingWaveCopyCompatibility = { documentName, html, plainText };
+      document.getElementById('wave-copy-standard').hidden = true;
+      document.getElementById('wave-copy-compatibility').hidden = false;
+      document.getElementById('wave-copy-modal-title').textContent = 'Word 带链接图片';
+      document.getElementById('wave-copy-compatibility-status').textContent =
+        '浏览器未完成自动复制。截图和链接已准备好，请点击兼容复制。';
+      waveCopyModal.hidden = false;
+      document.getElementById('wave-copy-compatibility-confirm').focus({ preventScroll: true });
+      vwdDebugLog('wave-screenshot', { phase: 'compatibility-ready', documentName });
+    }
+
+    function confirmWaveCopyCompatibility() {
+      const pending = pendingWaveCopyCompatibility;
+      if (!pending) return;
+      try {
+        window.VisualWaveDromImageClipboard.copyHtml(pending.html, pending.plainText);
+        closeWaveCopyModal();
+        setStatus(true, '带链接图片已兼容复制，可粘贴到 Word');
+        vwdDebugLog('wave-screenshot', {
+          phase: 'success', documentName: pending.documentName, mode: 'linked-image', method: 'copy-event'
+        });
+      } catch (error) {
+        document.getElementById('wave-copy-compatibility-status').textContent =
+          '浏览器仍未允许复制（' + error.name + '）。请检查权限或改用其他浏览器，并复制 Debug Mode 日志。';
+        vwdDebugLog('wave-screenshot', {
+          phase: 'compatibility-error', documentName: pending.documentName,
+          name: error.name, message: error.message,
+          capabilities: window.VisualWaveDromImageClipboard.capabilities()
+        });
+      }
     }
 
     function closeWaveScreenshotRangeModal(result) {
@@ -20053,7 +20132,7 @@ ${lines.join('\n')}`;
       host.appendChild(display);
       document.body.appendChild(host);
       try {
-        WaveDrom.RenderWaveForm(0, getWaveRenderSource(renderWindow.source), prefix, false);
+        WaveDrom.RenderWaveForm(0, getWaveRenderSource(renderWindow.source, true), prefix, false);
         const svg = display.querySelector('svg');
         if (!svg) throw new Error('所选列范围未生成 SVG');
         alignWaveDataToCycleGrid(svg);
@@ -20084,10 +20163,9 @@ ${lines.join('\n')}`;
         if (!tag) return false;
       }
       const browserCompatibility = getBrowserCompatibilityState();
-      const canWriteImageClipboard = browserCompatibility.family !== 'firefox'
-        && typeof window.ClipboardItem === 'function'
-        && !!navigator.clipboard
-        && typeof navigator.clipboard.write === 'function';
+      const clipboardApi = window.VisualWaveDromImageClipboard;
+      const clipboardCapabilities = clipboardApi.capabilities();
+      const canWriteImageClipboard = clipboardCapabilities.asyncWrite;
       let screenshotSource;
       let screenshotMetrics;
       try {
@@ -20112,6 +20190,10 @@ ${lines.join('\n')}`;
       const deepLink = needsDeepLink ? getWaveDocumentDeepLink(documentName) : '';
       if (needsDeepLink && !deepLink) {
         setStatus(false, '带链接复制仅支持服务模式，并且需要已加载波形库');
+        vwdDebugLog('wave-screenshot', {
+          phase: 'link-unavailable', documentName, mode,
+          serverMode: waveLibraryServerMode, hasLibraryId: !!currentWaveLibraryId
+        });
         return false;
       }
 
@@ -20120,13 +20202,15 @@ ${lines.join('\n')}`;
       button.classList.add('copying');
       button.title = '正在生成波形图截图';
       let temporaryScreenshot = null;
+      let screenshotStage = 'render';
       vwdDebugLog('wave-screenshot', {
         phase: 'start',
         documentName,
         mode,
         start: screenshotRange.start,
         end: screenshotRange.end,
-        totalColumns: screenshotMetrics.maxWaveLength
+        totalColumns: screenshotMetrics.maxWaveLength,
+        capabilities: clipboardCapabilities
       });
       try {
         let svg;
@@ -20145,7 +20229,7 @@ ${lines.join('\n')}`;
         }
         if (!svg) throw new Error('当前波形图未成功渲染，无法截图');
         const renderPromise = renderWaveSvgScreenshot(svg);
-        if (!canWriteImageClipboard) {
+        if (!canWriteImageClipboard && mode !== 'linked-image') {
           const result = await renderPromise;
           const titleText = getSavedTagTitle(tag) || 'VisualWaveDrom';
           const safeTitle = titleText.replace(/[\\/:*?"<>|]+/g, '_').slice(0, 96) || 'VisualWaveDrom';
@@ -20176,9 +20260,10 @@ ${lines.join('\n')}`;
         }
         const blobPromise = renderPromise.then((result) => result.blob);
         let clipboardData = { 'image/png': blobPromise };
+        let htmlPromise = null;
         if (mode === 'linked-image' || mode === 'linked-markdown') {
           const titleText = getSavedTagTitle(tag);
-          const htmlPromise = blobPromise
+          htmlPromise = blobPromise
             .then(blobToDataUrl)
             .then((dataUrl) => {
               const escapedHoverHint = escapeHtmlAttribute(WAVE_LINK_HOVER_HINT);
@@ -20199,22 +20284,34 @@ ${lines.join('\n')}`;
           const plainText = mode === 'linked-markdown'
             ? buildWaveMarkdownLink(titleText, deepLink)
             : deepLink;
-          clipboardData = mode === 'linked-markdown'
-            ? {
-                'text/html': htmlPromise,
-                'image/png': blobPromise,
-                'text/plain': Promise.resolve(new Blob([plainText], { type: 'text/plain' }))
-              }
-            : clipboardData;
-          if (mode === 'linked-image') {
-            clipboardData['text/html'] = htmlPromise;
-            clipboardData['text/plain'] = Promise.resolve(
-              new Blob([plainText], { type: 'text/plain' })
-            );
-          }
+          clipboardData = {
+            'text/html': htmlPromise,
+            'image/png': blobPromise,
+            'text/plain': new Blob([plainText], { type: 'text/plain' })
+          };
         }
-        const clipboardItem = new ClipboardItem(clipboardData);
-        await navigator.clipboard.write([clipboardItem]);
+        screenshotStage = 'clipboard';
+        let clipboardResult;
+        try {
+          clipboardResult = await clipboardApi.write(clipboardData, {
+            allowHtmlOnly: mode === 'linked-image',
+            onAttempt: (attempt) => vwdDebugLog('wave-screenshot', Object.assign({
+              phase: 'clipboard-attempt', documentName, mode
+            }, attempt))
+          });
+        } catch (error) {
+          // Rendering errors must not be reported as clipboard permission failures.
+          screenshotStage = 'render';
+          await renderPromise;
+          const html = htmlPromise ? await (await htmlPromise).text() : '';
+          screenshotStage = 'clipboard';
+          if (mode !== 'linked-image' || !html) throw error;
+          vwdDebugLog('wave-screenshot', {
+            phase: 'clipboard-fallback', documentName, mode, name: error.name, message: error.message
+          });
+          openWaveCopyCompatibility(documentName, html, deepLink);
+          return false;
+        }
         const result = await renderPromise;
         const titleText = getSavedTagTitle(tag);
         setStatus(true, mode === 'linked-markdown'
@@ -20233,6 +20330,7 @@ ${lines.join('\n')}`;
           inkPixels: result.inkPixels,
           blobSize: result.blob.size,
           mode,
+          method: clipboardResult.method,
           link: deepLink || undefined
         });
         window.setTimeout(() => {
@@ -20242,12 +20340,13 @@ ${lines.join('\n')}`;
         return true;
       } catch (error) {
         const message = error && error.message ? error.message : String(error);
-        setStatus(false, mode === 'linked-markdown'
-          ? '复制 Markdown 带链接图片失败，请检查浏览器剪贴板权限'
-          : (canWriteImageClipboard
-            ? '复制波形图截图失败，请检查浏览器剪贴板权限'
-            : '生成波形图 PNG 失败'));
-        vwdDebugLog('wave-screenshot', { phase: 'error', documentName, message });
+        setStatus(false, screenshotStage === 'clipboard'
+          ? '剪贴板写入失败（' + (error.name || 'Error') + '），请检查浏览器权限；详细原因见 Debug Mode'
+          : '生成波形图截图失败：' + message);
+        vwdDebugLog('wave-screenshot', {
+          phase: 'error', documentName, mode, stage: screenshotStage,
+          name: error.name, message, capabilities: clipboardCapabilities
+        });
         return false;
       } finally {
         if (temporaryScreenshot && typeof temporaryScreenshot.cleanup === 'function') {
@@ -20360,6 +20459,15 @@ ${lines.join('\n')}`;
       header.appendChild(screenshotButton);
       header.appendChild(scopeButton);
       header.appendChild(presenterButton);
+      const parameterButton = document.createElement('button');
+      parameterButton.type = 'button';
+      parameterButton.className = 'wave-document-parameters';
+      parameterButton.textContent = '链接参数表';
+      parameterButton.setAttribute('aria-haspopup', 'dialog');
+      parameterButton.addEventListener('click', () => {
+        void window.VisualWaveDromParameters.openLinks(documentName, parameterButton);
+      });
+      header.appendChild(parameterButton);
       header.appendChild(openButton);
       if (!singleWaveViewActive) header.appendChild(singleOpenButton);
       header.appendChild(deleteButton);
@@ -20635,6 +20743,7 @@ ${lines.join('\n')}`;
         }
         syncWaveDocumentDescriptionWidth(display);
         if (!useCanvas) setupFrozenWaveLabels(display);
+        window.VisualWaveDromParameters.decorate(display, meta.source || getWaveDocumentMeta(tag, false).source);
         entry.renderedContent = tag.content;
         entry.lastPreviewUse = ++waveLibraryPreviewUseSequence;
         setWavePreviewLoadingState(entry, false);
@@ -20777,7 +20886,9 @@ ${lines.join('\n')}`;
         entry.title.removeAttribute('tabindex');
       }
 
-      const descriptionText = getWaveDocumentDescription(tag);
+      const parameterSource = tag.deferred ? tag : getWaveDocumentMeta(tag, true).source;
+      const descriptionRaw = getWaveDocumentDescription(tag);
+      const descriptionText = window.VisualWaveDromParameters.text(descriptionRaw, parameterSource);
       if (!entry.description.querySelector('textarea')) {
         const nextDescription = descriptionText || '暂无波形图说明';
         if (entry.description.textContent !== nextDescription) {
@@ -20789,6 +20900,9 @@ ${lines.join('\n')}`;
       entry.description.classList.toggle('editable', descriptionEditable);
       const descriptionHint = descriptionEditable ? '点击编辑波形图说明' : '';
       if (entry.description.title !== descriptionHint) entry.description.title = descriptionHint;
+      entry.description.dataset.parameterHint = window.VisualWaveDromParameters.details(descriptionRaw, parameterSource);
+      const parameterTitle = parameterSource && (parameterSource.title || (parameterSource.head && parameterSource.head.text)) || tag.titleCache;
+      entry.title.dataset.parameterHint = window.VisualWaveDromParameters.details(parameterTitle, parameterSource);
 
       const observer = ensureWaveLibraryPreviewObserver();
       if (isEditingDocument) {
@@ -22392,6 +22506,8 @@ ${lines.join('\n')}`;
     }
 
     async function performCurrentWaveLibrarySave() {
+      try { await window.VisualWaveDromParameters.flush(); }
+      catch (error) { setStatus(false, '参数目录尚未保存：' + error.message); return false; }
       if (!waveLibraryServerMode) {
         try {
           flushPersistEditorJson();
@@ -22880,6 +22996,8 @@ ${lines.join('\n')}`;
       });
     }
     if (waveCopyCancel) waveCopyCancel.addEventListener('click', closeWaveCopyModal);
+    document.getElementById('wave-copy-compatibility-confirm')
+      .addEventListener('click', confirmWaveCopyCompatibility);
     if (waveScreenshotRangeCancel) {
       waveScreenshotRangeCancel.addEventListener('click', () => closeWaveScreenshotRangeModal(null));
     }
@@ -23589,6 +23707,87 @@ ${lines.join('\n')}`;
         if (singleWaveViewActive) renderWaveLibrary();
       });
     }
+
+    let parameterRefreshTimer = null;
+    window.VisualWaveDromParameters.mount({
+      identity: () => currentWaveLibraryId,
+      currentSource: () => JSON.parse(editor.value || '{}'),
+      status: (message) => setStatus(false, message),
+      saveLibrary: () => performCurrentWaveLibrarySave(),
+      source: async (name) => {
+        const tag = await ensureWaveDocumentLoaded(name);
+        if (!tag) throw new Error('波形图不存在');
+        return JSON.parse(name === editingWaveDocumentName ? editor.value : tag.content);
+      },
+      load: async () => {
+        if (waveLibraryServerMode) {
+          const response = await fetch('/api/wave-parameters?libraryId=' + encodeURIComponent(currentWaveLibraryId));
+          if (!response.ok) throw new Error('参数目录加载失败');
+          return response.json();
+        }
+        return withWaveLibraryWriteLock(async () => {
+          const store = await ensureBrowserWaveLibraryStore();
+          if (!await flushBrowserWaveLibrarySave({ lockHeld: true })) throw new Error('波形修改尚未保存');
+          if (!await store.loadPersisted() || store.libraryRow().libraryId !== currentWaveLibraryId) {
+            throw new Error('浏览器 SQLite 波形库已被替换，请重新载入波形库');
+          }
+          return store.readParameters();
+        });
+      },
+      save: async (parameters, revision) => {
+        if (waveLibraryServerMode) {
+          const response = await fetch('/api/wave-parameters?libraryId=' + encodeURIComponent(currentWaveLibraryId), {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ parameters, expectedRevision: revision })
+          });
+          const result = await response.json();
+          if (!response.ok) throw new Error(result.error || '参数目录保存失败');
+          return result;
+        }
+        return withWaveLibraryWriteLock(async () => {
+          const store = await ensureBrowserWaveLibraryStore();
+          if (!await flushBrowserWaveLibrarySave({ lockHeld: true })) throw new Error('波形修改尚未保存');
+          if (!await store.loadPersisted() || store.libraryRow().libraryId !== currentWaveLibraryId) {
+            throw new Error('浏览器 SQLite 波形库已被替换，请重新载入波形库');
+          }
+          const result = store.updateParameters(parameters, revision);
+          await store.persist();
+          return result;
+        });
+      },
+      bind: async (name, order) => {
+        const tag = await ensureWaveDocumentLoaded(name);
+        if (!tag) throw new Error('波形图不存在');
+        const parsed = JSON.parse(name === editingWaveDocumentName ? editor.value : tag.content);
+        parsed.parameterTables = order.slice();
+        const next = JSON.stringify(parsed, null, 2);
+        if (name === editingWaveDocumentName) {
+          pushUndoBeforeChange(next);
+          applyEditorChange(next, editor.selectionStart, editor.selectionEnd, { skipFocus: true });
+        } else {
+          const before = captureWaveLibrarySnapshot();
+          upsertSavedTag(name, Object.assign({}, tag, { content: next, parameterTables: order.slice() }), { skipSort: true });
+          activeTagName = before.activeTagName;
+          pushWaveLibraryHistory(before, captureWaveLibrarySnapshot());
+          refreshWaveDocumentCard(name); renderNavTree();
+        }
+        tag.parameterTables = order.slice();
+        if (waveLibraryServerMode) {
+          if (!await flushScheduledWaveLibraryServerSave()) throw new Error('参数表链接尚未保存，请重试');
+        } else if (!await flushBrowserWaveLibrarySave({ force: true })) throw new Error('参数表链接尚未保存，请重试');
+        setStatus(true, '已更新参数表链接');
+      },
+      changed: () => {
+        if (presenterWaveViewActive || scopeWaveViewActive) return;
+        waveDocumentMetaCache.clear(); navDocumentTitleCache.clear(); lastRenderedWaveText = null;
+        waveLibraryCardCache.forEach((entry) => { entry.renderedContent = null; });
+        clearTimeout(parameterRefreshTimer);
+        parameterRefreshTimer = setTimeout(() => {
+          if (window.VisualWaveDromParameters.page() !== 'wave' || inlineEditActive || !editor.value) return;
+          renderWaveform(editor.value); renderNavTree(); renderWaveLibrary();
+        }, 100);
+      }
+    });
 
     if (presenterWaveViewActive) {
       startPresenterWaveViewPage();

@@ -2,12 +2,10 @@ package main
 
 import (
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net/url"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -55,34 +53,16 @@ func loadServerRestart(configuration *config) (*serverRestartState, error) {
 	if !pathWithin(filepath.Join(configuration.tempDir, "sessions"), directory) {
 		return nil, errors.New("invalid recovery directory")
 	}
-	data, err := os.ReadFile(filepath.Join(directory, "restart.json"))
+	saved, err := readRestartRecord(*configuration, sessionID)
 	if err != nil {
-		return nil, fmt.Errorf("recovery session is unavailable: %w", err)
-	}
-	var saved serverRestartState
-	if err = json.Unmarshal(data, &saved); err != nil {
 		return nil, err
 	}
 	if !samePath(saved.Root, configuration.rootDir) || saved.HTML != configuration.htmlName ||
 		!samePath(saved.Library, configuration.configuredLibrary) || saved.Port < 1 || saved.Port > 65535 {
 		return nil, errors.New("recovery session does not match the launcher settings")
 	}
-	for source, working := range saved.WorkingLibraries {
-		if !pathWithin(directory, working) || !strings.EqualFold(filepath.Base(working), "library.sqlite") ||
-			(!samePath(source, configuration.configuredLibrary) && !pathWithin(configuration.waveDir, source)) {
-			return nil, errors.New("invalid recovery library path")
-		}
-		if _, err = os.Stat(working); err != nil {
-			return nil, fmt.Errorf("recovery library is unavailable: %w", err)
-		}
-	}
-	for _, source := range saved.LibrarySources {
-		if saved.WorkingLibraries[normalizedPath(source)] == "" {
-			return nil, errors.New("recovery library mapping is incomplete")
-		}
-	}
-	if len(saved.WorkingLibraries) == 0 {
-		return nil, errors.New("recovery session contains no libraries")
+	if err = validateRestartLibraries(*configuration, directory, saved, false); err != nil {
+		return nil, err
 	}
 	configuration.port = saved.Port
 	configuration.noOpen = true
@@ -100,7 +80,7 @@ func (s *service) persistRestartStateLocked() {
 			sources[id] = source
 		}
 	}
-	err := writeJSONAtomically(filepath.Join(s.workingDir, "restart.json"), serverRestartState{
+	err := writeOperationRecord(s.config.tempDir, "session:"+filepath.Base(s.workingDir), serverRestartState{
 		Root: s.config.rootDir, HTML: s.config.htmlName, Library: s.config.configuredLibrary,
 		Port: s.config.port, WorkingLibraries: s.workingLibraries, LibrarySources: sources,
 	})
@@ -113,7 +93,7 @@ func (s *service) recoveryDetails() map[string]string {
 	if s.config.protocolHandlerPath == "" || s.config.port < 1 {
 		return nil
 	}
-	if _, err := os.Stat(filepath.Join(s.workingDir, "restart.json")); err != nil {
+	if _, err := readRestartRecord(s.config, filepath.Base(s.workingDir)); err != nil {
 		return nil
 	}
 	sessionID := filepath.Base(s.workingDir)
