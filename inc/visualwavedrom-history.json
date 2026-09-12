@@ -1,5 +1,32 @@
 [
   {
+    "version": "2026.9.13.1",
+    "date": "2026-09-12T16:48:20Z",
+    "head": "ef56537f817b1ee956fbed2e536f76539248b5d3",
+    "notes": [
+      "参数行支持按住行号拖动调整位置，支持筛选状态下移动和撤销、重做，保留变量、公式、说明与原始行关系。",
+      "参数表新增单独打开按钮；独立窗口只加载参数表，保留编辑、撤销和保存波形库，服务模式与纯 HTML SQLite 模式均关联原库，不覆盖其他波形和预设。",
+      "变量值筛选支持 \u003e、\u003c、\u003e=、\u003c=，兼容负数、小数和科学计数法；公式按计算结果比较，保留普通文字筛选，错误条件给出提示。",
+      "变量名、变量值和说明编辑纳入统一撤销和重做；连续输入合并为一步，恢复原始公式，与行删除、行拖动的历史顺序一致，支持键盘和工具栏操作。",
+      "新增只读参数表比较，按变量名对齐显示值、公式原文、计算结果与说明差异，标出仅单侧存在、重复变量名和公式异常；支持搜索、只看差异、左右互换和分页。",
+      "已完成 Chrome、Edge 普通页面和独立窗口的局部验证，覆盖 SQLite 导出、跨窗口隔离、保存期间撤销、比较不修改数据以及桌面和窄屏布局。"
+    ],
+    "commits": [
+      {
+        "id": "ef56537f817b1ee956fbed2e536f76539248b5d3",
+        "date": "2026-09-13T00:46:26+08:00",
+        "title": "feat: extend parameter table editing and comparison",
+        "body": "Support row drag reordering with undo/redo and dedicated parameter table windows backed by the original library. Preserve waveform state and full SQLite library exports across standalone edits.\n\nAdd numeric value filters for \u003e, \u003c, \u003e= and \u003c= using evaluated formula values, with invalid-condition feedback and existing text matching retained.\n\nTrack grouped edits to names, values and descriptions in unified parameter undo/redo history. Restore raw formulas and integrate keyboard, toolbar, row deletion and reordering operations.\n\nAdd read-only two-table comparison by variable name with raw formula, result and description differences, missing entries, duplicate/error diagnostics, search, difference filtering, swap and pagination.\n\nVerified focused Chrome and Edge workflows in main/standalone views, service and file-based SQLite paths, history/persistence races, responsive layouts and comparison non-mutation."
+      },
+      {
+        "id": "116145c707c2c412f5e612435594b0d2a2ec60e4",
+        "date": "2026-09-12T23:28:31+08:00",
+        "title": "chore: publish release 2026.9.12.10"
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.9.12.10",
     "date": "2026-09-12T15:27:51Z",
     "head": "0f0f0581b3924ba5daa377cc8675c6cfa0155e06",
