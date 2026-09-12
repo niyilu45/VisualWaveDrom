@@ -32,7 +32,11 @@
 .parameter-grid tbody tr.selected { background: var(--surface-hover); outline: 1px solid var(--accent); outline-offset: -1px; }
 .parameter-grid td { border-bottom: 1px solid var(--border); padding: 5px 8px; vertical-align: top; }
 .parameter-cell { display: flex; align-items: flex-start; min-width: 0; }
-.parameter-row-select { flex: 0 0 32px; min-height: 34px; border: 0; background: transparent; color: var(--text-muted); font: inherit; font-variant-numeric: tabular-nums; cursor: pointer; }
+.parameter-row-select { display: inline-flex; align-items: center; gap: 2px; flex: 0 0 44px; min-height: 34px; padding: 0; border: 0; background: transparent; color: var(--text-muted); font: inherit; font-variant-numeric: tabular-nums; cursor: pointer; }
+.parameter-row-number { flex: 1; min-width: 0; font-size: .8em; }
+.parameter-row-error { display: inline-flex; flex: 0 0 14px; width: 14px; height: 14px; color: var(--error); }
+.parameter-row-error svg { width: 14px; height: 14px; }
+.parameter-row-error[hidden] { display: inline-flex; visibility: hidden; }
 .parameter-row-select:hover, tr.selected .parameter-row-select { color: var(--text); }
 .parameter-directory-actions, .parameter-row-actions { display: flex; align-items: center; gap: 6px; }
 .parameter-directory-actions .parameter-icon { flex: 1; border: 1px solid var(--border); }
@@ -42,6 +46,7 @@
 .parameter-value-cell { flex-direction: column; }
 .parameter-value-cell textarea { color: var(--text); }
 .parameter-value-cell textarea.parameter-formula-value:not(:focus) { color: #83bfff; }
+.parameter-value-cell textarea.parameter-negative-value:not(:focus) { color: var(--error); }
 .parameter-value-cell textarea[aria-invalid="true"] { border-color: var(--error); }
 .parameter-value-error { padding: 3px 9px; color: var(--error); font-size: .8rem; line-height: 1.5; overflow-wrap: anywhere; }
 .parameter-value-error[hidden] { display: none; }

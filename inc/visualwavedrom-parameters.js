@@ -1,6 +1,7 @@
 (function (global) {
   'use strict';
   const tokenPattern = /\{((?=[^{}]*\$)\s*(?:[$+\-.\d(]|(?:max|min)\s*\()[^{}]*)\}/g;
+  const parameterValuePattern = /\{(\s*(?:[$+\-.\d(]|(?:max|min)\s*\()[^{}]*)\}/g;
   const dataTokenPattern = /(?:\{(?=[^{}]*\$)\s*(?:[$+\-.\d(]|(?:max|min)\s*\()[^{}]*\}|\S)+/g;
   const numericPattern = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
   const clone = (value) => JSON.parse(JSON.stringify(value));
@@ -13,6 +14,7 @@
   const rowFilters = { name: '', val: '' };
   const clipboardKind = 'VisualWaveDromParametersClipboard';
   let parameterClipboard = null, clipboardRequest = 0;
+  let rowUndoStack = [], rowRedoStack = [];
   const menuHiddenStates = new WeakMap();
   const expanded = new Set(['']);
   const $ = (id) => document.getElementById(id);
@@ -64,8 +66,8 @@
     if (context.stack.length >= 128) return Object.assign(result, { formula: true, error: '变量依赖层级超过 128 层：' + name });
     context.stack.push({ row, name });
     try {
-      if (rawVal.includes('$')) {
-        const value = rawVal.replace(tokenPattern, (raw, expression) => {
+      if (rawVal.includes('{')) {
+        const value = rawVal.replace(parameterValuePattern, (raw, expression) => {
           result.formula = true;
           const evaluated = evaluate(expression, source, context);
           if (evaluated.error) { result.error = result.error || evaluated.error; return raw; }
@@ -97,6 +99,7 @@
   function evaluate(expression, source, state) {
     const context = state || { stack: [], values: new Map() };
     const variables = new Map();
+    const hasVariables = expression.includes('$');
     let offset = 0, depth = 0;
     function skipSpace() { while (/\s/.test(expression[offset] || '') && offset < expression.length) offset++; }
     function number(value) {
@@ -153,7 +156,7 @@
       skipSpace();
       const op = expression[offset];
       if (!op || !allowed.includes(op)) return '';
-      if (!/\s/.test(expression[offset - 1] || '') || !/\s/.test(expression[offset + 1] || '')) {
+      if (hasVariables && (!/\s/.test(expression[offset - 1] || '') || !/\s/.test(expression[offset + 1] || ''))) {
         throw new Error('运算符两侧至少保留一个空格');
       }
       offset++;
@@ -177,8 +180,9 @@
       return value;
     }
     try {
-      const result = sum(); skipSpace();
+      let result = sum(); skipSpace();
       if (offset !== expression.length) throw new Error('表达式格式错误：第 ' + (offset + 1) + ' 个字符附近有多余内容');
+      if (!hasVariables) result = number(result);
       return { value: String(result), variables: Array.from(variables.values()) };
     } catch (error) {
       return { error: error.message, variables: Array.from(variables.values()) };
@@ -372,6 +376,61 @@
     return '';
   }
   function isTextInput(target) { return !!(target && target.closest && target.closest('input,textarea,select,[contenteditable]:not([contenteditable="false"])')); }
+  function rowHistoryState() { return { canUndo: rowUndoStack.length > 0, canRedo: rowRedoStack.length > 0 }; }
+  function notifyRowHistory() { if (bridge && bridge.historyChanged) bridge.historyChanged(); }
+  function finishRowHistory(table, row, scrollTop) {
+    clipboardRequest++;
+    const switched = selectedTable !== table.id;
+    selectedTable = table.id; selectedFolder = table.parentId || ''; tableViewId = table.id; selectedRow = row;
+    if (switched) { rowFilters.name = ''; rowFilters.val = ''; }
+    changed(true, true);
+    const workspace = $('parameter-workspace');
+    let handle = workspace.querySelector('tr.selected .parameter-row-select');
+    if (row && !handle) {
+      rowFilters.name = ''; rowFilters.val = ''; selectedRow = row;
+      renderTable(); handle = workspace.querySelector('tr.selected .parameter-row-select');
+    }
+    const scroller = workspace.querySelector('.parameter-grid-scroll');
+    if (scroller) scroller.scrollTop = switched ? 0 : scrollTop;
+    workspace.tabIndex = -1;
+    (handle || workspace).focus({ preventScroll: true });
+    if (handle) handle.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
+  function deleteSelectedRow() {
+    if (activePage !== 'parameters' || modal) return false;
+    const table = catalog.tables.find((item) => item.id === selectedTable);
+    const index = table ? table.rows.indexOf(selectedRow) : -1;
+    if (index < 0) return false;
+    const scroller = $('parameter-workspace').querySelector('.parameter-grid-scroll');
+    // Retain the removed row and its neighbors, not a snapshot of unrelated edits.
+    rowUndoStack.push({ tableId: table.id, row: selectedRow, index, previous: table.rows[index - 1], next: table.rows[index + 1] });
+    if (rowUndoStack.length > 50) rowUndoStack.shift();
+    rowRedoStack = [];
+    table.rows.splice(index, 1);
+    finishRowHistory(table, null, scroller ? scroller.scrollTop : 0);
+    return true;
+  }
+  function applyRowHistory(redo) {
+    if (activePage !== 'parameters' || modal) return false;
+    const from = redo ? rowRedoStack : rowUndoStack, to = redo ? rowUndoStack : rowRedoStack;
+    const entry = from[from.length - 1]; if (!entry) return false;
+    const table = catalog.tables.find((item) => item.id === entry.tableId);
+    if (!table) return false;
+    const scroller = $('parameter-workspace').querySelector('.parameter-grid-scroll');
+    if (redo) {
+      const index = table.rows.indexOf(entry.row);
+      if (index < 0) return false;
+      entry.index = index; entry.previous = table.rows[index - 1]; entry.next = table.rows[index + 1];
+      table.rows.splice(index, 1);
+    } else {
+      const next = table.rows.indexOf(entry.next), previous = table.rows.indexOf(entry.previous);
+      const index = next >= 0 ? next : previous >= 0 ? previous + 1 : Math.min(entry.index, table.rows.length);
+      table.rows.splice(index, 0, entry.row);
+    }
+    from.pop(); to.push(entry);
+    finishRowHistory(table, redo ? null : entry.row, scroller ? scroller.scrollTop : 0);
+    return true;
+  }
   function onClipboardEvent(event) {
     const type = clipboardContext(event.target); if (!type) return;
     event.stopPropagation();
@@ -382,6 +441,17 @@
     if (event.type === 'copy') void copyParameters(type, event);
     else void pasteParameters(type, event);
   }
+  function parameterNameCounts(rows) {
+    const counts = new Map();
+    rows.forEach((row) => { const name = String(row.name || ''); counts.set(name, (counts.get(name) || 0) + 1); });
+    return counts;
+  }
+  function parameterRowNameError(row, counts) {
+    const name = String(row.name || '');
+    if (!name && !row.val && !row.description) return '';
+    if (!name || /[{}\s$]/.test(name)) return '变量名不能为空或包含空白、{}、$';
+    return counts.get(name) > 1 ? '变量名 ' + name + ' 重复' : '';
+  }
   function validate(value) {
     const ids = new Set();
     ['directories', 'tables', 'presets'].forEach((key) => value[key].forEach((item) => {
@@ -390,13 +460,10 @@
       if (!String(item.name || '').trim()) throw new Error('名称不能为空');
     }));
     value.tables.forEach((table) => {
-      const names = new Set();
+      const names = parameterNameCounts(table.rows);
       table.rows.forEach((row, index) => {
-        const name = String(row.name || '');
-        if (!name && !row.val && !row.description) return;
-        if (!name || /[{}\s$]/.test(name)) throw new Error(table.name + ' 第 ' + (index + 1) + ' 行：变量名不能为空或包含空白、{}、$');
-        if (names.has(name)) throw new Error(table.name + '：变量名 ' + name + ' 重复');
-        names.add(name);
+        const error = parameterRowNameError(row, names);
+        if (error) throw new Error(table.name + ' 第 ' + (index + 1) + ' 行：' + error);
       });
     });
   }
@@ -404,9 +471,12 @@
     generation++; cache = new WeakMap();
     if (bridge) bridge.changed();
   }
-  function changed(render) {
+  function changed(render, applyingRowHistory) {
+    if (!applyingRowHistory) rowRedoStack = [];
+    rowUndoStack = rowUndoStack.filter((entry) => catalog.tables.some((table) => table.id === entry.tableId));
     dirty++; failure = ''; invalidate();
     if (render) { renderTree(); renderTable(); }
+    notifyRowHistory();
     status('正在保存参数目录...');
     clearTimeout(timer); timer = setTimeout(() => { void flush().catch(() => {}); }, 220);
   }
@@ -431,11 +501,16 @@
   }
   function setCatalog(value, identity) {
     if (identity === libraryId && (dirty !== savedGeneration || Number(value && value.revision) < catalog.revision)) return;
-    catalog = normalize(value); libraryId = identity || ''; generation++; cache = new WeakMap();
+    const next = normalize(value);
+    const sameContent = identity === libraryId && (rowUndoStack.length || rowRedoStack.length)
+      && ['directories', 'tables', 'presets'].every((key) => JSON.stringify(catalog[key]) === JSON.stringify(next[key]));
+    if (sameContent) catalog.revision = next.revision;
+    else { catalog = next; rowUndoStack = []; rowRedoStack = []; }
+    libraryId = identity || ''; generation++; cache = new WeakMap();
     dirty = savedGeneration = 0; failure = '';
     if (!catalog.tables.some((table) => table.id === selectedTable)) selectedTable = '';
     if (!catalog.directories.some((dir) => dir.id === selectedFolder)) selectedFolder = '';
-    renderTree(); renderTable();
+    renderTree(); renderTable(); notifyRowHistory();
   }
   async function refresh() {
     if (!bridge || !bridge.identity()) throw new Error('波形库仍在加载，请稍后再试');
@@ -608,12 +683,7 @@
       parent.addEventListener('change', () => { table.parentId = parent.value; selectedFolder = parent.value; expanded.add(parent.value); changed(true); }); toolbar.append(parent);
       const addVariables = button('新增变量', () => openAddVariables(table.id, addVariables));
       addVariables.classList.add('parameter-add-variables'); toolbar.append(addVariables);
-      deleteRowButton = button('删除选中行', () => {
-        // Use the source row, never the filtered display index.
-        const index = table.rows.indexOf(selectedRow);
-        if (index < 0) return;
-        table.rows.splice(index, 1); selectedRow = null; changed(true);
-      }, 'trash');
+      deleteRowButton = button('删除选中行', deleteSelectedRow, 'trash');
       deleteRowButton.disabled = !selectedRow; toolbar.append(deleteRowButton);
       const rowActions = element('div', 'parameter-row-actions');
       rowActions.append(clipboardButton('row', 'copy', '复制行'), clipboardButton('row', 'paste', '粘贴行')); toolbar.append(rowActions);
@@ -660,7 +730,8 @@
     const valueSource = { parameterTables: [table.id] };
     function refreshValues() {
       const context = { stack: [], values: new Map() };
-      rowViews.forEach((view) => view.updateValue(context));
+      const names = parameterNameCounts(table.rows);
+      rowViews.forEach((view) => view.updateValue(context, names));
     }
     let selectedLine = null;
     function selectRow(row, line) {
@@ -683,7 +754,11 @@
         const input = element(field === 'name' ? 'input' : 'textarea');
         if (field === 'name') {
           const handle = button('选中第 ' + (index + 1) + ' 行', () => selectRow(row, line));
-          handle.className = 'parameter-row-select'; handle.textContent = index + 1;
+          handle.className = 'parameter-row-select';
+          const marker = element('span', 'parameter-row-error'); marker.hidden = true; marker.setAttribute('aria-hidden', 'true');
+          marker.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="lucide">' + paths.close + '</svg>';
+          handle.replaceChildren(marker, element('span', 'parameter-row-number', index + 1));
+          view.rowError = marker; view.rowHandle = handle; view.nameInput = input;
           fieldBox.append(handle);
         }
         input.value = row[field] == null ? '' : String(row[field]); input.setAttribute('aria-label', '第 ' + (index + 1) + ' 行 ' + field);
@@ -695,12 +770,22 @@
           const error = element('span', 'parameter-value-error'); error.hidden = true;
           error.id = 'parameter-value-error-' + index;
           input.setAttribute('aria-describedby', error.id);
-          view.updateValue = (context) => {
+          view.updateValue = (context, names) => {
             const result = resolveParameterRow(table, row, valueSource, context);
             view.valueResult = result;
+            const nameError = parameterRowNameError(row, names);
+            const rowError = [nameError, result.error].filter(Boolean).join('\n');
+            view.rowError.hidden = !rowError;
+            view.rowHandle.title = '选中第 ' + (index + 1) + ' 行' + (rowError ? '\n' + rowError : '');
+            if (rowError) view.rowHandle.setAttribute('aria-description', rowError);
+            else view.rowHandle.removeAttribute('aria-description');
+            view.nameInput.setAttribute('aria-invalid', String(!!nameError)); view.nameInput.title = nameError;
             const valueChanged = document.activeElement !== input && input.value !== result.val;
             if (valueChanged) input.value = result.val;
-            input.classList.toggle('parameter-formula-value', result.formula && !result.error);
+            const isFormula = result.formula && !result.error;
+            const numericValue = Number(result.val);
+            input.classList.toggle('parameter-formula-value', isFormula);
+            input.classList.toggle('parameter-negative-value', isFormula && Number.isFinite(numericValue) && numericValue < 0);
             input.setAttribute('aria-invalid', String(!!result.error));
             input.title = result.formula ? '公式：' + result.rawVal : '';
             error.hidden = !result.error; error.textContent = result.error;
@@ -711,7 +796,7 @@
         }
         input.addEventListener('input', () => {
           row[field] = input.value; resize(); changed(false);
-          if (field === 'name' || field === 'val') refreshValues();
+          if (field === 'name' || field === 'val' || !row.name) refreshValues();
         });
         input.addEventListener('blur', () => {
           refreshValues();
@@ -770,13 +855,21 @@
       else if (menuHiddenStates.has(section)) { section.hidden = menuHiddenStates.get(section); menuHiddenStates.delete(section); }
     });
     if (page === 'wave' && bridge) bridge.changed();
+    notifyRowHistory();
   }
   async function openLinks(documentName, anchor) {
     if (modal) return;
     try { await refresh(); } catch (error) { bridge.status(error.message); return; }
     let source;
     try { source = await bridge.source(documentName); } catch (error) { bridge.status(error.message); return; }
-    let order = linked(source).slice(), presetId = '', dragging = '';
+    let order = linked(source).slice(), presetId = typeof source.parameterPreset === 'string' ? source.parameterPreset : '', dragging = '';
+    // Older documents saved only the table order, so recover only an unambiguous preset.
+    if (!Object.prototype.hasOwnProperty.call(source, 'parameterPreset')) {
+      const matches = catalog.presets.filter((item) => Array.isArray(item.tableIds)
+        && item.tableIds.length === order.length && item.tableIds.every((tableId, index) => tableId === order[index]));
+      if (matches.length === 1) presetId = matches[0].id;
+    }
+    if (!catalog.presets.some((item) => item.id === presetId)) presetId = '';
     const overlay = element('div', 'modal-overlay parameter-modal');
     const dialog = element('div', 'modal-dialog parameter-link-dialog'); dialog.setAttribute('role', 'dialog'); dialog.setAttribute('aria-modal', 'true'); dialog.setAttribute('aria-labelledby', 'parameter-link-title');
     modal = overlay;
@@ -852,7 +945,7 @@
     search.addEventListener('input', renderLists); renderLists(); dialog.append(body);
     const footer = element('div', 'modal-footer'); const apply = button('应用', async () => {
       apply.disabled = true;
-      try { await flush(); await bridge.bind(documentName, order); close(); }
+      try { await flush(); await bridge.bind(documentName, order, presetId); close(); }
       catch (error) { message.textContent = error.message; }
       finally { apply.disabled = false; }
     }); apply.classList.add('modal-btn-primary'); footer.append(button('取消', close), apply); dialog.append(footer); overlay.append(dialog); document.body.append(overlay);
@@ -878,6 +971,11 @@
         const line = event.target.closest('tbody tr');
         if (line) { event.preventDefault(); line.querySelector('.parameter-row-select').focus({ preventScroll: true }); }
       }
+      if (event.isComposing || isTextInput(event.target)) return;
+      const action = bridge.historyShortcut ? bridge.historyShortcut(event) : '';
+      if (action === 'undo' || action === 'redo') { event.preventDefault(); applyRowHistory(action === 'redo'); return; }
+      if (event.key === 'Delete' && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey
+          && event.target.closest('#parameter-workspace')) { event.preventDefault(); deleteSelectedRow(); }
     }, true);
     global.addEventListener('copy', onClipboardEvent, true);
     global.addEventListener('paste', onClipboardEvent, true);
@@ -932,5 +1030,6 @@
     renderTree(); renderTable();
   }
   global.VisualWaveDromParameters = { mount, setCatalog, getCatalog: () => clone(catalog), resolve, text, details, decorate, resolveName,
-    openLinks, flush, refresh, page: () => activePage, pending: () => dirty !== savedGeneration };
+    openLinks, flush, refresh, page: () => activePage, pending: () => dirty !== savedGeneration,
+    historyState: rowHistoryState, undo: () => applyRowHistory(false), redo: () => applyRowHistory(true) };
 })(window);

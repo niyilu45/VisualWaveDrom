@@ -18653,6 +18653,11 @@ ${lines.join('\n')}`;
     function updateUndoRedoButtons() {
       const btnUndo = document.getElementById('btn-undo');
       const btnRedo = document.getElementById('btn-redo');
+      if (window.VisualWaveDromParameters.page() === 'parameters') {
+        const history = window.VisualWaveDromParameters.historyState();
+        btnUndo.disabled = !history.canUndo; btnRedo.disabled = !history.canRedo;
+        return;
+      }
       const pendingInlineEdit = hasPendingInlineEditorChange();
       btnUndo.disabled = !pendingInlineEdit
         && !directJsonEditDirty
@@ -18722,6 +18727,7 @@ ${lines.join('\n')}`;
     }
 
     function undo() {
+      if (window.VisualWaveDromParameters.page() === 'parameters') { window.VisualWaveDromParameters.undo(); return; }
       commitOpenTextEditors('before-undo');
       checkpointDirectJsonEdit('before-undo');
       const editorSequence = getLastHistorySequence(undoStack);
@@ -18770,6 +18776,7 @@ ${lines.join('\n')}`;
     }
 
     function redo() {
+      if (window.VisualWaveDromParameters.page() === 'parameters') { window.VisualWaveDromParameters.redo(); return; }
       commitOpenTextEditors('before-redo');
       checkpointDirectJsonEdit('before-redo');
       const editorSequence = getNextRedoSequence(redoStack);
@@ -23750,6 +23757,8 @@ ${lines.join('\n')}`;
     let parameterRefreshTimer = null;
     window.VisualWaveDromParameters.mount({
       identity: () => currentWaveLibraryId,
+      historyChanged: updateUndoRedoButtons,
+      historyShortcut: (event) => isUndoShortcut(event) ? 'undo' : isRedoShortcut(event) ? 'redo' : '',
       currentSource: () => JSON.parse(editor.value || '{}'),
       status: (message) => setStatus(false, message),
       saveLibrary: () => performCurrentWaveLibrarySave(),
@@ -23794,11 +23803,12 @@ ${lines.join('\n')}`;
           return result;
         });
       },
-      bind: async (name, order) => {
+      bind: async (name, order, presetId) => {
         const tag = await ensureWaveDocumentLoaded(name);
         if (!tag) throw new Error('波形图不存在');
         const parsed = JSON.parse(name === editingWaveDocumentName ? editor.value : tag.content);
         parsed.parameterTables = order.slice();
+        parsed.parameterPreset = typeof presetId === 'string' ? presetId : '';
         const next = JSON.stringify(parsed, null, 2);
         if (name === editingWaveDocumentName) {
           pushUndoBeforeChange(next);
