@@ -1,5 +1,30 @@
 [
   {
+    "version": "2026.9.12.9",
+    "date": "2026-09-12T12:51:26Z",
+    "head": "cdce154bc71f2fb307c54bf4cd0aa455509dabd5",
+    "notes": [
+      "修复重新打开波形图时参数值未自动替换：载入参数目录后，同时刷新参数解析缓存和波形显示缓存。",
+      "参数目录手动刷新与跨窗口同步复用同一刷新入口，避免重复刷新；编辑状态仍保留原始参数表达式。",
+      "已验证 Chrome、Edge 的重开、刷新、延迟加载、单独打开、切换参数值及纯 HTML 模式 SQLite 恢复。"
+    ],
+    "commits": [
+      {
+        "id": "cdce154bc71f2fb307c54bf4cd0aa455509dabd5",
+        "date": "2026-09-12T20:50:27+08:00",
+        "title": "fix: refresh parameter values when reopening waveforms",
+        "body": "Invalidate rendered waveform caches when loading a parameter catalog so restored JSON is resolved using the loaded tables. Avoid duplicate invalidation on refresh and cross-window synchronization.\n\nVerified Chrome and Edge: reload, deferred loading, single view, catalog changes, and file-mode SQLite restoration. Preserve raw parameter expressions in the editor."
+      },
+      {
+        "id": "4361dcb30b5f10068d4f92581c83207f3c575594",
+        "date": "2026-09-12T18:23:57+08:00",
+        "title": "chore: publish release 2026.9.12.8",
+        "body": "Record parameter preset persistence, constant formulas, negative result colors, row error markers and scoped row deletion undo/redo; refresh release history and all managed-resource checksums."
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.9.12.8",
     "date": "2026-09-12T10:23:37Z",
     "head": "d89c72ffa8a05105f6ef9cdaf7229acb21520c36",
