@@ -1053,6 +1053,8 @@ ${lines.join('\n')}`;
     const pageQuery = new URLSearchParams(window.location.search);
     const requestedLibraryId = String(pageQuery.get('libraryId') || '').trim();
     const requestedWaveDocumentName = String(pageQuery.get('waveId') || '').trim();
+    const requestedParameterTableId = String(pageQuery.get('tableId') || '').trim();
+    const singleParameterViewActive = pageQuery.get('view') === 'parameter' && !!requestedParameterTableId;
     const requestedScopeToken = String(pageQuery.get('scopeToken') || '').trim();
     const requestedPresenterToken = String(pageQuery.get('presenterToken') || '').trim();
     const singleWaveViewActive = pageQuery.get('view') === 'single' && !!requestedWaveDocumentName;
@@ -1062,18 +1064,18 @@ ${lines.join('\n')}`;
     const waveLibraryClientId = 'client-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
     const singleWindowStateNamespace = 'vwd-single-window:'
       + encodeURIComponent(requestedLibraryId || 'browser') + ':'
-      + encodeURIComponent(requestedWaveDocumentName || 'wave');
+      + encodeURIComponent(singleParameterViewActive ? 'parameter:' + requestedParameterTableId : requestedWaveDocumentName || 'wave');
 
     function getWindowStateStorage() {
       try {
-        return singleWaveViewActive ? window.sessionStorage : window.localStorage;
+        return singleWaveViewActive || singleParameterViewActive ? window.sessionStorage : window.localStorage;
       } catch (_error) {
         return null;
       }
     }
 
     function getWindowStateKey(key) {
-      return singleWaveViewActive ? (singleWindowStateNamespace + ':' + key) : key;
+      return singleWaveViewActive || singleParameterViewActive ? (singleWindowStateNamespace + ':' + key) : key;
     }
 
     function readWindowState(key) {
@@ -14997,7 +14999,7 @@ ${lines.join('\n')}`;
       return true;
     }
 
-    function showSingleWindowLoadingPage(opened, documentName) {
+    function showSingleWindowLoadingPage(opened, documentName, itemLabel) {
       try {
         const title = getSavedTagTitle(getSavedTagByName(documentName)
           || { name: documentName, content: '{}' });
@@ -15015,7 +15017,7 @@ ${lines.join('\n')}`;
           fontFamily: 'system-ui, sans-serif'
         });
         const message = loadingDocument.createElement('div');
-        message.textContent = '正在保存并打开波形图…';
+        message.textContent = '正在保存并打开' + (itemLabel || '波形图') + '…';
         message.setAttribute('role', 'status');
         message.style.fontSize = '15px';
         message.style.letterSpacing = '0';
@@ -15387,6 +15389,30 @@ ${lines.join('\n')}`;
       }
     }
 
+    async function openParameterTableInSingleWindow(tableId) {
+      const opened = window.open('about:blank', '_blank');
+      if (!opened) throw new Error('浏览器阻止了新窗口，请允许此页面打开弹出式窗口');
+      showSingleWindowLoadingPage(opened, '参数表', '参数表');
+      try {
+        await window.VisualWaveDromParameters.flush();
+        if (!currentWaveLibraryId) throw new Error('波形库仍在加载，请稍后再试');
+        if (!saveCurrentWaveDocumentBeforeSwitch()) throw new Error('当前波形修改尚未保存');
+        const saved = waveLibraryServerMode
+          ? await flushScheduledWaveLibraryServerSave()
+          : await flushBrowserWaveLibrarySave();
+        if (!saved) throw new Error('工作库同步失败，请重试');
+        const url = new URL(window.location.href);
+        url.search = new URLSearchParams({ view: 'parameter', tableId, libraryId: currentWaveLibraryId }).toString();
+        url.hash = '';
+        if (opened.closed) throw new Error('参数表窗口已关闭');
+        opened.location.replace(url.href);
+        try { opened.opener = null; } catch (_e) { /* browser policy */ }
+      } catch (error) {
+        try { if (!opened.closed) opened.close(); } catch (_e) { /* already closed */ }
+        throw error;
+      }
+    }
+
     async function commitCurrentWaveLibraryToServer() {
       if (!waveLibraryServerMode || !currentWaveLibraryId) return false;
       const response = await fetch('/api/wave-library-commit', {
@@ -15414,6 +15440,8 @@ ${lines.join('\n')}`;
     }
 
     async function flushBrowserWaveLibrarySave(options) {
+      // Parameter-only windows never write waveform state or directory snapshots.
+      if (singleParameterViewActive) return true;
       const opts = options || {};
       if (waveLibraryServerMode || !browserWaveLibraryReady || !browserWaveLibraryStore
           || applyingWaveLibraryBundle) return false;
@@ -15561,9 +15589,19 @@ ${lines.join('\n')}`;
 
     async function downloadWaveLibraryBundle() {
       const store = await ensureBrowserWaveLibraryStore();
-      const saved = await flushBrowserWaveLibrarySave({ force: true });
-      if (!saved) throw new Error('browser SQLite save failed');
-      const bytes = store.exportBytes();
+      let bytes;
+      if (singleParameterViewActive) {
+        bytes = await withWaveLibraryWriteLock(async () => {
+          if (!await store.loadPersisted() || store.libraryRow().libraryId !== currentWaveLibraryId) {
+            throw new Error('浏览器 SQLite 波形库已被替换，请重新打开参数表');
+          }
+          return store.exportBytes();
+        });
+      } else {
+        const saved = await flushBrowserWaveLibrarySave({ force: true });
+        if (!saved) throw new Error('browser SQLite save failed');
+        bytes = store.exportBytes();
+      }
       const blob = new Blob([bytes], { type: 'application/vnd.sqlite3' });
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
@@ -22555,6 +22593,10 @@ ${lines.join('\n')}`;
     async function performCurrentWaveLibrarySave() {
       try { await window.VisualWaveDromParameters.flush(); }
       catch (error) { setStatus(false, '参数目录尚未保存：' + error.message); return false; }
+      if (singleParameterViewActive) {
+        if (waveLibraryInitializationPending || !currentWaveLibraryId) return false;
+        return waveLibraryServerMode ? commitCurrentWaveLibraryToServer() : downloadWaveLibraryBundle();
+      }
       if (!waveLibraryServerMode) {
         try {
           flushPersistEditorJson();
@@ -22915,7 +22957,7 @@ ${lines.join('\n')}`;
     });
 
     function persistPageStateBeforeExit(reason) {
-      if (presenterWaveViewActive) return;
+      if (presenterWaveViewActive || singleParameterViewActive) return;
       if (pageExitStateFlushed) return;
       pageExitStateFlushed = true;
       commitOpenTextEditors(reason);
@@ -23756,12 +23798,14 @@ ${lines.join('\n')}`;
 
     let parameterRefreshTimer = null;
     window.VisualWaveDromParameters.mount({
+      singleTableId: singleParameterViewActive ? requestedParameterTableId : '',
+      openTable: openParameterTableInSingleWindow,
       identity: () => currentWaveLibraryId,
       historyChanged: updateUndoRedoButtons,
       historyShortcut: (event) => isUndoShortcut(event) ? 'undo' : isRedoShortcut(event) ? 'redo' : '',
       currentSource: () => JSON.parse(editor.value || '{}'),
       status: (message) => setStatus(false, message),
-      saveLibrary: () => performCurrentWaveLibrarySave(),
+      saveLibrary: () => singleParameterViewActive ? saveCurrentWaveLibrary() : performCurrentWaveLibrarySave(),
       source: async (name) => {
         const tag = await ensureWaveDocumentLoaded(name);
         if (!tag) throw new Error('波形图不存在');
@@ -23827,7 +23871,7 @@ ${lines.join('\n')}`;
         setStatus(true, '已更新参数表链接');
       },
       changed: () => {
-        if (presenterWaveViewActive || scopeWaveViewActive) return;
+        if (presenterWaveViewActive || scopeWaveViewActive || singleParameterViewActive) return;
         waveDocumentMetaCache.clear(); navDocumentTitleCache.clear(); lastRenderedWaveText = null;
         waveLibraryCardCache.forEach((entry) => { entry.renderedContent = null; });
         clearTimeout(parameterRefreshTimer);
@@ -23838,7 +23882,40 @@ ${lines.join('\n')}`;
       }
     });
 
-    if (presenterWaveViewActive) {
+    async function startSingleParameterViewPage() {
+      let errorMessage = '';
+      try {
+        if (waveLibraryServerMode) {
+          startWaveLibraryClientSession();
+          const response = await fetch('/api/wave-libraries');
+          if (!response.ok) throw new Error('本地波形库服务不可用');
+          const libraries = await response.json();
+          const library = (libraries.libraries || []).find((item) => item.libraryId === requestedLibraryId);
+          if (!library) throw new Error('链接指定的波形库不存在');
+          currentWaveLibraryId = library.libraryId;
+          currentWaveLibraryFile = library.name;
+          waveLibraryServerRecovery = getValidatedServerRecovery(libraries.recovery);
+        } else {
+          const store = await ensureBrowserWaveLibraryStore();
+          if (!await store.loadPersisted()) throw new Error('浏览器中尚未载入此波形库');
+          if (store.libraryRow().libraryId !== requestedLibraryId) throw new Error('链接指定的波形库已被替换');
+          currentWaveLibraryId = store.libraryRow().libraryId;
+          currentWaveLibraryFile = store.fileName;
+          browserWaveLibraryReady = true;
+        }
+        await window.VisualWaveDromParameters.refresh();
+      } catch (error) {
+        errorMessage = error.message;
+        vwdDebugLog('parameters', { phase: 'single-load-failed', tableId: requestedParameterTableId, message: errorMessage });
+      } finally {
+        waveLibraryInitializationPending = false;
+        window.VisualWaveDromParameters.finishSingleLoad(errorMessage);
+      }
+    }
+
+    if (singleParameterViewActive) {
+      void startSingleParameterViewPage();
+    } else if (presenterWaveViewActive) {
       startPresenterWaveViewPage();
     } else if (scopeWaveViewActive) {
       startScopeWaveViewPage();

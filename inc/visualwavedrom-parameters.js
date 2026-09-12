@@ -11,10 +11,12 @@
   let dirty = 0, savedGeneration = 0, timer = null, saving = null, failure = '';
   let modal = null, channel = null;
   let tableViewId = '', selectedRow = null;
+  let standaloneTableId = '', standaloneLoading = false, standaloneError = '';
   const rowFilters = { name: '', val: '' };
   const clipboardKind = 'VisualWaveDromParametersClipboard';
   let parameterClipboard = null, clipboardRequest = 0;
   let parameterUndoStack = [], parameterRedoStack = [];
+  let activeCellEdit = null;
   const menuHiddenStates = new WeakMap();
   const expanded = new Set(['']);
   const $ = (id) => document.getElementById(id);
@@ -26,6 +28,11 @@
   };
   const paths = {
     plus: '<path d="M12 5v14M5 12h14"/>',
+    swap: '<path d="M3 7h18l-4-4M21 17H3l4 4"/>',
+    left: '<path d="m15 18-6-6 6-6"/>', right: '<path d="m9 18 6-6-6-6"/>',
+    external: '<path d="M15 3h6v6M10 14 21 3M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/>',
+    undo: '<path d="M3 10h11a7 7 0 0 1 0 14M3 10l6-6M3 10l6 6" transform="translate(0 -3)"/>',
+    redo: '<path d="M21 10H10a7 7 0 0 0 0 14M21 10l-6-6M21 10l-6 6" transform="translate(0 -3)"/>',
     trash: '<path d="M3 6h18M9 6V4h6v2M5 6l1 14h12l1-14M10 10v6M14 10v6"/>',
     edit: '<path d="m16 3 5 5-12 12-6 1 1-6ZM14 5l5 5"/>',
     close: '<path d="m6 6 12 12M18 6 6 18"/>',
@@ -376,11 +383,33 @@
   }
   function isTextInput(target) { return !!(target && target.closest && target.closest('input,textarea,select,[contenteditable]:not([contenteditable="false"])')); }
   function parameterHistoryState() { return { canUndo: parameterUndoStack.length > 0, canRedo: parameterRedoStack.length > 0 }; }
-  function notifyParameterHistory() { if (bridge && bridge.historyChanged) bridge.historyChanged(); }
+  function notifyParameterHistory() {
+    const state = parameterHistoryState();
+    const undo = $('parameter-single-undo'), redo = $('parameter-single-redo');
+    if (undo) undo.disabled = !state.canUndo;
+    if (redo) redo.disabled = !state.canRedo;
+    if (bridge && bridge.historyChanged) bridge.historyChanged();
+  }
   function recordParameterHistory(entry) {
+    activeCellEdit = null;
     parameterUndoStack.push(entry);
     if (parameterUndoStack.length > 50) parameterUndoStack.shift();
     parameterRedoStack = [];
+  }
+  function editParameterCell(table, row, field, input) {
+    if (String(row[field] ?? '') === input.value) return false;
+    let entry = activeCellEdit && activeCellEdit.input === input ? activeCellEdit.entry : null;
+    if (!entry || parameterUndoStack[parameterUndoStack.length - 1] !== entry) {
+      entry = { kind: 'row-edit', tableId: table.id, row, field,
+        before: row[field], beforePresent: Object.prototype.hasOwnProperty.call(row, field), after: input.value };
+      recordParameterHistory(entry);
+      activeCellEdit = { input, entry };
+    }
+    row[field] = input.value; entry.after = input.value;
+    if (entry.beforePresent && entry.before === entry.after) {
+      parameterUndoStack.pop(); activeCellEdit = null;
+    }
+    return true;
   }
   function folderAncestors(parentId) {
     const parents = [], seen = new Set();
@@ -444,8 +473,31 @@
     finishRowHistory(table, null, scroller ? scroller.scrollTop : 0);
     return true;
   }
+  function rowPosition(table, row) {
+    const index = table.rows.indexOf(row);
+    return { index, previous: table.rows[index - 1], next: table.rows[index + 1] };
+  }
+  function insertRowAtPosition(table, row, position) {
+    const next = table.rows.indexOf(position.next), previous = table.rows.indexOf(position.previous);
+    const index = next >= 0 ? next : previous >= 0 ? previous + 1 : Math.min(position.index, table.rows.length);
+    table.rows.splice(index, 0, row);
+  }
+  function moveParameterRow(table, row, target, after) {
+    if (activePage !== 'parameters' || modal || selectedTable !== table.id || !catalog.tables.includes(table)) return false;
+    const before = rowPosition(table, row), targetIndex = table.rows.indexOf(target);
+    if (before.index < 0 || targetIndex < 0) return false;
+    let index = targetIndex + (after ? 1 : 0);
+    if (before.index < index) index--;
+    if (index === before.index) return false;
+    const scroller = $('parameter-workspace').querySelector('.parameter-grid-scroll');
+    table.rows.splice(before.index, 1); table.rows.splice(index, 0, row);
+    recordParameterHistory({ kind: 'row-move', tableId: table.id, row, before, after: rowPosition(table, row) });
+    finishRowHistory(table, row, scroller ? scroller.scrollTop : 0);
+    return true;
+  }
   function applyParameterHistory(redo) {
     if (activePage !== 'parameters' || modal) return false;
+    activeCellEdit = null;
     const from = redo ? parameterRedoStack : parameterUndoStack, to = redo ? parameterUndoStack : parameterRedoStack;
     const entry = from[from.length - 1]; if (!entry) return false;
     if (entry.kind === 'table-add' || entry.kind === 'table-delete') {
@@ -469,15 +521,40 @@
     const table = catalog.tables.find((item) => item.id === entry.tableId);
     if (!table) return false;
     const scroller = $('parameter-workspace').querySelector('.parameter-grid-scroll');
+    if (entry.kind === 'row-edit') {
+      if (!table.rows.includes(entry.row)) return false;
+      const focused = document.activeElement;
+      const editingCell = focused && focused.matches('[data-parameter-field]');
+      const caret = editingCell ? focused.selectionStart : null;
+      if (redo || entry.beforePresent) entry.row[entry.field] = redo ? entry.after : entry.before;
+      else delete entry.row[entry.field];
+      from.pop(); to.push(entry);
+      finishRowHistory(table, entry.row, scroller ? scroller.scrollTop : 0);
+      if (editingCell) {
+        const input = $('parameter-workspace').querySelector('tr.selected [data-parameter-field="' + entry.field + '"]');
+        if (input) {
+          input.focus({ preventScroll: true });
+          const position = Math.min(caret == null ? input.value.length : caret, input.value.length);
+          input.setSelectionRange(position, position);
+        }
+      }
+      return true;
+    }
+    if (entry.kind === 'row-move') {
+      const index = table.rows.indexOf(entry.row); if (index < 0) return false;
+      table.rows.splice(index, 1);
+      insertRowAtPosition(table, entry.row, redo ? entry.after : entry.before);
+      from.pop(); to.push(entry);
+      finishRowHistory(table, entry.row, scroller ? scroller.scrollTop : 0);
+      return true;
+    }
     if (redo) {
       const index = table.rows.indexOf(entry.row);
       if (index < 0) return false;
       entry.index = index; entry.previous = table.rows[index - 1]; entry.next = table.rows[index + 1];
       table.rows.splice(index, 1);
     } else {
-      const next = table.rows.indexOf(entry.next), previous = table.rows.indexOf(entry.previous);
-      const index = next >= 0 ? next : previous >= 0 ? previous + 1 : Math.min(entry.index, table.rows.length);
-      table.rows.splice(index, 0, entry.row);
+      insertRowAtPosition(table, entry.row, entry);
     }
     from.pop(); to.push(entry);
     finishRowHistory(table, redo ? null : entry.row, scroller ? scroller.scrollTop : 0);
@@ -624,6 +701,7 @@
     });
   }
   function renderTree() {
+    if (standaloneTableId) return;
     const tree = $('parameter-tree'); if (!tree) return;
     tree.replaceChildren();
     function directory(parentId, depth, number, seen) {
@@ -716,7 +794,10 @@
   }
   function renderTable() {
     const workspace = $('parameter-workspace'); if (!workspace) return;
+    activeCellEdit = null;
+    if (standaloneTableId) selectedTable = standaloneTableId;
     const table = catalog.tables.find((item) => item.id === selectedTable);
+    if (standaloneTableId) document.title = (table ? table.name : '参数表') + ' - VisualWaveDrom';
     if (tableViewId !== (table && table.id || '')) {
       tableViewId = table && table.id || ''; selectedRow = null;
       rowFilters.name = ''; rowFilters.val = '';
@@ -747,19 +828,47 @@
         if (!global.confirm('删除参数表“' + table.name + '”？已链接的波形会保留引用，并提示参数表缺失。')) return;
         deleteTable(table);
       }, 'trash'));
-    } else toolbar.append(button('新增参数表', addTable));
+      const compare = button('比较参数表', () => openComparison(table.id, compare));
+      compare.classList.add('parameter-compare-open'); toolbar.append(compare);
+    } else if (!standaloneTableId) toolbar.append(button('新增参数表', addTable));
+    if (table && !standaloneTableId) {
+      const open = button('单独打开', async () => {
+        open.disabled = true;
+        try { await bridge.openTable(table.id); }
+        catch (error) { status(error.message, true); }
+        finally { open.disabled = false; }
+      });
+      open.classList.add('parameter-open-single');
+      open.insertAdjacentHTML('afterbegin', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="lucide" aria-hidden="true">' + paths.external + '</svg>');
+      toolbar.append(open);
+    }
+    if (standaloneTableId) {
+      const undo = button('撤销', () => applyParameterHistory(false), 'undo'); undo.id = 'parameter-single-undo';
+      const redo = button('重做', () => applyParameterHistory(true), 'redo'); redo.id = 'parameter-single-redo';
+      toolbar.append(undo, redo);
+    }
     const saveLibrary = button('保存波形库', async () => {
       saveLibrary.disabled = true;
-      try { await flush(); await bridge.saveLibrary(); }
+      try {
+        await flush();
+        if (await bridge.saveLibrary()) status('已保存波形库');
+        else status('波形库保存失败，请重试', true);
+      }
       catch (error) { status(error.message, true); }
       finally { saveLibrary.disabled = false; }
     });
     saveLibrary.classList.add('parameter-library-save'); toolbar.append(saveLibrary);
+    saveLibrary.disabled = standaloneLoading || !!standaloneError;
     workspace.append(toolbar);
+    notifyParameterHistory();
     updateClipboardButtons();
     const state = element('div', 'parameter-status'); state.id = 'parameter-status'; state.setAttribute('role', 'status');
     state.textContent = failure || (dirty !== savedGeneration ? '正在保存参数目录...' : ''); workspace.append(state);
-    if (!table) { workspace.append(element('p', 'parameter-empty', '未选中参数表')); return; }
+    if (!table) {
+      workspace.append(element('p', 'parameter-empty', standaloneTableId
+        ? (standaloneLoading ? '正在加载参数表...' : standaloneError || '此参数表不存在或已被删除') : '未选中参数表'));
+      return;
+    }
     const scroller = element('div', 'parameter-grid-scroll'); const grid = element('table', 'parameter-grid');
     const head = element('thead'); const tr = element('tr');
     const filterInputs = {}, filterCount = element('span', 'parameter-filter-count');
@@ -783,6 +892,56 @@
     head.append(tr); grid.append(head);
     const body = element('tbody');
     const rowViews = [];
+    const rowDropViews = new Map();
+    const rowDragType = 'application/x-vwd-parameter-row', dragLibraryId = libraryId;
+    let draggedRow = null, draggedLine = null, dropTarget = null;
+    function clearDropTarget() {
+      if (dropTarget) dropTarget.view.line.classList.remove('parameter-drop-before', 'parameter-drop-after');
+      dropTarget = null;
+    }
+    function clearRowDrag() {
+      clearDropTarget();
+      if (draggedLine) draggedLine.classList.remove('parameter-row-dragging');
+      draggedRow = draggedLine = null;
+    }
+    function acceptsRowDrag(event) {
+      return draggedRow && dragLibraryId === libraryId && activePage === 'parameters' && selectedTable === table.id
+        && catalog.tables.includes(table) && scroller.isConnected && event.dataTransfer && event.dataTransfer.types.includes(rowDragType);
+    }
+    function findRowDrop(event) {
+      if (!acceptsRowDrag(event)) return null;
+      let view = rowDropViews.get(event.target.closest('tr'));
+      let after;
+      if (view && !view.line.hidden) {
+        const bounds = view.line.getBoundingClientRect(); after = event.clientY >= bounds.top + bounds.height / 2;
+      } else {
+        const visible = rowViews.filter((item) => !item.line.hidden);
+        if (!visible.length || event.clientY < head.getBoundingClientRect().bottom) return null;
+        const first = visible[0], last = visible[visible.length - 1];
+        if (event.clientY < first.line.getBoundingClientRect().top) { view = first; after = false; }
+        else if (event.clientY >= last.line.getBoundingClientRect().bottom) { view = last; after = true; }
+        else return null;
+      }
+      const from = table.rows.indexOf(draggedRow), target = table.rows.indexOf(view.row);
+      let index = target + (after ? 1 : 0); if (from < index) index--;
+      return from < 0 || target < 0 || from === index ? null : { view, after };
+    }
+    scroller.addEventListener('dragover', (event) => {
+      if (!acceptsRowDrag(event)) return;
+      event.preventDefault(); event.stopPropagation(); event.dataTransfer.dropEffect = 'move';
+      const next = findRowDrop(event);
+      if (dropTarget && next && dropTarget.view === next.view && dropTarget.after === next.after) return;
+      clearDropTarget(); dropTarget = next;
+      if (dropTarget) dropTarget.view.line.classList.add(dropTarget.after ? 'parameter-drop-after' : 'parameter-drop-before');
+    });
+    scroller.addEventListener('dragleave', (event) => { if (!scroller.contains(event.relatedTarget)) clearDropTarget(); });
+    scroller.addEventListener('drop', (event) => {
+      if (!acceptsRowDrag(event)) return;
+      event.preventDefault(); event.stopPropagation();
+      const target = findRowDrop(event), row = draggedRow;
+      clearRowDrag();
+      if (target) moveParameterRow(table, row, target.view.row, target.after);
+    });
     const valueSource = { parameterTables: [table.id] };
     function refreshValues() {
       const context = { stack: [], values: new Map() };
@@ -801,6 +960,7 @@
     table.rows.forEach((row, index) => {
       const line = element('tr');
       const view = { row, line, resize: [] }; rowViews.push(view);
+      rowDropViews.set(line, view);
       line.addEventListener('click', () => selectRow(row, line));
       line.addEventListener('focusin', () => selectRow(row, line));
       line.setAttribute('aria-selected', 'false');
@@ -811,6 +971,15 @@
         if (field === 'name') {
           const handle = button('选中第 ' + (index + 1) + ' 行', () => selectRow(row, line));
           handle.className = 'parameter-row-select';
+          handle.draggable = true;
+          handle.addEventListener('dragstart', (event) => {
+            if (modal || activePage !== 'parameters' || selectedTable !== table.id || !catalog.tables.includes(table)) { event.preventDefault(); return; }
+            event.stopPropagation(); selectRow(row, line);
+            draggedRow = row; draggedLine = line;
+            event.dataTransfer.setData(rowDragType, table.id); event.dataTransfer.effectAllowed = 'move';
+            line.classList.add('parameter-row-dragging');
+          });
+          handle.addEventListener('dragend', clearRowDrag);
           const marker = element('span', 'parameter-row-error'); marker.hidden = true; marker.setAttribute('aria-hidden', 'true');
           marker.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="lucide">' + paths.close + '</svg>';
           handle.replaceChildren(marker, element('span', 'parameter-row-number', index + 1));
@@ -818,6 +987,7 @@
           fieldBox.append(handle);
         }
         input.value = row[field] == null ? '' : String(row[field]); input.setAttribute('aria-label', '第 ' + (index + 1) + ' 行 ' + field);
+        input.dataset.parameterField = field;
         input.spellcheck = false; if (field !== 'name') input.rows = 1;
         const resize = () => { if (field !== 'name' && !line.hidden) { input.style.height = 'auto'; input.style.height = Math.min(220, input.scrollHeight) + 'px'; } };
         view.resize.push(resize);
@@ -832,7 +1002,7 @@
             const nameError = parameterRowNameError(row, names);
             const rowError = [nameError, result.error].filter(Boolean).join('\n');
             view.rowError.hidden = !rowError;
-            view.rowHandle.title = '选中第 ' + (index + 1) + ' 行' + (rowError ? '\n' + rowError : '');
+            view.rowHandle.title = '选中第 ' + (index + 1) + ' 行，按住拖动调整顺序' + (rowError ? '\n' + rowError : '');
             if (rowError) view.rowHandle.setAttribute('aria-description', rowError);
             else view.rowHandle.removeAttribute('aria-description');
             view.nameInput.setAttribute('aria-invalid', String(!!nameError)); view.nameInput.title = nameError;
@@ -851,10 +1021,16 @@
           fieldBox.append(error);
         }
         input.addEventListener('input', () => {
-          row[field] = input.value; resize(); changed(false);
+          if (!editParameterCell(table, row, field, input)) return;
+          resize(); changed(false);
           if (field === 'name' || field === 'val' || !row.name) refreshValues();
         });
+        input.addEventListener('beforeinput', (event) => {
+          if (event.inputType !== 'historyUndo' && event.inputType !== 'historyRedo') return;
+          event.preventDefault(); applyParameterHistory(event.inputType === 'historyRedo');
+        });
         input.addEventListener('blur', () => {
+          if (activeCellEdit && activeCellEdit.input === input) activeCellEdit = null;
           refreshValues();
           void flush().catch(() => {});
           const treeRow = Array.from($('parameter-tree').querySelectorAll('[data-table-id]')).find((item) => item.dataset.tableId === table.id);
@@ -868,19 +1044,49 @@
       body.append(line);
     });
     const emptyRow = element('tr'), emptyCell = element('td', 'parameter-empty'); emptyCell.colSpan = 3;
+    emptyCell.id = 'parameter-filter-message';
     emptyRow.append(emptyCell); body.append(emptyRow);
     function applyFilters() {
       const name = rowFilters.name.trim().toLowerCase(), val = rowFilters.val.trim().toLowerCase();
+      const comparison = val.match(/^(>=|<=|>|<)\s*(.*)$/);
+      const limit = comparison ? Number(comparison[2]) : 0;
+      const filterError = comparison && (!numericPattern.test(comparison[2]) || !Number.isFinite(limit))
+        ? '比较符后需要有效数字，例如 >1 或 <=-0.5' : '';
+      filterInputs.val.setAttribute('aria-invalid', String(!!filterError));
+      filterInputs.val.title = filterError;
+      if (filterError) filterInputs.val.setAttribute('aria-describedby', emptyCell.id);
+      else filterInputs.val.removeAttribute('aria-describedby');
       let count = 0;
       rowViews.forEach((view) => {
+        const result = view.valueResult;
+        const displayedValue = String(result ? result.val ?? '' : view.row.val ?? '').trim();
+        let matchesValue;
+        if (comparison) {
+          const value = Number(displayedValue);
+          matchesValue = !filterError && !(result && result.error)
+            && numericPattern.test(displayedValue) && Number.isFinite(value);
+          if (matchesValue) {
+            switch (comparison[1]) {
+              case '>': matchesValue = value > limit; break;
+              case '<': matchesValue = value < limit; break;
+              case '>=': matchesValue = value >= limit; break;
+              case '<=': matchesValue = value <= limit; break;
+            }
+          }
+        } else {
+          matchesValue = String(view.row.val ?? '').toLowerCase().includes(val)
+            || displayedValue.toLowerCase().includes(val);
+        }
         const visible = String(view.row.name ?? '').toLowerCase().includes(name)
-          && (String(view.row.val ?? '').toLowerCase().includes(val) || String(view.valueResult && view.valueResult.val || '').toLowerCase().includes(val));
+          && matchesValue;
         const wasHidden = view.line.hidden; view.line.hidden = !visible;
         if (visible) count++;
         else if (selectedRow === view.row) selectRow(null, null);
         if (visible && wasHidden) requestAnimationFrame(() => view.resize.forEach((resize) => resize()));
       });
-      emptyRow.hidden = count > 0; emptyCell.textContent = name || val ? '没有匹配的变量' : '暂无变量';
+      emptyRow.hidden = count > 0;
+      emptyCell.textContent = filterError || (name || val ? '没有匹配的变量' : '暂无变量');
+      emptyCell.classList.toggle('parameter-value-error', !!filterError);
       filterCount.textContent = count + ' / ' + table.rows.length;
       clearFilters.disabled = !rowFilters.name && !rowFilters.val;
     }
@@ -888,6 +1094,7 @@
     grid.append(body); scroller.append(grid); workspace.append(scroller);
   }
   async function switchPage(page) {
+    if (standaloneTableId) return;
     if (page === activePage) return;
     if (page === 'parameters') {
       try { await refresh(); } catch (error) { if (bridge) bridge.status(error.message); return; }
@@ -907,6 +1114,156 @@
     });
     if (page === 'wave' && bridge) bridge.changed();
     notifyParameterHistory();
+  }
+  function compareTables(left, right) {
+    function indexRows(table) {
+      const groups = new Map(), names = parameterNameCounts(table.rows);
+      const context = { stack: [], values: new Map() }, source = { parameterTables: [table.id] };
+      table.rows.forEach((row, index) => {
+        if (['name', 'val', 'description'].every((field) => !String(row[field] ?? '').trim())) return;
+        const name = String(row.name || ''), key = name || Symbol();
+        const value = resolveParameterRow(table, row, source, context);
+        const entry = { index, raw: value.rawVal, value: value.val, formula: value.formula,
+          description: String(row.description ?? ''),
+          error: [name ? parameterRowNameError(row, names) : '变量名不能为空', value.error].filter(Boolean).join('\n') };
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(entry);
+      });
+      return groups;
+    }
+    const a = indexRows(left), b = indexRows(right);
+    return Array.from(new Set([...a.keys(), ...b.keys()]), (key) => {
+      const l = a.get(key) || [], r = b.get(key) || [];
+      const entry = { name: typeof key === 'string' ? key : '第 ' + ((l[0] || r[0]).index + 1) + ' 行（无变量名）',
+        left: l, right: r, kind: 'same', reasons: [], flags: {} };
+      if (l.concat(r).some((item) => item.error)) entry.kind = 'error';
+      else if (!l.length) entry.kind = 'right';
+      else if (!r.length) entry.kind = 'left';
+      else {
+        entry.flags.raw = l[0].raw !== r[0].raw;
+        entry.flags.value = l[0].value !== r[0].value;
+        entry.flags.description = l[0].description !== r[0].description;
+        if (entry.flags.raw) entry.reasons.push(l[0].formula || r[0].formula ? '公式不同' : '变量值不同');
+        if (entry.flags.value && !entry.reasons.includes('变量值不同')) entry.reasons.push('计算结果不同');
+        if (entry.flags.description) entry.reasons.push('说明不同');
+        if (entry.reasons.length) entry.kind = 'different';
+      }
+      return entry;
+    });
+  }
+  function openComparison(tableId, anchor) {
+    if (modal) return;
+    const overlay = element('div', 'modal-overlay parameter-modal');
+    const dialog = element('div', 'modal-dialog parameter-compare-dialog');
+    dialog.setAttribute('role', 'dialog'); dialog.setAttribute('aria-modal', 'true'); dialog.setAttribute('aria-labelledby', 'parameter-compare-title');
+    const header = element('div', 'modal-header');
+    const heading = element('h2', '', '参数表比较'); heading.id = 'parameter-compare-title';
+    function close() {
+      global.removeEventListener('keydown', onKey, true);
+      overlay.remove(); modal = null;
+      const target = anchor && anchor.isConnected ? anchor : document.querySelector('.parameter-compare-open');
+      if (target) target.focus({ preventScroll: true });
+    }
+    const closeButton = button('关闭比较', close, 'close'); header.append(heading, closeButton); dialog.append(header);
+    const controls = element('div', 'parameter-compare-controls');
+    function tableSelect(caption) {
+      const label = element('label', 'parameter-compare-select'), select = element('select');
+      select.setAttribute('aria-label', caption); select.add(new Option('选择参数表', ''));
+      catalog.tables.forEach((table) => select.add(new Option((folderPath(table.parentId) || '根目录') + ' / ' + table.name, table.id)));
+      label.append(element('span', '', caption), select); return { label, select };
+    }
+    const left = tableSelect('左侧参数表'), right = tableSelect('右侧参数表'); left.select.value = tableId;
+    right.select.value = (catalog.tables.find((table) => table.id !== tableId) || {}).id || '';
+    const swap = button('交换左右参数表', () => {
+      const previous = left.select.value; left.select.value = right.select.value; right.select.value = previous; rebuild();
+    }, 'swap');
+    controls.append(left.label, swap, right.label); dialog.append(controls);
+    const filters = element('div', 'parameter-compare-filters');
+    const search = element('input'); search.type = 'search'; search.placeholder = '筛选变量名'; search.setAttribute('aria-label', '比较中筛选变量名');
+    const onlyDifferent = element('input'); onlyDifferent.type = 'checkbox'; onlyDifferent.checked = true;
+    const onlyLabel = element('label', 'parameter-compare-toggle'); onlyLabel.append(onlyDifferent, element('span', '', '只看差异'));
+    filters.append(search, onlyLabel); dialog.append(filters);
+    const summary = element('div', 'parameter-compare-summary'); summary.setAttribute('role', 'status'); dialog.append(summary);
+    const scroll = element('div', 'parameter-compare-scroll'); scroll.tabIndex = 0; scroll.setAttribute('aria-label', '参数表比较结果');
+    const grid = element('table', 'parameter-compare-grid'), head = element('thead'), headers = element('tr');
+    const leftHeading = element('th'), rightHeading = element('th');
+    headers.append(element('th', '', '变量名 / 比较结果'), leftHeading, rightHeading);
+    Array.from(headers.children).forEach((th) => { th.scope = 'col'; }); head.append(headers);
+    const body = element('tbody'); grid.append(head, body); scroll.append(grid); dialog.append(scroll);
+    const footer = element('div', 'modal-footer parameter-compare-footer');
+    const pageInfo = element('span');
+    const previous = button('上一页', () => { page--; render(); }, 'left');
+    const next = button('下一页', () => { page++; render(); }, 'right');
+    footer.append(pageInfo, previous, next); dialog.append(footer);
+    const labels = { same: '相同', different: '不同', left: '仅左侧', right: '仅右侧', error: '异常' };
+    let records = [], page = 0, problem = ''; const pageSize = 100;
+    function cell(items, flags) {
+      const td = element('td');
+      if (!items.length) { td.append(element('span', 'parameter-compare-missing', '无此变量')); return td; }
+      items.forEach((item) => {
+        const content = element('div', 'parameter-compare-entry');
+        if (items.length > 1) content.append(element('small', '', '第 ' + (item.index + 1) + ' 行'));
+        content.append(element('div', 'parameter-compare-value' + (flags.value ? ' difference' : ''), item.error ? '存在异常' : item.value || '（空）'));
+        if (item.formula || item.error) {
+          content.append(element('small', '', item.formula ? '公式' : '原值'));
+          content.append(element('code', 'parameter-compare-raw' + (flags.raw ? ' difference' : ''), item.raw || '（空）'));
+        }
+        if (item.description || flags.description) {
+          content.append(element('small', '', '说明'));
+          content.append(element('div', 'parameter-compare-description' + (flags.description ? ' difference' : ''), item.description || '（空）'));
+        }
+        if (item.error) content.append(element('div', 'parameter-compare-error', item.error));
+        td.append(content);
+      });
+      return td;
+    }
+    function render() {
+      const query = search.value.trim().toLowerCase();
+      const filtered = records.filter((entry) => (!onlyDifferent.checked || entry.kind !== 'same') && entry.name.toLowerCase().includes(query));
+      page = Math.max(0, Math.min(page, Math.ceil(filtered.length / pageSize) - 1));
+      const start = page * pageSize, shown = filtered.slice(start, start + pageSize);
+      body.replaceChildren();
+      shown.forEach((entry) => {
+        const tr = element('tr'); tr.dataset.kind = entry.kind; tr.dataset.name = entry.name;
+        const name = element('th'); name.scope = 'row'; name.append(element('strong', '', entry.name));
+        name.append(element('span', 'parameter-compare-state ' + entry.kind, labels[entry.kind]));
+        if (entry.reasons.length) name.append(element('small', '', entry.reasons.join('、')));
+        tr.append(name, cell(entry.left, entry.flags), cell(entry.right, entry.flags)); body.append(tr);
+      });
+      if (!shown.length) {
+        const tr = element('tr'), td = element('td', 'parameter-empty'); td.colSpan = 3;
+        td.textContent = problem || (query ? '没有匹配的变量' : !records.length ? '两张参数表均无变量' : '没有差异，两张参数表内容相同');
+        tr.append(td); body.append(tr);
+      }
+      pageInfo.textContent = filtered.length ? (start + 1) + '-' + (start + shown.length) + ' / ' + filtered.length : '0 / 0';
+      previous.disabled = !page; next.disabled = start + pageSize >= filtered.length; scroll.scrollTop = 0;
+    }
+    function rebuild() {
+      const l = catalog.tables.find((table) => table.id === left.select.value), r = catalog.tables.find((table) => table.id === right.select.value);
+      leftHeading.textContent = l ? l.name : '左侧参数表'; rightHeading.textContent = r ? r.name : '右侧参数表';
+      problem = !l || !r ? (catalog.tables.length < 2 ? '当前波形库不足两张参数表' : '请选择两张参数表') : l.id === r.id ? '请选择两张不同的参数表' : '';
+      records = problem ? [] : compareTables(l, r); page = 0;
+      const counts = { same: 0, different: 0, left: 0, right: 0, error: 0 }; records.forEach((entry) => counts[entry.kind]++);
+      summary.textContent = problem || '共 ' + records.length + ' 项 · ' + Object.keys(counts).map((key) => labels[key] + ' ' + counts[key]).join(' · ');
+      render();
+    }
+    function onKey(event) {
+      if (!overlay.contains(event.target)) return;
+      event.stopPropagation();
+      if (event.key === 'Escape' && !event.isComposing) { event.preventDefault(); close(); }
+      if (event.key === 'Tab') {
+        const inputs = Array.from(dialog.querySelectorAll('button:not(:disabled),select,input,[tabindex="0"]'));
+        if (event.shiftKey && event.target === inputs[0]) { event.preventDefault(); inputs[inputs.length - 1].focus(); }
+        else if (!event.shiftKey && event.target === inputs[inputs.length - 1]) { event.preventDefault(); inputs[0].focus(); }
+      }
+    }
+    left.select.addEventListener('change', rebuild); right.select.addEventListener('change', rebuild);
+    search.addEventListener('input', () => { page = 0; render(); }); onlyDifferent.addEventListener('change', () => { page = 0; render(); });
+    let startedOutside = false;
+    overlay.addEventListener('pointerdown', (event) => { startedOutside = event.target === overlay; });
+    overlay.addEventListener('click', (event) => { if (startedOutside && event.target === overlay) close(); });
+    modal = overlay; overlay.append(dialog); document.body.append(overlay);
+    global.addEventListener('keydown', onKey, true); rebuild(); right.select.focus();
   }
   async function openLinks(documentName, anchor) {
     if (modal) return;
@@ -1015,6 +1372,14 @@
   }
   function mount(api) {
     bridge = api;
+    standaloneTableId = api.singleTableId || '';
+    standaloneLoading = !!standaloneTableId;
+    if (standaloneTableId) {
+      activePage = 'parameters';
+      document.body.classList.add('parameter-page-active', 'single-parameter-view');
+      $('parameter-workspace').hidden = false;
+      document.querySelector('.app > main.main').hidden = true;
+    }
     global.addEventListener('keydown', (event) => {
       if (activePage !== 'parameters' || modal || event.target.closest('.modal-overlay')) return;
       event.stopPropagation();
@@ -1022,9 +1387,11 @@
         const line = event.target.closest('tbody tr');
         if (line) { event.preventDefault(); line.querySelector('.parameter-row-select').focus({ preventScroll: true }); }
       }
-      if (event.isComposing || isTextInput(event.target)) return;
+      if (event.isComposing) return;
+      if (isTextInput(event.target) && !event.target.matches('[data-parameter-field]')) return;
       const action = bridge.historyShortcut ? bridge.historyShortcut(event) : '';
       if (action === 'undo' || action === 'redo') { event.preventDefault(); applyParameterHistory(action === 'redo'); return; }
+      if (isTextInput(event.target)) return;
       if (event.key === 'Delete' && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey
           && event.target.closest('#parameter-workspace')) { event.preventDefault(); deleteSelectedRow(); }
     }, true);
@@ -1077,7 +1444,12 @@
     } catch (_) { /* Explicit refresh on opening either parameter surface remains available. */ }
     renderTree(); renderTable();
   }
-  global.VisualWaveDromParameters = { mount, setCatalog, getCatalog: () => clone(catalog), resolve, text, details, decorate, resolveName,
+  function finishSingleLoad(error) {
+    standaloneLoading = false; standaloneError = error || '';
+    renderTable();
+    if (error) status(error, true);
+  }
+  global.VisualWaveDromParameters = { mount, setCatalog, finishSingleLoad, getCatalog: () => clone(catalog), resolve, text, details, decorate, resolveName,
     openLinks, flush, refresh, page: () => activePage, pending: () => dirty !== savedGeneration,
     historyState: parameterHistoryState, undo: () => applyParameterHistory(false), redo: () => applyParameterHistory(true) };
 })(window);
