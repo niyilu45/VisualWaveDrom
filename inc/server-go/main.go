@@ -688,41 +688,7 @@ func (s *service) registerProtocolHandler() {
 		log.Printf("Protocol handler not found: %s", handler)
 		return
 	}
-	if runtime.GOOS == "windows" {
-		s.registerWindowsProtocol(handler)
-	} else if runtime.GOOS == "linux" {
-		s.registerLinuxProtocol(handler)
-	}
-}
-
-func (s *service) registerWindowsProtocol(handler string) {
-	if !strings.EqualFold(filepath.Ext(handler), ".bat") || strings.Contains(handler, `"`) {
-		log.Printf("Protocol handler BAT not found: %s", handler)
-		return
-	}
-	command := fmt.Sprintf(`"%s" "%%1"`, handler)
-	schemes := []string{s.activeScheme, recoveryProtocolScheme(s.config)}
-	if s.activeScheme != protocolScheme {
-		schemes = append(schemes, protocolScheme)
-	}
-	for _, scheme := range schemes {
-		key := `HKCU\Software\Classes\` + scheme
-		commands := [][]string{
-			{"add", key, "/ve", "/d", "URL:VisualWaveDrom Protocol", "/f"},
-			{"add", key, "/v", "URL Protocol", "/t", "REG_SZ", "/f"},
-			{"add", key + `\DefaultIcon`, "/ve", "/d", `"` + s.config.htmlPath + `",0`, "/f"},
-			{"add", key + `\shell\open\command`, "/ve", "/d", command, "/f"},
-		}
-		for _, arguments := range commands {
-			run := exec.Command("reg.exe", arguments...)
-			run.Stdout = nil
-			run.Stderr = nil
-			if err := run.Run(); err != nil {
-				log.Printf("Could not register the VisualWaveDrom URL protocol: %v", err)
-				return
-			}
-		}
-	}
+	s.registerPlatformProtocol(handler)
 }
 
 func desktopQuoted(value string) string {
