@@ -1,12 +1,18 @@
 (function (global) {
   'use strict';
-  const tokenPattern = /\{\$([^{}\s]+)\}/g;
+  const tokenPattern = /\{((?=[^{}]*\$)\s*[$+\-.\d][^{}]*)\}/g;
+  const dataTokenPattern = /(?:\{(?=[^{}]*\$)\s*[$+\-.\d][^{}]*\}|\S)+/g;
+  const numericPattern = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
   const clone = (value) => JSON.parse(JSON.stringify(value));
   const empty = () => ({ revision: 0, directories: [], tables: [], presets: [] });
   let catalog = empty(), libraryId = '', bridge = null, generation = 0;
   let cache = new WeakMap(), selectedFolder = '', selectedTable = '', activePage = 'wave';
   let dirty = 0, savedGeneration = 0, timer = null, saving = null, failure = '';
   let modal = null, channel = null;
+  let tableViewId = '', selectedRow = null;
+  const rowFilters = { name: '', val: '' };
+  const clipboardKind = 'VisualWaveDromParametersClipboard';
+  let parameterClipboard = null, clipboardRequest = 0;
   const menuHiddenStates = new WeakMap();
   const expanded = new Set(['']);
   const $ = (id) => document.getElementById(id);
@@ -21,6 +27,8 @@
     trash: '<path d="M3 6h18M9 6V4h6v2M5 6l1 14h12l1-14M10 10v6M14 10v6"/>',
     edit: '<path d="m16 3 5 5-12 12-6 1 1-6ZM14 5l5 5"/>',
     close: '<path d="m6 6 12 12M18 6 6 18"/>',
+    copy: '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+    paste: '<rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>',
     up: '<path d="m6 14 6-6 6 6"/>', down: '<path d="m6 10 6 6 6-6"/>',
     grip: '<circle cx="9" cy="5" r="1"/><circle cx="15" cy="5" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="9" cy="19" r="1"/><circle cx="15" cy="19" r="1"/>',
     link: '<path d="m10 13 4-4M8 16l-1 1a4 4 0 0 1-6-6l5-5a4 4 0 0 1 6 0m4 2 1-1a4 4 0 0 1 6 6l-5 5a4 4 0 0 1-6 0"/>'
@@ -52,19 +60,63 @@
     return null;
   }
   function text(value, source) {
-    if (typeof value !== 'string' || !value.includes('{$')) return value;
-    return value.replace(tokenPattern, (raw, name) => {
-      const found = resolveName(name, source);
-      return found ? found.val : raw;
+    if (typeof value !== 'string' || !value.includes('$')) return value;
+    return value.replace(tokenPattern, (raw, expression) => {
+      const result = evaluate(expression, source);
+      return result.error ? raw : result.value;
     });
+  }
+  function evaluate(expression, source) {
+    const tokens = expression.trim().split(/\s+/);
+    const variables = new Map();
+    try {
+      if (tokens.length % 2 === 0 || tokens.some((token, index) => index % 2
+        ? !/^[+*/-]$/.test(token)
+        : !/^\$[^{}\s$]+$/.test(token) && !numericPattern.test(token))) {
+        throw new Error('表达式格式错误：仅支持加减乘除，运算符两侧至少保留一个空格');
+      }
+      function operand(token) {
+        let value = token;
+        if (token[0] === '$') {
+          const name = token.slice(1);
+          const found = variables.get(name) || resolveName(name, source);
+          if (!found) throw new Error('未找到变量：' + token + '（运算符两侧需有空格）');
+          variables.set(name, found); value = found.val;
+        }
+        if (tokens.length === 1) return value;
+        if (!numericPattern.test(value.trim()) || !Number.isFinite(Number(value))) {
+          throw new Error(token + ' 的值不是有效数字，不能参与运算');
+        }
+        return Number(value);
+      }
+      let term = operand(tokens[0]), sum = 0, sign = 1;
+      // Accumulate multiplicative terms first, preserving left associativity.
+      for (let index = 1; index < tokens.length; index += 2) {
+        const op = tokens[index], right = operand(tokens[index + 1]);
+        if (op === '*' || op === '/') {
+          if (op === '/' && right === 0) throw new Error('除数不能为 0');
+          term = op === '*' ? term * right : term / right;
+        } else {
+          sum += sign * term; sign = op === '+' ? 1 : -1; term = right;
+        }
+        if (!Number.isFinite(term) || !Number.isFinite(sum)) throw new Error('运算结果超出有效数字范围');
+      }
+      const result = tokens.length === 1 ? term : sum + sign * term;
+      if (tokens.length > 1 && !Number.isFinite(result)) throw new Error('运算结果超出有效数字范围');
+      return { value: String(result), variables: Array.from(variables.values()) };
+    } catch (error) {
+      return { error: error.message, variables: Array.from(variables.values()) };
+    }
   }
   function details(value, source) {
     const found = new Set();
     return Array.from(String(value || '').matchAll(tokenPattern), (match) => {
       if (found.has(match[1])) return '';
       found.add(match[1]);
-      const item = resolveName(match[1], source);
-      return item ? match[0] + '\n参数表：' + item.table + '\n值：' + item.val + '\n说明：' + (item.description || '无') : match[0] + '\n未找到变量';
+      const result = evaluate(match[1], source);
+      const summary = result.error ? '\n' + result.error : '\n结果：' + result.value;
+      return match[0] + summary + result.variables.map((item) => '\n\n$' + item.name + '\n参数表：' + item.table
+        + '\n值：' + item.val + '\n说明：' + (item.description || '无')).join('');
     }).filter(Boolean).join('\n\n');
   }
   function resolve(source) {
@@ -77,7 +129,10 @@
       let next = value;
       Object.keys(value).forEach((key) => {
         if (key === 'parameterTables') return;
-        const result = visit(value[key]);
+        const raw = value[key];
+        const result = key === 'data' && typeof raw === 'string' && raw.includes('$') && raw.match(tokenPattern)
+          ? (raw.match(dataTokenPattern) || []).map((label) => text(label, source))
+          : visit(raw);
         if (result !== value[key]) {
           if (next === value) next = Array.isArray(value) ? value.slice() : Object.assign({}, value);
           next[key] = result;
@@ -96,7 +151,7 @@
     if (!host || !source || !linked(source).length) return;
     const bindings = new Map();
     function add(raw) {
-      if (typeof raw !== 'string' || !raw.includes('{$')) return;
+      if (typeof raw !== 'string' || !raw.includes('$')) return;
       const rendered = text(raw, source);
       const hint = details(raw, source);
       if (hint) {
@@ -109,7 +164,7 @@
         if (Array.isArray(row)) { add(row[0]); rows(row.slice(1)); }
         else if (row && typeof row === 'object') {
           add(row.name);
-          (Array.isArray(row.data) ? row.data : typeof row.data === 'string' ? row.data.split(/\s+/) : []).forEach(add);
+          (Array.isArray(row.data) ? row.data : typeof row.data === 'string' ? row.data.match(dataTokenPattern) || [] : []).forEach(add);
         }
       });
     }
@@ -126,6 +181,130 @@
   function status(message, error) {
     const node = $('parameter-status');
     if (node) { node.textContent = message; node.classList.toggle('error', !!error); }
+  }
+  function clipboardButton(type, action, label) {
+    const node = button(label, () => {
+      if (action === 'copy') void copyParameters(type);
+      else void pasteParameters(type);
+    }, action);
+    node.dataset.parameterClipboard = type + '-' + action;
+    node.title = label + (action === 'copy' ? ' (Ctrl+C)' : ' (Ctrl+V)');
+    return node;
+  }
+  function updateClipboardButtons() {
+    const table = catalog.tables.find((item) => item.id === selectedTable);
+    document.querySelectorAll('[data-parameter-clipboard]').forEach((node) => {
+      const [type, action] = node.dataset.parameterClipboard.split('-');
+      node.disabled = action === 'copy'
+        ? !table || (type === 'row' && !table.rows.includes(selectedRow))
+        : (type === 'row' && !table) || !(parameterClipboard && parameterClipboard.type === type || global.navigator.clipboard && global.navigator.clipboard.readText);
+    });
+  }
+  function clipboardSnapshot(type) {
+    const table = catalog.tables.find((item) => item.id === selectedTable);
+    if (!table || type === 'row' && !table.rows.includes(selectedRow)) throw new Error(type === 'table' ? '请先选中参数表' : '请先选中一行');
+    const payload = { kind: clipboardKind, version: 1, type };
+    if (type === 'table') payload.table = { name: table.name, rows: table.rows };
+    else payload.row = selectedRow;
+    return clone(payload);
+  }
+  function parseClipboard(value, type) {
+    if (!value || value.length > 8 * 1024 * 1024) throw new Error('剪贴板为空或参数内容过大');
+    let payload;
+    try { payload = JSON.parse(value); } catch (_) { throw new Error('剪贴板中不是参数表或参数行'); }
+    if (!payload || payload.kind !== clipboardKind || payload.version !== 1 || payload.type !== type) {
+      throw new Error(type === 'table' ? '请先复制一张参数表' : '请先复制一行参数');
+    }
+    const table = type === 'table' ? payload.table : { name: '参数行', rows: [payload.row] };
+    if (!table || typeof table.name !== 'string' || !Array.isArray(table.rows) || table.rows.some((row) =>
+      !row || typeof row !== 'object' || Array.isArray(row) || typeof row.name !== 'string'
+      || ![row.val, row.description].every((item) => item == null || ['string', 'number', 'boolean'].includes(typeof item)))) {
+      throw new Error('剪贴板中的参数格式无效');
+    }
+    validate({ directories: [], presets: [], tables: [Object.assign({ id: 'clipboard' }, table)] });
+    return payload;
+  }
+  async function copyParameters(type, event) {
+    try {
+      const payload = clipboardSnapshot(type), text = JSON.stringify(payload, null, 2);
+      parameterClipboard = payload; const request = ++clipboardRequest; updateClipboardButtons();
+      const label = type === 'table' ? '已复制参数表' : '已复制参数行';
+      if (event && event.clipboardData) {
+        event.clipboardData.setData('text/plain', text); event.preventDefault(); status(label); return;
+      }
+      status(label);
+      try {
+        if (!global.navigator.clipboard || !global.navigator.clipboard.writeText) throw new Error('unavailable');
+        await global.navigator.clipboard.writeText(text);
+      } catch (_) { if (request === clipboardRequest) status(label + '，可在当前窗口粘贴'); }
+    } catch (error) { status(error.message, true); }
+  }
+  function uniqueCopyName(name, existing, table) {
+    if (!existing.has(name)) return name;
+    const base = name + (table ? ' 副本' : '_copy'); let next = base, index = 2;
+    while (existing.has(next)) next = base + index++;
+    return next;
+  }
+  function focusTreeItem(type, value) {
+    const node = Array.from($('parameter-tree').querySelectorAll('.parameter-tree-label')).find((item) => item.dataset[type] === value);
+    if (node) node.focus({ preventScroll: true });
+  }
+  function applyClipboard(payload, type) {
+    if (type === 'table') {
+      const table = { id: id(), name: uniqueCopyName(payload.table.name, new Set(catalog.tables.map((item) => item.name)), true), parentId: selectedFolder, rows: clone(payload.table.rows) };
+      catalog.tables.push(table); selectedTable = table.id; expanded.add(selectedFolder);
+      changed(true); focusTreeItem('tableId', table.id); return;
+    }
+    const table = catalog.tables.find((item) => item.id === selectedTable);
+    if (!table) throw new Error('请先选中目标参数表');
+    const row = clone(payload.row);
+    if (row.name) row.name = uniqueCopyName(row.name, new Set(table.rows.map((item) => item.name)), false);
+    const index = table.rows.indexOf(selectedRow);
+    table.rows.splice(index < 0 ? table.rows.length : index + 1, 0, row);
+    selectedRow = row; rowFilters.name = ''; rowFilters.val = '';
+    changed(true);
+    const handle = $('parameter-workspace').querySelector('tr.selected .parameter-row-select');
+    if (handle) { handle.focus({ preventScroll: true }); handle.scrollIntoView({ block: 'nearest', inline: 'nearest' }); }
+  }
+  async function pasteParameters(type, event) {
+    const destination = { libraryId, folder: selectedFolder, table: selectedTable, row: selectedRow };
+    const request = ++clipboardRequest;
+    try {
+      let text;
+      if (event && event.clipboardData) { text = event.clipboardData.getData('text/plain'); event.preventDefault(); }
+      else {
+        try {
+          if (!global.navigator.clipboard || !global.navigator.clipboard.readText) throw new Error('unavailable');
+          text = await global.navigator.clipboard.readText();
+        } catch (_) {
+          if (!parameterClipboard) throw new Error('无法读取剪贴板，请先复制参数，或使用 Ctrl+V 粘贴');
+          text = JSON.stringify(parameterClipboard);
+        }
+      }
+      if (request !== clipboardRequest || destination.libraryId !== libraryId || activePage !== 'parameters'
+          || destination.folder !== selectedFolder || destination.table !== selectedTable || destination.row !== selectedRow) {
+        status('粘贴位置已改变，请重新粘贴', true); return;
+      }
+      const payload = parseClipboard(text, type);
+      applyClipboard(payload, type); parameterClipboard = clone(payload); updateClipboardButtons();
+    } catch (error) { status(error.message, true); }
+  }
+  function clipboardContext(target) {
+    if (activePage !== 'parameters' || modal || !target || !target.closest || target.closest('.modal-overlay')) return '';
+    if (target.closest('#parameter-directory-page')) return 'table';
+    if (target.closest('#parameter-workspace')) return 'row';
+    return '';
+  }
+  function isTextInput(target) { return !!(target && target.closest && target.closest('input,textarea,select,[contenteditable]:not([contenteditable="false"])')); }
+  function onClipboardEvent(event) {
+    const type = clipboardContext(event.target); if (!type) return;
+    event.stopPropagation();
+    if (isTextInput(event.target)) {
+      if (event.type === 'copy') { parameterClipboard = null; clipboardRequest++; updateClipboardButtons(); }
+      return;
+    }
+    if (event.type === 'copy') void copyParameters(type, event);
+    else void pasteParameters(type, event);
   }
   function validate(value) {
     const ids = new Set();
@@ -255,8 +434,9 @@
       const choose = button((dir ? number + ' ' + dir.name : '参数表'), () => {
         selectedFolder = parentId; selectedTable = '';
         if (expanded.has(parentId)) expanded.delete(parentId); else expanded.add(parentId);
-        renderTree(); renderTable();
+        renderTree(); renderTable(); focusTreeItem('folderId', parentId);
       });
+      choose.dataset.folderId = parentId;
       choose.className = 'parameter-tree-label'; choose.classList.toggle('active', !selectedTable && selectedFolder === parentId);
       const chevron = element('span', 'parameter-tree-chevron', expanded.has(parentId) ? '−' : '+');
       choose.prepend(chevron); choose.setAttribute('aria-expanded', String(expanded.has(parentId))); line.append(choose);
@@ -269,7 +449,8 @@
       catalog.tables.filter((item) => (item.parentId || '') === parentId).forEach((table) => {
         const row = element('div', 'parameter-tree-row'); row.style.setProperty('--depth', depth + 1);
         row.dataset.tableId = table.id;
-        const pick = button(table.name, () => { selectedTable = table.id; selectedFolder = parentId; renderTree(); renderTable(); });
+        const pick = button(table.name, () => { selectedTable = table.id; selectedFolder = parentId; renderTree(); renderTable(); focusTreeItem('tableId', table.id); });
+        pick.dataset.tableId = table.id;
         pick.className = 'parameter-tree-label'; pick.classList.toggle('active', selectedTable === table.id);
         pick.draggable = true; pick.addEventListener('dragstart', (e) => e.dataTransfer.setData('application/x-vwd-parameter', table.id));
         row.append(pick, element('span', 'parameter-count', table.rows.filter((item) => item.name).length)); tree.append(row);
@@ -277,17 +458,89 @@
     }
     directory('', 0, '', new Set());
   }
+  function openAddVariables(tableId, anchor) {
+    if (modal) return;
+    const identity = libraryId;
+    const overlay = element('div', 'modal-overlay parameter-modal');
+    const dialog = element('form', 'modal-dialog parameter-count-dialog'); dialog.noValidate = true;
+    dialog.setAttribute('role', 'dialog'); dialog.setAttribute('aria-modal', 'true'); dialog.setAttribute('aria-labelledby', 'parameter-count-title');
+    const header = element('div', 'modal-header'); const title = element('h2', '', '新增变量'); title.id = 'parameter-count-title';
+    let closed = false;
+    function close() {
+      if (closed) return;
+      closed = true; overlay.remove(); modal = null;
+      const target = anchor && anchor.isConnected ? anchor : $('parameter-workspace').querySelector('.parameter-add-variables');
+      if (target) target.focus({ preventScroll: true });
+    }
+    header.append(title, button('关闭', close, 'close')); dialog.append(header);
+    const body = element('div', 'modal-body'); const label = element('label', 'parameter-count-label', '添加数量');
+    const input = element('input'); input.id = 'parameter-add-count'; input.type = 'number'; input.min = '1'; input.max = '1000'; input.step = '1'; input.value = '1'; input.required = true;
+    label.htmlFor = input.id;
+    const error = element('p', 'parameter-count-error'); error.id = 'parameter-count-error'; error.setAttribute('role', 'alert');
+    input.setAttribute('aria-describedby', error.id);
+    input.addEventListener('input', () => { error.textContent = ''; input.removeAttribute('aria-invalid'); });
+    body.append(label, input, error); dialog.append(body);
+    const footer = element('div', 'modal-footer'); const confirm = button('添加', () => {}); confirm.type = 'submit'; confirm.classList.add('modal-btn-primary');
+    footer.append(button('取消', close), confirm); dialog.append(footer);
+    dialog.addEventListener('submit', (event) => {
+      event.preventDefault(); if (closed) return;
+      const count = Number(input.value);
+      if (!input.value.trim() || !Number.isInteger(count) || count < 1 || count > 1000) {
+        error.textContent = '请输入 1 到 1000 之间的整数'; input.setAttribute('aria-invalid', 'true'); input.focus(); return;
+      }
+      const table = catalog.tables.find((item) => item.id === tableId);
+      if (!table || identity !== libraryId || selectedTable !== tableId || activePage !== 'parameters') {
+        error.textContent = '目标参数表已变化，请关闭后重新选择'; return;
+      }
+      confirm.disabled = true;
+      const rows = Array.from({ length: count }, () => ({ name: '', val: '', description: '' }));
+      table.rows.push(...rows); selectedRow = rows[0]; rowFilters.name = ''; rowFilters.val = '';
+      close(); changed(true);
+      const firstInput = $('parameter-workspace').querySelector('tr.selected input');
+      if (firstInput) { firstInput.focus({ preventScroll: true }); firstInput.scrollIntoView({ block: 'nearest', inline: 'nearest' }); }
+    });
+    let startedOutside = false;
+    overlay.addEventListener('pointerdown', (event) => { startedOutside = event.target === overlay; });
+    overlay.addEventListener('click', (event) => { if (startedOutside && event.target === overlay) close(); });
+    overlay.addEventListener('keydown', (event) => {
+      event.stopPropagation();
+      if (event.key === 'Escape') { event.preventDefault(); close(); }
+      if (event.key === 'Enter' && event.isComposing) event.preventDefault();
+      if (event.key === 'Tab') {
+        const controls = Array.from(dialog.querySelectorAll('button:not(:disabled),input'));
+        if (event.shiftKey && document.activeElement === controls[0]) { event.preventDefault(); controls[controls.length - 1].focus(); }
+        else if (!event.shiftKey && document.activeElement === controls[controls.length - 1]) { event.preventDefault(); controls[0].focus(); }
+      }
+    });
+    clipboardRequest++; modal = overlay; overlay.append(dialog); document.body.append(overlay); input.focus(); input.select();
+  }
   function renderTable() {
     const workspace = $('parameter-workspace'); if (!workspace) return;
     const table = catalog.tables.find((item) => item.id === selectedTable);
+    if (tableViewId !== (table && table.id || '')) {
+      tableViewId = table && table.id || ''; selectedRow = null;
+      rowFilters.name = ''; rowFilters.val = '';
+    }
+    if (!table || !table.rows.includes(selectedRow)) selectedRow = null;
     workspace.replaceChildren();
     const toolbar = element('header', 'parameter-workspace-header');
+    let deleteRowButton;
     toolbar.append(element('h2', '', table ? table.name : (folderPath(selectedFolder) || '参数目录')));
     if (table) {
       toolbar.append(button('修改参数表名称', () => rename(table), 'edit'));
       const parent = element('select', 'parameter-parent'); parent.setAttribute('aria-label', '参数表所属标题'); folderOptions(parent, table.parentId);
       parent.addEventListener('change', () => { table.parentId = parent.value; selectedFolder = parent.value; expanded.add(parent.value); changed(true); }); toolbar.append(parent);
-      toolbar.append(button('新增变量', () => { table.rows.push({ name: '', val: '', description: '' }); changed(true); const inputs = workspace.querySelectorAll('tbody input'); inputs[inputs.length - 1].focus(); }));
+      const addVariables = button('新增变量', () => openAddVariables(table.id, addVariables));
+      addVariables.classList.add('parameter-add-variables'); toolbar.append(addVariables);
+      deleteRowButton = button('删除选中行', () => {
+        // Use the source row, never the filtered display index.
+        const index = table.rows.indexOf(selectedRow);
+        if (index < 0) return;
+        table.rows.splice(index, 1); selectedRow = null; changed(true);
+      }, 'trash');
+      deleteRowButton.disabled = !selectedRow; toolbar.append(deleteRowButton);
+      const rowActions = element('div', 'parameter-row-actions');
+      rowActions.append(clipboardButton('row', 'copy', '复制行'), clipboardButton('row', 'paste', '粘贴行')); toolbar.append(rowActions);
       toolbar.append(button('删除参数表', () => {
         if (!global.confirm('删除参数表“' + table.name + '”？已链接的波形会保留引用，并提示参数表缺失。')) return;
         catalog.tables = catalog.tables.filter((item) => item !== table); selectedTable = ''; changed(true);
@@ -301,22 +554,61 @@
     });
     saveLibrary.classList.add('parameter-library-save'); toolbar.append(saveLibrary);
     workspace.append(toolbar);
+    updateClipboardButtons();
     const state = element('div', 'parameter-status'); state.id = 'parameter-status'; state.setAttribute('role', 'status');
     state.textContent = failure || (dirty !== savedGeneration ? '正在保存参数目录...' : ''); workspace.append(state);
     if (!table) { workspace.append(element('p', 'parameter-empty', '未选中参数表')); return; }
     const scroller = element('div', 'parameter-grid-scroll'); const grid = element('table', 'parameter-grid');
     const head = element('thead'); const tr = element('tr');
-    ['变量名 name', '变量值 val', '变量说明 description'].forEach((label) => tr.append(element('th', '', label)));
+    const filterInputs = {}, filterCount = element('span', 'parameter-filter-count');
+    const clearFilters = button('清除筛选', () => {
+      ['name', 'val'].forEach((field) => { rowFilters[field] = ''; filterInputs[field].value = ''; });
+      applyFilters(); filterInputs.name.focus();
+    }, 'close');
+    ['变量名 name', '变量值 val', '变量说明 description'].forEach((label, index) => {
+      const th = element('th'); th.scope = 'col'; th.append(element('span', 'parameter-column-label', label));
+      if (index < 2) {
+        const field = index === 0 ? 'name' : 'val'; const input = element('input', 'parameter-column-filter');
+        input.type = 'search'; input.value = rowFilters[field]; input.spellcheck = false;
+        input.placeholder = index === 0 ? '筛选变量名' : '筛选变量值'; input.setAttribute('aria-label', input.placeholder);
+        input.addEventListener('input', () => { rowFilters[field] = input.value; applyFilters(); });
+        filterInputs[field] = input; th.append(input);
+      } else {
+        const controls = element('div', 'parameter-filter-summary'); controls.append(filterCount, clearFilters); th.append(controls);
+      }
+      tr.append(th);
+    });
     head.append(tr); grid.append(head);
     const body = element('tbody');
+    const rowViews = [];
+    let selectedLine = null;
+    function selectRow(row, line) {
+      if (selectedLine) { selectedLine.classList.remove('selected'); selectedLine.setAttribute('aria-selected', 'false'); }
+      selectedRow = row; selectedLine = line;
+      if (line) { line.classList.add('selected'); line.setAttribute('aria-selected', 'true'); }
+      deleteRowButton.disabled = !row;
+      deleteRowButton.title = row ? '删除第 ' + (table.rows.indexOf(row) + 1) + ' 行' : '删除选中行';
+      updateClipboardButtons();
+    }
     table.rows.forEach((row, index) => {
       const line = element('tr');
+      const view = { row, line, resize: [] }; rowViews.push(view);
+      line.addEventListener('click', () => selectRow(row, line));
+      line.addEventListener('focusin', () => selectRow(row, line));
+      line.setAttribute('aria-selected', 'false');
+      if (selectedRow === row) selectRow(row, line);
       ['name', 'val', 'description'].forEach((field) => {
         const td = element('td'); const fieldBox = element('div', 'parameter-cell');
         const input = element(field === 'name' ? 'input' : 'textarea');
+        if (field === 'name') {
+          const handle = button('选中第 ' + (index + 1) + ' 行', () => selectRow(row, line));
+          handle.className = 'parameter-row-select'; handle.textContent = index + 1;
+          fieldBox.append(handle);
+        }
         input.value = row[field] == null ? '' : String(row[field]); input.setAttribute('aria-label', '第 ' + (index + 1) + ' 行 ' + field);
         input.spellcheck = false; if (field !== 'name') input.rows = 1;
-        const resize = () => { if (field !== 'name') { input.style.height = 'auto'; input.style.height = Math.min(220, input.scrollHeight) + 'px'; } };
+        const resize = () => { if (field !== 'name' && !line.hidden) { input.style.height = 'auto'; input.style.height = Math.min(220, input.scrollHeight) + 'px'; } };
+        view.resize.push(resize);
         input.addEventListener('input', () => { row[field] = input.value; resize(); changed(false); });
         input.addEventListener('blur', () => {
           void flush().catch(() => {});
@@ -324,12 +616,28 @@
           if (treeRow) treeRow.querySelector('.parameter-count').textContent = table.rows.filter((item) => item.name).length;
         });
         fieldBox.append(input);
-        if (field === 'name') fieldBox.append(button('删除第 ' + (index + 1) + ' 行', () => { table.rows.splice(index, 1); changed(true); }, 'trash'));
         td.append(fieldBox); line.append(td);
         requestAnimationFrame(resize);
       });
       body.append(line);
     });
+    const emptyRow = element('tr'), emptyCell = element('td', 'parameter-empty'); emptyCell.colSpan = 3;
+    emptyRow.append(emptyCell); body.append(emptyRow);
+    function applyFilters() {
+      const name = rowFilters.name.trim().toLowerCase(), val = rowFilters.val.trim().toLowerCase();
+      let count = 0;
+      rowViews.forEach((view) => {
+        const visible = String(view.row.name ?? '').toLowerCase().includes(name) && String(view.row.val ?? '').toLowerCase().includes(val);
+        const wasHidden = view.line.hidden; view.line.hidden = !visible;
+        if (visible) count++;
+        else if (selectedRow === view.row) selectRow(null, null);
+        if (visible && wasHidden) requestAnimationFrame(() => view.resize.forEach((resize) => resize()));
+      });
+      emptyRow.hidden = count > 0; emptyCell.textContent = name || val ? '没有匹配的变量' : '暂无变量';
+      filterCount.textContent = count + ' / ' + table.rows.length;
+      clearFilters.disabled = !rowFilters.name && !rowFilters.val;
+    }
+    applyFilters();
     grid.append(body); scroller.append(grid); workspace.append(scroller);
     const bottom = element('footer', 'parameter-table-footer');
     bottom.append(button('重新加载', async () => {
@@ -458,11 +766,21 @@
   function mount(api) {
     bridge = api;
     global.addEventListener('keydown', (event) => {
-      if (activePage === 'parameters' && !modal && !event.target.closest('.modal-overlay')) event.stopPropagation();
+      if (activePage !== 'parameters' || modal || event.target.closest('.modal-overlay')) return;
+      event.stopPropagation();
+      if (event.key === 'Escape' && !event.isComposing && isTextInput(event.target)) {
+        const line = event.target.closest('tbody tr');
+        if (line) { event.preventDefault(); line.querySelector('.parameter-row-select').focus({ preventScroll: true }); }
+      }
     }, true);
+    global.addEventListener('copy', onClipboardEvent, true);
+    global.addEventListener('paste', onClipboardEvent, true);
     $('wave-directory-tab').addEventListener('click', () => { void switchPage('wave'); });
     $('parameter-directory-tab').addEventListener('click', () => { void switchPage('parameters'); });
     $('parameter-add-table').addEventListener('click', addTable);
+    const tableActions = element('div', 'parameter-directory-actions');
+    tableActions.append(clipboardButton('table', 'copy', '复制参数表'), clipboardButton('table', 'paste', '粘贴参数表'));
+    $('parameter-add-table').insertAdjacentElement('afterend', tableActions);
     $('parameter-toggle-all').addEventListener('click', () => {
       const all = ['', ...catalog.directories.map((dir) => dir.id)]; const collapse = all.every((entry) => expanded.has(entry));
       all.forEach((entry) => collapse ? expanded.delete(entry) : expanded.add(entry));
@@ -470,7 +788,10 @@
     });
     document.querySelector('.app > main.main').id = 'wave-workspace';
     const tooltip = element('div', 'parameter-tooltip'); tooltip.hidden = true; tooltip.setAttribute('role', 'tooltip'); document.body.append(tooltip);
+    let tooltipTimer = null;
     document.addEventListener('mouseover', (event) => {
+      clearTimeout(tooltipTimer);
+      if (tooltip.contains(event.target)) return;
       let hint = ''; const target = event.target && event.target.closest('[data-parameter-hint], input, textarea, .cm-parameter');
       if (target) {
         hint = target.dataset.parameterHint || '';
@@ -478,10 +799,18 @@
           try { hint = details(target.value || target.textContent, bridge.currentSource()); } catch (_) { /* Invalid JSON stays editable. */ }
         }
       }
-      tooltip.hidden = !hint; tooltip.textContent = hint;
-      if (hint) { tooltip.style.left = Math.max(8, Math.min(event.clientX + 12, innerWidth - 340)) + 'px'; tooltip.style.top = Math.max(8, Math.min(event.clientY + 18, innerHeight - 180)) + 'px'; }
+      if (!hint) { tooltipTimer = setTimeout(() => { tooltip.hidden = true; }, 120); return; }
+      tooltip.hidden = false; tooltip.textContent = hint;
+      if (hint) {
+        tooltip.style.left = '8px'; tooltip.style.top = '8px';
+        const bounds = tooltip.getBoundingClientRect();
+        tooltip.style.left = Math.max(8, Math.min(event.clientX + 12, innerWidth - bounds.width - 8)) + 'px';
+        tooltip.style.top = Math.max(8, Math.min(event.clientY + 18, innerHeight - bounds.height - 8)) + 'px';
+      }
     });
-    document.addEventListener('pointerdown', () => { tooltip.hidden = true; }, true);
+    document.addEventListener('pointerdown', (event) => {
+      if (!tooltip.contains(event.target)) { clearTimeout(tooltipTimer); tooltip.hidden = true; }
+    }, true);
     global.addEventListener('beforeunload', (event) => { if (dirty !== savedGeneration) { event.preventDefault(); event.returnValue = ''; } });
     try {
       channel = new BroadcastChannel('vwd-parameters:' + global.location.pathname);

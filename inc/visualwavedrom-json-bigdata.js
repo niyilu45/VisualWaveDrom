@@ -54,7 +54,7 @@
       return value == null ? '' : String(value);
     });
     if (typeof data !== 'string' || !data.trim()) return [];
-    return data.trim().split(/\s+/);
+    return data.match(/(?:\{(?=[^{}]*\$)\s*[$+\-.\d][^{}]*\}|\S)+/g) || [];
   }
 
   function collectDataColumns(wave) {

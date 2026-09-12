@@ -75,7 +75,7 @@
   function normalizeDataValues(data) {
     if (Array.isArray(data)) return data.slice();
     if (typeof data !== 'string' || !data.trim()) return [];
-    return data.trim().split(/\s+/);
+    return data.match(/(?:\{(?=[^{}]*\$)\s*[$+\-.\d][^{}]*\}|\S)+/g) || [];
   }
 
   function isSampleSequence(value) {
