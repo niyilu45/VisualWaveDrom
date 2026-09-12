@@ -1,5 +1,30 @@
 [
   {
+    "version": "2026.9.12.10",
+    "date": "2026-09-12T15:27:51Z",
+    "head": "0f0f0581b3924ba5daa377cc8675c6cfa0155e06",
+    "notes": [
+      "参数表支持点击顶部表名直接改名，并同步更新目录；移除独立改名按钮、目录位置下拉框及底部重新加载、重试保存按钮，统一通过保存波形库保存。",
+      "移除参数目录中的复制和粘贴参数表按钮，保留 Ctrl+C、Ctrl+V；表内行复制粘贴与文本复制粘贴不受影响。",
+      "新增、删除参数表以及粘贴生成副本支持撤销和重做，与删除参数行共用操作历史；恢复表内容、原有标识与目录位置，保留波形链接及预设引用。",
+      "已验证 Chrome、Edge 的快捷键、连续撤销重做、保存失败重试、保存过程中撤销、刷新与切库隔离，以及桌面和窄屏布局。"
+    ],
+    "commits": [
+      {
+        "id": "0f0f0581b3924ba5daa377cc8675c6cfa0155e06",
+        "date": "2026-09-12T23:26:48+08:00",
+        "title": "feat: simplify parameter controls and add table undo history",
+        "body": "Rename tables by clicking their heading. Remove the parent selector, reload/retry footer, and directory copy/paste buttons; retain keyboard clipboard support and Save Library.\n\nSupport undo and redo for table creation, deletion and pasted copies alongside row deletion. Preserve table identities, references, contents and directory order without reverting unrelated edits.\n\nVerified Chrome and Edge: controls, keyboard clipboard, mixed table/row history, save retries and races, refresh, directory fallback, library isolation, and responsive layout."
+      },
+      {
+        "id": "201c69715ed24e97257bfc9dd9145ff84741cb90",
+        "date": "2026-09-12T20:51:57+08:00",
+        "title": "chore: publish release 2026.9.12.9"
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.9.12.9",
     "date": "2026-09-12T12:51:26Z",
     "head": "cdce154bc71f2fb307c54bf4cd0aa455509dabd5",
