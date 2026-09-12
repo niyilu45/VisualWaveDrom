@@ -14,7 +14,7 @@
   const rowFilters = { name: '', val: '' };
   const clipboardKind = 'VisualWaveDromParametersClipboard';
   let parameterClipboard = null, clipboardRequest = 0;
-  let rowUndoStack = [], rowRedoStack = [];
+  let parameterUndoStack = [], parameterRedoStack = [];
   const menuHiddenStates = new WeakMap();
   const expanded = new Set(['']);
   const $ = (id) => document.getElementById(id);
@@ -332,8 +332,7 @@
   function applyClipboard(payload, type) {
     if (type === 'table') {
       const table = { id: id(), name: uniqueCopyName(payload.table.name, new Set(catalog.tables.map((item) => item.name)), true), parentId: selectedFolder, rows: clone(payload.table.rows) };
-      catalog.tables.push(table); selectedTable = table.id; expanded.add(selectedFolder);
-      changed(true); focusTreeItem('tableId', table.id); return;
+      insertTable(table); return;
     }
     const table = catalog.tables.find((item) => item.id === selectedTable);
     if (!table) throw new Error('请先选中目标参数表');
@@ -376,8 +375,45 @@
     return '';
   }
   function isTextInput(target) { return !!(target && target.closest && target.closest('input,textarea,select,[contenteditable]:not([contenteditable="false"])')); }
-  function rowHistoryState() { return { canUndo: rowUndoStack.length > 0, canRedo: rowRedoStack.length > 0 }; }
-  function notifyRowHistory() { if (bridge && bridge.historyChanged) bridge.historyChanged(); }
+  function parameterHistoryState() { return { canUndo: parameterUndoStack.length > 0, canRedo: parameterRedoStack.length > 0 }; }
+  function notifyParameterHistory() { if (bridge && bridge.historyChanged) bridge.historyChanged(); }
+  function recordParameterHistory(entry) {
+    parameterUndoStack.push(entry);
+    if (parameterUndoStack.length > 50) parameterUndoStack.shift();
+    parameterRedoStack = [];
+  }
+  function folderAncestors(parentId) {
+    const parents = [], seen = new Set();
+    while (parentId && !seen.has(parentId)) {
+      seen.add(parentId); parents.push(parentId);
+      parentId = (catalog.directories.find((dir) => dir.id === parentId) || {}).parentId;
+    }
+    return parents.concat('');
+  }
+  function captureTablePosition(entry) {
+    const index = catalog.tables.indexOf(entry.table);
+    entry.index = index; entry.previous = catalog.tables[index - 1]; entry.next = catalog.tables[index + 1];
+    entry.parents = folderAncestors(entry.table.parentId);
+    return entry;
+  }
+  function finishTableHistory(table, parentId) {
+    clipboardRequest++;
+    selectedTable = table ? table.id : ''; selectedFolder = table ? table.parentId || '' : parentId || '';
+    folderAncestors(selectedFolder).forEach((id) => expanded.add(id));
+    changed(true, true);
+    focusTreeItem(table ? 'tableId' : 'folderId', table ? table.id : selectedFolder);
+  }
+  function insertTable(table) {
+    catalog.tables.push(table);
+    recordParameterHistory(captureTablePosition({ kind: 'table-add', table }));
+    finishTableHistory(table);
+  }
+  function deleteTable(table) {
+    const index = catalog.tables.indexOf(table); if (index < 0) return;
+    recordParameterHistory(captureTablePosition({ kind: 'table-delete', table }));
+    catalog.tables.splice(index, 1);
+    finishTableHistory(null, table.parentId);
+  }
   function finishRowHistory(table, row, scrollTop) {
     clipboardRequest++;
     const switched = selectedTable !== table.id;
@@ -403,17 +439,33 @@
     if (index < 0) return false;
     const scroller = $('parameter-workspace').querySelector('.parameter-grid-scroll');
     // Retain the removed row and its neighbors, not a snapshot of unrelated edits.
-    rowUndoStack.push({ tableId: table.id, row: selectedRow, index, previous: table.rows[index - 1], next: table.rows[index + 1] });
-    if (rowUndoStack.length > 50) rowUndoStack.shift();
-    rowRedoStack = [];
+    recordParameterHistory({ kind: 'row-delete', tableId: table.id, row: selectedRow, index, previous: table.rows[index - 1], next: table.rows[index + 1] });
     table.rows.splice(index, 1);
     finishRowHistory(table, null, scroller ? scroller.scrollTop : 0);
     return true;
   }
-  function applyRowHistory(redo) {
+  function applyParameterHistory(redo) {
     if (activePage !== 'parameters' || modal) return false;
-    const from = redo ? rowRedoStack : rowUndoStack, to = redo ? rowUndoStack : rowRedoStack;
+    const from = redo ? parameterRedoStack : parameterUndoStack, to = redo ? parameterUndoStack : parameterRedoStack;
     const entry = from[from.length - 1]; if (!entry) return false;
+    if (entry.kind === 'table-add' || entry.kind === 'table-delete') {
+      const insert = (entry.kind === 'table-add') === redo;
+      if (insert) {
+        if (catalog.tables.some((table) => table.id === entry.table.id)) return false;
+        const next = catalog.tables.indexOf(entry.next), previous = catalog.tables.indexOf(entry.previous);
+        const index = next >= 0 ? next : previous >= 0 ? previous + 1 : Math.min(entry.index, catalog.tables.length);
+        // Keep the original table identity so links, presets and older row history still refer to it.
+        entry.table.parentId = entry.parents.find((id) => !id || catalog.directories.some((dir) => dir.id === id)) || '';
+        catalog.tables.splice(index, 0, entry.table);
+      } else {
+        const index = catalog.tables.indexOf(entry.table); if (index < 0) return false;
+        captureTablePosition(entry);
+        catalog.tables.splice(index, 1);
+      }
+      from.pop(); to.push(entry);
+      finishTableHistory(insert ? entry.table : null, entry.table.parentId);
+      return true;
+    }
     const table = catalog.tables.find((item) => item.id === entry.tableId);
     if (!table) return false;
     const scroller = $('parameter-workspace').querySelector('.parameter-grid-scroll');
@@ -471,12 +523,11 @@
     generation++; cache = new WeakMap();
     if (bridge) bridge.changed();
   }
-  function changed(render, applyingRowHistory) {
-    if (!applyingRowHistory) rowRedoStack = [];
-    rowUndoStack = rowUndoStack.filter((entry) => catalog.tables.some((table) => table.id === entry.tableId));
+  function changed(render, applyingHistory) {
+    if (!applyingHistory) parameterRedoStack = [];
     dirty++; failure = ''; invalidate();
     if (render) { renderTree(); renderTable(); }
-    notifyRowHistory();
+    notifyParameterHistory();
     status('正在保存参数目录...');
     clearTimeout(timer); timer = setTimeout(() => { void flush().catch(() => {}); }, 220);
   }
@@ -502,10 +553,10 @@
   function setCatalog(value, identity) {
     if (identity === libraryId && (dirty !== savedGeneration || Number(value && value.revision) < catalog.revision)) return;
     const next = normalize(value);
-    const sameContent = identity === libraryId && (rowUndoStack.length || rowRedoStack.length)
+    const sameContent = identity === libraryId && (parameterUndoStack.length || parameterRedoStack.length)
       && ['directories', 'tables', 'presets'].every((key) => JSON.stringify(catalog[key]) === JSON.stringify(next[key]));
     if (sameContent) catalog.revision = next.revision;
-    else { catalog = next; rowUndoStack = []; rowRedoStack = []; }
+    else { catalog = next; parameterUndoStack = []; parameterRedoStack = []; }
     libraryId = identity || '';
     dirty = savedGeneration = 0; failure = '';
     if (!catalog.tables.some((table) => table.id === selectedTable)) selectedTable = '';
@@ -513,7 +564,7 @@
     // A restored JSON document can be unchanged while its parameter values differ.
     // Invalidate the host's rendered-wave caches as well as the resolver cache.
     invalidate();
-    renderTree(); renderTable(); notifyRowHistory();
+    renderTree(); renderTable(); notifyParameterHistory();
   }
   async function refresh() {
     if (!bridge || !bridge.identity()) throw new Error('波形库仍在加载，请稍后再试');
@@ -533,7 +584,7 @@
   function addTable() {
     const name = namePrompt('参数表名称'); if (!name) return;
     const table = { id: id(), name, parentId: selectedFolder, rows: [{ name: '', val: '', description: '' }] };
-    catalog.tables.push(table); selectedTable = table.id; expanded.add(selectedFolder); changed(true);
+    insertTable(table);
     const input = $('parameter-workspace').querySelector('tbody input'); if (input) input.focus();
   }
   function rename(item) {
@@ -554,11 +605,6 @@
       if (!dir) break; names.unshift(dir.name); idValue = dir.parentId;
     }
     return names.join(' / ');
-  }
-  function folderOptions(select, current) {
-    select.replaceChildren(new Option('根目录', ''));
-    catalog.directories.forEach((dir) => select.add(new Option(folderPath(dir.id), dir.id)));
-    select.value = current || '';
   }
   function enableFolderDrop(node, parentId) {
     node.addEventListener('dragover', (event) => { if (event.dataTransfer.types.includes('application/x-vwd-parameter')) { event.preventDefault(); node.classList.add('drop-target'); } });
@@ -679,11 +725,18 @@
     workspace.replaceChildren();
     const toolbar = element('header', 'parameter-workspace-header');
     let deleteRowButton;
-    toolbar.append(element('h2', '', table ? table.name : (folderPath(selectedFolder) || '参数目录')));
+    const heading = element('h2');
     if (table) {
-      toolbar.append(button('修改参数表名称', () => rename(table), 'edit'));
-      const parent = element('select', 'parameter-parent'); parent.setAttribute('aria-label', '参数表所属标题'); folderOptions(parent, table.parentId);
-      parent.addEventListener('change', () => { table.parentId = parent.value; selectedFolder = parent.value; expanded.add(parent.value); changed(true); }); toolbar.append(parent);
+      const name = button(table.name, () => {
+        rename(table);
+        workspace.querySelector('.parameter-table-name').focus({ preventScroll: true });
+      });
+      name.className = 'parameter-table-name'; name.title = '点击修改参数表名称';
+      name.setAttribute('aria-label', '修改参数表名称：' + table.name);
+      heading.append(name);
+    } else heading.textContent = folderPath(selectedFolder) || '参数目录';
+    toolbar.append(heading);
+    if (table) {
       const addVariables = button('新增变量', () => openAddVariables(table.id, addVariables));
       addVariables.classList.add('parameter-add-variables'); toolbar.append(addVariables);
       deleteRowButton = button('删除选中行', deleteSelectedRow, 'trash');
@@ -692,7 +745,7 @@
       rowActions.append(clipboardButton('row', 'copy', '复制行'), clipboardButton('row', 'paste', '粘贴行')); toolbar.append(rowActions);
       toolbar.append(button('删除参数表', () => {
         if (!global.confirm('删除参数表“' + table.name + '”？已链接的波形会保留引用，并提示参数表缺失。')) return;
-        catalog.tables = catalog.tables.filter((item) => item !== table); selectedTable = ''; changed(true);
+        deleteTable(table);
       }, 'trash'));
     } else toolbar.append(button('新增参数表', addTable));
     const saveLibrary = button('保存波形库', async () => {
@@ -833,11 +886,6 @@
     }
     refreshValues(); applyFilters();
     grid.append(body); scroller.append(grid); workspace.append(scroller);
-    const bottom = element('footer', 'parameter-table-footer');
-    bottom.append(button('重新加载', async () => {
-      if (dirty !== savedGeneration && !global.confirm('放弃当前未保存的参数修改并重新加载？')) return;
-      dirty = savedGeneration; try { await refresh(); } catch (error) { status(error.message, true); }
-    }), button('重试保存', () => { void flush().catch(() => {}); })); workspace.append(bottom);
   }
   async function switchPage(page) {
     if (page === activePage) return;
@@ -858,7 +906,7 @@
       else if (menuHiddenStates.has(section)) { section.hidden = menuHiddenStates.get(section); menuHiddenStates.delete(section); }
     });
     if (page === 'wave' && bridge) bridge.changed();
-    notifyRowHistory();
+    notifyParameterHistory();
   }
   async function openLinks(documentName, anchor) {
     if (modal) return;
@@ -976,7 +1024,7 @@
       }
       if (event.isComposing || isTextInput(event.target)) return;
       const action = bridge.historyShortcut ? bridge.historyShortcut(event) : '';
-      if (action === 'undo' || action === 'redo') { event.preventDefault(); applyRowHistory(action === 'redo'); return; }
+      if (action === 'undo' || action === 'redo') { event.preventDefault(); applyParameterHistory(action === 'redo'); return; }
       if (event.key === 'Delete' && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey
           && event.target.closest('#parameter-workspace')) { event.preventDefault(); deleteSelectedRow(); }
     }, true);
@@ -985,9 +1033,6 @@
     $('wave-directory-tab').addEventListener('click', () => { void switchPage('wave'); });
     $('parameter-directory-tab').addEventListener('click', () => { void switchPage('parameters'); });
     $('parameter-add-table').addEventListener('click', addTable);
-    const tableActions = element('div', 'parameter-directory-actions');
-    tableActions.append(clipboardButton('table', 'copy', '复制参数表'), clipboardButton('table', 'paste', '粘贴参数表'));
-    $('parameter-add-table').insertAdjacentElement('afterend', tableActions);
     $('parameter-toggle-all').addEventListener('click', () => {
       const all = ['', ...catalog.directories.map((dir) => dir.id)]; const collapse = all.every((entry) => expanded.has(entry));
       all.forEach((entry) => collapse ? expanded.delete(entry) : expanded.add(entry));
@@ -1034,5 +1079,5 @@
   }
   global.VisualWaveDromParameters = { mount, setCatalog, getCatalog: () => clone(catalog), resolve, text, details, decorate, resolveName,
     openLinks, flush, refresh, page: () => activePage, pending: () => dirty !== savedGeneration,
-    historyState: rowHistoryState, undo: () => applyRowHistory(false), redo: () => applyRowHistory(true) };
+    historyState: parameterHistoryState, undo: () => applyParameterHistory(false), redo: () => applyParameterHistory(true) };
 })(window);

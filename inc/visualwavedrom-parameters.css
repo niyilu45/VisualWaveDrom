@@ -5,6 +5,8 @@
 .parameter-workspace { order: 2; flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--surface); color: var(--text); overflow: hidden; }
 .parameter-workspace-header { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 16px 20px; border-bottom: 1px solid var(--border); }
 .parameter-workspace h2 { font-size: 1.1rem; line-height: 1.4; overflow-wrap: anywhere; flex: 1 1 160px; }
+.parameter-table-name { max-width: 100%; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; overflow-wrap: anywhere; cursor: pointer; }
+.parameter-table-name:hover { color: var(--accent); }
 .parameter-workspace input, .parameter-workspace textarea, .parameter-workspace select,
 .parameter-modal input:not([type="checkbox"]), .parameter-modal select { border: 1px solid var(--border); border-radius: 4px; background: var(--bg); color: var(--text); font: inherit; padding: 7px 9px; min-width: 0; max-width: 100%; }
 .parameter-workspace :focus-visible, .parameter-modal :focus-visible, .directory-tabs :focus-visible, #parameter-tree :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -38,8 +40,7 @@
 .parameter-row-error svg { width: 14px; height: 14px; }
 .parameter-row-error[hidden] { display: inline-flex; visibility: hidden; }
 .parameter-row-select:hover, tr.selected .parameter-row-select { color: var(--text); }
-.parameter-directory-actions, .parameter-row-actions { display: flex; align-items: center; gap: 6px; }
-.parameter-directory-actions .parameter-icon { flex: 1; border: 1px solid var(--border); }
+.parameter-row-actions { display: flex; align-items: center; gap: 6px; }
 .parameter-row-actions { padding-left: 8px; border-left: 1px solid var(--border); }
 .parameter-cell input, .parameter-cell textarea { width: 100%; border-color: transparent; background: transparent; min-height: 34px; font-family: var(--editor-font); line-height: 1.5; }
 .parameter-cell textarea { resize: vertical; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -51,11 +52,9 @@
 .parameter-value-error { padding: 3px 9px; color: var(--error); font-size: .8rem; line-height: 1.5; overflow-wrap: anywhere; }
 .parameter-value-error[hidden] { display: none; }
 .parameter-cell input:hover, .parameter-cell textarea:hover { border-color: var(--border); }
-.parameter-parent { max-width: 240px !important; }
 .parameter-status { min-height: 26px; padding: 4px 20px; font-size: .82rem; color: var(--text-muted); overflow-wrap: anywhere; }
 .parameter-status.error, .parameter-modal .error { color: var(--error); }
 .parameter-empty { color: var(--text-muted); padding: 20px; }
-.parameter-table-footer { display: flex; justify-content: flex-end; gap: 8px; padding: 10px 20px; border-top: 1px solid var(--border); }
 .parameter-count-dialog { width: min(360px, calc(100vw - 24px)); max-height: calc(100vh - 32px); overflow-y: auto; }
 .parameter-count-dialog .modal-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .parameter-count-dialog h2 { font-size: 1.1rem; }
@@ -98,6 +97,7 @@
   .parameter-link-columns { grid-template-columns: 1fr; gap: 16px; }
   .parameter-choices, .parameter-priority { max-height: 26vh; }
   .parameter-workspace-header { padding: 12px; }
+  .parameter-workspace-header h2 { flex-basis: 100%; min-width: 0; }
   .parameter-grid th, .parameter-grid td { padding: 5px 3px; }
   .parameter-cell { flex-wrap: nowrap; }
   .parameter-cell input, .parameter-cell textarea { padding: 6px 3px; }
