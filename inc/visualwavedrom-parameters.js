@@ -506,10 +506,13 @@
       && ['directories', 'tables', 'presets'].every((key) => JSON.stringify(catalog[key]) === JSON.stringify(next[key]));
     if (sameContent) catalog.revision = next.revision;
     else { catalog = next; rowUndoStack = []; rowRedoStack = []; }
-    libraryId = identity || ''; generation++; cache = new WeakMap();
+    libraryId = identity || '';
     dirty = savedGeneration = 0; failure = '';
     if (!catalog.tables.some((table) => table.id === selectedTable)) selectedTable = '';
     if (!catalog.directories.some((dir) => dir.id === selectedFolder)) selectedFolder = '';
+    // A restored JSON document can be unchanged while its parameter values differ.
+    // Invalidate the host's rendered-wave caches as well as the resolver cache.
+    invalidate();
     renderTree(); renderTable(); notifyRowHistory();
   }
   async function refresh() {
@@ -519,7 +522,7 @@
     const loadGeneration = dirty;
     const value = await bridge.load();
     if (identity !== bridge.identity() || dirty !== loadGeneration) return;
-    setCatalog(value, identity); invalidate();
+    setCatalog(value, identity);
   }
   function namePrompt(label, initial) { const answer = global.prompt(label, initial || ''); return answer == null ? null : answer.trim(); }
   function addDirectory(parentId) {
@@ -1023,7 +1026,7 @@
         const data = event.data;
         if (!data || data.libraryId !== libraryId || dirty !== savedGeneration || Number(data.catalog && data.catalog.revision) <= catalog.revision) return;
         if (activePage === 'parameters' && $('parameter-workspace').contains(document.activeElement)) return;
-        setCatalog(data.catalog, libraryId); invalidate();
+        setCatalog(data.catalog, libraryId);
       };
       global.addEventListener('pagehide', () => channel.close(), { once: true });
     } catch (_) { /* Explicit refresh on opening either parameter surface remains available. */ }
