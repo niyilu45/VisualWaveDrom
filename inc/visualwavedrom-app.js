@@ -2881,6 +2881,8 @@ ${lines.join('\n')}`;
       const svg = host.querySelector('svg');
       const scroller = getWavePreviewScroller(host);
       if (!svg || !scroller) return;
+      const context = scroller.__vwdJsonWindowContext;
+      if (context && context.svg === svg && context.nativeBoundsMeasured) return;
       let waveStartX = 0;
       try {
         const drawBounds = getWaveLaneGroups(svg).map(function (lane) {
@@ -2891,7 +2893,7 @@ ${lines.join('\n')}`;
       } catch (_e) {
         waveStartX = 0;
       }
-      scroller.__vwdJsonWindowContext = { svg, waveStartX };
+      scroller.__vwdJsonWindowContext = { svg, waveStartX, nativeBoundsMeasured: true };
       if (!scroller.__vwdJsonWindowScrollBound) {
         scroller.addEventListener('scroll', () => {
           const context = scroller.__vwdJsonWindowContext;
@@ -9416,6 +9418,9 @@ ${lines.join('\n')}`;
         if (overlay.isConnected) overlay.remove();
         inlineEditActive = false;
         setActiveInlineEditState(null);
+        if (selectedEdgeIndex === index) {
+          clearConnectionSelectionContext('edge-label-edit-finished');
+        }
         finishVimEdgeLabelEdit();
         updateUndoRedoButtons();
       };
@@ -10595,7 +10600,7 @@ ${lines.join('\n')}`;
 
     function updateFrozenWaveLabelsForScroller(scroller) {
       const controller = scroller && scroller.__vwdFrozenLabelController;
-      if (controller && typeof controller.update === 'function') controller.update();
+      if (controller && typeof controller.update === 'function') controller.update(true);
     }
 
     function clearFrozenWaveLabelsForHost(renderHost) {
@@ -10620,7 +10625,7 @@ ${lines.join('\n')}`;
 
       const existingController = svg.__vwdFrozenLabelController;
       if (existingController && existingController.scroller === scroller) {
-        existingController.update();
+        existingController.update(true);
         return true;
       }
       if (existingController && typeof existingController.dispose === 'function') {
@@ -10784,15 +10789,26 @@ ${lines.join('\n')}`;
         layer,
         updateRaf: null,
         resizeObserver: null,
-        update() {
+        geometryDirty: true,
+        measuredUserWidth: 0,
+        userUnitsPerPixel: 1,
+        lastTranslateX: null,
+        update(forceGeometry) {
           if (!svg.isConnected || !layer.isConnected) return;
-          const rect = svg.getBoundingClientRect();
           const currentViewBox = svg.viewBox && svg.viewBox.baseVal;
           const userWidth = currentViewBox && currentViewBox.width > 0
             ? currentViewBox.width
             : Math.max(1, parseFloat(svg.getAttribute('width') || '1'));
-          const userUnitsPerPixel = rect.width > 0 ? userWidth / rect.width : 1;
-          const translateX = Math.max(0, scroller.scrollLeft) * userUnitsPerPixel;
+          // Scrolling changes the offset, not the SVG scale. Remeasure only after layout changes.
+          if (forceGeometry || this.geometryDirty || this.measuredUserWidth !== userWidth || !this.resizeObserver) {
+            const rect = svg.getBoundingClientRect();
+            this.userUnitsPerPixel = rect.width > 0 ? userWidth / rect.width : 1;
+            this.measuredUserWidth = userWidth;
+            this.geometryDirty = !(rect.width > 0);
+          }
+          const translateX = Math.max(0, scroller.scrollLeft) * this.userUnitsPerPixel;
+          if (translateX === this.lastTranslateX) return;
+          this.lastTranslateX = translateX;
           layer.setAttribute('transform', 'translate(' + translateX + ' 0)');
         },
         dispose() {
@@ -10825,7 +10841,10 @@ ${lines.join('\n')}`;
         scroller.__vwdJsonWindowScrollBound = true;
       }
       if (typeof ResizeObserver === 'function') {
-        controller.resizeObserver = new ResizeObserver(() => scheduleFrozenWaveLabelUpdate(scroller));
+        controller.resizeObserver = new ResizeObserver(() => {
+          controller.geometryDirty = true;
+          scheduleFrozenWaveLabelUpdate(scroller);
+        });
         controller.resizeObserver.observe(svg);
         controller.resizeObserver.observe(scroller);
       }
@@ -19560,7 +19579,7 @@ ${lines.join('\n')}`;
         ? Math.max(0, Math.min(oldValue.length, interaction.caretOffset))
         : getDescriptionCaretOffsetAtPoint(descriptionEl, interaction, oldValue.length);
       if (tag.name !== editingWaveDocumentName) {
-        openWaveDocumentForEditing(tag.name, { immediate: true });
+        openWaveDocumentForEditing(tag.name, { immediate: true, scrollIntoView: false });
         setTimeout(() => {
           const card = waveLibraryContainer && waveLibraryContainer.querySelector('.wave-document-card.focused');
           const nextDescription = card && card.querySelector('.wave-document-description');
@@ -19569,6 +19588,7 @@ ${lines.join('\n')}`;
         return;
       }
       if (descriptionEl.querySelector('textarea')) return;
+      const viewport = captureWaveDocumentViewport(tag.name);
       clearConnectionSelectionContext('wave-document-description-edit');
 
       const editorHeightOptions = getDescriptionEditorHeightOptions(descriptionEl);
@@ -19576,6 +19596,8 @@ ${lines.join('\n')}`;
       editorBox.className = 'wave-document-description-editor';
       editorBox.value = oldValue;
       editorBox.placeholder = '输入波形图说明';
+      // Keep the note's height while swapping the display for an editor.
+      editorBox.style.height = editorHeightOptions.minHeight + 'px';
       descriptionEl.innerHTML = '';
       descriptionEl.classList.remove('empty');
       descriptionEl.classList.add('editing');
@@ -19583,12 +19605,13 @@ ${lines.join('\n')}`;
       trackInlineEditorHistoryState(editorBox, oldValue);
       const resizeEditor = () => autoResizeDescriptionOverlay(editorBox, editorHeightOptions);
       resizeEditor();
+      editorBox.setSelectionRange(requestedCaretOffset, requestedCaretOffset);
       try {
         editorBox.focus({ preventScroll: true });
       } catch (_e) {
         editorBox.focus();
       }
-      editorBox.setSelectionRange(requestedCaretOffset, requestedCaretOffset);
+      restoreWaveDocumentViewport(viewport);
 
       let committed = false;
       let outsidePointerHandler = null;
@@ -19598,7 +19621,8 @@ ${lines.join('\n')}`;
         document.removeEventListener('pointerdown', outsidePointerHandler, true);
         outsidePointerHandler = null;
       };
-      const closeEditor = (value) => {
+      const closeEditor = (value, savedViewport) => {
+        const viewport = savedViewport || captureWaveDocumentViewport(tag.name);
         detachOutsidePointerHandler();
         if (doneButton && doneButton.isConnected) doneButton.remove();
         descriptionEl.classList.remove('editing');
@@ -19608,14 +19632,16 @@ ${lines.join('\n')}`;
         descriptionEl.classList.toggle('empty', !value);
         descriptionEl.title = '点击编辑波形图说明';
         updateUndoRedoButtons();
+        restoreWaveDocumentViewport(viewport);
       };
       const commit = (reason) => {
         if (committed) return;
         committed = true;
+        const viewport = captureWaveDocumentViewport(tag.name);
         const nextValue = editorBox.value;
         vwdDebugLog('wave-library', { phase: 'commit-description', documentName: tag.name, reason: reason || 'manual', changed: nextValue !== oldValue, valueLength: nextValue.length });
         if (nextValue === oldValue) {
-          closeEditor(oldValue);
+          closeEditor(oldValue, viewport);
           return;
         }
         let newText = replaceGlobalDescribeInSource(editor.value || '', nextValue);
@@ -19630,7 +19656,7 @@ ${lines.join('\n')}`;
         } catch (_e) {
           setStatus(false, '说明保存失败：当前 JSON 无法解析');
           vwdDebugLog('wave-library', { phase: 'commit-description-error', documentName: tag.name, reason: 'invalid-json' });
-          closeEditor(oldValue);
+          closeEditor(oldValue, viewport);
           return;
         }
         pushUndoBeforeChange(newText);
@@ -19644,7 +19670,7 @@ ${lines.join('\n')}`;
         if (editingWaveDocumentName === tag.name) {
           upsertSavedTag(tag.name, getCurrentStateSnapshot());
         }
-        closeEditor(nextValue);
+        closeEditor(nextValue, viewport);
         setStatus(true, '已保存波形图说明');
       };
       editorBox.__vwdCommit = commit;
@@ -19671,7 +19697,16 @@ ${lines.join('\n')}`;
       const doneHost = descriptionEl.closest('.wave-document-description-shell') || descriptionEl;
       doneHost.appendChild(doneButton);
       editorBox.addEventListener('input', resizeEditor);
-      editorBox.addEventListener('blur', () => commit('blur'));
+      editorBox.addEventListener('blur', (event) => {
+        const nextTarget = event.relatedTarget;
+        // Browser/OS shortcuts can blur the window without leaving this field.
+        if (!nextTarget || descriptionEl.contains(nextTarget)
+            || (doneButton && doneButton.contains(nextTarget))) {
+          vwdDebugLog('wave-description', { phase: 'blur-kept-editor', documentName: tag.name });
+          return;
+        }
+        commit('blur');
+      });
       editorBox.addEventListener('wheel', (event) => {
         if (event.ctrlKey || event.metaKey || !event.deltaY) return;
         const deltaScale = event.deltaMode === 1
@@ -20609,14 +20644,14 @@ ${lines.join('\n')}`;
     function trimRenderedWavePreviews(keepEntry) {
       const rendered = [];
       waveLibraryCardCache.forEach((candidate) => {
-        if (!candidate || candidate === keepEntry || candidate.documentName === editingWaveDocumentName) return;
+        if (!candidate || candidate.documentName === editingWaveDocumentName) return;
         if (candidate.previewDisplay.querySelector('svg, .wave-fast-preview, .wave-error')) {
           rendered.push(candidate);
         }
       });
       rendered.sort((a, b) => a.lastPreviewUse - b.lastPreviewUse);
-      rendered.filter((candidate) => !candidate.previewNearViewport)
-        .slice(0, Math.max(0, rendered.length - WAVE_PREVIEW_MAX_RENDERED + 1)).forEach((candidate) => {
+      rendered.filter((candidate) => candidate !== keepEntry && !candidate.previewNearViewport)
+        .slice(0, Math.max(0, rendered.length - WAVE_PREVIEW_MAX_RENDERED)).forEach((candidate) => {
           releaseWaveDocumentPreview(candidate, 'preview-lru');
         });
     }
@@ -20814,6 +20849,11 @@ ${lines.join('\n')}`;
     function queueWaveLibraryPreview(entry, tag, priority) {
       if (!entry || !tag || tag.name === editingWaveDocumentName) return;
       if (entry.previewObserved && !entry.previewNearViewport) return;
+      if (!tag.deferred && entry.renderedContent === tag.content && entry.previewDisplay
+          && entry.previewDisplay.querySelector('svg, .wave-fast-preview, .wave-error')) {
+        entry.lastPreviewUse = ++waveLibraryPreviewUseSequence;
+        return;
+      }
       entry.queuedContent = tag.deferred ? ('deferred:' + tag.revision) : tag.content;
       if (!entry.previewQueued) {
         entry.previewQueued = true;
@@ -20838,9 +20878,9 @@ ${lines.join('\n')}`;
           } else {
             entry.previewQueued = false;
             waveLibraryPreviewQueue = waveLibraryPreviewQueue.filter((candidate) => candidate !== entry);
-            releaseWaveDocumentPreview(entry, 'intersection-exit');
           }
         });
+        trimRenderedWavePreviews();
       }, { root: wavePanel, rootMargin: WAVE_PREVIEW_ROOT_MARGIN, threshold: 0 });
       return waveLibraryPreviewObserver;
     }
@@ -22771,7 +22811,7 @@ ${lines.join('\n')}`;
         }
       }
       const insideWaveArea = !!(target && target.closest('#wave-panel'));
-      const interactiveWaveControl = !!(target && target.closest('input, textarea, select, button, [contenteditable="true"]'));
+      const interactiveWaveControl = !!(target && target.closest('input, textarea, select, button, [contenteditable="true"], .wave-document-description-shell'));
       if (insideJsonEditor) {
         setKeyboardInputScope('json', 'json-pointer');
       } else if (insideWaveArea && !interactiveWaveControl) {
@@ -22820,6 +22860,7 @@ ${lines.join('\n')}`;
 
     document.addEventListener('keydown', (e) => {
       if (presenterWaveViewActive) return;
+      if (e.target && e.target.closest && e.target.closest('.wave-document-description-editor')) return;
       if (e.target && e.target.closest && e.target.closest('#ui-settings-modal, #wave-shortcut-modal')) return;
       if (e.target && e.target.closest && e.target.closest('.vwd-big-wave-jump')) return;
       if (e.target && e.target.closest && e.target.closest('#wave-collection-import-modal')) return;
@@ -23349,8 +23390,6 @@ ${lines.join('\n')}`;
             || !scroller.classList.contains('wave-document-preview-scroll')
             || !scroller.contains(waveContainer)) return;
         bindJsonWindowScroller(waveContainer);
-        const context = scroller.__vwdJsonWindowContext;
-        if (context) scheduleJsonWindowFromNativeScroller(scroller, context.svg, context.waveStartX);
       }, { capture: true, passive: true });
     }
     document.getElementById('btn-export-json').addEventListener('click', exportWaveJson);

@@ -795,8 +795,9 @@
       let hint = ''; const target = event.target && event.target.closest('[data-parameter-hint], input, textarea, .cm-parameter');
       if (target) {
         hint = target.dataset.parameterHint || '';
-        if (!hint && !target.closest('#parameter-workspace, .parameter-modal')) {
-          try { hint = details(target.value || target.textContent, bridge.currentSource()); } catch (_) { /* Invalid JSON stays editable. */ }
+        const value = target.value || target.textContent || '';
+        if (!hint && value.includes('$') && !target.closest('#parameter-workspace, .parameter-modal')) {
+          try { hint = details(value, bridge.currentSource()); } catch (_) { /* Invalid JSON stays editable. */ }
         }
       }
       if (!hint) { tooltipTimer = setTimeout(() => { tooltip.hidden = true; }, 120); return; }
