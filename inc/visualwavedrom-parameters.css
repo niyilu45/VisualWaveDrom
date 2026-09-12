@@ -39,6 +39,12 @@
 .parameter-row-actions { padding-left: 8px; border-left: 1px solid var(--border); }
 .parameter-cell input, .parameter-cell textarea { width: 100%; border-color: transparent; background: transparent; min-height: 34px; font-family: var(--editor-font); line-height: 1.5; }
 .parameter-cell textarea { resize: vertical; white-space: pre-wrap; overflow-wrap: anywhere; }
+.parameter-value-cell { flex-direction: column; }
+.parameter-value-cell textarea { color: var(--text); }
+.parameter-value-cell textarea.parameter-formula-value:not(:focus) { color: #83bfff; }
+.parameter-value-cell textarea[aria-invalid="true"] { border-color: var(--error); }
+.parameter-value-error { padding: 3px 9px; color: var(--error); font-size: .8rem; line-height: 1.5; overflow-wrap: anywhere; }
+.parameter-value-error[hidden] { display: none; }
 .parameter-cell input:hover, .parameter-cell textarea:hover { border-color: var(--border); }
 .parameter-parent { max-width: 240px !important; }
 .parameter-status { min-height: 26px; padding: 4px 20px; font-size: .82rem; color: var(--text-muted); overflow-wrap: anywhere; }

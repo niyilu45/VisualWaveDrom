@@ -5,7 +5,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"syscall"
 )
@@ -94,7 +93,7 @@ try {
 [Console]::Write($selected)
 `
 
-	command := exec.Command(
+	command := systemCommand(
 		"powershell.exe",
 		"-NoProfile",
 		"-STA",

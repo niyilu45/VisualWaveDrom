@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
-  const tokenPattern = /\{((?=[^{}]*\$)\s*[$+\-.\d][^{}]*)\}/g;
-  const dataTokenPattern = /(?:\{(?=[^{}]*\$)\s*[$+\-.\d][^{}]*\}|\S)+/g;
+  const tokenPattern = /\{((?=[^{}]*\$)\s*(?:[$+\-.\d(]|(?:max|min)\s*\()[^{}]*)\}/g;
+  const dataTokenPattern = /(?:\{(?=[^{}]*\$)\s*(?:[$+\-.\d(]|(?:max|min)\s*\()[^{}]*\}|\S)+/g;
   const numericPattern = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
   const clone = (value) => JSON.parse(JSON.stringify(value));
   const empty = () => ({ revision: 0, directories: [], tables: [], presets: [] });
@@ -51,11 +51,39 @@
   }
   function id() { return 'param-' + (global.crypto.randomUUID ? global.crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2)); }
   function linked(source) { return source && Array.isArray(source.parameterTables) ? source.parameterTables : []; }
-  function resolveName(name, source) {
+  function resolveParameterRow(table, row, source, state) {
+    const context = state || { stack: [], values: new Map() };
+    if (context.values.has(row)) return context.values.get(row);
+    const name = String(row.name || '');
+    const rawVal = row.val == null ? '' : String(row.val);
+    const result = { name, table: table.name, tableId: table.id, val: rawVal, rawVal, description: String(row.description || ''), formula: false, error: '' };
+    const cycle = context.stack.findIndex((entry) => entry.row === row);
+    if (cycle >= 0) {
+      return Object.assign(result, { formula: true, error: '变量循环引用：' + context.stack.slice(cycle).map((entry) => entry.name).concat(name).join(' -> ') });
+    }
+    if (context.stack.length >= 128) return Object.assign(result, { formula: true, error: '变量依赖层级超过 128 层：' + name });
+    context.stack.push({ row, name });
+    try {
+      if (rawVal.includes('$')) {
+        const value = rawVal.replace(tokenPattern, (raw, expression) => {
+          result.formula = true;
+          const evaluated = evaluate(expression, source, context);
+          if (evaluated.error) { result.error = result.error || evaluated.error; return raw; }
+          return evaluated.value;
+        });
+        if (!result.error) result.val = value;
+      }
+    } finally {
+      context.stack.pop();
+    }
+    context.values.set(row, result);
+    return result;
+  }
+  function resolveName(name, source, state) {
     for (const tableId of linked(source)) {
       const table = catalog.tables.find((item) => item.id === tableId);
       const row = table && table.rows.find((item) => String(item.name || '') === name);
-      if (row) return { name, table: table.name, tableId, val: row.val == null ? '' : String(row.val), description: String(row.description || '') };
+      if (row) return resolveParameterRow(table, row, source, state);
     }
     return null;
   }
@@ -66,43 +94,91 @@
       return result.error ? raw : result.value;
     });
   }
-  function evaluate(expression, source) {
-    const tokens = expression.trim().split(/\s+/);
+  function evaluate(expression, source, state) {
+    const context = state || { stack: [], values: new Map() };
     const variables = new Map();
+    let offset = 0, depth = 0;
+    function skipSpace() { while (/\s/.test(expression[offset] || '') && offset < expression.length) offset++; }
+    function number(value) {
+      if (!numericPattern.test(String(value).trim()) || !Number.isFinite(Number(value))) {
+        throw new Error(String(value) + ' 不是有效数字，不能参与运算');
+      }
+      return Number(value);
+    }
+    function finite(value) {
+      if (!Number.isFinite(value)) throw new Error('运算结果超出有效数字范围');
+      return value;
+    }
+    function primary() {
+      skipSpace();
+      if (++depth > 64) throw new Error('公式嵌套超过 64 层');
+      try {
+        const rest = expression.slice(offset);
+        const variable = /^\$[^{}\s$(),]+/.exec(rest);
+        if (variable) {
+          offset += variable[0].length;
+          const name = variable[0].slice(1);
+          const found = variables.get(name) || resolveName(name, source, context);
+          if (!found) throw new Error('未找到变量：' + variable[0] + '（运算符两侧需有空格）');
+          if (found.error) throw new Error(found.error);
+          variables.set(name, found);
+          return found.val;
+        }
+        const literal = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?/.exec(rest);
+        if (literal) { offset += literal[0].length; return literal[0]; }
+        const call = /^(max|min)\s*\(/.exec(rest);
+        if (call || expression[offset] === '(') {
+          offset += call ? call[0].length : 1;
+          skipSpace();
+          if (expression[offset] === ')') throw new Error(call ? call[1] + ' 至少需要一个参数' : '括号内不能为空');
+          let value = sum();
+          if (call) {
+            value = number(value); skipSpace();
+            while (expression[offset] === ',') {
+              offset++;
+              const right = number(sum());
+              value = call[1] === 'max' ? Math.max(value, right) : Math.min(value, right);
+              skipSpace();
+            }
+          }
+          skipSpace();
+          if (expression[offset] !== ')') throw new Error('缺少右括号或函数参数分隔符（英文逗号）');
+          offset++;
+          return value;
+        }
+        throw new Error('表达式格式错误：仅支持变量、数字、加减乘除和 max/min');
+      } finally { depth--; }
+    }
+    function operator(allowed) {
+      skipSpace();
+      const op = expression[offset];
+      if (!op || !allowed.includes(op)) return '';
+      if (!/\s/.test(expression[offset - 1] || '') || !/\s/.test(expression[offset + 1] || '')) {
+        throw new Error('运算符两侧至少保留一个空格');
+      }
+      offset++;
+      return op;
+    }
+    function product() {
+      let value = primary(), op;
+      while ((op = operator('*/'))) {
+        const left = number(value), right = number(primary());
+        if (op === '/' && right === 0) throw new Error('除数不能为 0');
+        value = finite(op === '*' ? left * right : left / right);
+      }
+      return value;
+    }
+    function sum() {
+      let value = product(), op;
+      while ((op = operator('+-'))) {
+        const left = number(value), right = number(product());
+        value = finite(op === '+' ? left + right : left - right);
+      }
+      return value;
+    }
     try {
-      if (tokens.length % 2 === 0 || tokens.some((token, index) => index % 2
-        ? !/^[+*/-]$/.test(token)
-        : !/^\$[^{}\s$]+$/.test(token) && !numericPattern.test(token))) {
-        throw new Error('表达式格式错误：仅支持加减乘除，运算符两侧至少保留一个空格');
-      }
-      function operand(token) {
-        let value = token;
-        if (token[0] === '$') {
-          const name = token.slice(1);
-          const found = variables.get(name) || resolveName(name, source);
-          if (!found) throw new Error('未找到变量：' + token + '（运算符两侧需有空格）');
-          variables.set(name, found); value = found.val;
-        }
-        if (tokens.length === 1) return value;
-        if (!numericPattern.test(value.trim()) || !Number.isFinite(Number(value))) {
-          throw new Error(token + ' 的值不是有效数字，不能参与运算');
-        }
-        return Number(value);
-      }
-      let term = operand(tokens[0]), sum = 0, sign = 1;
-      // Accumulate multiplicative terms first, preserving left associativity.
-      for (let index = 1; index < tokens.length; index += 2) {
-        const op = tokens[index], right = operand(tokens[index + 1]);
-        if (op === '*' || op === '/') {
-          if (op === '/' && right === 0) throw new Error('除数不能为 0');
-          term = op === '*' ? term * right : term / right;
-        } else {
-          sum += sign * term; sign = op === '+' ? 1 : -1; term = right;
-        }
-        if (!Number.isFinite(term) || !Number.isFinite(sum)) throw new Error('运算结果超出有效数字范围');
-      }
-      const result = tokens.length === 1 ? term : sum + sign * term;
-      if (tokens.length > 1 && !Number.isFinite(result)) throw new Error('运算结果超出有效数字范围');
+      const result = sum(); skipSpace();
+      if (offset !== expression.length) throw new Error('表达式格式错误：第 ' + (offset + 1) + ' 个字符附近有多余内容');
       return { value: String(result), variables: Array.from(variables.values()) };
     } catch (error) {
       return { error: error.message, variables: Array.from(variables.values()) };
@@ -116,7 +192,7 @@
       const result = evaluate(match[1], source);
       const summary = result.error ? '\n' + result.error : '\n结果：' + result.value;
       return match[0] + summary + result.variables.map((item) => '\n\n$' + item.name + '\n参数表：' + item.table
-        + '\n值：' + item.val + '\n说明：' + (item.description || '无')).join('');
+        + '\n值：' + item.val + (item.formula ? '\n公式：' + item.rawVal : '') + '\n说明：' + (item.description || '无')).join('');
     }).filter(Boolean).join('\n\n');
   }
   function resolve(source) {
@@ -581,6 +657,11 @@
     head.append(tr); grid.append(head);
     const body = element('tbody');
     const rowViews = [];
+    const valueSource = { parameterTables: [table.id] };
+    function refreshValues() {
+      const context = { stack: [], values: new Map() };
+      rowViews.forEach((view) => view.updateValue(context));
+    }
     let selectedLine = null;
     function selectRow(row, line) {
       if (selectedLine) { selectedLine.classList.remove('selected'); selectedLine.setAttribute('aria-selected', 'false'); }
@@ -609,13 +690,37 @@
         input.spellcheck = false; if (field !== 'name') input.rows = 1;
         const resize = () => { if (field !== 'name' && !line.hidden) { input.style.height = 'auto'; input.style.height = Math.min(220, input.scrollHeight) + 'px'; } };
         view.resize.push(resize);
-        input.addEventListener('input', () => { row[field] = input.value; resize(); changed(false); });
+        if (field === 'val') {
+          fieldBox.classList.add('parameter-value-cell');
+          const error = element('span', 'parameter-value-error'); error.hidden = true;
+          error.id = 'parameter-value-error-' + index;
+          input.setAttribute('aria-describedby', error.id);
+          view.updateValue = (context) => {
+            const result = resolveParameterRow(table, row, valueSource, context);
+            view.valueResult = result;
+            const valueChanged = document.activeElement !== input && input.value !== result.val;
+            if (valueChanged) input.value = result.val;
+            input.classList.toggle('parameter-formula-value', result.formula && !result.error);
+            input.setAttribute('aria-invalid', String(!!result.error));
+            input.title = result.formula ? '公式：' + result.rawVal : '';
+            error.hidden = !result.error; error.textContent = result.error;
+            if (input.isConnected && valueChanged) resize();
+          };
+          input.addEventListener('focus', () => { input.value = row.val == null ? '' : String(row.val); resize(); });
+          fieldBox.append(error);
+        }
+        input.addEventListener('input', () => {
+          row[field] = input.value; resize(); changed(false);
+          if (field === 'name' || field === 'val') refreshValues();
+        });
         input.addEventListener('blur', () => {
+          refreshValues();
           void flush().catch(() => {});
           const treeRow = Array.from($('parameter-tree').querySelectorAll('[data-table-id]')).find((item) => item.dataset.tableId === table.id);
           if (treeRow) treeRow.querySelector('.parameter-count').textContent = table.rows.filter((item) => item.name).length;
         });
-        fieldBox.append(input);
+        if (field === 'val') fieldBox.prepend(input);
+        else fieldBox.append(input);
         td.append(fieldBox); line.append(td);
         requestAnimationFrame(resize);
       });
@@ -627,7 +732,8 @@
       const name = rowFilters.name.trim().toLowerCase(), val = rowFilters.val.trim().toLowerCase();
       let count = 0;
       rowViews.forEach((view) => {
-        const visible = String(view.row.name ?? '').toLowerCase().includes(name) && String(view.row.val ?? '').toLowerCase().includes(val);
+        const visible = String(view.row.name ?? '').toLowerCase().includes(name)
+          && (String(view.row.val ?? '').toLowerCase().includes(val) || String(view.valueResult && view.valueResult.val || '').toLowerCase().includes(val));
         const wasHidden = view.line.hidden; view.line.hidden = !visible;
         if (visible) count++;
         else if (selectedRow === view.row) selectRow(null, null);
@@ -637,7 +743,7 @@
       filterCount.textContent = count + ' / ' + table.rows.length;
       clearFilters.disabled = !rowFilters.name && !rowFilters.val;
     }
-    applyFilters();
+    refreshValues(); applyFilters();
     grid.append(body); scroller.append(grid); workspace.append(scroller);
     const bottom = element('footer', 'parameter-table-footer');
     bottom.append(button('重新加载', async () => {

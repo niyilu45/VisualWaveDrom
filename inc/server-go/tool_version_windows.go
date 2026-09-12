@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"golang.org/x/sys/windows"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -123,7 +122,7 @@ try {
  if ($form.ShowDialog() -eq [System.Windows.Forms.DialogResult]::Yes) { [Console]::Write('yes') }
 } finally { $form.Dispose() }
 `
-	command := exec.Command("powershell.exe", "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-Command", dialogScript)
+	command := systemCommand("powershell.exe", "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-Command", dialogScript)
 	command.SysProcAttr = &syscall.SysProcAttr{CreationFlags: 0x08000000}
 	command.Env = append(os.Environ(), "VWD_VERSION_MESSAGE="+strings.ReplaceAll(message, "\n", "\r\n"), "VWD_VERSION_HISTORY_FILE="+historyFile,
 		"VWD_VERSION_TITLE=VisualWaveDrom \u7248\u672c\u66f4\u65b0", "VWD_VERSION_SKIP=\u6682\u4e0d\u66f4\u65b0", "VWD_VERSION_UPDATE=\u7acb\u5373\u66f4\u65b0", "VWD_VERSION_HISTORY=\u67e5\u770b\u7248\u672c\u5386\u53f2", "VWD_VERSION_BACK=\u8fd4\u56de\u66f4\u65b0\u8bf4\u660e")

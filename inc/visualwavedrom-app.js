@@ -6046,7 +6046,7 @@ ${lines.join('\n')}`;
     function normalizeWaveDataValues(data) {
       if (Array.isArray(data)) return data.slice();
       if (data === undefined || data === null || data === '') return [];
-      return String(data).match(/(?:\{(?=[^{}]*\$)\s*[$+\-.\d][^{}]*\}|\S)+/g) || [];
+      return String(data).match(/(?:\{(?=[^{}]*\$)\s*(?:[$+\-.\d(]|(?:max|min)\s*\()[^{}]*\}|\S)+/g) || [];
     }
 
     function applyMappedWaveDataLabels(signal, originalWave, newWave, resolveBinding) {
@@ -13512,7 +13512,7 @@ ${lines.join('\n')}`;
         crudeMeasuringFrom: 10000
       });
       codeMirrorEditor.addOverlay({ token(stream) {
-        if (stream.match(/\{(?=[^{}]*\$)\s*[$+\-.\d][^{}]*\}/)) return 'parameter';
+        if (stream.match(/\{(?=[^{}]*\$)\s*(?:[$+\-.\d(]|(?:max|min)\s*\()[^{}]*\}/)) return 'parameter';
         if (stream.peek() === '{') { stream.next(); return null; }
         while (!stream.eol() && stream.peek() !== '{') stream.next();
         return null;

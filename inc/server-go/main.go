@@ -801,12 +801,20 @@ func browserCommands(goos, address string) [][]string {
 	}
 }
 
+func systemCommand(name string, args ...string) *exec.Cmd {
+	executable, err := systemExecutable(name)
+	if err != nil {
+		return &exec.Cmd{Err: err}
+	}
+	return exec.Command(executable, args...)
+}
+
 func launchBrowserCommand(candidate []string, probeDelay time.Duration) error {
 	if len(candidate) == 0 {
 		return errors.New("empty browser launcher command")
 	}
 	var stderr strings.Builder
-	command := exec.Command(candidate[0], candidate[1:]...)
+	command := systemCommand(candidate[0], candidate[1:]...)
 	command.Stdout = io.Discard
 	command.Stderr = &stderr
 	if err := command.Start(); err != nil {
