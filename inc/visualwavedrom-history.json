@@ -1,5 +1,32 @@
 [
   {
+    "version": "2026.9.12.7",
+    "date": "2026-09-12T09:03:19Z",
+    "head": "3ae7a72e96afe8542180d2bfb63c012214b28d5f",
+    "notes": [
+      "参数表变量值支持 {$a + $b} 公式：编辑保留原公式，非编辑显示蓝色计算结果；普通值保持白色。",
+      "支持 max/min 多参数、嵌套及加减乘除组合；同步波形数据标签和 JSON 高亮解析。",
+      "支持依赖变量连续引用和参数表优先级；报告循环引用、缺失变量、非数字及除零；保存、复制保留原始公式。",
+      "修复部分 Windows 电脑 PATH 缺失导致 rundll32.exe 无法打开浏览器；系统程序使用 Windows 系统目录查找，覆盖 PowerShell 文件选择和版本窗口。",
+      "更新 Windows/Linux 便携服务程序；完成针对性计算、Chrome/Edge 编辑显示及 Windows PATH 独立性验证。"
+    ],
+    "commits": [
+      {
+        "id": "3ae7a72e96afe8542180d2bfb63c012214b28d5f",
+        "date": "2026-09-12T17:01:40+08:00",
+        "title": "feat: support parameter value formulas and min/max operations",
+        "body": "Keep raw parameter formulas for editing, persistence and copying; show computed values in blue and refresh dependent rows. Resolve chained references using linked-table priority, report missing variables, cycles and division errors, and support nested min/max with arithmetic in waveform labels.\n\nResolve Windows rundll32, cmd and PowerShell through the OS system directory instead of PATH. Update portable Windows/Linux servers and add focused PATH-independence checks."
+      },
+      {
+        "id": "8f4b6b0ff5a073ad7093d634601f0757649c6ef8",
+        "date": "2026-09-12T16:23:57+08:00",
+        "title": "发布滚动与说明框修复版本 2026.9.12.6",
+        "body": "同步工具栏版本号、离线版本历史和资源校验清单，记录说明框焦点与滚动修复、连接标签取消选中及波形滚动性能优化。全部 58 项发布文件校验通过，不修改服务器、启动器、波形库或本机状态文件。"
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.9.12.6",
     "date": "2026-09-12T08:23:18Z",
     "head": "adb1fca7e9c7ea1c11abf30d56a4eee5aff790c9",
