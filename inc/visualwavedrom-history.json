@@ -1,5 +1,28 @@
 [
   {
+    "version": "2026.9.12.4",
+    "date": "2026-09-12T03:40:28Z",
+    "head": "2fe92ebabdebcfcdd7212a8c2c93fad4f9fa9875",
+    "notes": [
+      "参数表支持变量名和值筛选、工具栏删除选中行、整表及单行复制粘贴和快捷键；新增变量支持数量确认与批量添加。参数引用支持带空格的加减乘除及数字常量，保留原始表达式并显示计算结果、变量来源和错误提示；修复数据标签及大数据窗口中表达式被拆分的问题。"
+    ],
+    "commits": [
+      {
+        "id": "2fe92ebabdebcfcdd7212a8c2c93fad4f9fa9875",
+        "date": "2026-09-12T11:38:28+08:00",
+        "title": "增强参数表操作并支持参数算术表达式",
+        "body": "参数表支持变量名和值筛选，删除选中行按钮移至工具栏；支持整表及单行复制粘贴和 Ctrl+C/Ctrl+V，保留输入框原生文本操作。\n\n新增变量改为数量确认卡片，支持批量添加、回车确认、Esc 取消和输入校验。参数引用支持四则运算及数字常量，运算符两侧须有空格；按优先级计算，错误保留原文并提示来源与原因。\n\n保持带空格的参数表达式在数据标签、复制编辑及大数据窗口中的完整性，适配 JSON 高亮和多变量悬停提示。Chrome/Edge 针对性检查及 JS 语法检查通过。"
+      },
+      {
+        "id": "105c589f2abf3dca55ddff3580765d89d0e79c2f",
+        "date": "2026-09-12T04:45:28+08:00",
+        "title": "Add parameter catalogs and portable release management",
+        "body": "Add nested parameter directories, editable name/val/description tables, per-wave table priorities and reusable named presets. Resolve variable references for display while preserving raw text for editing, with source tooltips and SQLite persistence in both browser and service modes.\n\nConsolidate temporary editing sessions and recovery records into .tmp/operations.sqlite without modifying formal Wave libraries before explicit save. Add offline local version comparison, managed directory updates, version history, release manifests and rebuilt Windows/Linux servers for 2026.9.12.3.\n\nImprove linked-image clipboard compatibility and document the new workflows. Verified focused Go persistence, migration and conflict tests plus Chrome/Edge browser workflows and isolated service-mode UI checks. Exclude temporary artifacts and Wave data."
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.9.12.3",
     "date": "2026-09-11T20:37:37Z",
     "head": "105242ab80b1997731ef2d334898a188c2ee3901",
