@@ -1,5 +1,32 @@
 [
   {
+    "version": "2026.9.12.8",
+    "date": "2026-09-12T10:23:37Z",
+    "head": "d89c72ffa8a05105f6ef9cdaf7229acb21520c36",
+    "notes": [
+      "修复波形链接参数表后未保存所选预设的问题：预设标识和表顺序随波形保存，重载恢复，旧波形仅在唯一匹配时恢复预设。",
+      "参数值支持花括号中的纯常数加减乘除、括号、max/min 和无空格表达式；编辑及复制保存原公式，依赖变量读取计算结果。",
+      "负数公式结果显示红色，零和正数结果显示蓝色，普通值保持白色；异常行号左侧显示红叉，提示公式错误、变量名异常及重复名称，修正后自动消失。",
+      "参数行支持 Del 删除，并复用撤销/重做按钮和快捷键；恢复原行数据和位置，不覆盖其他行后续编辑，不影响输入框原生编辑或波形图撤销。",
+      "验证 Chrome/Edge、SQLite 保存重载、筛选及连续删除、自定义快捷键、保存中撤销、保存失败恢复和跨波形库历史隔离。"
+    ],
+    "commits": [
+      {
+        "id": "d89c72ffa8a05105f6ef9cdaf7229acb21520c36",
+        "date": "2026-09-12T18:22:27+08:00",
+        "title": "feat: improve parameter table persistence and row editing",
+        "body": "Persist each wave's selected parameter preset with its table order, including explicit custom selection and unambiguous legacy recovery. Support constant-only arithmetic and min/max formulas; display negative formula results in red and add row error markers for formula/name validation.\n\nSupport Del row deletion and scoped undo/redo without affecting native text editing or waveform history. Preserve row contents and position, unrelated edits and matching filters; clear stale history on library/external changes. Verified Chrome/Edge interactions, save races and SQLite round trips."
+      },
+      {
+        "id": "80292edcb5d09ac506fc264d456357a46a1bb821",
+        "date": "2026-09-12T17:03:49+08:00",
+        "title": "chore: publish release 2026.9.12.7",
+        "body": "Record parameter formula/min-max support and Windows system launcher fixes; refresh managed-resource checksums and detailed release history."
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.9.12.7",
     "date": "2026-09-12T09:03:19Z",
     "head": "3ae7a72e96afe8542180d2bfb63c012214b28d5f",
