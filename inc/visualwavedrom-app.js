@@ -18332,11 +18332,11 @@ ${lines.join('\n')}`;
         && window.WaveSkin;
     }
 
-    function alignWaveDataToCycleGrid(container) {
+    function alignWaveDataToCycleGrid(container, source) {
       const geometry = window.VisualWaveDromWaveGeometry;
       if (!geometry || typeof geometry.alignDataTransitions !== 'function' || !container) return null;
       const svg = container.localName === 'svg' ? container : container.querySelector('svg');
-      return svg ? geometry.alignDataTransitions(svg) : null;
+      return svg ? geometry.alignDataTransitions(svg, source) : null;
     }
 
     function showWaveError(container, message) {
@@ -18628,7 +18628,7 @@ ${lines.join('\n')}`;
             setStatus(false, '渲染错误');
             return false;
           }
-          alignWaveDataToCycleGrid(displayDiv);
+          alignWaveDataToCycleGrid(displayDiv, renderSource);
           syncHscaleInputFromJson(jsonText, fullSource);
           attachWaveInteractivity(jsonText, fullSource, documentSource);
           applyNavVisibilityToWave();
@@ -20215,7 +20215,7 @@ ${lines.join('\n')}`;
         WaveDrom.RenderWaveForm(0, getWaveRenderSource(renderWindow.source, true), prefix, false);
         const svg = display.querySelector('svg');
         if (!svg) throw new Error('所选列范围未生成 SVG');
-        alignWaveDataToCycleGrid(svg);
+        alignWaveDataToCycleGrid(svg, renderWindow.source);
         return {
           svg,
           start: renderWindow.start,
@@ -20819,7 +20819,7 @@ ${lines.join('\n')}`;
         } else {
           WaveDrom.RenderWaveForm(0, meta.renderSource, entry.prefix, false);
           if (!display.querySelector('svg')) throw new Error('未生成 SVG');
-          alignWaveDataToCycleGrid(display);
+          alignWaveDataToCycleGrid(display, meta.renderSource);
         }
         syncWaveDocumentDescriptionWidth(display);
         if (!useCanvas) setupFrozenWaveLabels(display);
@@ -21173,7 +21173,7 @@ ${lines.join('\n')}`;
         container.appendChild(displayDiv);
         try {
           WaveDrom.RenderWaveForm(0, item.wave, prefix, false);
-          alignWaveDataToCycleGrid(displayDiv);
+          alignWaveDataToCycleGrid(displayDiv, item.wave);
         } catch (e) {
           showWaveError(container, '图例渲染失败');
         }

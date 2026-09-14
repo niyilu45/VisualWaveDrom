@@ -1185,13 +1185,16 @@
     function draftTable(id) {
       if (!drafts.has(id)) {
         const table = catalog.tables.find((item) => item.id === id);
-        if (table) drafts.set(id, { base: clone(table), draft: clone(table) });
+        if (table) {
+          const draft = clone(table);
+          drafts.set(id, { base: clone(table), draft, missingRows: new Map(), compared: { table: clone(table), rows: draft.rows.slice() } });
+        }
       }
       return drafts.has(id) ? drafts.get(id).draft : null;
     }
     function formChanged() {
-      return editor && (!editor.item.table.rows.includes(editor.item.row)
-        || fields.some((field) => editor.inputs[field].value !== String(editor.item.row[field] ?? '')));
+      return editor && editor.forms.some((form) => form.create
+        || fields.some((field) => form.inputs[field].value !== String(form.item.row[field] ?? '')));
     }
     function hasChanges() { return editedRows.size > 0 || formChanged(); }
     const overlay = element('div', 'modal-overlay parameter-modal');
@@ -1201,6 +1204,7 @@
     const heading = element('h2', '', '参数表比较'); heading.id = 'parameter-compare-title';
     function close(discard) {
       if (busy) return;
+      if (discard !== true) applyEditor();
       if (discard !== true && hasChanges()) { message.textContent = '本次修改尚未保存，请选择“保存修改”或“不保存”。'; return; }
       global.removeEventListener('keydown', onKey, true);
       global.removeEventListener('beforeunload', onUnload);
@@ -1241,20 +1245,33 @@
     const undoDraft = button('撤销比较修改', () => draftHistory(false), 'undo');
     const redoDraft = button('重做比较修改', () => draftHistory(true), 'redo');
     const save = button('保存修改', () => { void saveChanges(); }); save.classList.add('primary');
+    const refreshCompare = button('更新比较', () => {
+      applyEditor();
+      [left.select.value, right.select.value].forEach((id) => {
+        const state = drafts.get(id);
+        if (state) {
+          state.compared = { table: clone(state.draft), rows: state.draft.rows.slice() };
+          state.missingRows.clear();
+        }
+      });
+      message.textContent = editedRows.size ? '比较结果已更新，修改尚未保存。' : '比较结果已更新。';
+      rebuild(true);
+    });
     const discard = button('不保存', () => close(true));
     const message = element('div', 'parameter-compare-message'); message.setAttribute('role', 'status');
     dialog.append(message);
-    footer.append(pageInfo, previous, next, undoDraft, redoDraft, discard, save); dialog.append(footer);
+    footer.append(pageInfo, previous, next, undoDraft, redoDraft, discard, refreshCompare, save); dialog.append(footer);
     const labels = { same: '相同', different: '不同', left: '仅左侧', right: '仅右侧', error: '异常' };
     let records = [], page = 0, problem = ''; const pageSize = 100;
     function updateActions() {
       save.disabled = busy || !hasChanges(); discard.disabled = closeButton.disabled = busy;
       save.textContent = busy ? '正在保存...' : '保存修改';
-      undoDraft.disabled = busy || !!editor || !draftUndo.length;
-      redoDraft.disabled = busy || !!editor || !draftRedo.length;
-      [left.select, right.select, swap, search, onlyDifferent].forEach((input) => { input.disabled = busy || !!editor; });
-      dialog.querySelectorAll('.parameter-compare-edit').forEach((input) => { input.disabled = busy || !!editor; });
-      if (busy || editor) previous.disabled = next.disabled = true;
+      undoDraft.disabled = busy || (!draftUndo.length && !formChanged());
+      redoDraft.disabled = busy || !!formChanged() || !draftRedo.length;
+      refreshCompare.disabled = busy || !!problem;
+      [left.select, right.select, swap, search, onlyDifferent].forEach((input) => { input.disabled = busy; });
+      dialog.querySelectorAll('.parameter-compare-edit').forEach((input) => { input.disabled = busy; });
+      if (busy) previous.disabled = next.disabled = true;
     }
     function trackRow(item) {
       const index = item.table.rows.indexOf(item.row), base = drafts.get(item.table.id).base.rows[index];
@@ -1262,58 +1279,91 @@
       else editedRows.delete(item.row);
     }
     function draftHistory(redo) {
-      if (busy || editor) return;
+      if (busy) return;
+      applyEditor();
       const from = redo ? draftRedo : draftUndo, to = redo ? draftUndo : draftRedo;
       const entry = from.pop(); if (!entry) return;
-      const value = redo ? entry.after : entry.before;
-      if (entry.added) {
-        if (redo) entry.item.table.rows.splice(Math.min(entry.index, entry.item.table.rows.length), 0, entry.item.row);
-        else entry.item.table.rows.splice(entry.item.table.rows.indexOf(entry.item.row), 1);
-      }
-      fields.forEach((field) => {
-        if (Object.prototype.hasOwnProperty.call(value, field)) entry.item.row[field] = value[field];
-        else delete entry.item.row[field];
+      (redo ? entry : entry.slice().reverse()).forEach((change) => {
+        const value = redo ? change.after : change.before;
+        if (change.added) {
+          if (redo) change.item.table.rows.splice(Math.min(change.index, change.item.table.rows.length), 0, change.item.row);
+          else change.item.table.rows.splice(change.item.table.rows.indexOf(change.item.row), 1);
+        }
+        fields.forEach((field) => {
+          if (Object.prototype.hasOwnProperty.call(value, field)) change.item.row[field] = value[field];
+          else delete change.item.row[field];
+        });
+        trackRow(change.item);
       });
-      to.push(entry); trackRow(entry.item); message.textContent = ''; rebuild(true); scroll.focus({ preventScroll: true });
+      to.push(entry); message.textContent = '已暂存修改，比较结果待更新。'; render(true); scroll.focus({ preventScroll: true });
     }
     function applyEditor() {
       if (!editor) return;
-      const { item, inputs } = editor, before = clone(item.row);
-      const index = item.table.rows.indexOf(item.row), added = index < 0;
-      const base = drafts.get(item.table.id).base.rows[index] || {};
-      fields.forEach((field) => {
-        const value = field === 'name' ? inputs[field].value.trim() : inputs[field].value;
-        if (value === String(base[field] ?? '')) {
-          if (Object.prototype.hasOwnProperty.call(base, field)) item.row[field] = base[field];
-          else delete item.row[field];
-        } else item.row[field] = value;
+      const active = editor, changes = [];
+      editor = null;
+      active.forms.forEach(({ item, inputs, create }) => {
+        const before = clone(item.row), index = item.table.rows.indexOf(item.row), added = index < 0;
+        if (added && !create && fields.every((field) => inputs[field].value === String(item.row[field] ?? ''))) return;
+        const base = drafts.get(item.table.id).base.rows[index] || {};
+        fields.forEach((field) => {
+          const value = field === 'name' ? inputs[field].value.trim() : inputs[field].value;
+          if (value === String(base[field] ?? '')) {
+            if (Object.prototype.hasOwnProperty.call(base, field)) item.row[field] = base[field];
+            else delete item.row[field];
+          } else item.row[field] = value;
+        });
+        if (added) item.table.rows.push(item.row);
+        if (added || fields.some((field) => before[field] !== item.row[field])) {
+          changes.push({ item, before, after: clone(item.row), added, index: item.table.rows.indexOf(item.row) });
+          trackRow(item);
+        }
       });
-      if (added) item.table.rows.push(item.row);
-      if (added || fields.some((field) => before[field] !== item.row[field])) {
-        draftUndo.push({ item, before, after: clone(item.row), added, index: item.table.rows.indexOf(item.row) });
+      if (changes.length) {
+        draftUndo.push(changes);
         if (draftUndo.length > 50) draftUndo.shift();
-        draftRedo.length = 0; trackRow(item);
+        draftRedo.length = 0;
+        message.textContent = '已暂存修改，比较结果待更新。';
       }
-      editor = null; message.textContent = editedRows.size ? '已暂存 ' + editedRows.size + ' 行修改，尚未保存。' : '';
-      rebuild(true); scroll.focus({ preventScroll: true });
+      const scrollTop = scroll.scrollTop;
+      renderEntry(active.tr, active.entry);
+      scroll.scrollTop = scrollTop; updateActions();
+      if (!overlay.contains(document.activeElement)) scroll.focus({ preventScroll: true });
     }
-    function openEditor(item, content) {
-      if (editor || busy) return;
-      const form = element('div', 'parameter-compare-editor'), inputs = {};
-      const captions = { name: '变量名', val: '变量值 / 公式', description: '变量说明' };
-      fields.forEach((field) => {
-        const label = element('label'), input = element(field === 'name' ? 'input' : 'textarea');
-        input.value = String(item.row[field] ?? ''); input.dataset.compareField = field;
-        input.setAttribute('aria-label', captions[field]); input.spellcheck = false;
-        if (field !== 'name') input.rows = 3;
-        input.addEventListener('input', updateActions);
-        label.append(element('span', '', captions[field]), input); form.append(label); inputs[field] = input;
+    function entryItems(entry, side) {
+      if (entry[side].length) return entry[side];
+      const table = draftTable(entry.tableIds[side]), state = drafts.get(table.id);
+      const other = entry[side === 'left' ? 'right' : 'left'][0];
+      const name = other ? other.name : '';
+      if (!state.missingRows.has(name)) state.missingRows.set(name, { name, val: '', description: '' });
+      return [{ table, row: state.missingRows.get(name), name }];
+    }
+    function openEditor(entry, tr, side, selectedItem) {
+      if (busy) return;
+      applyEditor();
+      const forms = [];
+      editor = { entry, tr, forms }; tr.classList.add('editing');
+      ['left', 'right'].forEach((currentSide, column) => {
+        const td = tr.children[column + 1]; td.replaceChildren();
+        entryItems(entry, currentSide).forEach((item) => {
+          const form = element('div', 'parameter-compare-editor'), inputs = {};
+          const captions = { name: '变量名', val: '变量值 / 公式', description: '变量说明' };
+          form.setAttribute('role', 'group'); form.setAttribute('aria-label', (currentSide === 'left' ? '左侧' : '右侧') + '参数编辑');
+          fields.forEach((field) => {
+            const label = element('label'), input = element(field === 'name' ? 'input' : 'textarea');
+            input.value = String(item.row[field] ?? ''); input.dataset.compareField = field;
+            input.setAttribute('aria-label', captions[field]); input.spellcheck = false;
+            if (field !== 'name') input.rows = 3;
+            input.addEventListener('input', updateActions);
+            label.append(element('span', '', captions[field]), input); form.append(label); inputs[field] = input;
+          });
+          forms.push({ item, inputs, create: item.row === selectedItem.row && !item.table.rows.includes(item.row), side: currentSide });
+          td.append(form);
+        });
       });
-      const actions = element('div', 'parameter-compare-editor-actions');
-      actions.append(button('更新比较', applyEditor), button('取消修改', cancelEditor)); form.append(actions);
-      editor = { item, inputs }; content.replaceChildren(form); updateActions(); inputs.val.focus({ preventScroll: true });
+      updateActions();
+      const focused = forms.find((form) => form.side === side && form.item.row === selectedItem.row) || forms[0];
+      focused.inputs.val.focus({ preventScroll: true });
     }
-    function cancelEditor() { editor = null; rebuild(true); scroll.focus({ preventScroll: true }); }
     async function saveChanges() {
       if (busy) return;
       applyEditor();
@@ -1374,38 +1424,44 @@
         if (dirty !== savedGeneration) timer = setTimeout(() => { void flush().catch(() => {}); }, 220);
       }
     }
-    function cell(items, flags, tableId, counterpart) {
+    function cell(entry, side, tr) {
+      const items = entryItems(entry, side), flags = entry.flags;
       const td = element('td');
-      if (!items.length) {
-        const table = draftTable(tableId), name = String(counterpart[0].row.name || '');
-        const content = element('div', 'parameter-compare-entry');
-        const add = button('添加 ' + table.name + ' 的 ' + (name || '参数'), () => {
-          openEditor({ table, row: { name, val: '', description: '' } }, content);
-        }, 'plus');
-        add.classList.add('parameter-compare-edit');
-        content.append(add, element('span', 'parameter-compare-missing', '无此变量')); td.append(content); return td;
-      }
       items.forEach((item) => {
         const content = element('div', 'parameter-compare-entry');
-        const edit = button('编辑 ' + item.table.name + ' 的 ' + (item.row.name || '第 ' + (item.index + 1) + ' 行'), () => openEditor(item, content), 'edit');
+        const missing = !item.table.rows.includes(item.row);
+        const edit = button((missing ? '添加 ' : '编辑 ') + item.table.name + ' 的 ' + (item.row.name || '参数'), () => openEditor(entry, tr, side, item), missing ? 'plus' : 'edit');
         edit.classList.add('parameter-compare-edit'); content.append(edit);
+        if (missing) { content.append(element('span', 'parameter-compare-missing', '无此变量')); td.append(content); return; }
+        const raw = String(item.row.val ?? ''), description = String(item.row.description ?? '');
+        const stale = item.raw !== raw || item.name !== item.row.name || item.description !== description;
         if (editedRows.has(item.row)) content.append(element('small', 'parameter-compare-unsaved', '未保存'));
+        if (stale) content.append(element('small', 'parameter-compare-pending', '待更新比较'));
         if (items.length > 1) content.append(element('small', '', '第 ' + (item.index + 1) + ' 行'));
-        content.append(element('div', 'parameter-compare-value' + (flags.value ? ' difference' : ''), item.error ? '存在异常' : item.value || '（空）'));
-        if (item.formula || item.error) {
+        if (item.row.name !== item.name) content.append(element('strong', '', item.row.name || '（无变量名）'));
+        content.append(element('div', 'parameter-compare-value' + (flags.value ? ' difference' : ''), stale ? raw || '（空）' : item.error ? '存在异常' : item.value || '（空）'));
+        if (!stale && (item.formula || item.error)) {
           content.append(element('small', '', item.formula ? '公式' : '原值'));
           content.append(element('code', 'parameter-compare-raw' + (flags.raw ? ' difference' : ''), item.raw || '（空）'));
         }
-        if (item.description || flags.description) {
+        if (description || flags.description) {
           content.append(element('small', '', '说明'));
-          content.append(element('div', 'parameter-compare-description' + (flags.description ? ' difference' : ''), item.description || '（空）'));
+          content.append(element('div', 'parameter-compare-description' + (flags.description ? ' difference' : ''), description || '（空）'));
         }
-        if (item.error) content.append(element('div', 'parameter-compare-error', item.error));
+        if (!stale && item.error) content.append(element('div', 'parameter-compare-error', item.error));
         td.append(content);
       });
       return td;
     }
+    function renderEntry(tr, entry) {
+      tr.classList.remove('editing'); tr.dataset.kind = entry.kind; tr.dataset.name = entry.name;
+      const name = element('th'); name.scope = 'row'; name.append(element('strong', '', entry.name));
+      name.append(element('span', 'parameter-compare-state ' + entry.kind, labels[entry.kind]));
+      if (entry.reasons.length) name.append(element('small', '', entry.reasons.join('、')));
+      tr.replaceChildren(name, cell(entry, 'left', tr), cell(entry, 'right', tr));
+    }
     function render(preserveScroll) {
+      applyEditor();
       const scrollTop = scroll.scrollTop;
       const query = search.value.trim().toLowerCase();
       const filtered = records.filter((entry) => (!onlyDifferent.checked || entry.kind !== 'same') && entry.name.toLowerCase().includes(query));
@@ -1413,11 +1469,7 @@
       const start = page * pageSize, shown = filtered.slice(start, start + pageSize);
       body.replaceChildren();
       shown.forEach((entry) => {
-        const tr = element('tr'); tr.dataset.kind = entry.kind; tr.dataset.name = entry.name;
-        const name = element('th'); name.scope = 'row'; name.append(element('strong', '', entry.name));
-        name.append(element('span', 'parameter-compare-state ' + entry.kind, labels[entry.kind]));
-        if (entry.reasons.length) name.append(element('small', '', entry.reasons.join('、')));
-        tr.append(name, cell(entry.left, entry.flags, left.select.value, entry.right), cell(entry.right, entry.flags, right.select.value, entry.left)); body.append(tr);
+        const tr = element('tr'); renderEntry(tr, entry); body.append(tr);
       });
       if (!shown.length) {
         const tr = element('tr'), td = element('td', 'parameter-empty'); td.colSpan = 3;
@@ -1429,10 +1481,26 @@
       updateActions();
     }
     function rebuild(preserveScroll) {
+      applyEditor();
       const l = draftTable(left.select.value), r = draftTable(right.select.value);
       leftHeading.textContent = l ? l.name : '左侧参数表'; rightHeading.textContent = r ? r.name : '右侧参数表';
       problem = !l || !r ? (catalog.tables.length < 2 ? '当前波形库不足两张参数表' : '请选择两张参数表') : l.id === r.id ? '请选择两张不同的参数表' : '';
-      records = problem ? [] : compareTables(l, r); if (preserveScroll !== true) page = 0;
+      records = [];
+      if (!problem) {
+        const a = drafts.get(l.id).compared, b = drafts.get(r.id).compared;
+        // Pair selection uses the last explicit comparison snapshots, not unapplied draft results.
+        records = compareTables(a.table, b.table);
+        records.forEach((entry) => {
+          entry.tableIds = { left: l.id, right: r.id };
+          ['left', 'right'].forEach((side) => {
+            const snapshot = side === 'left' ? a : b, table = side === 'left' ? l : r;
+            entry[side].forEach((item) => {
+              item.name = String(item.row.name || ''); item.row = snapshot.rows[item.index]; item.table = table;
+            });
+          });
+        });
+      }
+      if (preserveScroll !== true) page = 0;
       const counts = { same: 0, different: 0, left: 0, right: 0, error: 0 }; records.forEach((entry) => counts[entry.kind]++);
       summary.textContent = problem || '共 ' + records.length + ' 项 · ' + Object.keys(counts).map((key) => labels[key] + ' ' + counts[key]).join(' · ');
       render(preserveScroll === true);
@@ -1441,7 +1509,10 @@
       if (!overlay.contains(event.target)) return;
       event.stopPropagation();
       if (busy) { event.preventDefault(); return; }
-      if (event.key === 'Escape' && !event.isComposing) { event.preventDefault(); if (editor) cancelEditor(); else close(); }
+      if (event.key === 'Escape' && !event.isComposing) {
+        event.preventDefault();
+        if (editor) { applyEditor(); scroll.focus({ preventScroll: true }); } else close();
+      }
       if ((event.ctrlKey || event.metaKey) && event.key === 'Enter' && !event.isComposing && editor) { event.preventDefault(); applyEditor(); }
       if (!isTextInput(event.target)) {
         const action = bridge && bridge.historyShortcut ? bridge.historyShortcut(event) : '';
@@ -1455,8 +1526,16 @@
     }
     left.select.addEventListener('change', rebuild); right.select.addEventListener('change', rebuild);
     search.addEventListener('input', () => { page = 0; render(); }); onlyDifferent.addEventListener('change', () => { page = 0; render(); });
-    let startedOutside = false;
-    overlay.addEventListener('pointerdown', (event) => { startedOutside = event.target === overlay; });
+    let startedOutside = false, startedInEditor = false;
+    overlay.addEventListener('pointerdown', (event) => {
+      startedOutside = event.target === overlay;
+      startedInEditor = !!editor && editor.tr.contains(event.target) && !!event.target.closest('.parameter-compare-editor');
+    });
+    overlay.addEventListener('click', (event) => {
+      if (busy || !editor || event.target.closest('.parameter-compare-editor, .parameter-compare-edit')) return;
+      if (event.detail && startedInEditor) return;
+      applyEditor();
+    }, true);
     overlay.addEventListener('click', (event) => { if (startedOutside && event.target === overlay) close(); });
     modal = overlay; overlay.append(dialog); document.body.append(overlay);
     function onUnload(event) { if (busy || hasChanges()) { event.preventDefault(); event.returnValue = ''; } }

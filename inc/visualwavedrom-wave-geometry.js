@@ -113,11 +113,38 @@
     return count;
   }
 
-  function alignDataTransitions(svg) {
+  function makeEdgeLabelsTransparent(svg, source) {
+    if (!source || !Array.isArray(source.edge)) return;
+    svg.querySelectorAll('[id^="wavearcs_"]').forEach(function (group) {
+      const paths = new Map();
+      Array.from(group.children).forEach(function (child) {
+        if (child.localName !== 'path' || !child.id.startsWith('gmark_')) return;
+        if (!paths.has(child.id)) paths.set(child.id, []);
+        paths.get(child.id).push(child);
+      });
+      source.edge.forEach(function (edge) {
+        if (typeof edge !== 'string') return;
+        const text = edge.trim();
+        const token = text.split(/\s+/, 1)[0];
+        const matches = paths.get('gmark_' + token[0] + '_' + token.slice(-1));
+        const path = matches && matches.shift();
+        if (!path || !text.slice(token.length).trim()) return;
+        // Only labeled edges own the following group; trailing groups are node names.
+        const label = path.nextElementSibling;
+        if (!label || label.localName !== 'g') return;
+        Array.from(label.children).forEach(function (child) {
+          if (child.localName === 'rect') child.style.fill = 'transparent';
+        });
+      });
+    });
+  }
+
+  function alignDataTransitions(svg, source) {
     if (!svg || typeof svg.querySelectorAll !== 'function') {
       return { lanes: 0, transitions: 0, labels: 0, arcGroups: 0 };
     }
     const totals = { lanes: 0, transitions: 0, labels: 0, arcGroups: 0 };
+    makeEdgeLabelsTransparent(svg, source);
     let clipId = '';
     const getClipId = function () {
       if (!clipId) clipId = createTailClip(svg);
