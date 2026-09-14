@@ -1,5 +1,32 @@
 [
   {
+    "version": "2026.9.14.1",
+    "date": "2026-09-14T01:56:42Z",
+    "head": "b580693a49e23f049a279b32a89e57abb22300c2",
+    "notes": [
+      "参数表比较窗口支持编辑两侧的变量名、变量值或公式及说明，修改先暂存，按暂存值重新计算公式与差异，不影响原表。",
+      "新增保存修改与不保存选项；未保存关闭时提示选择，取消仅丢弃本次比较编辑，保留进入比较前的原表改动。",
+      "保存成功后将两侧修改作为一次操作纳入撤销和重做，保留原行标识及既有历史；正式波形库文件仍通过保存波形库写入。",
+      "保存失败保留草稿，支持重试或放弃；保存时校验变量名及版本冲突，避免覆盖其他窗口修改。",
+      "支持比较草稿的撤销、重做，保持分页与滚动位置，适配长公式、多行说明和窄屏布局。",
+      "已验证 Chrome 主界面、Edge 单独参数窗口及纯 HTML SQLite 的保存、不保存、撤销、失败重试与并发冲突。"
+    ],
+    "commits": [
+      {
+        "id": "b580693a49e23f049a279b32a89e57abb22300c2",
+        "date": "2026-09-14T09:55:55+08:00",
+        "title": "feat: edit parameter comparisons with explicit save or discard",
+        "body": "Add inline editing for names, raw values/formulas and descriptions on both sides of parameter comparisons. Keep changes in isolated drafts, recompute dependent formulas from draft values and retain the current comparison page and scroll position.\n\nProvide explicit Save changes and Discard actions, unsaved-close warnings and local draft undo/redo. Persist a validated candidate before updating live rows, preserving drafts on save failure and rejecting stale-table conflicts.\n\nRecord a successful comparison save as one undoable batch without replacing row identities or disturbing older history. Formal Wave library files remain controlled by Save library.\n\nVerified focused Chrome main-view and Edge standalone workflows, save failure/retry, concurrent changes, pagination, responsive layouts and real file-mode SQLite save/discard/undo. Temporary validation files were removed."
+      },
+      {
+        "id": "4f02c388cacfced244c3b56ded6c08b23b5ead04",
+        "date": "2026-09-13T00:48:55+08:00",
+        "title": "chore: publish release 2026.9.13.1"
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.9.13.1",
     "date": "2026-09-12T16:48:20Z",
     "head": "ef56537f817b1ee956fbed2e536f76539248b5d3",
