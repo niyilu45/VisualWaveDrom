@@ -1,5 +1,29 @@
 [
   {
+    "version": "2026.9.14.7",
+    "date": "2026-09-14T09:53:26Z",
+    "head": "97c6baed340b22723dd5756b1ff3bca7de0f7362",
+    "notes": [
+      "修复修改波形行名、连接标签或连接线样式后波形图位置跳变：重绘期间暂时保持原波形高度，避免旧 SVG 清空时浏览器把滚动位置收回顶部。",
+      "行名和连接标签的文本编辑框获取焦点时不再自动滚动页面；保留当前横向和纵向浏览位置，适配完整波形库与单图窗口。",
+      "重绘成功或失败后恢复原高度限制，删除波形行后图框仍可正常缩短；已验证撤销重做、窄窗口和等待重绘期间继续滚动的场景。"
+    ],
+    "commits": [
+      {
+        "id": "97c6baed340b22723dd5756b1ff3bca7de0f7362",
+        "date": "2026-09-14T17:52:48+08:00",
+        "title": "fix: preserve waveform viewport during inline edits",
+        "body": "Hold the current waveform height while replacing the SVG so browser scroll clamping cannot jump back to the top. Restore the prior minimum height after success or failure, preserving normal layout shrinkage. Focus signal-name and edge-label inputs without scrolling.\n\nValidation: Chrome and Edge, gallery and standalone views, name/edge edits, line styles, undo/redo, scrolling after render scheduling, narrow layout, error cleanup and shorter waveforms; syntax and whitespace checks passed."
+      },
+      {
+        "id": "10637f9ad3430d26dc33c43c8d792c5a6cc67e09",
+        "date": "2026-09-14T17:32:40+08:00",
+        "title": "chore: publish release 2026.9.14.6"
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.9.14.6",
     "date": "2026-09-14T09:30:52Z",
     "head": "d16749086147a655c1da1d22b55295c2c4949d92",
