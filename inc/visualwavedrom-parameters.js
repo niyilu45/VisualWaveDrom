@@ -236,10 +236,12 @@
     if (value !== source) cache.set(value, { generation, value });
     return value;
   }
-  function decorateText(node, raw, source) {
+  function decorateText(node, raw, source, options) {
     if (!node || node.matches('input, textarea, .editing') || node.querySelector('textarea, input')) return;
+    const wholeLabel = !!(options && options.wholeLabel);
     const content = node.textContent, previous = textDecorations.get(node);
     if (previous && previous.raw === raw && previous.source === source && previous.content === content && previous.generation === generation
+      && previous.wholeLabel === wholeLabel
       && previous.spans.every((span) => node.contains(span))) return;
     node.dataset.parameterHint = details(raw, source);
     node.querySelectorAll('[data-parameter-negative]').forEach((span) => span.replaceWith(...span.childNodes));
@@ -259,6 +261,7 @@
     rendered += value.slice(end);
     const offset = content.endsWith(rendered) ? content.length - rendered.length : -1;
     if (ranges.length && offset >= 0) {
+      if (wholeLabel) ranges.splice(0, ranges.length, { start: 0, end: rendered.length });
       const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT), texts = [];
       while (walker.nextNode()) texts.push(walker.currentNode);
       let position = 0;
@@ -283,13 +286,13 @@
         textNode.replaceWith(fragment);
       });
     }
-    textDecorations.set(node, { raw, source, content, generation, spans });
+    textDecorations.set(node, { raw, source, content, generation, spans, wholeLabel });
   }
   function decorate(host, source, renderWindow) {
     if (!host || !source || !linked(source).length) return;
     const bindings = new Map(), signals = [], groups = [];
-    function bind(node, raw) {
-      if (node && !node.hasAttribute('data-parameter-hint')) decorateText(node, raw, source);
+    function bind(node, raw, options) {
+      if (node && !node.hasAttribute('data-parameter-hint')) decorateText(node, raw, source, options);
     }
     function add(raw) {
       if (typeof raw !== 'string' || !raw.includes('$')) return;
@@ -348,7 +351,7 @@
         const matches = edges.get(path.id);
         if (!matches || !matches.length) return;
         const raw = matches.shift(), label = path.nextElementSibling;
-        if (raw && label && label.localName === 'g') bind(label.querySelector('text'), raw);
+        if (raw && label && label.localName === 'g') bind(label.querySelector('text'), raw, { wholeLabel: true });
       });
     });
     host.querySelectorAll('svg text, .wave-document-description:not(.editing), h2').forEach((node) => {
@@ -1142,7 +1145,7 @@
             const isFormula = result.formula && !result.error;
             const numericValue = Number(result.val);
             input.classList.toggle('parameter-formula-value', isFormula);
-            input.classList.toggle('parameter-negative-value', isFormula && Number.isFinite(numericValue) && numericValue < 0);
+            input.classList.toggle('parameter-negative-value', !result.error && Number.isFinite(numericValue) && numericValue < 0);
             input.setAttribute('aria-invalid', String(!!result.error));
             input.title = result.formula ? '公式：' + result.rawVal : '';
             error.hidden = !result.error; error.textContent = result.error;

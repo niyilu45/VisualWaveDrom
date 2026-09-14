@@ -1039,6 +1039,9 @@ ${lines.join('\n')}`;
     let waveLibraryPreviewQueue = [];
     let waveLibraryPreviewWorkHandle = null;
     let waveLibraryPreviewUseSequence = 0;
+    let wavePanelWheelScroll = null;
+    let waveLibraryPreviewResumeAt = 0;
+    let wavePanelScrollSample = { top: 0, time: 0 };
     let savedTagsPersistTimer = null;
     let savedTagsPersistIdleHandle = null;
     let activeTagName = null;
@@ -7193,14 +7196,13 @@ ${lines.join('\n')}`;
     }
 
     function adjustEdgeLabelOffsetsAfterRowChange(source, previousSignals) {
-      if (!Array.isArray(source.edgeOptions) || !Array.isArray(source.edge)) return false;
+      if (!Array.isArray(source.edge)) return false;
       const endpoints = new Set();
       const movedLabels = [];
       source.edge.forEach((edge, index) => {
         const offset = getEdgeLabelOffsetOption(source, index);
-        if (!offset.y) return;
-        const { from, to } = parseEdgeString(edge);
-        if (!from || !to || from === to) return;
+        const { from, to, label } = parseEdgeString(edge);
+        if (!from || !to || from === to || !label) return;
         endpoints.add(from);
         endpoints.add(to);
         movedLabels.push({ index, from, to, offset });
@@ -7219,17 +7221,35 @@ ${lines.join('\n')}`;
       };
       const before = nodeRows(previousSignals);
       const after = nodeRows(flattenSignals(source.signal || []));
+      const svg = waveContainer.querySelector('svg');
+      const lanes = svg ? getWaveLaneGroups(svg) : [];
+      let rowHeight = 30;
+      if (lanes.length > 1) {
+        try {
+          const inverse = svg.getCTM().inverse();
+          const firstY = inverse.multiply(lanes[0].getCTM()).f;
+          const secondY = inverse.multiply(lanes[1].getCTM()).f;
+          const measured = Math.abs(secondY - firstY);
+          if (Number.isFinite(measured) && measured > 0) rowHeight = measured;
+        } catch (_) { /* Use WaveDrom's default row pitch before SVG layout is ready. */ }
+      }
+      const labelTexts = new Map();
+      if (svg) svg.querySelectorAll('.wave-edge-label-text').forEach((text) => {
+        labelTexts.set(Number(text.dataset.vwdEdgeIndex), text);
+      });
       let changed = false;
       movedLabels.forEach(({ index, from, to, offset }) => {
         if (!before.has(from) || !before.has(to) || !after.has(from) || !after.has(to)) return;
         const oldSpan = before.get(to) - before.get(from);
         const newSpan = after.get(to) - after.get(from);
-        if (!oldSpan || oldSpan === newSpan) return;
-        // The renderer already moves the midpoint; scale only the user's vertical offset.
-        setEdgeLabelOffsetOption(source, index, { x: offset.x, y: offset.y * newSpan / oldSpan });
+        const rowDelta = Math.abs(newSpan) - Math.abs(oldSpan);
+        if (!rowDelta) return;
+        // Follow the lower endpoint by a full row; the renderer already moves half a row.
+        const correction = rootDeltaToLabelParent(labelTexts.get(index), 0, rowDelta * rowHeight / 2);
+        setEdgeLabelOffsetOption(source, index, { x: offset.x, y: offset.y + correction.y });
         changed = true;
         vwdDebugLog('connection-label', {
-          phase: 'rows-adjusted', edgeIndex: index, oldSpan, newSpan,
+          phase: 'rows-adjusted', edgeIndex: index, oldSpan, newSpan, rowDelta, rowHeight,
           previous: offset, next: getEdgeLabelOffsetOption(source, index)
         });
       });
@@ -11593,6 +11613,40 @@ ${lines.join('\n')}`;
       return true;
     }
 
+    function cancelWavePanelWheelScroll() {
+      if (!wavePanelWheelScroll) return;
+      cancelAnimationFrame(wavePanelWheelScroll.frame);
+      wavePanelWheelScroll = null;
+    }
+
+    function waveLibraryPreviewScrollBusy() {
+      return !!wavePanelWheelScroll || performance.now() < waveLibraryPreviewResumeAt;
+    }
+
+    function animateWavePanelWheelScroll(now) {
+      const state = wavePanelWheelScroll;
+      if (!state) return;
+      const current = wavePanel.scrollTop;
+      if (Math.abs(current - state.lastTop) > 1) {
+        cancelWavePanelWheelScroll();
+        scheduleWaveLibraryPreviewWork();
+        return;
+      }
+      state.target = Math.max(0, Math.min(state.target, wavePanel.scrollHeight - wavePanel.clientHeight));
+      const elapsed = Math.max(1, Math.min(64, now - state.time));
+      const distance = state.target - current;
+      const step = distance * (1 - Math.exp(-elapsed / 70));
+      const finished = Math.abs(distance) <= 1;
+      wavePanel.scrollTop = finished ? state.target : current + step;
+      state.lastTop = wavePanel.scrollTop;
+      state.time = now;
+      if (finished || (Math.abs(step) < 1 && state.lastTop === current)) {
+        if (!finished) wavePanel.scrollTop = state.target;
+        wavePanelWheelScroll = null;
+        scheduleWaveLibraryPreviewWork();
+      } else state.frame = requestAnimationFrame(animateWavePanelWheelScroll);
+    }
+
     function handleWavePanelWheelPaging(e) {
       if (!wavePanel || !e) return;
       if (inlineEditActive) return;
@@ -11612,14 +11666,18 @@ ${lines.join('\n')}`;
 
       const pageHeight = Math.max(1, Math.floor((wavePanel.clientHeight - 32) * 0.45));
       const delta = e.deltaY > 0 ? 1 : -1;
-      const nextTop = wavePanel.scrollTop + delta * pageHeight;
+      const current = wavePanel.scrollTop;
+      const state = wavePanelWheelScroll;
+      const sameDirection = state && Math.sign(state.target - current) === delta;
+      const nextTop = (sameDirection ? state.target : current) + delta * pageHeight;
       const maxTop = Math.max(0, wavePanel.scrollHeight - wavePanel.clientHeight);
       const clampedTop = Math.max(0, Math.min(maxTop, nextTop));
-      wavePanel.scrollTo({
-        top: clampedTop,
-        left: wavePanel.scrollLeft,
-        behavior: 'smooth'
-      });
+      waveLibraryPreviewResumeAt = performance.now() + 100;
+      if (state) state.target = clampedTop;
+      else if (Math.abs(clampedTop - current) > 0.5) {
+        wavePanelWheelScroll = { target: clampedTop, lastTop: current, time: performance.now(), frame: 0 };
+        wavePanelWheelScroll.frame = requestAnimationFrame(animateWavePanelWheelScroll);
+      }
     }
 
     function startGroupLabelInlineEdit(textEl, group, anchorEl, groupIndex, inputEvent) {
@@ -13360,7 +13418,7 @@ ${lines.join('\n')}`;
       svg.querySelectorAll('.wave-edge-label-text').forEach((node) => {
         const edge = parameterEdgeSource && (parameterEdgeSource.edge || [])[Number(node.dataset.vwdEdgeIndex)];
         const label = typeof edge === 'string' ? parseEdgeString(edge).label : '';
-        window.VisualWaveDromParameters.decorateText(node, label, parameterEdgeSource);
+        window.VisualWaveDromParameters.decorateText(node, label, parameterEdgeSource, { wholeLabel: true });
       });
       // Rendering may synthesize head.text from title; edits must target the original JSON.
       attachHeadFootInteractivity(jsonText, documentSource || parsedSource);
@@ -19064,6 +19122,7 @@ ${lines.join('\n')}`;
       return {
         entry,
         top: cardRect.top - panelRect.top,
+        panelTop: wavePanel.scrollTop,
         panelLeft: wavePanel.scrollLeft,
         previewLeft: entry.previewScroller.scrollLeft,
         descriptionLeft: entry.descriptionScroller.scrollLeft
@@ -19093,12 +19152,21 @@ ${lines.join('\n')}`;
       const currentTop = entry.card.getBoundingClientRect().top - wavePanel.getBoundingClientRect().top;
       // The previous card can change height when its editor becomes a preview.
       // Keep the clicked card anchored, rather than restoring an obsolete scrollTop.
-      const adjustment = currentTop - viewport.top;
+      // Exclude scrolling since capture, including compositor movement during SVG layout.
+      const scrolled = Number.isFinite(viewport.panelTop) ? wavePanel.scrollTop - viewport.panelTop : 0;
+      const adjustment = currentTop - viewport.top + scrolled;
       if (Math.abs(adjustment) <= 0.5 && wavePanel.scrollLeft === viewport.panelLeft
           && entry.previewScroller.scrollLeft === viewport.previewLeft
           && entry.descriptionScroller.scrollLeft === viewport.descriptionLeft) return;
       // Even assigning the current scrollTop interrupts a native smooth scroll.
-      if (Math.abs(adjustment) > 0.5) wavePanel.scrollTop += adjustment;
+      if (Math.abs(adjustment) > 0.5) {
+        wavePanel.scrollTop += adjustment;
+        wavePanelScrollSample.top += adjustment;
+        if (wavePanelWheelScroll) {
+          wavePanelWheelScroll.target += adjustment;
+          wavePanelWheelScroll.lastTop = wavePanel.scrollTop;
+        }
+      }
       if (wavePanel.scrollLeft !== viewport.panelLeft) wavePanel.scrollLeft = viewport.panelLeft;
       if (entry.previewScroller.scrollLeft !== viewport.previewLeft) entry.previewScroller.scrollLeft = viewport.previewLeft;
       if (entry.descriptionScroller.scrollLeft !== viewport.descriptionLeft) entry.descriptionScroller.scrollLeft = viewport.descriptionLeft;
@@ -19106,6 +19174,7 @@ ${lines.join('\n')}`;
       vwdDebugLog('wave-scroll', {
         phase: viewport.reason === 'preview-layout' ? 'restore-after-preview-layout' : 'restore-after-document-activation',
         adjustment,
+        scrollDelta: scrolled,
         documentName: entry.documentName,
         beforeTop: viewport.top,
         afterTop: entry.card.getBoundingClientRect().top - wavePanel.getBoundingClientRect().top,
@@ -20682,6 +20751,7 @@ ${lines.join('\n')}`;
         previewObserved: false,
         previewNearViewport: false,
         analysisPending: false,
+        previewAnalysis: null,
         previewHeight: 0,
         previewScrollerHeight: 0,
         lastPreviewUse: 0
@@ -20701,6 +20771,9 @@ ${lines.join('\n')}`;
     function rememberWavePreviewHeight(entry, sourceElement) {
       if (!entry) return WAVE_PREVIEW_FALLBACK_HEIGHT;
       const target = sourceElement || entry.previewDisplay;
+      if (!target || !target.querySelector('svg, .wave-fast-preview, .wave-error')) {
+        return entry.previewHeight || WAVE_PREVIEW_FALLBACK_HEIGHT;
+      }
       let height = 0;
       if (target && typeof target.getBoundingClientRect === 'function') {
         height = target.getBoundingClientRect().height;
@@ -20737,6 +20810,7 @@ ${lines.join('\n')}`;
       display.replaceChildren();
       entry.renderedContent = null;
       entry.queuedContent = null;
+      entry.previewAnalysis = null;
       vwdDebugLog('performance', {
         phase: 'preview-release',
         documentName: entry.documentName,
@@ -20908,41 +20982,65 @@ ${lines.join('\n')}`;
       }
     }
 
-    function runWaveLibraryPreviewQueue(deadline) {
+    function runWaveLibraryPreviewQueue() {
       waveLibraryPreviewWorkHandle = null;
-      let processed = 0;
+      if (waveLibraryPreviewScrollBusy()) {
+        scheduleWaveLibraryPreviewWork();
+        return;
+      }
+      if (waveLibraryPreviewQueue.length > 1) {
+        const panel = wavePanel.getBoundingClientRect();
+        const ranked = waveLibraryPreviewQueue.map((entry) => {
+          const rect = entry.card.getBoundingClientRect();
+          const distance = rect.bottom <= panel.top ? panel.height + panel.top - rect.bottom
+            : rect.top >= panel.bottom ? panel.height + rect.top - panel.bottom
+            : Math.max(0, rect.top - panel.top);
+          return { entry, distance };
+        });
+        ranked.sort((a, b) => a.distance - b.distance);
+        waveLibraryPreviewQueue = ranked.map((item) => item.entry);
+      }
       while (waveLibraryPreviewQueue.length > 0) {
-        if (processed > 0 && deadline && typeof deadline.timeRemaining === 'function' && deadline.timeRemaining() < 4) break;
         const entry = waveLibraryPreviewQueue.shift();
         entry.previewQueued = false;
+        if (!entry.card.isConnected || entry.documentName === editingWaveDocumentName
+            || (entry.previewObserved && !entry.previewNearViewport)) continue;
         const tag = getSavedTagByName(entry.documentName);
         if (tag && tag.deferred) {
           ensureWaveDocumentLoaded(tag.name).then((loaded) => {
             if (loaded && entry.card.isConnected) queueWaveLibraryPreview(entry, loaded, true);
           });
         } else if (tag && entry.queuedContent === tag.content) {
-          if (tag.content.length >= WAVE_PREVIEW_WORKER_PARSE_THRESHOLD && !entry.analysisPending) {
+          const prepared = entry.previewAnalysis && entry.previewAnalysis.content === tag.content
+            ? entry.previewAnalysis : null;
+          if (tag.content.length >= WAVE_PREVIEW_WORKER_PARSE_THRESHOLD && !prepared && !entry.analysisPending) {
             entry.analysisPending = true;
+            const content = tag.content;
             requestWaveJsonAnalysis(tag.content).then((analysis) => {
               entry.analysisPending = false;
               const current = getSavedTagByName(entry.documentName);
-              if (current && current.content === tag.content && entry.card.isConnected) {
-                renderWaveDocumentPreview(entry, current, analysis);
+              if (current && entry.card.isConnected && (!entry.previewObserved || entry.previewNearViewport)) {
+                if (current.content === content) entry.previewAnalysis = { content, result: analysis };
+                queueWaveLibraryPreview(entry, current, true);
               }
             });
           } else if (!entry.analysisPending) {
-            renderWaveDocumentPreview(entry, tag);
+            renderWaveDocumentPreview(entry, tag, prepared && prepared.result);
+            entry.previewAnalysis = null;
           }
         }
-        processed += 1;
-        if (!deadline && processed >= 1) break;
+        // Yield between previews even when an idle deadline still has time remaining.
+        break;
       }
       if (waveLibraryPreviewQueue.length > 0) scheduleWaveLibraryPreviewWork();
     }
 
     function scheduleWaveLibraryPreviewWork() {
       if (waveLibraryPreviewWorkHandle !== null || waveLibraryPreviewQueue.length === 0) return;
-      if (typeof window.requestIdleCallback === 'function') {
+      if (waveLibraryPreviewScrollBusy()) {
+        const id = setTimeout(() => runWaveLibraryPreviewQueue(null), 64);
+        waveLibraryPreviewWorkHandle = { kind: 'timeout', id };
+      } else if (typeof window.requestIdleCallback === 'function') {
         const id = window.requestIdleCallback(runWaveLibraryPreviewQueue, { timeout: 250 });
         waveLibraryPreviewWorkHandle = { kind: 'idle', id };
       } else {
@@ -23493,8 +23591,21 @@ ${lines.join('\n')}`;
     document.getElementById('btn-format-json').addEventListener('click', formatEditorJson);
     if (wavePanel) {
       wavePanel.addEventListener('wheel', handleWavePanelWheelPaging, { passive: false });
+      wavePanel.addEventListener('pointerdown', cancelWavePanelWheelScroll, { capture: true, passive: true });
+      wavePanel.addEventListener('keydown', (event) => {
+        if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) cancelWavePanelWheelScroll();
+      }, true);
       wavePanel.addEventListener('scroll', function (event) {
         const scroller = event.target;
+        if (scroller === wavePanel) {
+          const top = wavePanel.scrollTop, now = performance.now();
+          const elapsed = now - wavePanelScrollSample.time;
+          if (elapsed > 0 && elapsed < 200 && Math.abs(top - wavePanelScrollSample.top) / elapsed > 1.2) {
+            waveLibraryPreviewResumeAt = now + 100;
+          }
+          wavePanelScrollSample = { top, time: now };
+          if (wavePanelWheelScroll && Math.abs(top - wavePanelWheelScroll.lastTop) > 1) cancelWavePanelWheelScroll();
+        }
         if (!scroller || !scroller.classList
             || !scroller.classList.contains('wave-document-preview-scroll')
             || !scroller.contains(waveContainer)) return;
