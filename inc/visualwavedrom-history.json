@@ -1,5 +1,29 @@
 [
   {
+    "version": "2026.9.14.3",
+    "date": "2026-09-14T03:18:48Z",
+    "head": "ccfc970dc9038cd62b8a041d570be74094273326",
+    "notes": [
+      "参数表比较支持左右同一行同步编辑，点击其他位置自动暂存并退出编辑，切换行时保留内容。",
+      "增加更新比较按钮，仅主动点击时重新计算比较结果；保存修改仅更新参数表，波形库仍由用户手动保存。",
+      "连接线标签改为透明底，统一普通波形预览、演讲者视图及截图效果，保留标签点击、编辑和拖动区域。"
+    ],
+    "commits": [
+      {
+        "id": "ccfc970dc9038cd62b8a041d570be74094273326",
+        "date": "2026-09-14T11:17:54+08:00",
+        "title": "feat: stage comparison row edits and use transparent edge labels",
+        "body": "Edit both parameter-table sides together, stage changes when leaving a row, and refresh comparison results only on request. Saving applies drafts to tables without committing the waveform library.\n\nMake edge-label backgrounds transparent across waveform previews, presenter views and screenshot exports while retaining label geometry and hit regions."
+      },
+      {
+        "id": "7e2d27a597aece4a9fe68f287f26bfab47216ed4",
+        "date": "2026-09-14T10:21:10+08:00",
+        "title": "chore: publish release 2026.9.14.2"
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.9.14.2",
     "date": "2026-09-14T02:20:22Z",
     "head": "6338c6037cf879800d28256545b04845e1d5c184",
