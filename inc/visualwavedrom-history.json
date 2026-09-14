@@ -1,5 +1,29 @@
 [
   {
+    "version": "2026.9.14.8",
+    "date": "2026-09-14T15:02:23Z",
+    "head": "a46c64bfdbb60061fbe190311aa9b41402d30a21",
+    "notes": [
+      "修复参数表更新后，波形预览中的连接线标签丢失手动拖动位置的问题；预览重新生成时恢复已保存的标签偏移，标签白底同步移动。",
+      "统一编辑、预览及范围截图中的标签位置恢复；按连接关系和源顺序匹配偏移，避免重复应用偏移，不修改波形 JSON 中保存的位置。",
+      "已通过 Chrome、Edge 针对性验证，覆盖参数变化、较长参数值、编辑与预览切换、范围截图、标签再次移动和撤销重做。"
+    ],
+    "commits": [
+      {
+        "id": "a46c64bfdbb60061fbe190311aa9b41402d30a21",
+        "date": "2026-09-14T23:01:47+08:00",
+        "title": "fix: preserve dragged edge labels in previews and exports",
+        "body": "Restore saved connection-label offsets after SVG preview rendering, including parameter-triggered refreshes and range screenshots. Keep label backgrounds aligned, map offsets by edge identity and source order, and avoid applying offsets twice to the active editor.\n\nValidation: focused Chrome and Edge checks for parameter updates, longer values, preview/editor switching, range exports, idempotent positioning and move undo/redo; JavaScript syntax and whitespace checks passed."
+      },
+      {
+        "id": "4c7802046366eabc87712946e462dcc4f46fca09",
+        "date": "2026-09-14T17:54:42+08:00",
+        "title": "chore: publish release 2026.9.14.7"
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.9.14.7",
     "date": "2026-09-14T09:53:26Z",
     "head": "97c6baed340b22723dd5756b1ff3bca7de0f7362",
