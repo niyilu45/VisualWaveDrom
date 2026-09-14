@@ -1,5 +1,31 @@
 [
   {
+    "version": "2026.9.14.2",
+    "date": "2026-09-14T02:20:22Z",
+    "head": "6338c6037cf879800d28256545b04845e1d5c184",
+    "notes": [
+      "参数表比较时，缺少参数的一侧新增加号编辑入口，默认带入另一侧的变量名，可以填写变量值、公式和说明。",
+      "新增参数先留在比较草稿中，保存修改后才写入原表；取消编辑或选择不保存不会新增原表数据。",
+      "补充参数支持草稿撤销和重做；新增行与现有参数的修改可以一并保存，并作为一次操作撤销或重做，保留原行标识与添加顺序。",
+      "保留公式计算、变量重名检查、保存失败重试及跨窗口冲突保护，避免重复插入或覆盖其他窗口修改。",
+      "已验证 Chrome 主界面、Edge 独立窗口及纯 HTML SQLite，覆盖空参数表、两侧补充、混合修改、保存和放弃、重复撤销重做。"
+    ],
+    "commits": [
+      {
+        "id": "6338c6037cf879800d28256545b04845e1d5c184",
+        "date": "2026-09-14T10:19:53+08:00",
+        "title": "feat: add missing parameters from comparison view",
+        "body": "Add an inline plus action on the missing side of parameter comparisons, prefilled with the counterpart name. Keep newly created rows in the comparison draft until explicit save, with discard and close warnings preserved.\n\nSupport draft undo/redo for additions and edits, evaluated formula previews, validated persistence and conflict protection. Record inserted rows with cell edits as a single undoable batch, preserving row identity and insertion order.\n\nVerified Chrome main view, Edge standalone view and real file-mode SQLite: empty tables, additions on both sides, mixed edits, save/discard, retry, duplicate names, concurrent changes and repeated undo/redo. Temporary test files were removed."
+      },
+      {
+        "id": "577e77fbdd406b4451e350faf0f01efc5335cf39",
+        "date": "2026-09-14T09:57:52+08:00",
+        "title": "chore: publish release 2026.9.14.1"
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.9.14.1",
     "date": "2026-09-14T01:56:42Z",
     "head": "b580693a49e23f049a279b32a89e57abb22300c2",
