@@ -1,6 +1,6 @@
 {
   "app": "VisualWaveDrom",
-  "version": "2026.9.14.3",
+  "version": "2026.9.14.4",
   "html": "VisualWaveDrom.html",
   "files": {
     "ReadMe.md": "b9d0dfe524be6211180c58a2b98ebacd07955c2d08cfcafba251fff1aec26f43",
@@ -32,7 +32,7 @@
     "inc/visualwavedrom-formula-eval-worker.js": "a6d13075b98a959adc3dd9de8e9bc473021655f23c0e6663c5182e87fc9b4ad6",
     "inc/visualwavedrom-formula-import-worker.js": "c943231147e5bebafd2f5d1aefc8ca2d4a6868e750ce68b00c1431c6b4f1d06d",
     "inc/visualwavedrom-formula.js": "b1b49fd51d0420a807304f59e3eddc37773f37e230ac9c9a01c585492cc722b9",
-    "inc/visualwavedrom-history.json": "af4503969fccce6a053a93e043734bae4264a007a45421040f4502215941b4e0",
+    "inc/visualwavedrom-history.json": "663c71d3d027f9b8e6f33b03b48d5f51ce5e2eceef5d1b4fd1509ec65a25002b",
     "inc/visualwavedrom-image-clipboard.js": "4e1394f4582b10aa55d900169e2f1fc37413b954bf99a655895f4a4494320e9c",
     "inc/visualwavedrom-import-collection.js": "284dafa428643cd95a5414d80dd16cc047ca302bdc6d1b7beabcfabf22aba11e",
     "inc/visualwavedrom-json-bigdata.js": "0d0b83a8aaf4e1503049e0e5b88fa6264115e1efa3dbdc1c151d86c875dc7940",
@@ -54,10 +54,10 @@
     "inc/visualwavedrom-sqlite-browser.js": "1c25ad48b783f3b10c948878efc78fed17e097abb31964eb0b63c7ea6f19b655",
     "inc/visualwavedrom-version-ui.js": "443cf7b0e643b12cc4608b3e85128196bed008e8ff245bdd563fedc68f1e4078",
     "inc/visualwavedrom-version.css": "08487c8479a6da764b6133e094aa54aa3655e9bc1b7eba6230c52be3213a6b97",
-    "inc/visualwavedrom-version.js": "d013397c56e03eeb84ae01dbae76086b89ed9909586d783f2c0fcd85c83f4b65",
+    "inc/visualwavedrom-version.js": "1f4a0f225440ec7ec491132950fc60a65c69a2034cf9c9c8184579badaef688b",
     "inc/visualwavedrom-vim.js": "a82ebe95fce3e19f31511c88cafa86d6c317f02e69d4a6351cbd437dd7d188fb",
     "inc/visualwavedrom-wave-clipboard.js": "dfdc04451628fd8b89b333e232dd50ff88fc42548f824724f96cee9756445ba7",
-    "inc/visualwavedrom-wave-geometry.js": "4f1ab7f458650934e216ea077912801fd0d459feef5b1c886576f17fff08fa1b",
+    "inc/visualwavedrom-wave-geometry.js": "f4b4f5f9cb668cf2cfd0c210bece3c36f25d1f1c47e5e22c40edbfa4311d5097",
     "inc/visualwavedrom-worker.js": "2609f7392febfc4e36351ac95a727b2417e6ce5658d1ceccccdd0bdeeb48160a",
     "inc/visualwavedrom.css": "46d09650146126457e66bcd99c1d05dc9242abc9c5d9a7ed78ba01fc5fe0ec66",
     "inc/wavedrom.min.js": "23d50ecdb770a3a98fad521c427ee115e8dfce9618ad46b56640e6df005eca4f"

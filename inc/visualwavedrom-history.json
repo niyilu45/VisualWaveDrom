@@ -1,5 +1,28 @@
 [
   {
+    "version": "2026.9.14.4",
+    "date": "2026-09-14T04:02:42Z",
+    "head": "fa761185238c35e25da43a8b75702c022bfdeecc",
+    "notes": [
+      "连接线标签恢复白底，背景尺寸按文字实际边界计算，不增加额外留白，减少对波形和连线的遮挡。",
+      "普通波形、演讲者模式和截图统一使用紧凑白底，保留标签编辑和拖动功能；集中测量文字后更新底框，减少重复布局计算。"
+    ],
+    "commits": [
+      {
+        "id": "fa761185238c35e25da43a8b75702c022bfdeecc",
+        "date": "2026-09-14T12:02:15+08:00",
+        "title": "fix: fit white edge-label backgrounds to rendered text",
+        "body": "Restore white backgrounds with no extra padding across waveform, presenter and screenshot rendering. Batch text measurements before geometry updates and preserve label hit regions and drag transforms."
+      },
+      {
+        "id": "d6ea6bee2278713c59b70b00f0013cbb6a052489",
+        "date": "2026-09-14T11:20:35+08:00",
+        "title": "chore: publish release 2026.9.14.3"
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.9.14.3",
     "date": "2026-09-14T03:18:48Z",
     "head": "ccfc970dc9038cd62b8a041d570be74094273326",
