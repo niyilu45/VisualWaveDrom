@@ -9485,7 +9485,7 @@ ${lines.join('\n')}`;
       };
       overlay.addEventListener('input', resize);
       resize();
-      overlay.focus();
+      overlay.focus({ preventScroll: true });
       overlay.select();
 
       let finished = false;
@@ -12607,7 +12607,7 @@ ${lines.join('\n')}`;
       if (resizeDescriptionOverlay) {
         requestAnimationFrame(() => resizeDescriptionOverlay());
       }
-      overlay.focus();
+      overlay.focus({ preventScroll: true });
       if (field === 'name' && oldValue === '') {
         overlay.setSelectionRange(0, 0);
       } else {
@@ -18658,6 +18658,10 @@ ${lines.join('\n')}`;
         return true;
       }
       const waveScrollState = captureActiveWaveScrollState();
+      const previousMinHeight = waveContainer.style.getPropertyValue('min-height');
+      const previousMinHeightPriority = waveContainer.style.getPropertyPriority('min-height');
+      // Keep the scroll extent stable while the old SVG is replaced and measured.
+      waveContainer.style.setProperty('min-height', waveContainer.offsetHeight + 'px');
       isRenderingWaveform = true;
       vwdMark('renderWaveform:start');
 
@@ -18769,6 +18773,8 @@ ${lines.join('\n')}`;
           return false;
         }
       } finally {
+        if (previousMinHeight) waveContainer.style.setProperty('min-height', previousMinHeight, previousMinHeightPriority);
+        else waveContainer.style.removeProperty('min-height');
         restoreActiveWaveScrollState(waveScrollState);
         isRenderingWaveform = false;
         if (pendingRenderText !== null) {
