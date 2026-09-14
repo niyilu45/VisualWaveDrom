@@ -502,15 +502,27 @@
     const from = redo ? parameterRedoStack : parameterUndoStack, to = redo ? parameterUndoStack : parameterRedoStack;
     const entry = from[from.length - 1]; if (!entry) return false;
     if (entry.kind === 'cell-batch') {
+      const additions = entry.additions || [];
       if (entry.changes.some((change) => !catalog.tables.some((table) => table.id === change.tableId && table.rows.includes(change.row)))) return false;
+      if (additions.some((item) => {
+        const table = catalog.tables.find((table) => table.id === item.tableId);
+        return !table || table.rows.includes(item.row) === redo;
+      })) return false;
+      additions.forEach((item) => {
+        const table = catalog.tables.find((table) => table.id === item.tableId);
+        if (redo) table.rows.splice(Math.min(item.index, table.rows.length), 0, item.row);
+        else table.rows.splice(table.rows.indexOf(item.row), 1);
+      });
       entry.changes.forEach((change) => {
         if (redo || change.beforePresent) change.row[change.field] = redo ? change.after : change.before;
         else delete change.row[change.field];
       });
       from.pop(); to.push(entry);
-      const change = entry.changes.find((item) => item.tableId === selectedTable) || entry.changes[0];
+      const items = entry.changes.concat(additions);
+      const change = items.find((item) => item.tableId === selectedTable) || items[0];
+      const table = catalog.tables.find((table) => table.id === change.tableId);
       const scroller = $('parameter-workspace').querySelector('.parameter-grid-scroll');
-      finishRowHistory(catalog.tables.find((table) => table.id === change.tableId), change.row, scroller ? scroller.scrollTop : 0);
+      finishRowHistory(table, table.rows.includes(change.row) ? change.row : null, scroller ? scroller.scrollTop : 0);
       return true;
     }
     if (entry.kind === 'table-add' || entry.kind === 'table-delete') {
@@ -1177,7 +1189,10 @@
       }
       return drafts.has(id) ? drafts.get(id).draft : null;
     }
-    function formChanged() { return editor && fields.some((field) => editor.inputs[field].value !== String(editor.item.row[field] ?? '')); }
+    function formChanged() {
+      return editor && (!editor.item.table.rows.includes(editor.item.row)
+        || fields.some((field) => editor.inputs[field].value !== String(editor.item.row[field] ?? '')));
+    }
     function hasChanges() { return editedRows.size > 0 || formChanged(); }
     const overlay = element('div', 'modal-overlay parameter-modal');
     const dialog = element('div', 'modal-dialog parameter-compare-dialog');
@@ -1242,8 +1257,8 @@
       if (busy || editor) previous.disabled = next.disabled = true;
     }
     function trackRow(item) {
-      const base = drafts.get(item.table.id).base.rows[item.index];
-      if (fields.some((field) => item.row[field] !== base[field])) editedRows.set(item.row, item);
+      const index = item.table.rows.indexOf(item.row), base = drafts.get(item.table.id).base.rows[index];
+      if (index >= 0 && (!base || fields.some((field) => item.row[field] !== base[field]))) editedRows.set(item.row, item);
       else editedRows.delete(item.row);
     }
     function draftHistory(redo) {
@@ -1251,6 +1266,10 @@
       const from = redo ? draftRedo : draftUndo, to = redo ? draftUndo : draftRedo;
       const entry = from.pop(); if (!entry) return;
       const value = redo ? entry.after : entry.before;
+      if (entry.added) {
+        if (redo) entry.item.table.rows.splice(Math.min(entry.index, entry.item.table.rows.length), 0, entry.item.row);
+        else entry.item.table.rows.splice(entry.item.table.rows.indexOf(entry.item.row), 1);
+      }
       fields.forEach((field) => {
         if (Object.prototype.hasOwnProperty.call(value, field)) entry.item.row[field] = value[field];
         else delete entry.item.row[field];
@@ -1260,7 +1279,8 @@
     function applyEditor() {
       if (!editor) return;
       const { item, inputs } = editor, before = clone(item.row);
-      const base = drafts.get(item.table.id).base.rows[item.index];
+      const index = item.table.rows.indexOf(item.row), added = index < 0;
+      const base = drafts.get(item.table.id).base.rows[index] || {};
       fields.forEach((field) => {
         const value = field === 'name' ? inputs[field].value.trim() : inputs[field].value;
         if (value === String(base[field] ?? '')) {
@@ -1268,8 +1288,9 @@
           else delete item.row[field];
         } else item.row[field] = value;
       });
-      if (fields.some((field) => before[field] !== item.row[field])) {
-        draftUndo.push({ item, before, after: clone(item.row) });
+      if (added) item.table.rows.push(item.row);
+      if (added || fields.some((field) => before[field] !== item.row[field])) {
+        draftUndo.push({ item, before, after: clone(item.row), added, index: item.table.rows.indexOf(item.row) });
         if (draftUndo.length > 50) draftUndo.shift();
         draftRedo.length = 0; trackRow(item);
       }
@@ -1302,7 +1323,7 @@
       try {
         if (saving) { try { await saving; } catch (_) { /* Validate the repaired draft below before retrying. */ } }
         if (identity !== libraryId) throw new Error('波形库已切换，请重新打开比较。');
-        const current = catalog, at = dirty, candidate = clone(current), changes = [];
+        const current = catalog, at = dirty, candidate = clone(current), changes = [], additions = [];
         const checked = new Set();
         editedRows.forEach((item) => {
           const table = current.tables.find((entry) => entry.id === item.table.id);
@@ -1312,20 +1333,33 @@
             }
             checked.add(item.table.id);
           }
-          const target = candidate.tables.find((entry) => entry.id === table.id).rows[item.index], row = table.rows[item.index];
+          const index = item.table.rows.indexOf(item.row);
+          if (index >= drafts.get(table.id).base.rows.length) {
+            additions.push({ tableId: table.id, row: clone(item.row), index }); return;
+          }
+          const target = candidate.tables.find((entry) => entry.id === table.id).rows[index], row = table.rows[index];
           fields.forEach((field) => {
             if (row[field] === item.row[field]) return;
             changes.push({ tableId: table.id, row, field, before: row[field], beforePresent: Object.prototype.hasOwnProperty.call(row, field), after: item.row[field] });
             target[field] = item.row[field];
           });
         });
+        additions.sort((a, b) => a.index - b.index);
+        additions.forEach((item) => {
+          const table = candidate.tables.find((entry) => entry.id === item.tableId);
+          table.rows.splice(Math.min(item.index, table.rows.length), 0, item.row);
+        });
         validate(candidate);
         // Persist the candidate before touching live rows, so a failed save can still be discarded.
         saving = (async () => {
           const saved = await bridge.save(candidate, current.revision);
           if (identity !== libraryId || current !== catalog || at !== dirty) throw new Error('保存期间原参数表发生变化，请重新打开比较。');
+          additions.forEach((item) => {
+            const table = catalog.tables.find((entry) => entry.id === item.tableId);
+            table.rows.splice(Math.min(item.index, table.rows.length), 0, item.row);
+          });
           changes.forEach((change) => { change.row[change.field] = change.after; });
-          recordParameterHistory({ kind: 'cell-batch', changes });
+          recordParameterHistory({ kind: 'cell-batch', changes, additions });
           catalog.revision = saved.revision; dirty++; savedGeneration = dirty; failure = '';
           invalidate(); renderTree(); renderTable(); notifyParameterHistory();
           if (channel) channel.postMessage({ libraryId, catalog: saved });
@@ -1340,9 +1374,17 @@
         if (dirty !== savedGeneration) timer = setTimeout(() => { void flush().catch(() => {}); }, 220);
       }
     }
-    function cell(items, flags) {
+    function cell(items, flags, tableId, counterpart) {
       const td = element('td');
-      if (!items.length) { td.append(element('span', 'parameter-compare-missing', '无此变量')); return td; }
+      if (!items.length) {
+        const table = draftTable(tableId), name = String(counterpart[0].row.name || '');
+        const content = element('div', 'parameter-compare-entry');
+        const add = button('添加 ' + table.name + ' 的 ' + (name || '参数'), () => {
+          openEditor({ table, row: { name, val: '', description: '' } }, content);
+        }, 'plus');
+        add.classList.add('parameter-compare-edit');
+        content.append(add, element('span', 'parameter-compare-missing', '无此变量')); td.append(content); return td;
+      }
       items.forEach((item) => {
         const content = element('div', 'parameter-compare-entry');
         const edit = button('编辑 ' + item.table.name + ' 的 ' + (item.row.name || '第 ' + (item.index + 1) + ' 行'), () => openEditor(item, content), 'edit');
@@ -1375,7 +1417,7 @@
         const name = element('th'); name.scope = 'row'; name.append(element('strong', '', entry.name));
         name.append(element('span', 'parameter-compare-state ' + entry.kind, labels[entry.kind]));
         if (entry.reasons.length) name.append(element('small', '', entry.reasons.join('、')));
-        tr.append(name, cell(entry.left, entry.flags), cell(entry.right, entry.flags)); body.append(tr);
+        tr.append(name, cell(entry.left, entry.flags, left.select.value, entry.right), cell(entry.right, entry.flags, right.select.value, entry.left)); body.append(tr);
       });
       if (!shown.length) {
         const tr = element('tr'), td = element('td', 'parameter-empty'); td.colSpan = 3;
