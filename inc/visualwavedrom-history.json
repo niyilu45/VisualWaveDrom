@@ -1,5 +1,31 @@
 [
   {
+    "version": "2026.9.14.5",
+    "date": "2026-09-14T08:39:04Z",
+    "head": "251a43d11121ae128f2cea01b2554f7a6882b7cc",
+    "notes": [
+      "参数表输入期间只保留单元格草稿，失去焦点后统一计算、刷新关联波形并写回工作参数目录，减少逐字保存和整表计算导致的卡顿；保留撤销、重做、主动保存和并发保存时的草稿保护。",
+      "波形图引用参数表时，成功计算出的负数参数值标红，保留原始表达式和来源提示，并适配标题、分组、说明、数据标签、连接标签及截图。",
+      "新增连接选择起终点后自动生成直线箭头并保持选中，折线优先使用先竖后横；避免重复插入及切换波形后的过期插入。",
+      "连接线及标签显示在间隔符遮罩上方，避免标签被 | 波形遮挡，保留紧凑白底和拖动功能。",
+      "起终点之间新增、复制、删除或移动信号行时，手动移动过的连接标签按原相对比例垂直调整，横向偏移保持不变，白底同步移动，支持撤销和重做。"
+    ],
+    "commits": [
+      {
+        "id": "251a43d11121ae128f2cea01b2554f7a6882b7cc",
+        "date": "2026-09-14T16:38:31+08:00",
+        "title": "fix: defer parameter edits and improve connection labels",
+        "body": "Commit parameter cell drafts on blur or explicit save, avoiding per-keystroke catalog writes, formula evaluation and waveform invalidation. Preserve undo/redo and protect drafts during concurrent saves and catalog refreshes.\n\nRender negative parameter references in red across wave text and screenshots. Create selected straight connections after choosing endpoints and prioritize vertical-horizontal elbows. Keep connection labels above gap masks and adjust moved labels proportionally when rows are inserted, copied, removed or moved.\n\nValidation: focused Chrome and Edge checks for parameter drafts, history, formula display, save races, connection creation, label dragging, row tracking and gap overlap; JavaScript syntax and whitespace checks."
+      },
+      {
+        "id": "dd5a9a4e33c759416100299a802438261ff599b7",
+        "date": "2026-09-14T12:04:14+08:00",
+        "title": "chore: publish release 2026.9.14.4"
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.9.14.4",
     "date": "2026-09-14T04:02:42Z",
     "head": "fa761185238c35e25da43a8b75702c022bfdeecc",
