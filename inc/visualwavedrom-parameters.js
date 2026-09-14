@@ -10,6 +10,7 @@
   let cache = new WeakMap(), selectedFolder = '', selectedTable = '', activePage = 'wave';
   let dirty = 0, savedGeneration = 0, timer = null, saving = null, failure = '';
   let modal = null, channel = null;
+  let comparisonCommit = false;
   let tableViewId = '', selectedRow = null;
   let standaloneTableId = '', standaloneLoading = false, standaloneError = '';
   const rowFilters = { name: '', val: '' };
@@ -90,7 +91,7 @@
   }
   function resolveName(name, source, state) {
     for (const tableId of linked(source)) {
-      const table = catalog.tables.find((item) => item.id === tableId);
+      const table = state && state.tables ? state.tables.get(tableId) : catalog.tables.find((item) => item.id === tableId);
       const row = table && table.rows.find((item) => String(item.name || '') === name);
       if (row) return resolveParameterRow(table, row, source, state);
     }
@@ -500,6 +501,18 @@
     activeCellEdit = null;
     const from = redo ? parameterRedoStack : parameterUndoStack, to = redo ? parameterUndoStack : parameterRedoStack;
     const entry = from[from.length - 1]; if (!entry) return false;
+    if (entry.kind === 'cell-batch') {
+      if (entry.changes.some((change) => !catalog.tables.some((table) => table.id === change.tableId && table.rows.includes(change.row)))) return false;
+      entry.changes.forEach((change) => {
+        if (redo || change.beforePresent) change.row[change.field] = redo ? change.after : change.before;
+        else delete change.row[change.field];
+      });
+      from.pop(); to.push(entry);
+      const change = entry.changes.find((item) => item.tableId === selectedTable) || entry.changes[0];
+      const scroller = $('parameter-workspace').querySelector('.parameter-grid-scroll');
+      finishRowHistory(catalog.tables.find((table) => table.id === change.tableId), change.row, scroller ? scroller.scrollTop : 0);
+      return true;
+    }
     if (entry.kind === 'table-add' || entry.kind === 'table-delete') {
       const insert = (entry.kind === 'table-add') === redo;
       if (insert) {
@@ -628,6 +641,7 @@
     if (dirty !== savedGeneration) return flush();
   }
   function setCatalog(value, identity) {
+    if (comparisonCommit && identity === libraryId) return;
     if (identity === libraryId && (dirty !== savedGeneration || Number(value && value.revision) < catalog.revision)) return;
     const next = normalize(value);
     const sameContent = identity === libraryId && (parameterUndoStack.length || parameterRedoStack.length)
@@ -1118,12 +1132,12 @@
   function compareTables(left, right) {
     function indexRows(table) {
       const groups = new Map(), names = parameterNameCounts(table.rows);
-      const context = { stack: [], values: new Map() }, source = { parameterTables: [table.id] };
+      const context = { stack: [], values: new Map(), tables: new Map([[table.id, table]]) }, source = { parameterTables: [table.id] };
       table.rows.forEach((row, index) => {
         if (['name', 'val', 'description'].every((field) => !String(row[field] ?? '').trim())) return;
         const name = String(row.name || ''), key = name || Symbol();
         const value = resolveParameterRow(table, row, source, context);
-        const entry = { index, raw: value.rawVal, value: value.val, formula: value.formula,
+        const entry = { index, row, table, raw: value.rawVal, value: value.val, formula: value.formula,
           description: String(row.description ?? ''),
           error: [name ? parameterRowNameError(row, names) : '变量名不能为空', value.error].filter(Boolean).join('\n') };
         if (!groups.has(key)) groups.set(key, []);
@@ -1153,18 +1167,33 @@
   }
   function openComparison(tableId, anchor) {
     if (modal) return;
+    const identity = libraryId, drafts = new Map(), editedRows = new Map();
+    const fields = ['name', 'val', 'description'], draftUndo = [], draftRedo = [];
+    let editor = null, busy = false;
+    function draftTable(id) {
+      if (!drafts.has(id)) {
+        const table = catalog.tables.find((item) => item.id === id);
+        if (table) drafts.set(id, { base: clone(table), draft: clone(table) });
+      }
+      return drafts.has(id) ? drafts.get(id).draft : null;
+    }
+    function formChanged() { return editor && fields.some((field) => editor.inputs[field].value !== String(editor.item.row[field] ?? '')); }
+    function hasChanges() { return editedRows.size > 0 || formChanged(); }
     const overlay = element('div', 'modal-overlay parameter-modal');
     const dialog = element('div', 'modal-dialog parameter-compare-dialog');
     dialog.setAttribute('role', 'dialog'); dialog.setAttribute('aria-modal', 'true'); dialog.setAttribute('aria-labelledby', 'parameter-compare-title');
     const header = element('div', 'modal-header');
     const heading = element('h2', '', '参数表比较'); heading.id = 'parameter-compare-title';
-    function close() {
+    function close(discard) {
+      if (busy) return;
+      if (discard !== true && hasChanges()) { message.textContent = '本次修改尚未保存，请选择“保存修改”或“不保存”。'; return; }
       global.removeEventListener('keydown', onKey, true);
+      global.removeEventListener('beforeunload', onUnload);
       overlay.remove(); modal = null;
       const target = anchor && anchor.isConnected ? anchor : document.querySelector('.parameter-compare-open');
       if (target) target.focus({ preventScroll: true });
     }
-    const closeButton = button('关闭比较', close, 'close'); header.append(heading, closeButton); dialog.append(header);
+    const closeButton = button('关闭比较', () => close(), 'close'); header.append(heading, closeButton); dialog.append(header);
     const controls = element('div', 'parameter-compare-controls');
     function tableSelect(caption) {
       const label = element('label', 'parameter-compare-select'), select = element('select');
@@ -1194,14 +1223,131 @@
     const pageInfo = element('span');
     const previous = button('上一页', () => { page--; render(); }, 'left');
     const next = button('下一页', () => { page++; render(); }, 'right');
-    footer.append(pageInfo, previous, next); dialog.append(footer);
+    const undoDraft = button('撤销比较修改', () => draftHistory(false), 'undo');
+    const redoDraft = button('重做比较修改', () => draftHistory(true), 'redo');
+    const save = button('保存修改', () => { void saveChanges(); }); save.classList.add('primary');
+    const discard = button('不保存', () => close(true));
+    const message = element('div', 'parameter-compare-message'); message.setAttribute('role', 'status');
+    dialog.append(message);
+    footer.append(pageInfo, previous, next, undoDraft, redoDraft, discard, save); dialog.append(footer);
     const labels = { same: '相同', different: '不同', left: '仅左侧', right: '仅右侧', error: '异常' };
     let records = [], page = 0, problem = ''; const pageSize = 100;
+    function updateActions() {
+      save.disabled = busy || !hasChanges(); discard.disabled = closeButton.disabled = busy;
+      save.textContent = busy ? '正在保存...' : '保存修改';
+      undoDraft.disabled = busy || !!editor || !draftUndo.length;
+      redoDraft.disabled = busy || !!editor || !draftRedo.length;
+      [left.select, right.select, swap, search, onlyDifferent].forEach((input) => { input.disabled = busy || !!editor; });
+      dialog.querySelectorAll('.parameter-compare-edit').forEach((input) => { input.disabled = busy || !!editor; });
+      if (busy || editor) previous.disabled = next.disabled = true;
+    }
+    function trackRow(item) {
+      const base = drafts.get(item.table.id).base.rows[item.index];
+      if (fields.some((field) => item.row[field] !== base[field])) editedRows.set(item.row, item);
+      else editedRows.delete(item.row);
+    }
+    function draftHistory(redo) {
+      if (busy || editor) return;
+      const from = redo ? draftRedo : draftUndo, to = redo ? draftUndo : draftRedo;
+      const entry = from.pop(); if (!entry) return;
+      const value = redo ? entry.after : entry.before;
+      fields.forEach((field) => {
+        if (Object.prototype.hasOwnProperty.call(value, field)) entry.item.row[field] = value[field];
+        else delete entry.item.row[field];
+      });
+      to.push(entry); trackRow(entry.item); message.textContent = ''; rebuild(true); scroll.focus({ preventScroll: true });
+    }
+    function applyEditor() {
+      if (!editor) return;
+      const { item, inputs } = editor, before = clone(item.row);
+      const base = drafts.get(item.table.id).base.rows[item.index];
+      fields.forEach((field) => {
+        const value = field === 'name' ? inputs[field].value.trim() : inputs[field].value;
+        if (value === String(base[field] ?? '')) {
+          if (Object.prototype.hasOwnProperty.call(base, field)) item.row[field] = base[field];
+          else delete item.row[field];
+        } else item.row[field] = value;
+      });
+      if (fields.some((field) => before[field] !== item.row[field])) {
+        draftUndo.push({ item, before, after: clone(item.row) });
+        if (draftUndo.length > 50) draftUndo.shift();
+        draftRedo.length = 0; trackRow(item);
+      }
+      editor = null; message.textContent = editedRows.size ? '已暂存 ' + editedRows.size + ' 行修改，尚未保存。' : '';
+      rebuild(true); scroll.focus({ preventScroll: true });
+    }
+    function openEditor(item, content) {
+      if (editor || busy) return;
+      const form = element('div', 'parameter-compare-editor'), inputs = {};
+      const captions = { name: '变量名', val: '变量值 / 公式', description: '变量说明' };
+      fields.forEach((field) => {
+        const label = element('label'), input = element(field === 'name' ? 'input' : 'textarea');
+        input.value = String(item.row[field] ?? ''); input.dataset.compareField = field;
+        input.setAttribute('aria-label', captions[field]); input.spellcheck = false;
+        if (field !== 'name') input.rows = 3;
+        input.addEventListener('input', updateActions);
+        label.append(element('span', '', captions[field]), input); form.append(label); inputs[field] = input;
+      });
+      const actions = element('div', 'parameter-compare-editor-actions');
+      actions.append(button('更新比较', applyEditor), button('取消修改', cancelEditor)); form.append(actions);
+      editor = { item, inputs }; content.replaceChildren(form); updateActions(); inputs.val.focus({ preventScroll: true });
+    }
+    function cancelEditor() { editor = null; rebuild(true); scroll.focus({ preventScroll: true }); }
+    async function saveChanges() {
+      if (busy) return;
+      applyEditor();
+      if (!editedRows.size) { close(true); return; }
+      busy = true; comparisonCommit = true; updateActions(); message.textContent = '正在保存修改...';
+      clearTimeout(timer);
+      try {
+        if (saving) { try { await saving; } catch (_) { /* Validate the repaired draft below before retrying. */ } }
+        if (identity !== libraryId) throw new Error('波形库已切换，请重新打开比较。');
+        const current = catalog, at = dirty, candidate = clone(current), changes = [];
+        const checked = new Set();
+        editedRows.forEach((item) => {
+          const table = current.tables.find((entry) => entry.id === item.table.id);
+          if (!checked.has(item.table.id)) {
+            if (!table || JSON.stringify(table.rows) !== JSON.stringify(drafts.get(item.table.id).base.rows)) {
+              throw new Error('参数表“' + item.table.name + '”已被其他窗口修改或删除。请保留所需内容后重新打开比较，避免覆盖。');
+            }
+            checked.add(item.table.id);
+          }
+          const target = candidate.tables.find((entry) => entry.id === table.id).rows[item.index], row = table.rows[item.index];
+          fields.forEach((field) => {
+            if (row[field] === item.row[field]) return;
+            changes.push({ tableId: table.id, row, field, before: row[field], beforePresent: Object.prototype.hasOwnProperty.call(row, field), after: item.row[field] });
+            target[field] = item.row[field];
+          });
+        });
+        validate(candidate);
+        // Persist the candidate before touching live rows, so a failed save can still be discarded.
+        saving = (async () => {
+          const saved = await bridge.save(candidate, current.revision);
+          if (identity !== libraryId || current !== catalog || at !== dirty) throw new Error('保存期间原参数表发生变化，请重新打开比较。');
+          changes.forEach((change) => { change.row[change.field] = change.after; });
+          recordParameterHistory({ kind: 'cell-batch', changes });
+          catalog.revision = saved.revision; dirty++; savedGeneration = dirty; failure = '';
+          invalidate(); renderTree(); renderTable(); notifyParameterHistory();
+          if (channel) channel.postMessage({ libraryId, catalog: saved });
+          status('比较修改已保存到工作库');
+        })().finally(() => { saving = null; });
+        await saving;
+        busy = false; close(true);
+      } catch (error) {
+        message.textContent = '保存失败：' + error.message;
+      } finally {
+        busy = false; comparisonCommit = false; updateActions();
+        if (dirty !== savedGeneration) timer = setTimeout(() => { void flush().catch(() => {}); }, 220);
+      }
+    }
     function cell(items, flags) {
       const td = element('td');
       if (!items.length) { td.append(element('span', 'parameter-compare-missing', '无此变量')); return td; }
       items.forEach((item) => {
         const content = element('div', 'parameter-compare-entry');
+        const edit = button('编辑 ' + item.table.name + ' 的 ' + (item.row.name || '第 ' + (item.index + 1) + ' 行'), () => openEditor(item, content), 'edit');
+        edit.classList.add('parameter-compare-edit'); content.append(edit);
+        if (editedRows.has(item.row)) content.append(element('small', 'parameter-compare-unsaved', '未保存'));
         if (items.length > 1) content.append(element('small', '', '第 ' + (item.index + 1) + ' 行'));
         content.append(element('div', 'parameter-compare-value' + (flags.value ? ' difference' : ''), item.error ? '存在异常' : item.value || '（空）'));
         if (item.formula || item.error) {
@@ -1217,7 +1363,8 @@
       });
       return td;
     }
-    function render() {
+    function render(preserveScroll) {
+      const scrollTop = scroll.scrollTop;
       const query = search.value.trim().toLowerCase();
       const filtered = records.filter((entry) => (!onlyDifferent.checked || entry.kind !== 'same') && entry.name.toLowerCase().includes(query));
       page = Math.max(0, Math.min(page, Math.ceil(filtered.length / pageSize) - 1));
@@ -1236,23 +1383,30 @@
         tr.append(td); body.append(tr);
       }
       pageInfo.textContent = filtered.length ? (start + 1) + '-' + (start + shown.length) + ' / ' + filtered.length : '0 / 0';
-      previous.disabled = !page; next.disabled = start + pageSize >= filtered.length; scroll.scrollTop = 0;
+      previous.disabled = !page; next.disabled = start + pageSize >= filtered.length; scroll.scrollTop = preserveScroll ? scrollTop : 0;
+      updateActions();
     }
-    function rebuild() {
-      const l = catalog.tables.find((table) => table.id === left.select.value), r = catalog.tables.find((table) => table.id === right.select.value);
+    function rebuild(preserveScroll) {
+      const l = draftTable(left.select.value), r = draftTable(right.select.value);
       leftHeading.textContent = l ? l.name : '左侧参数表'; rightHeading.textContent = r ? r.name : '右侧参数表';
       problem = !l || !r ? (catalog.tables.length < 2 ? '当前波形库不足两张参数表' : '请选择两张参数表') : l.id === r.id ? '请选择两张不同的参数表' : '';
-      records = problem ? [] : compareTables(l, r); page = 0;
+      records = problem ? [] : compareTables(l, r); if (preserveScroll !== true) page = 0;
       const counts = { same: 0, different: 0, left: 0, right: 0, error: 0 }; records.forEach((entry) => counts[entry.kind]++);
       summary.textContent = problem || '共 ' + records.length + ' 项 · ' + Object.keys(counts).map((key) => labels[key] + ' ' + counts[key]).join(' · ');
-      render();
+      render(preserveScroll === true);
     }
     function onKey(event) {
       if (!overlay.contains(event.target)) return;
       event.stopPropagation();
-      if (event.key === 'Escape' && !event.isComposing) { event.preventDefault(); close(); }
+      if (busy) { event.preventDefault(); return; }
+      if (event.key === 'Escape' && !event.isComposing) { event.preventDefault(); if (editor) cancelEditor(); else close(); }
+      if ((event.ctrlKey || event.metaKey) && event.key === 'Enter' && !event.isComposing && editor) { event.preventDefault(); applyEditor(); }
+      if (!isTextInput(event.target)) {
+        const action = bridge && bridge.historyShortcut ? bridge.historyShortcut(event) : '';
+        if (action) { event.preventDefault(); draftHistory(action === 'redo'); }
+      }
       if (event.key === 'Tab') {
-        const inputs = Array.from(dialog.querySelectorAll('button:not(:disabled),select,input,[tabindex="0"]'));
+        const inputs = Array.from(dialog.querySelectorAll('button:not(:disabled),select:not(:disabled),input:not(:disabled),textarea,[tabindex="0"]'));
         if (event.shiftKey && event.target === inputs[0]) { event.preventDefault(); inputs[inputs.length - 1].focus(); }
         else if (!event.shiftKey && event.target === inputs[inputs.length - 1]) { event.preventDefault(); inputs[0].focus(); }
       }
@@ -1263,6 +1417,8 @@
     overlay.addEventListener('pointerdown', (event) => { startedOutside = event.target === overlay; });
     overlay.addEventListener('click', (event) => { if (startedOutside && event.target === overlay) close(); });
     modal = overlay; overlay.append(dialog); document.body.append(overlay);
+    function onUnload(event) { if (busy || hasChanges()) { event.preventDefault(); event.returnValue = ''; } }
+    global.addEventListener('beforeunload', onUnload);
     global.addEventListener('keydown', onKey, true); rebuild(); right.select.focus();
   }
   async function openLinks(documentName, anchor) {

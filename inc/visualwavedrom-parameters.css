@@ -130,7 +130,20 @@
 .parameter-compare-raw { display: block; font-size: .84rem; }
 .parameter-compare-error { margin-top: 6px; font-size: .8rem; }
 .parameter-compare-entry + .parameter-compare-entry { margin-top: 10px; padding-top: 6px; border-top: 1px solid var(--border); }
-.parameter-compare-footer { flex: 0 0 auto; align-items: center; }
+.parameter-compare-entry::after { content: ''; display: block; clear: both; }
+.parameter-compare-edit { float: right; margin: 0 0 4px 6px; }
+.parameter-compare-grid small.parameter-compare-unsaved { color: var(--warning); }
+.parameter-compare-editor { display: flex; flex-direction: column; gap: 10px; }
+.parameter-compare-editor label { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.parameter-compare-editor label > span { color: var(--text-muted); font-size: .8rem; }
+.parameter-compare-editor input, .parameter-compare-editor textarea { box-sizing: border-box; width: 100%; min-width: 0; font: inherit; }
+.parameter-compare-editor textarea { padding: 8px; border: 1px solid var(--border); border-radius: 4px; color: var(--text); background: var(--surface-2); font-family: var(--editor-font); line-height: 1.5; resize: vertical; min-height: 80px; max-height: 260px; overflow-wrap: anywhere; }
+.parameter-compare-editor textarea:focus { border-color: var(--accent); outline: 2px solid var(--accent); outline-offset: 1px; }
+.parameter-compare-editor-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.parameter-compare-editor-actions button { padding: 6px 10px; white-space: normal; }
+.parameter-compare-message { flex: 0 0 auto; max-height: 84px; overflow: auto; padding: 8px 20px; color: var(--warning); font-size: .82rem; overflow-wrap: anywhere; }
+.parameter-compare-message:empty { display: none; }
+.parameter-compare-footer { flex: 0 0 auto; align-items: center; flex-wrap: wrap; gap: 8px; }
 .parameter-compare-footer > span { margin-right: auto; font-size: .82rem; color: var(--text-muted); font-variant-numeric: tabular-nums; }
 @media (max-width: 700px) {
   .parameter-compare-controls { gap: 6px; padding: 12px 10px 4px; }
