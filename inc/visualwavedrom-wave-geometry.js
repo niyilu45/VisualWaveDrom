@@ -113,8 +113,9 @@
     return count;
   }
 
-  function makeEdgeLabelsTransparent(svg, source) {
+  function fitEdgeLabelBackgrounds(svg, source) {
     if (!source || !Array.isArray(source.edge)) return;
+    const backgrounds = [];
     svg.querySelectorAll('[id^="wavearcs_"]').forEach(function (group) {
       const paths = new Map();
       Array.from(group.children).forEach(function (child) {
@@ -132,9 +133,24 @@
         // Only labeled edges own the following group; trailing groups are node names.
         const label = path.nextElementSibling;
         if (!label || label.localName !== 'g') return;
+        const labelText = label.querySelector('text');
+        let bounds = null;
+        try {
+          const box = labelText && labelText.getBBox();
+          if (box && box.width > 0 && box.height > 0
+            && [box.x, box.y, box.width, box.height].every(Number.isFinite)) bounds = box;
+        } catch (_) { /* Retain the renderer's dimensions when text cannot be measured. */ }
         Array.from(label.children).forEach(function (child) {
-          if (child.localName === 'rect') child.style.fill = 'transparent';
+          if (child.localName === 'rect') backgrounds.push({ rect: child, bounds: bounds });
         });
+      });
+    });
+    // Batch measurements before changing SVG geometry to avoid repeated layout work.
+    backgrounds.forEach(function (item) {
+      item.rect.style.fill = '#fff';
+      if (!item.bounds) return;
+      ['x', 'y', 'width', 'height'].forEach(function (name) {
+        item.rect.setAttribute(name, String(item.bounds[name]));
       });
     });
   }
@@ -144,7 +160,7 @@
       return { lanes: 0, transitions: 0, labels: 0, arcGroups: 0 };
     }
     const totals = { lanes: 0, transitions: 0, labels: 0, arcGroups: 0 };
-    makeEdgeLabelsTransparent(svg, source);
+    fitEdgeLabelBackgrounds(svg, source);
     let clipId = '';
     const getClipId = function () {
       if (!clipId) clipId = createTailClip(svg);
