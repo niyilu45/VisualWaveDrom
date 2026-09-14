@@ -8,6 +8,7 @@
   const empty = () => ({ revision: 0, directories: [], tables: [], presets: [] });
   let catalog = empty(), libraryId = '', bridge = null, generation = 0;
   let cache = new WeakMap(), selectedFolder = '', selectedTable = '', activePage = 'wave';
+  const textDecorations = new WeakMap();
   let dirty = 0, savedGeneration = 0, timer = null, saving = null, failure = '';
   let modal = null, channel = null;
   let comparisonCommit = false;
@@ -235,9 +236,61 @@
     if (value !== source) cache.set(value, { generation, value });
     return value;
   }
-  function decorate(host, source) {
+  function decorateText(node, raw, source) {
+    if (!node || node.matches('input, textarea, .editing') || node.querySelector('textarea, input')) return;
+    const content = node.textContent, previous = textDecorations.get(node);
+    if (previous && previous.raw === raw && previous.source === source && previous.content === content && previous.generation === generation
+      && previous.spans.every((span) => node.contains(span))) return;
+    node.dataset.parameterHint = details(raw, source);
+    node.querySelectorAll('[data-parameter-negative]').forEach((span) => span.replaceWith(...span.childNodes));
+    const ranges = [], spans = [];
+    let end = 0, rendered = '';
+    const value = typeof raw === 'string' ? raw : '';
+    for (const match of value.matchAll(tokenPattern)) {
+      rendered += value.slice(end, match.index);
+      const result = evaluate(match[1], source);
+      const replacement = result.error ? match[0] : result.value;
+      if (!result.error && numericPattern.test(replacement.trim()) && Number.isFinite(Number(replacement)) && Number(replacement) < 0) {
+        ranges.push({ start: rendered.length, end: rendered.length + replacement.length });
+      }
+      rendered += replacement;
+      end = match.index + match[0].length;
+    }
+    rendered += value.slice(end);
+    const offset = content.endsWith(rendered) ? content.length - rendered.length : -1;
+    if (ranges.length && offset >= 0) {
+      const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT), texts = [];
+      while (walker.nextNode()) texts.push(walker.currentNode);
+      let position = 0;
+      texts.forEach((textNode) => {
+        const text = textNode.nodeValue, start = position; position += text.length;
+        const matches = ranges.map((range) => ({ start: Math.max(0, range.start + offset - start), end: Math.min(text.length, range.end + offset - start) }))
+          .filter((range) => range.end > range.start);
+        if (!matches.length) return;
+        const fragment = document.createDocumentFragment();
+        let cursor = 0;
+        matches.forEach((range) => {
+          fragment.append(document.createTextNode(text.slice(cursor, range.start)));
+          const svg = node.namespaceURI === 'http://www.w3.org/2000/svg';
+          const span = svg ? document.createElementNS(node.namespaceURI, 'tspan') : document.createElement('span');
+          span.dataset.parameterNegative = '1';
+          span.style.color = '#c62828';
+          if (svg) span.style.fill = '#c62828';
+          span.textContent = text.slice(range.start, range.end);
+          fragment.append(span); spans.push(span); cursor = range.end;
+        });
+        fragment.append(document.createTextNode(text.slice(cursor)));
+        textNode.replaceWith(fragment);
+      });
+    }
+    textDecorations.set(node, { raw, source, content, generation, spans });
+  }
+  function decorate(host, source, renderWindow) {
     if (!host || !source || !linked(source).length) return;
-    const bindings = new Map();
+    const bindings = new Map(), signals = [], groups = [];
+    function bind(node, raw) {
+      if (node && !node.hasAttribute('data-parameter-hint')) decorateText(node, raw, source);
+    }
     function add(raw) {
       if (typeof raw !== 'string' || !raw.includes('$')) return;
       const rendered = text(raw, source);
@@ -249,8 +302,9 @@
     }
     function rows(items) {
       (items || []).forEach((row) => {
-        if (Array.isArray(row)) { add(row[0]); rows(row.slice(1)); }
+        if (Array.isArray(row)) { add(row[0]); rows(row.slice(1)); groups.push(row[0]); }
         else if (row && typeof row === 'object') {
+          signals.push(row);
           add(row.name);
           (Array.isArray(row.data) ? row.data : typeof row.data === 'string' ? row.data.match(dataTokenPattern) || [] : []).forEach(add);
         }
@@ -258,6 +312,45 @@
     }
     rows(source.signal); add(source.title); add(source.head && source.head.text); add(source.foot && source.foot.text); add(source.description);
     (source.edge || []).forEach((edge) => add(String(edge).replace(/^\S+\s*/, '').replace(/^:\s*/, '')));
+    // Use row identity in previews so a literal value is not mistaken for an equal parameter result.
+    host.querySelectorAll('g[id^="wavelane_"]').forEach((lane) => {
+      const match = /^wavelane_(\d+)_/.exec(lane.id), row = match && signals[Number(match[1])];
+      if (!row) return;
+      const name = lane.querySelector('text.info');
+      bind(name, row.name);
+      const data = Array.isArray(row.data) ? row.data : typeof row.data === 'string' ? row.data.match(dataTokenPattern) || [] : [];
+      lane.querySelectorAll('[id^="wavelane_draw_"] > text').forEach((node, index) => {
+        const context = renderWindow && renderWindow.rows && renderWindow.rows[Number(match[1])];
+        const fullIndex = context && context.dataIndices ? context.dataIndices[index] : index;
+        bind(node, data[fullIndex]);
+      });
+    });
+    host.querySelectorAll('[id^="gmarks_"] > text').forEach((node) => {
+      const field = Number(node.getAttribute('y')) < 0 ? 'head' : 'foot';
+      bind(node, source[field] && source[field].text || (field === 'head' ? source.title : ''));
+    });
+    host.querySelectorAll('path[id^="group_"]').forEach((path) => {
+      const match = /^group_(\d+)_/.exec(path.id), label = path.nextElementSibling;
+      if (match && label && label.localName === 'g') bind(label.querySelector('text'), groups[Number(match[1])]);
+    });
+    host.querySelectorAll('[id^="wavearcs_"]').forEach((group) => {
+      const edges = new Map();
+      const sourceEdges = source.edge || [];
+      const visibleEdges = renderWindow && renderWindow.edgeIndexes ? renderWindow.edgeIndexes.map((index) => sourceEdges[index]) : sourceEdges;
+      visibleEdges.forEach((edge) => {
+        if (typeof edge !== 'string') return;
+        const value = edge.trim(), token = value.split(/\s+/, 1)[0];
+        const id = 'gmark_' + token[0] + '_' + token.slice(-1);
+        if (!edges.has(id)) edges.set(id, []);
+        edges.get(id).push(value.slice(token.length).trim().replace(/^:\s*/, ''));
+      });
+      Array.from(group.children).forEach((path) => {
+        const matches = edges.get(path.id);
+        if (!matches || !matches.length) return;
+        const raw = matches.shift(), label = path.nextElementSibling;
+        if (raw && label && label.localName === 'g') bind(label.querySelector('text'), raw);
+      });
+    });
     host.querySelectorAll('svg text, .wave-document-description:not(.editing), h2').forEach((node) => {
       if (node.hasAttribute('data-parameter-hint')) return;
       const content = node.textContent;
@@ -383,7 +476,7 @@
     return '';
   }
   function isTextInput(target) { return !!(target && target.closest && target.closest('input,textarea,select,[contenteditable]:not([contenteditable="false"])')); }
-  function parameterHistoryState() { return { canUndo: parameterUndoStack.length > 0, canRedo: parameterRedoStack.length > 0 }; }
+  function parameterHistoryState() { return { canUndo: !!activeCellEdit || parameterUndoStack.length > 0, canRedo: !activeCellEdit && parameterRedoStack.length > 0 }; }
   function notifyParameterHistory() {
     const state = parameterHistoryState();
     const undo = $('parameter-single-undo'), redo = $('parameter-single-redo');
@@ -392,26 +485,32 @@
     if (bridge && bridge.historyChanged) bridge.historyChanged();
   }
   function recordParameterHistory(entry) {
-    activeCellEdit = null;
+    commitParameterCell();
     parameterUndoStack.push(entry);
     if (parameterUndoStack.length > 50) parameterUndoStack.shift();
     parameterRedoStack = [];
   }
-  function editParameterCell(table, row, field, input) {
-    if (String(row[field] ?? '') === input.value) return false;
-    let entry = activeCellEdit && activeCellEdit.input === input ? activeCellEdit.entry : null;
-    if (!entry || parameterUndoStack[parameterUndoStack.length - 1] !== entry) {
-      entry = { kind: 'row-edit', tableId: table.id, row, field,
-        before: row[field], beforePresent: Object.prototype.hasOwnProperty.call(row, field), after: input.value };
-      recordParameterHistory(entry);
-      activeCellEdit = { input, entry };
-    }
-    row[field] = input.value; entry.after = input.value;
-    if (entry.beforePresent && entry.before === entry.after) {
-      parameterUndoStack.pop(); activeCellEdit = null;
-    }
+  function editParameterCell(table, row, field, input, refresh) {
+    if (activeCellEdit && activeCellEdit.input !== input) commitParameterCell();
+    const wasEditing = !!activeCellEdit;
+    // Keep typing local to this control; no catalog writes, evaluation or wave invalidation.
+    activeCellEdit = String(row[field] ?? '') === input.value ? null : { table, row, field, input, refresh };
+    if (wasEditing !== !!activeCellEdit) notifyParameterHistory();
+  }
+  function commitParameterCell() {
+    const edit = activeCellEdit;
+    if (!edit) return false;
+    activeCellEdit = null;
+    const { table, row, field, input, refresh } = edit;
+    if (!catalog.tables.includes(table) || !table.rows.includes(row) || String(row[field] ?? '') === input.value) return false;
+    recordParameterHistory({ kind: 'row-edit', tableId: table.id, row, field,
+      before: row[field], beforePresent: Object.prototype.hasOwnProperty.call(row, field), after: input.value });
+    row[field] = input.value;
+    changed(false);
+    refresh();
     return true;
   }
+  function pendingParameterChanges() { return !!activeCellEdit || dirty !== savedGeneration; }
   function folderAncestors(parentId) {
     const parents = [], seen = new Set();
     while (parentId && !seen.has(parentId)) {
@@ -498,7 +597,7 @@
   }
   function applyParameterHistory(redo) {
     if (activePage !== 'parameters' || modal) return false;
-    activeCellEdit = null;
+    commitParameterCell();
     const from = redo ? parameterRedoStack : parameterUndoStack, to = redo ? parameterUndoStack : parameterRedoStack;
     const entry = from[from.length - 1]; if (!entry) return false;
     if (entry.kind === 'cell-batch') {
@@ -631,11 +730,12 @@
     if (render) { renderTree(); renderTable(); }
     notifyParameterHistory();
     status('正在保存参数目录...');
-    clearTimeout(timer); timer = setTimeout(() => { void flush().catch(() => {}); }, 220);
+    clearTimeout(timer); timer = setTimeout(() => { void flush(false).catch(() => {}); }, 220);
   }
-  async function flush() {
+  async function flush(includeDraft = true) {
+    if (includeDraft) commitParameterCell();
     clearTimeout(timer);
-    if (saving) { await saving; if (dirty !== savedGeneration) return flush(); return; }
+    if (saving) { await saving; if (dirty !== savedGeneration) return flush(false); return; }
     if (dirty === savedGeneration) return;
     const at = dirty, identity = libraryId;
     const value = clone(catalog);
@@ -650,11 +750,11 @@
       failure = error.message; status(failure, true); throw error;
     }).finally(() => { saving = null; });
     await saving;
-    if (dirty !== savedGeneration) return flush();
+    if (dirty !== savedGeneration) return flush(false);
   }
   function setCatalog(value, identity) {
     if (comparisonCommit && identity === libraryId) return;
-    if (identity === libraryId && (dirty !== savedGeneration || Number(value && value.revision) < catalog.revision)) return;
+    if (identity === libraryId && (pendingParameterChanges() || Number(value && value.revision) < catalog.revision)) return;
     const next = normalize(value);
     const sameContent = identity === libraryId && (parameterUndoStack.length || parameterRedoStack.length)
       && ['directories', 'tables', 'presets'].every((key) => JSON.stringify(catalog[key]) === JSON.stringify(next[key]));
@@ -820,7 +920,7 @@
   }
   function renderTable() {
     const workspace = $('parameter-workspace'); if (!workspace) return;
-    activeCellEdit = null;
+    commitParameterCell();
     if (standaloneTableId) selectedTable = standaloneTableId;
     const table = catalog.tables.find((item) => item.id === selectedTable);
     if (standaloneTableId) document.title = (table ? table.name : '参数表') + ' - VisualWaveDrom';
@@ -974,6 +1074,11 @@
       const names = parameterNameCounts(table.rows);
       rowViews.forEach((view) => view.updateValue(context, names));
     }
+    function refreshCommittedCell() {
+      refreshValues();
+      const treeRow = Array.from($('parameter-tree').querySelectorAll('[data-table-id]')).find((item) => item.dataset.tableId === table.id);
+      if (treeRow) treeRow.querySelector('.parameter-count').textContent = table.rows.filter((item) => item.name).length;
+    }
     let selectedLine = null;
     function selectRow(row, line) {
       if (selectedLine) { selectedLine.classList.remove('selected'); selectedLine.setAttribute('aria-selected', 'false'); }
@@ -1047,20 +1152,17 @@
           fieldBox.append(error);
         }
         input.addEventListener('input', () => {
-          if (!editParameterCell(table, row, field, input)) return;
-          resize(); changed(false);
-          if (field === 'name' || field === 'val' || !row.name) refreshValues();
+          editParameterCell(table, row, field, input, refreshCommittedCell);
+          resize();
         });
         input.addEventListener('beforeinput', (event) => {
           if (event.inputType !== 'historyUndo' && event.inputType !== 'historyRedo') return;
           event.preventDefault(); applyParameterHistory(event.inputType === 'historyRedo');
         });
         input.addEventListener('blur', () => {
-          if (activeCellEdit && activeCellEdit.input === input) activeCellEdit = null;
-          refreshValues();
-          void flush().catch(() => {});
-          const treeRow = Array.from($('parameter-tree').querySelectorAll('[data-table-id]')).find((item) => item.dataset.tableId === table.id);
-          if (treeRow) treeRow.querySelector('.parameter-count').textContent = table.rows.filter((item) => item.name).length;
+          const committed = activeCellEdit && activeCellEdit.input === input && commitParameterCell();
+          if (!committed) refreshValues();
+          void flush(false).catch(() => {});
         });
         if (field === 'val') fieldBox.prepend(input);
         else fieldBox.append(input);
@@ -1421,7 +1523,7 @@
         message.textContent = '保存失败：' + error.message;
       } finally {
         busy = false; comparisonCommit = false; updateActions();
-        if (dirty !== savedGeneration) timer = setTimeout(() => { void flush().catch(() => {}); }, 220);
+        if (dirty !== savedGeneration) timer = setTimeout(() => { void flush(false).catch(() => {}); }, 220);
       }
     }
     function cell(entry, side, tr) {
@@ -1708,12 +1810,12 @@
     document.addEventListener('pointerdown', (event) => {
       if (!tooltip.contains(event.target)) { clearTimeout(tooltipTimer); tooltip.hidden = true; }
     }, true);
-    global.addEventListener('beforeunload', (event) => { if (dirty !== savedGeneration) { event.preventDefault(); event.returnValue = ''; } });
+    global.addEventListener('beforeunload', (event) => { if (pendingParameterChanges()) { event.preventDefault(); event.returnValue = ''; } });
     try {
       channel = new BroadcastChannel('vwd-parameters:' + global.location.pathname);
       channel.onmessage = (event) => {
         const data = event.data;
-        if (!data || data.libraryId !== libraryId || dirty !== savedGeneration || Number(data.catalog && data.catalog.revision) <= catalog.revision) return;
+        if (!data || data.libraryId !== libraryId || pendingParameterChanges() || Number(data.catalog && data.catalog.revision) <= catalog.revision) return;
         if (activePage === 'parameters' && $('parameter-workspace').contains(document.activeElement)) return;
         setCatalog(data.catalog, libraryId);
       };
@@ -1726,7 +1828,7 @@
     renderTable();
     if (error) status(error, true);
   }
-  global.VisualWaveDromParameters = { mount, setCatalog, finishSingleLoad, getCatalog: () => clone(catalog), resolve, text, details, decorate, resolveName,
-    openLinks, flush, refresh, page: () => activePage, pending: () => dirty !== savedGeneration,
+  global.VisualWaveDromParameters = { mount, setCatalog, finishSingleLoad, getCatalog: () => clone(catalog), resolve, text, details, decorate, decorateText, resolveName,
+    openLinks, flush, refresh, page: () => activePage, pending: pendingParameterChanges,
     historyState: parameterHistoryState, undo: () => applyParameterHistory(false), redo: () => applyParameterHistory(true) };
 })(window);

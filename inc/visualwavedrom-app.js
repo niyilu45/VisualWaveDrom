@@ -150,8 +150,8 @@ if (!window.VWDCodeEditorPairs) {
       straight: [{ id: 'straight', token: '-', label: '实线' }],
       dashed: [{ id: 'dashed', token: '-', label: '虚线' }],
       orthogonal: [
-        { id: 'horizontal-vertical', token: '-|', label: '先横后竖' },
         { id: 'vertical-horizontal', token: '|-', label: '先竖后横' },
+        { id: 'horizontal-vertical', token: '-|', label: '先横后竖' },
         { id: 'centered-orthogonal', token: '-|-', label: '横竖横' }
       ],
       curve: [
@@ -7192,6 +7192,50 @@ ${lines.join('\n')}`;
       else delete source.edgeOptions;
     }
 
+    function adjustEdgeLabelOffsetsAfterRowChange(source, previousSignals) {
+      if (!Array.isArray(source.edgeOptions) || !Array.isArray(source.edge)) return false;
+      const endpoints = new Set();
+      const movedLabels = [];
+      source.edge.forEach((edge, index) => {
+        const offset = getEdgeLabelOffsetOption(source, index);
+        if (!offset.y) return;
+        const { from, to } = parseEdgeString(edge);
+        if (!from || !to || from === to) return;
+        endpoints.add(from);
+        endpoints.add(to);
+        movedLabels.push({ index, from, to, offset });
+      });
+      if (!movedLabels.length) return false;
+      const nodeRows = (signals) => {
+        const rows = new Map();
+        signals.forEach((signal, index) => {
+          const node = String(signal.node || '');
+          if (!node) return;
+          endpoints.forEach((id) => {
+            if (node.includes(id)) rows.set(id, index);
+          });
+        });
+        return rows;
+      };
+      const before = nodeRows(previousSignals);
+      const after = nodeRows(flattenSignals(source.signal || []));
+      let changed = false;
+      movedLabels.forEach(({ index, from, to, offset }) => {
+        if (!before.has(from) || !before.has(to) || !after.has(from) || !after.has(to)) return;
+        const oldSpan = before.get(to) - before.get(from);
+        const newSpan = after.get(to) - after.get(from);
+        if (!oldSpan || oldSpan === newSpan) return;
+        // The renderer already moves the midpoint; scale only the user's vertical offset.
+        setEdgeLabelOffsetOption(source, index, { x: offset.x, y: offset.y * newSpan / oldSpan });
+        changed = true;
+        vwdDebugLog('connection-label', {
+          phase: 'rows-adjusted', edgeIndex: index, oldSpan, newSpan,
+          previous: offset, next: getEdgeLabelOffsetOption(source, index)
+        });
+      });
+      return changed;
+    }
+
     function getSvgViewportMetrics(svg) {
       const viewBox = svg && svg.viewBox && svg.viewBox.baseVal;
       const x = viewBox && Number.isFinite(viewBox.x) ? viewBox.x : 0;
@@ -7480,15 +7524,12 @@ ${lines.join('\n')}`;
       updateConnectionPresetDisabledState();
     }
 
-    function finishConnectionAddSessionFast() {
+    function finishConnectionAddSessionFast(edgeIndex) {
       connectionAddSessionActive = false;
       connectionPickActive = false;
       pendingEdgeTemplate = null;
-      connectionFromPoint = null;
-      connectionToPoint = null;
-      updateEdgeLabelEditUI();
-      updateConnectionPointStatusUI();
-      updateConnectionPresetDisabledState();
+      setConnectionSelectActive(true);
+      selectEdge(edgeIndex);
     }
     function scheduleConnectionHighlightUpdate(lanes, sourceMap) {
       pendingHighlightLanes = lanes;
@@ -7748,6 +7789,7 @@ ${lines.join('\n')}`;
       const insertedAfterSelection = hasSelectedRow
         && insertSignalAfterFlatIndex(parsed.signal, selectedSignalIndex, tpl);
       if (!insertedAfterSelection) parsed.signal.push(tpl);
+      adjustEdgeLabelOffsetsAfterRowChange(parsed, oldMap.map((entry) => entry.signal));
 
       const newText = JSON.stringify(parsed, null, 2);
       const newMap = buildSignalSourceMap(newText);
@@ -7795,6 +7837,7 @@ ${lines.join('\n')}`;
       }
 
       pushUndoBeforeChange();
+      adjustEdgeLabelOffsetsAfterRowChange(parsed, sourceMap.map((entry) => entry.signal));
       const newText = JSON.stringify(parsed, null, 2);
       const newIndex = sourceIndex + 1;
       const newMap = buildSignalSourceMap(newText);
@@ -8176,6 +8219,7 @@ ${lines.join('\n')}`;
       }
 
       pushUndoBeforeChange();
+      adjustEdgeLabelOffsetsAfterRowChange(parsed, sourceMap.map((item) => item.signal));
       const newText = JSON.stringify(parsed, null, 2);
       const movedEntry = buildSignalSourceMap(newText)[toIndex];
       adjustConnectionPointAfterRowMove(fromIndex, toIndex);
@@ -8246,6 +8290,9 @@ ${lines.join('\n')}`;
       if (nodeUpdates.length) {
         newText = applySignalUpdatesInText(newText, nodeUpdates);
         parsed = JSON.parse(newText);
+      }
+      if (adjustEdgeLabelOffsetsAfterRowChange(parsed, sourceMap.map((item) => item.signal))) {
+        newText = JSON.stringify(parsed, null, 2);
       }
 
       const newCount = flattenSignals(parsed.signal || []).length;
@@ -8425,7 +8472,7 @@ ${lines.join('\n')}`;
       } else if (connectionAddSessionActive && connectionPickActive) {
         if (!connectionFromPoint) hint = ' · 请在波形上点击连接起点';
         else if (!connectionToPoint) hint = ' · 请点击连接终点';
-        else hint = ' · 请选择连接样式';
+        else hint = ' · 正在生成连接';
       } else if (connectionPickActive && !connectionAddSessionActive) {
         hint = ' · 请先点击「新增连接」';
       } else if (connectionSelectActive) {
@@ -8448,6 +8495,7 @@ ${lines.join('\n')}`;
 
     function handleConnectionPointClick(rowIndex, colIndex, svgPoint) {
       if (!connectionPickActive) return false;
+      if (isInsertingEdge) return true;
 
       if (connectionEndpointEditMode === 'from' || connectionEndpointEditMode === 'to') {
         const endpoint = connectionEndpointEditMode;
@@ -8462,7 +8510,6 @@ ${lines.join('\n')}`;
         setStatus(true, '已选连接起点 [' + rowIndex + ',' + colIndex + ']，请选择终点');
       } else if (!connectionToPoint) {
         connectionToPoint = Object.assign({ rowIndex, colIndex }, svgPoint || {});
-        setStatus(true, '已选连接终点 [' + rowIndex + ',' + colIndex + ']，请选择连接线样式');
       } else {
         connectionFromPoint = Object.assign({ rowIndex, colIndex }, svgPoint || {});
         connectionToPoint = null;
@@ -8478,6 +8525,12 @@ ${lines.join('\n')}`;
         hasFrom: !!connectionFromPoint,
         hasTo: !!connectionToPoint
       });
+      if (connectionFromPoint && connectionToPoint) {
+        connectionLineStyle = 'straight';
+        connectionLineVariant = 'straight';
+        pendingEdgeTemplate = buildConnectionTemplate(connectionArrowStyle, connectionLineStyle, connectionLineVariant);
+        insertEdgeFromTemplate(pendingEdgeTemplate, connectionLineStyle);
+      }
       return true;
     }
 
@@ -9610,6 +9663,7 @@ ${lines.join('\n')}`;
     }
 
     function handleConnectionArrowStyleClick(arrowStyle) {
+      if (isInsertingEdge) return;
       if (!CONNECTION_ARROW_STYLES.includes(arrowStyle)) return;
       if (!connectionAddSessionActive && selectedEdgeIndex < 0) {
         setStatus(false, '请先新增连接或选择一条连接线');
@@ -9632,6 +9686,7 @@ ${lines.join('\n')}`;
     }
 
     function handleConnectionLineStyleClick(lineStyle) {
+      if (isInsertingEdge) return;
       if (!CONNECTION_LINE_STYLES.includes(lineStyle)) return;
       const variants = getConnectionLineVariants(lineStyle);
       const shouldCycle = selectedEdgeIndex >= 0 && connectionLineStyle === lineStyle && variants.length > 1;
@@ -9904,6 +9959,9 @@ ${lines.join('\n')}`;
 
       const endpoints = resolveConnectionEndpoints();
       if (!endpoints) return;
+      const documentName = editingWaveDocumentName;
+      const sourceText = editor.value;
+      const fromPickFlow = connectionAddSessionActive && connectionPickActive;
 
       isInsertingEdge = true;
       setStatus(true, '正在插入连接…');
@@ -9911,11 +9969,11 @@ ${lines.join('\n')}`;
 
       requestAnimationFrame(() => {
         vwdMark('commitEdgeInsert:raf');
-        const fromPickFlow = connectionAddSessionActive && connectionPickActive;
         let statusMsg = '';
-        let deferCompletion = false;
 
         try {
+          if (editingWaveDocumentName !== documentName || editor.value !== sourceText
+              || (fromPickFlow && !connectionAddSessionActive)) return;
           let text = editor.value;
           const sourceMap = buildSignalSourceMap(text);
           const currentFromPoint = Object.assign({}, endpoints.from, {
@@ -9981,7 +10039,6 @@ ${lines.join('\n')}`;
 
           pushUndoBeforeChange(newText);
           vwdMark('commitEdgeInsert:beforeApply');
-          deferCompletion = true;
 
           applyEdgeInsertTextFast(newText, selStart, selEnd, fromPickFlow);
 
@@ -9998,7 +10055,7 @@ ${lines.join('\n')}`;
           vwdMark('commitEdgeInsert:optimisticEdge');
 
           if (fromPickFlow) {
-            finishConnectionAddSessionFast();
+            finishConnectionAddSessionFast(newEdgeIndex);
           } else {
             requestAnimationFrame(() => scrollEditorToEdge(newText, edgeStr));
           }
@@ -10025,9 +10082,7 @@ ${lines.join('\n')}`;
           vwdDebugLog('connection', { phase: 'insert-error', message, stack: e && e.stack ? String(e.stack) : '' });
           setStatus(false, '连接生成失败: ' + message);
         } finally {
-          if (!deferCompletion) {
-            isInsertingEdge = false;
-          }
+          isInsertingEdge = false;
         }
       });
     }
@@ -12316,7 +12371,7 @@ ${lines.join('\n')}`;
           hasFallback: !!fallbackRect
         });
         labelTargets.forEach((targetEl) => {
-          targetEl.dataset.parameterHint = window.VisualWaveDromParameters.details(group.label, parameterGroupSource);
+          window.VisualWaveDromParameters.decorateText(targetEl, group.label, parameterGroupSource);
           targetEl.dataset.vwdGroupIndex = String(index);
           targetEl.dataset.vwdGroupLabel = '1';
           if (Number.isFinite(group.labelStart)) {
@@ -12688,8 +12743,8 @@ ${lines.join('\n')}`;
         if (!parsed[field] && !usesTitleAsHead) return;
 
         textEl.classList.add('wave-headfoot-text');
-        textEl.dataset.parameterHint = window.VisualWaveDromParameters.details(
-          usesTitleAsHead ? parsed.title : parsed[field].text, parsed
+        window.VisualWaveDromParameters.decorateText(
+          textEl, usesTitleAsHead ? parsed.title : parsed[field].text, parsed
         );
         if (usesTitleAsHead) textEl.classList.add('wave-title-text');
         textEl.addEventListener('click', (e) => {
@@ -13264,8 +13319,8 @@ ${lines.join('\n')}`;
 
         attachSignalNameEdit(lane, entry, handleLanePointSelect);
         const parameterNameText = lane.querySelector('text.info');
-        if (parameterNameText) parameterNameText.dataset.parameterHint = window.VisualWaveDromParameters.details(
-          entry.signal.name, documentSource || parsedSource
+        if (parameterNameText) window.VisualWaveDromParameters.decorateText(
+          parameterNameText, entry.signal.name, documentSource || parsedSource
         );
 
         const drawGroup = laneDrawGroup;
@@ -13280,8 +13335,8 @@ ${lines.join('\n')}`;
               ? renderContext.dataIndices[dataIdx]
               : dataIdx;
             textEl.dataset.vwdDataIndex = String(fullDataIndex);
-            textEl.dataset.parameterHint = window.VisualWaveDromParameters.details(
-              parameterData[fullDataIndex], documentSource || parsedSource
+            window.VisualWaveDromParameters.decorateText(
+              textEl, parameterData[fullDataIndex], documentSource || parsedSource
             );
             textEl.classList.add('wave-data-text');
             textEl.addEventListener('click', (e) => {
@@ -13304,7 +13359,8 @@ ${lines.join('\n')}`;
       }
       svg.querySelectorAll('.wave-edge-label-text').forEach((node) => {
         const edge = parameterEdgeSource && (parameterEdgeSource.edge || [])[Number(node.dataset.vwdEdgeIndex)];
-        node.dataset.parameterHint = window.VisualWaveDromParameters.details(edge, parameterEdgeSource);
+        const label = typeof edge === 'string' ? parseEdgeString(edge).label : '';
+        window.VisualWaveDromParameters.decorateText(node, label, parameterEdgeSource);
       });
       // Rendering may synthesize head.text from title; edits must target the original JSON.
       attachHeadFootInteractivity(jsonText, documentSource || parsedSource);
@@ -19673,7 +19729,7 @@ ${lines.join('\n')}`;
         descriptionEl.classList.remove('editing');
         const parameterSource = getWaveDocumentMeta(tag, true).source;
         descriptionEl.textContent = window.VisualWaveDromParameters.text(value, parameterSource) || '暂无波形图说明';
-        descriptionEl.dataset.parameterHint = window.VisualWaveDromParameters.details(value, parameterSource);
+        window.VisualWaveDromParameters.decorateText(descriptionEl, value, parameterSource);
         descriptionEl.classList.toggle('empty', !value);
         descriptionEl.title = '点击编辑波形图说明';
         updateUndoRedoButtons();
@@ -20190,7 +20246,7 @@ ${lines.join('\n')}`;
       });
     }
 
-    function renderWaveScreenshotRange(source, metrics, range) {
+    function renderWaveScreenshotRange(source, metrics, range, parameterSource) {
       const api = getBigWaveApi();
       if (!api) throw new Error('大波形截图模块不可用');
       const renderWindow = api.createRenderWindow(source, {
@@ -20216,6 +20272,7 @@ ${lines.join('\n')}`;
         const svg = display.querySelector('svg');
         if (!svg) throw new Error('所选列范围未生成 SVG');
         alignWaveDataToCycleGrid(svg, renderWindow.source);
+        window.VisualWaveDromParameters.decorate(display, parameterSource || source, renderWindow);
         return {
           svg,
           start: renderWindow.start,
@@ -20247,9 +20304,11 @@ ${lines.join('\n')}`;
       const clipboardCapabilities = clipboardApi.capabilities();
       const canWriteImageClipboard = clipboardCapabilities.asyncWrite;
       let screenshotSource;
+      let screenshotParameterSource;
       let screenshotMetrics;
       try {
-        screenshotSource = getWaveRenderSource(JSON.parse(tag.content));
+        screenshotParameterSource = JSON.parse(tag.content);
+        screenshotSource = getWaveRenderSource(screenshotParameterSource);
         screenshotMetrics = getBigWaveApi()
           ? getBigWaveApi().measureSource(screenshotSource)
           : { maxWaveLength: 0 };
@@ -20298,7 +20357,8 @@ ${lines.join('\n')}`;
           temporaryScreenshot = renderWaveScreenshotRange(
             screenshotSource,
             screenshotMetrics,
-            screenshotRange
+            screenshotRange,
+            screenshotParameterSource
           );
           svg = temporaryScreenshot.svg;
         } else {
@@ -20822,8 +20882,8 @@ ${lines.join('\n')}`;
           alignWaveDataToCycleGrid(display, meta.renderSource);
         }
         syncWaveDocumentDescriptionWidth(display);
-        if (!useCanvas) setupFrozenWaveLabels(display);
         window.VisualWaveDromParameters.decorate(display, meta.source || getWaveDocumentMeta(tag, false).source);
+        if (!useCanvas) setupFrozenWaveLabels(display);
         entry.renderedContent = tag.content;
         entry.lastPreviewUse = ++waveLibraryPreviewUseSequence;
         setWavePreviewLoadingState(entry, false);
@@ -20985,9 +21045,9 @@ ${lines.join('\n')}`;
       entry.description.classList.toggle('editable', descriptionEditable);
       const descriptionHint = descriptionEditable ? '点击编辑波形图说明' : '';
       if (entry.description.title !== descriptionHint) entry.description.title = descriptionHint;
-      entry.description.dataset.parameterHint = window.VisualWaveDromParameters.details(descriptionRaw, parameterSource);
+      window.VisualWaveDromParameters.decorateText(entry.description, descriptionRaw, parameterSource);
       const parameterTitle = parameterSource && (parameterSource.title || (parameterSource.head && parameterSource.head.text)) || tag.titleCache;
-      entry.title.dataset.parameterHint = window.VisualWaveDromParameters.details(parameterTitle, parameterSource);
+      window.VisualWaveDromParameters.decorateText(entry.title, parameterTitle, parameterSource);
 
       const observer = ensureWaveLibraryPreviewObserver();
       if (isEditingDocument) {

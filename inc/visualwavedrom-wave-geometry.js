@@ -105,6 +105,13 @@
   function alignWaveArcs(svg) {
     let count = 0;
     Array.from(svg.querySelectorAll('[id^="wavearcs_"]')).forEach(function (group) {
+      const parent = group.parentNode;
+      const gapsId = group.id.replace(/^wavearcs_/, 'wavegaps_');
+      const gaps = Array.from(parent.children).find(function (child) { return child.id === gapsId; });
+      // Keep paths and their editable label groups together, above the gap masks.
+      if (gaps && (group.compareDocumentPosition(gaps) & Node.DOCUMENT_POSITION_FOLLOWING)) {
+        parent.insertBefore(group, gaps.nextSibling);
+      }
       if (group.getAttribute(ARCS_ALIGNED_ATTRIBUTE) === '1') return;
       appendTransform(group, 'translate(' + TRANSITION_OFFSET_X + ' 0)');
       group.setAttribute(ARCS_ALIGNED_ATTRIBUTE, '1');
