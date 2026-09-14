@@ -1,5 +1,30 @@
 [
   {
+    "version": "2026.9.14.6",
+    "date": "2026-09-14T09:30:52Z",
+    "head": "d16749086147a655c1da1d22b55295c2c4949d92",
+    "notes": [
+      "优化多波形图快速上下滚动，连续滚轮输入累加滚动目标，修正预览加载时的滚动补偿，避免页面被拉回；快速滚动期间延后预览绘制，停止后优先显示当前可见波形，并保留稳定占位高度。",
+      "连接线起终点之间新增、复制、删除或移动行时，标签改为按实际行高移动，不再按比例缩放；默认位置、反向连接和白底同步处理，横向位置保持不变，支持撤销和重做。",
+      "连接线标签中任一引用参数为负数时，整条标签标红；参数恢复非负数时恢复原色，预览与截图显示一致，其他波形文字仍只标红对应参数值。",
+      "参数表手动填写的负数也标红，包含负小数和负科学计数值；保留非负公式结果蓝色、其他值原色，以及失焦提交和撤销重做行为。"
+    ],
+    "commits": [
+      {
+        "id": "d16749086147a655c1da1d22b55295c2c4949d92",
+        "date": "2026-09-14T17:29:44+08:00",
+        "title": "fix: smooth wave scrolling and refine negative parameter labels",
+        "body": "Accumulate wheel scrolling without backward jumps and postpone preview rendering during fast gestures. Preserve stable preview heights and prioritize visible cards when resuming work.\n\nMove connection labels by actual row pitch when intermediate rows change, including default offsets and reverse connections. Color the entire edge label when any referenced parameter is negative, and color manually entered negative parameter values while preserving formula colors and blur-based editing.\n\nValidation: focused Chrome and Edge checks for scrolling, label geometry, undo/redo, parameter display and SVG export; JavaScript syntax and whitespace checks passed."
+      },
+      {
+        "id": "583d6f686119ddea9cd54e3b9b6b12d801b84560",
+        "date": "2026-09-14T16:40:26+08:00",
+        "title": "chore: publish release 2026.9.14.5"
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.9.14.5",
     "date": "2026-09-14T08:39:04Z",
     "head": "251a43d11121ae128f2cea01b2554f7a6882b7cc",
