@@ -19991,6 +19991,7 @@ ${lines.join('\n')}`;
 
     function cloneWaveSvgForScreenshot(svg, metrics) {
       const clone = svg.cloneNode(true);
+      clone.querySelectorAll('.parameter-reference-highlight').forEach((element) => element.classList.remove('parameter-reference-highlight'));
       clone.querySelectorAll([
         '.vwd-frozen-label-layer',
         '.wave-col-highlight',
@@ -23997,13 +23998,97 @@ ${lines.join('\n')}`;
       void initializeWaveLibrary().finally(() => {
         waveLibraryInitializationPending = false;
         if (singleWaveViewActive) renderWaveLibrary();
+        const tableId = pageQuery.get('parameterTable'), name = pageQuery.get('parameterName');
+        if (tableId && name && requestedWaveDocumentName) {
+          void window.VisualWaveDromParameters.revealReference({ libraryId: currentWaveLibraryId,
+            waveId: requestedWaveDocumentName, tableId, name }).catch((error) => setStatus(false, error.message));
+        }
       });
+    }
+
+    async function listParameterReferenceDocuments() {
+      const identity = currentWaveLibraryId;
+      let documents;
+      if (waveLibraryServerMode) {
+        const response = await fetch('/api/wave-library?summary=1&libraryId=' + encodeURIComponent(identity));
+        const summary = await response.json();
+        if (!response.ok || summary.libraryId !== identity) throw new Error('无法读取当前波形库');
+        documents = summary.documents || [];
+      } else {
+        const store = await ensureBrowserWaveLibraryStore();
+        documents = await withWaveLibraryWriteLock(async () => {
+          if (singleParameterViewActive) await store.loadPersisted();
+          if (store.libraryRow().libraryId !== identity) throw new Error('浏览器中的波形库已被替换');
+          return store.readSummary().documents || [];
+        });
+      }
+      if (identity !== currentWaveLibraryId) throw new Error('波形库已切换');
+      const entries = new Map(documents.map((document) => [document.name, document]));
+      if (!singleParameterViewActive) {
+        savedTags.forEach((tag) => {
+          const stored = entries.get(tag.name);
+          if (!stored || dirtyWaveDocumentNames.has(tag.name) || tag.name === editingWaveDocumentName
+              || !tag.deferred && tag.revision >= (stored.revision || 0)) entries.set(tag.name, tag);
+        });
+        deletedWaveDocumentNames.forEach((name) => entries.delete(name));
+      }
+      return Array.from(entries.values(), (document) => Object.assign({}, document, {
+        content: !singleParameterViewActive && document.name === editingWaveDocumentName ? editor.value : document.content,
+        read: async () => {
+          let value;
+          if (waveLibraryServerMode) {
+            const response = await fetch('/api/wave-document?' + new URLSearchParams({ libraryId: identity, waveId: document.name }));
+            if (!response.ok) throw new Error('波形图读取失败');
+            value = (await response.json()).document;
+          } else value = browserWaveLibraryStore.readDocument(document.name);
+          return JSON.parse(value.content);
+        }
+      }));
+    }
+
+    async function revealParameterReference(target) {
+      if (target.libraryId !== currentWaveLibraryId) throw new Error('波形库已切换');
+      if (singleParameterViewActive) {
+        const url = new URL(window.location.href);
+        url.search = new URLSearchParams({ libraryId: currentWaveLibraryId, waveId: target.waveId,
+          view: 'single', parameterTable: target.tableId, parameterName: target.name }).toString();
+        url.hash = '';
+        window.location.assign(url.href);
+        return;
+      }
+      if (singleWaveViewActive && target.waveId !== requestedWaveDocumentName) throw new Error('此窗口不属于目标波形图');
+      const tag = await ensureWaveDocumentLoaded(target.waveId);
+      if (!tag) throw new Error('目标波形图不存在或已被删除');
+      clearTimeout(parameterRefreshTimer);
+      openWaveDocumentForEditing(target.waveId, { immediate: true, scrollIntoView: false });
+      if (editingWaveDocumentName !== target.waveId) throw new Error('当前波形图未能保存，无法跳转');
+      renderWaveform(editor.value);
+      if (bigWaveViewportState.enabled && !waveContainer.querySelector('text.parameter-reference-highlight')) {
+        const source = JSON.parse(editor.value);
+        const rows = flattenSignals(source.signal || []);
+        for (const row of rows) {
+          const index = normalizeWaveDataValues(row.data).findIndex((value) =>
+            window.VisualWaveDromParameters.matchesReference(value, source, target.tableId, target.name));
+          if (index < 0) continue;
+          const slot = getWaveDataSlots(row.wave)[index];
+          if (slot && ensureBigWaveColumnVisible(slot.col, 'parameter-reference')) {
+            await new Promise((resolve) => scheduleRenderWaveform(editor.value, resolve));
+          }
+          break;
+        }
+      }
+      focusWaveDocument(target.waveId);
+      vwdDebugLog('parameters', { phase: 'reference-jump', waveId: target.waveId, tableId: target.tableId, name: target.name });
     }
 
     let parameterRefreshTimer = null;
     window.VisualWaveDromParameters.mount({
       singleTableId: singleParameterViewActive ? requestedParameterTableId : '',
       openTable: openParameterTableInSingleWindow,
+      referenceDocuments: listParameterReferenceDocuments,
+      revealReference: revealParameterReference,
+      referenceTargetRank: (name) => waveLibraryInitializationPending || singleParameterViewActive || scopeWaveViewActive || presenterWaveViewActive
+        ? -1 : singleWaveViewActive ? (requestedWaveDocumentName === name ? 0 : -1) : getSavedTagByName(name) ? 1 : -1,
       identity: () => currentWaveLibraryId,
       historyChanged: updateUndoRedoButtons,
       historyShortcut: (event) => isUndoShortcut(event) ? 'undo' : isRedoShortcut(event) ? 'redo' : '',

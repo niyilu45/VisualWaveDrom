@@ -38,6 +38,17 @@
 .parameter-grid tr.parameter-drop-after > td { box-shadow: inset 0 -2px var(--accent); }
 .parameter-grid td { border-bottom: 1px solid var(--border); padding: 5px 8px; vertical-align: top; }
 .parameter-cell { display: flex; align-items: flex-start; min-width: 0; }
+.parameter-reference-jump { margin-top: 3px; color: var(--accent); }
+.parameter-reference-dialog { width: min(560px, calc(100vw - 24px)); max-height: calc(100vh - 32px); display: flex; flex-direction: column; }
+.parameter-reference-dialog .modal-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.parameter-reference-dialog h2 { font-size: 1rem; overflow-wrap: anywhere; }
+.parameter-reference-choices { min-height: 0; overflow-y: auto; }
+.parameter-reference-choice { display: flex; flex-direction: column; gap: 4px; width: 100%; padding: 12px 8px; border: 0; border-bottom: 1px solid var(--border); background: transparent; color: var(--text); text-align: left; font: inherit; overflow-wrap: anywhere; cursor: pointer; }
+.parameter-reference-choice:hover { background: var(--surface-hover); }
+.parameter-reference-choice small { color: var(--text-muted); font-size: .8rem; }
+.parameter-reference-highlight { background: #fff0a6 !important; outline: 2px solid #aa6500; outline-offset: 2px; }
+svg text.parameter-reference-highlight { background: none !important; outline: none; paint-order: stroke fill; stroke: #ffd768; stroke-width: 6px; stroke-linejoin: round; }
+svg text.parameter-reference-highlight tspan { paint-order: stroke fill; stroke: #ffd768; stroke-width: 6px; }
 .parameter-row-select { display: inline-flex; align-items: center; gap: 2px; flex: 0 0 44px; min-height: 34px; padding: 0; border: 0; background: transparent; color: var(--text-muted); font: inherit; font-variant-numeric: tabular-nums; cursor: grab; user-select: none; }
 .parameter-row-select:active { cursor: grabbing; }
 .parameter-row-number { flex: 1; min-width: 0; font-size: .8em; }

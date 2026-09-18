@@ -9,6 +9,10 @@
   let catalog = empty(), libraryId = '', bridge = null, generation = 0;
   let cache = new WeakMap(), selectedFolder = '', selectedTable = '', activePage = 'wave';
   const textDecorations = new WeakMap();
+  const referenceDocuments = new Map();
+  let referenceRefresh = null, referenceScan = 0, referenceHighlight = null;
+  let referenceChannel = null;
+  const referenceClientId = id(), referenceRequests = new Map();
   let dirty = 0, savedGeneration = 0, timer = null, saving = null, failure = '';
   let modal = null, channel = null;
   let comparisonCommit = false;
@@ -62,6 +66,182 @@
   }
   function id() { return 'param-' + (global.crypto.randomUUID ? global.crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2)); }
   function linked(source) { return source && Array.isArray(source.parameterTables) ? source.parameterTables : []; }
+  function referenceNames(raw) {
+    const names = new Set();
+    if (typeof raw !== 'string' || !raw.includes('$')) return names;
+    for (const match of raw.matchAll(tokenPattern)) {
+      for (const variable of match[1].matchAll(/\$[^{}\s$(),]+/g)) names.add(variable[0].slice(1));
+    }
+    return names;
+  }
+  function referenceKey(tableId, name) { return JSON.stringify([tableId, name]); }
+  function referenceKeys(names, source) {
+    const keys = [];
+    for (const name of names) {
+      const tableId = linked(source).find((tableId) => {
+        const table = catalog.tables.find((item) => item.id === tableId);
+        return table && table.rows.some((row) => String(row.name || '') === name);
+      });
+      if (tableId) keys.push(referenceKey(tableId, name));
+    }
+    return keys;
+  }
+  function matchesReference(raw, source, tableId, name) {
+    return referenceKeys(referenceNames(raw), source).includes(referenceKey(tableId, name));
+  }
+  async function collectReferenceNames(source) {
+    const names = new Set();
+    let work = 0;
+    function add(value) {
+      if (typeof value === 'string') referenceNames(value).forEach((name) => names.add(name));
+      else if (Array.isArray(value)) value.forEach(add);
+    }
+    async function rows(items) {
+      for (const row of items || []) {
+        if (Array.isArray(row)) { add(row[0]); await rows(row.slice(1)); }
+        else if (row && typeof row === 'object') {
+          add(row.name);
+          const values = Array.isArray(row.data) ? row.data : [row.data];
+          for (const value of values) {
+            add(value);
+            if (++work % 4096 === 0) await new Promise((resolve) => setTimeout(resolve, 0));
+          }
+        }
+      }
+    }
+    await rows(source.signal);
+    [source.title, source.head && source.head.text, source.foot && source.foot.text, source.description].forEach(add);
+    (source.edge || []).forEach((edge) => add(String(edge).replace(/^\S+\s*/, '').replace(/^:\s*/, '')));
+    return names;
+  }
+  function applyReferenceHighlight(node) {
+    const card = node.closest('.wave-document-card');
+    const hit = !!(referenceHighlight && card && card.dataset.documentName === referenceHighlight.waveId
+      && (node.namespaceURI !== 'http://www.w3.org/2000/svg' || node.localName === 'text')
+      && JSON.parse(node.dataset.parameterReferences || '[]').includes(referenceHighlight.key));
+    node.classList.toggle('parameter-reference-highlight', hit);
+  }
+  function clearReferenceHighlight() {
+    referenceHighlight = null;
+    document.querySelectorAll('.parameter-reference-highlight').forEach((node) => node.classList.remove('parameter-reference-highlight'));
+  }
+  function referenceError(error) {
+    if (activePage === 'wave') bridge.status(error.message);
+    else status(error.message, true);
+  }
+  async function revealReference(target) {
+    if (target.libraryId !== libraryId) throw new Error('波形库已切换，请重新选择参数');
+    clearReferenceHighlight();
+    referenceHighlight = { waveId: target.waveId, key: referenceKey(target.tableId, target.name) };
+    try { await switchPage('wave'); await bridge.revealReference(target); }
+    catch (error) { clearReferenceHighlight(); throw error; }
+    document.querySelectorAll('[data-parameter-references]').forEach(applyReferenceHighlight);
+    const first = document.querySelector('.parameter-reference-highlight');
+    if (first) first.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
+  function sendReferenceMessage(message) {
+    if (referenceChannel) referenceChannel.postMessage(Object.assign({ libraryId, clientId: referenceClientId }, message));
+  }
+  async function jumpToReference(document, tableId, name) {
+    const target = { libraryId, waveId: document.name, tableId, name };
+    await flush();
+    if (!standaloneTableId) return revealReference(target);
+    // Probe first, then command exactly one matching window. Other single-wave windows never navigate.
+    const requestId = id(), replies = [];
+    referenceRequests.set(requestId, (data) => { if (data.type === 'candidate') replies.push(data); });
+    sendReferenceMessage({ type: 'probe', requestId, target });
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    referenceRequests.delete(requestId);
+    replies.sort((a, b) => a.rank - b.rank || Number(b.visible) - Number(a.visible) || a.clientId.localeCompare(b.clientId));
+    for (const candidate of replies) {
+      const accepted = await new Promise((resolve) => {
+        const timeout = setTimeout(() => { referenceRequests.delete(requestId); resolve(false); }, 900);
+        referenceRequests.set(requestId, (data) => {
+          if (data.type !== 'accepted' || data.clientId !== candidate.clientId) return;
+          clearTimeout(timeout); referenceRequests.delete(requestId); resolve(true);
+        });
+        sendReferenceMessage({ type: 'reveal', requestId, recipient: candidate.clientId, target });
+      });
+      if (accepted) { status('已定位到已打开的波形图：' + document.title); return; }
+    }
+    await bridge.revealReference(target);
+  }
+  function chooseReference(documents, tableId, name, anchor) {
+    if (modal) return;
+    const overlay = element('div', 'modal-overlay parameter-modal');
+    const dialog = element('div', 'modal-dialog parameter-reference-dialog');
+    dialog.setAttribute('role', 'dialog'); dialog.setAttribute('aria-modal', 'true'); dialog.setAttribute('aria-labelledby', 'parameter-reference-title');
+    const header = element('div', 'modal-header'), title = element('h2', '', '跳转到引用 $' + name + ' 的时序图'); title.id = 'parameter-reference-title';
+    const close = () => { overlay.remove(); modal = null; if (anchor.isConnected) anchor.focus({ preventScroll: true }); };
+    header.append(title, button('关闭', close, 'close'));
+    const body = element('div', 'modal-body parameter-reference-choices');
+    documents.forEach((document) => {
+      const choice = button(document.title, () => {
+        close(); void jumpToReference(document, tableId, name).catch(referenceError);
+      });
+      choice.className = 'parameter-reference-choice'; choice.append(element('small', '', document.location || document.name));
+      body.append(choice);
+    });
+    let outside = false;
+    overlay.addEventListener('pointerdown', (event) => { outside = event.target === overlay; });
+    overlay.addEventListener('click', (event) => { if (outside && event.target === overlay) close(); });
+    overlay.addEventListener('keydown', (event) => {
+      event.stopPropagation();
+      if (event.key === 'Escape') { event.preventDefault(); close(); }
+      if (event.key === 'Tab') {
+        const controls = Array.from(dialog.querySelectorAll('button'));
+        if (event.shiftKey && document.activeElement === controls[0]) { event.preventDefault(); controls[controls.length - 1].focus(); }
+        else if (!event.shiftKey && document.activeElement === controls[controls.length - 1]) { event.preventDefault(); controls[0].focus(); }
+      }
+    });
+    clipboardRequest++; dialog.append(header, body); overlay.append(dialog); document.body.append(overlay); modal = overlay;
+    body.querySelector('button').focus();
+  }
+  async function updateReferenceButtons(table, views, workspace) {
+    if (!bridge || !bridge.referenceDocuments || !libraryId || activePage !== 'parameters') return;
+    const sequence = ++referenceScan, identity = libraryId;
+    views.forEach((view) => { view.jump.disabled = true; view.jump.title = '正在查找引用...'; });
+    const found = new Map();
+    let skipped = 0;
+    const current = () => sequence === referenceScan && identity === libraryId && workspace.contains(views[0] && views[0].line);
+    try {
+      const documents = await bridge.referenceDocuments();
+      for (const document of documents) {
+        if (!current()) return;
+        if (!document.content && Array.isArray(document.parameterTables) && !document.parameterTables.includes(table.id)) continue;
+        const key = identity + ':' + document.name;
+        const stamp = document.content || JSON.stringify([document.revision, document.savedAt, document.contentLength]);
+        let cached = referenceDocuments.get(key);
+        if (!cached || cached.stamp !== stamp) {
+          try {
+            const source = document.content ? JSON.parse(document.content) : await document.read();
+            cached = { stamp, names: await collectReferenceNames(source), parameterTables: linked(source).slice(), title: source.title || source.head && source.head.text || document.title };
+            if (!current()) return;
+            referenceDocuments.set(key, cached);
+          } catch (_) { skipped++; continue; /* An invalid diagram must not block other references. */ }
+        }
+        const item = { name: document.name, title: text(String(cached.title || document.name), cached), location: document.location };
+        referenceKeys(cached.names, cached).forEach((key) => {
+          if (!found.has(key)) found.set(key, []);
+          found.get(key).push(item);
+        });
+      }
+      if (!current()) return;
+      views.forEach((view) => {
+        const name = String(view.row.name || '');
+        view.references = table.rows.find((row) => String(row.name || '') === name) === view.row
+          ? found.get(referenceKey(table.id, name)) || [] : [];
+        view.jump.disabled = !view.references.length;
+        view.jump.title = view.references.length ? '跳转到引用此参数的时序图（' + view.references.length + ' 张）' : '没有时序图引用此参数';
+        view.jump.setAttribute('aria-label', view.jump.title + '：' + String(view.row.name || ''));
+      });
+      if (skipped) status('已跳过 ' + skipped + ' 张无法读取或 JSON 无效的时序图；可正常跳转其余引用', true);
+    } catch (error) {
+      if (!current()) return;
+      views.forEach((view) => { view.jump.title = '引用查找失败：' + error.message; });
+      status('引用查找失败：' + error.message, true);
+    }
+  }
   function resolveParameterRow(table, row, source, state) {
     const context = state || { stack: [], values: new Map() };
     if (context.values.has(row)) return context.values.get(row);
@@ -238,12 +418,15 @@
   }
   function decorateText(node, raw, source, options) {
     if (!node || node.matches('input, textarea, .editing') || node.querySelector('textarea, input')) return;
+    applyReferenceHighlight(node);
     const wholeLabel = !!(options && options.wholeLabel);
     const content = node.textContent, previous = textDecorations.get(node);
     if (previous && previous.raw === raw && previous.source === source && previous.content === content && previous.generation === generation
       && previous.wholeLabel === wholeLabel
       && previous.spans.every((span) => node.contains(span))) return;
     node.dataset.parameterHint = details(raw, source);
+    node.dataset.parameterReferences = JSON.stringify(referenceKeys(referenceNames(raw), source));
+    applyReferenceHighlight(node);
     node.querySelectorAll('[data-parameter-negative]').forEach((span) => span.replaceWith(...span.childNodes));
     const ranges = [], spans = [];
     let end = 0, rendered = '';
@@ -758,6 +941,7 @@
   function setCatalog(value, identity) {
     if (comparisonCommit && identity === libraryId) return;
     if (identity === libraryId && (pendingParameterChanges() || Number(value && value.revision) < catalog.revision)) return;
+    if (identity !== libraryId) { referenceDocuments.clear(); clearReferenceHighlight(); }
     const next = normalize(value);
     const sameContent = identity === libraryId && (parameterUndoStack.length || parameterRedoStack.length)
       && ['directories', 'tables', 'presets'].every((key) => JSON.stringify(catalog[key]) === JSON.stringify(next[key]));
@@ -923,6 +1107,7 @@
   }
   function renderTable() {
     const workspace = $('parameter-workspace'); if (!workspace) return;
+    referenceScan++; referenceRefresh = null;
     commitParameterCell();
     if (standaloneTableId) selectedTable = standaloneTableId;
     const table = catalog.tables.find((item) => item.id === selectedTable);
@@ -1079,6 +1264,7 @@
     }
     function refreshCommittedCell() {
       refreshValues();
+      if (referenceRefresh) referenceRefresh();
       const treeRow = Array.from($('parameter-tree').querySelectorAll('[data-table-id]')).find((item) => item.dataset.tableId === table.id);
       if (treeRow) treeRow.querySelector('.parameter-count').textContent = table.rows.filter((item) => item.name).length;
     }
@@ -1103,6 +1289,15 @@
         const td = element('td'); const fieldBox = element('div', 'parameter-cell');
         const input = element(field === 'name' ? 'input' : 'textarea');
         if (field === 'name') {
+          const jump = button('正在查找引用...', (event) => {
+            event.stopPropagation();
+            const documents = view.references || [];
+            if (!documents.length) return;
+            if (documents.length > 1) chooseReference(documents, table.id, String(row.name || ''), jump);
+            else void jumpToReference(documents[0], table.id, String(row.name || '')).catch(referenceError);
+          }, 'external');
+          jump.disabled = true; jump.classList.add('parameter-reference-jump'); view.jump = jump;
+          fieldBox.append(jump);
           const handle = button('选中第 ' + (index + 1) + ' 行', () => selectRow(row, line));
           handle.className = 'parameter-row-select';
           handle.draggable = true;
@@ -1223,6 +1418,8 @@
     }
     refreshValues(); applyFilters();
     grid.append(body); scroller.append(grid); workspace.append(scroller);
+    referenceRefresh = () => { void updateReferenceButtons(table, rowViews, workspace); };
+    referenceRefresh();
   }
   async function switchPage(page) {
     if (standaloneTableId) return;
@@ -1244,6 +1441,7 @@
       else if (menuHiddenStates.has(section)) { section.hidden = menuHiddenStates.get(section); menuHiddenStates.delete(section); }
     });
     if (page === 'wave' && bridge) bridge.changed();
+    if (page === 'parameters' && referenceRefresh) referenceRefresh();
     notifyParameterHistory();
   }
   function compareTables(left, right) {
@@ -1812,7 +2010,36 @@
     });
     document.addEventListener('pointerdown', (event) => {
       if (!tooltip.contains(event.target)) { clearTimeout(tooltipTimer); tooltip.hidden = true; }
+      if (referenceHighlight && event.target.closest('#wave-workspace')
+          && !event.target.closest('[data-parameter-references], button, input, textarea, path, use, text, .wave-cell-hit-target')) clearReferenceHighlight();
     }, true);
+    global.addEventListener('focus', () => { if (referenceRefresh) referenceRefresh(); });
+    try {
+      referenceChannel = new BroadcastChannel('vwd-parameter-navigation:' + global.location.pathname);
+      referenceChannel.onmessage = (event) => {
+        const data = event.data;
+        if (!data || data.libraryId !== libraryId || data.clientId === referenceClientId) return;
+        const pending = referenceRequests.get(data.requestId);
+        if (pending) pending(data);
+        if (!data.target || data.target.libraryId !== libraryId) return;
+        const rank = bridge.referenceTargetRank(data.target.waveId);
+        if (data.type === 'probe' && rank >= 0) {
+          sendReferenceMessage({ type: 'candidate', requestId: data.requestId, rank, visible: document.visibilityState === 'visible' });
+        } else if (data.type === 'reveal' && data.recipient === referenceClientId && rank >= 0) {
+          sendReferenceMessage({ type: 'accepted', requestId: data.requestId });
+          global.focus();
+          void revealReference(data.target).catch((error) => {
+            referenceError(error);
+            sendReferenceMessage({ type: 'failed', recipient: data.clientId, message: error.message });
+          });
+        }
+      };
+      referenceChannel.addEventListener('message', (event) => {
+        const data = event.data;
+        if (data && data.libraryId === libraryId && data.type === 'failed' && data.recipient === referenceClientId) status('跳转失败：' + data.message, true);
+      });
+      global.addEventListener('pagehide', () => referenceChannel.close(), { once: true });
+    } catch (_) { /* Without cross-tab messaging, navigation stays in the current tab. */ }
     global.addEventListener('beforeunload', (event) => { if (pendingParameterChanges()) { event.preventDefault(); event.returnValue = ''; } });
     try {
       channel = new BroadcastChannel('vwd-parameters:' + global.location.pathname);
@@ -1832,6 +2059,7 @@
     if (error) status(error, true);
   }
   global.VisualWaveDromParameters = { mount, setCatalog, finishSingleLoad, getCatalog: () => clone(catalog), resolve, text, details, decorate, decorateText, resolveName,
+    revealReference, clearReferenceHighlight, matchesReference,
     openLinks, flush, refresh, page: () => activePage, pending: pendingParameterChanges,
     historyState: parameterHistoryState, undo: () => applyParameterHistory(false), redo: () => applyParameterHistory(true) };
 })(window);
