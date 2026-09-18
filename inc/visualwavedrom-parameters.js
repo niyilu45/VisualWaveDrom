@@ -13,6 +13,7 @@
   let referenceRefresh = null, referenceScan = 0, referenceHighlight = null;
   let referenceChannel = null;
   const referenceClientId = id(), referenceRequests = new Map();
+  let referenceWindowFamily = referenceClientId, lastReferenceJumpId = '';
   let dirty = 0, savedGeneration = 0, timer = null, saving = null, failure = '';
   let modal = null, channel = null;
   let comparisonCommit = false;
@@ -142,29 +143,63 @@
   function sendReferenceMessage(message) {
     if (referenceChannel) referenceChannel.postMessage(Object.assign({ libraryId, clientId: referenceClientId }, message));
   }
+  function referenceWindowInfo() {
+    return { clientId: referenceClientId, libraryId, windowName: global.name, family: referenceWindowFamily };
+  }
+  function activateReferenceWindow(candidate) {
+    if (candidate.clientId === referenceClientId) return true;
+    // Named targets can only be reused in a related browsing-context group.
+    // Never open a second copy of an independently opened tab just to focus it.
+    if (!candidate.windowName || candidate.family !== referenceWindowFamily) return false;
+    let opened;
+    try {
+      opened = global.open('', candidate.windowName);
+      if (!opened) return false;
+      const api = opened.VisualWaveDromParameters;
+      const info = api && api.referenceWindowInfo();
+      if (!info || info.clientId !== candidate.clientId || info.libraryId !== libraryId) {
+        if (opened.location.href === 'about:blank') opened.close();
+        return false;
+      }
+      opened.focus();
+      return true;
+    } catch (_) { return false; /* The tab may have closed or navigated away. */ }
+  }
   async function jumpToReference(document, tableId, name) {
     const target = { libraryId, waveId: document.name, tableId, name };
-    await flush();
-    if (!standaloneTableId) return revealReference(target);
     // Probe first, then command exactly one matching window. Other single-wave windows never navigate.
     const requestId = id(), replies = [];
+    lastReferenceJumpId = requestId;
+    const localRank = bridge.referenceTargetRank(target.waveId);
+    if (localRank >= 0) replies.push(Object.assign(referenceWindowInfo(), { rank: localRank, visible: true }));
     referenceRequests.set(requestId, (data) => { if (data.type === 'candidate') replies.push(data); });
     sendReferenceMessage({ type: 'probe', requestId, target });
-    await new Promise((resolve) => setTimeout(resolve, 350));
+    if (referenceChannel) await new Promise((resolve) => setTimeout(resolve, 350));
     referenceRequests.delete(requestId);
-    replies.sort((a, b) => a.rank - b.rank || Number(b.visible) - Number(a.visible) || a.clientId.localeCompare(b.clientId));
+    if (lastReferenceJumpId !== requestId || target.libraryId !== libraryId) return;
+    replies.sort((a, b) => a.rank - b.rank
+      || Number(a.clientId === referenceClientId) - Number(b.clientId === referenceClientId)
+      || Number(b.visible) - Number(a.visible) || a.clientId.localeCompare(b.clientId));
     for (const candidate of replies) {
+      // Focus from the clicked page before saving can consume the user-activation window.
+      activateReferenceWindow(candidate);
+      await flush();
+      if (lastReferenceJumpId !== requestId || target.libraryId !== libraryId) return;
+      if (candidate.clientId === referenceClientId) return revealReference(target);
       const accepted = await new Promise((resolve) => {
         const timeout = setTimeout(() => { referenceRequests.delete(requestId); resolve(false); }, 900);
         referenceRequests.set(requestId, (data) => {
           if (data.type !== 'accepted' || data.clientId !== candidate.clientId) return;
           clearTimeout(timeout); referenceRequests.delete(requestId); resolve(true);
         });
-        sendReferenceMessage({ type: 'reveal', requestId, recipient: candidate.clientId, target });
+        sendReferenceMessage({ type: 'reveal', requestId, recipient: candidate.clientId, target, title: document.title });
       });
-      if (accepted) { status('已定位到已打开的波形图：' + document.title); return; }
+      if (accepted) { status('正在定位已打开的波形图：' + document.title); return; }
     }
-    await bridge.revealReference(target);
+    await flush();
+    if (lastReferenceJumpId !== requestId || target.libraryId !== libraryId) return;
+    if (standaloneTableId) await bridge.revealReference(target);
+    else await revealReference(target);
   }
   function chooseReference(documents, tableId, name, anchor) {
     if (modal) return;
@@ -1952,6 +1987,12 @@
   }
   function mount(api) {
     bridge = api;
+    if (!global.name) global.name = 'vwd-reference-' + referenceClientId;
+    try {
+      const key = 'vwd-reference-window-family:' + global.location.pathname;
+      referenceWindowFamily = global.sessionStorage.getItem(key) || referenceClientId;
+      global.sessionStorage.setItem(key, referenceWindowFamily);
+    } catch (_) { /* Cross-tab highlighting still works when session storage is unavailable. */ }
     standaloneTableId = api.singleTableId || '';
     standaloneLoading = !!standaloneTableId;
     if (standaloneTableId) {
@@ -2021,14 +2062,22 @@
         if (!data || data.libraryId !== libraryId || data.clientId === referenceClientId) return;
         const pending = referenceRequests.get(data.requestId);
         if (pending) pending(data);
+        if (data.type === 'revealed' && data.recipient === referenceClientId && data.requestId === lastReferenceJumpId) {
+          status(data.active ? '已激活并定位到波形图：' + data.title
+            : '已高亮波形图“' + data.title + '”；浏览器未允许自动激活，请切换到该标签页');
+          return;
+        }
         if (!data.target || data.target.libraryId !== libraryId) return;
         const rank = bridge.referenceTargetRank(data.target.waveId);
         if (data.type === 'probe' && rank >= 0) {
-          sendReferenceMessage({ type: 'candidate', requestId: data.requestId, rank, visible: document.visibilityState === 'visible' });
+          sendReferenceMessage(Object.assign(referenceWindowInfo(), { type: 'candidate', requestId: data.requestId, rank, visible: document.visibilityState === 'visible' }));
         } else if (data.type === 'reveal' && data.recipient === referenceClientId && rank >= 0) {
           sendReferenceMessage({ type: 'accepted', requestId: data.requestId });
           global.focus();
-          void revealReference(data.target).catch((error) => {
+          void revealReference(data.target).then(() => {
+            sendReferenceMessage({ type: 'revealed', requestId: data.requestId, recipient: data.clientId,
+              title: data.title || data.target.waveId, active: document.visibilityState === 'visible' && document.hasFocus() });
+          }).catch((error) => {
             referenceError(error);
             sendReferenceMessage({ type: 'failed', recipient: data.clientId, message: error.message });
           });
@@ -2059,7 +2108,7 @@
     if (error) status(error, true);
   }
   global.VisualWaveDromParameters = { mount, setCatalog, finishSingleLoad, getCatalog: () => clone(catalog), resolve, text, details, decorate, decorateText, resolveName,
-    revealReference, clearReferenceHighlight, matchesReference,
+    revealReference, clearReferenceHighlight, matchesReference, referenceWindowInfo,
     openLinks, flush, refresh, page: () => activePage, pending: pendingParameterChanges,
     historyState: parameterHistoryState, undo: () => applyParameterHistory(false), redo: () => applyParameterHistory(true) };
 })(window);
