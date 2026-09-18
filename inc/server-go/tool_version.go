@@ -151,7 +151,7 @@ func readToolRelease(root string) (toolRelease, error) {
 			return release, fmt.Errorf("invalid release entry: %s", name)
 		}
 	}
-	for _, required := range []string{release.HTML, toolVersionScript, "bin/VisualWaveDrom-server.exe", "bin/VisualWaveDrom-server-linux-amd64", "VisualWaveDrom.bat", "VisualWaveDrom.sh"} {
+	for _, required := range []string{release.HTML, toolVersionScript, "bin/VisualWaveDrom-server.exe", "bin/VisualWaveDrom-server-linux-amd64", "VisualWaveDrom.bat"} {
 		if release.Files[required] == "" {
 			return release, fmt.Errorf("release is missing %s", required)
 		}
@@ -422,9 +422,13 @@ func updateToolDirectory(source, target, sourceHTML, targetHTML string) (err err
 			_ = os.RemoveAll(stage)
 		}
 	}()
-	next := toolRelease{App: appID, Version: release.Version, HTML: targetHTML, Files: make(map[string]string), Launchers: release.Launchers}
+	next := toolRelease{App: appID, Version: release.Version, HTML: targetHTML, Files: make(map[string]string), Launchers: make(map[string]string)}
 	names := make([]string, 0, len(release.Files))
 	for name := range release.Files {
+		// Older manifests include SH, but synchronization must not read or replace it.
+		if name == "VisualWaveDrom.sh" {
+			continue
+		}
 		names = append(names, name)
 	}
 	sort.Strings(names)
@@ -436,7 +440,7 @@ func updateToolDirectory(source, target, sourceHTML, targetHTML string) (err err
 		if e != nil {
 			return e
 		}
-		launcher := name == "VisualWaveDrom.bat" || name == "VisualWaveDrom.sh"
+		launcher := name == "VisualWaveDrom.bat"
 		var launcherData []byte
 		if launcher {
 			launcherData, e = os.ReadFile(from)
@@ -453,12 +457,13 @@ func updateToolDirectory(source, target, sourceHTML, targetHTML string) (err err
 			return e
 		}
 		if launcher {
+			next.Launchers[toName] = toolLauncherHash(launcherData)
 			if exists {
 				oldData, readErr := os.ReadFile(to)
 				if readErr != nil {
 					return readErr
 				}
-				// BAT/SH are project configuration and may still be executing this check.
+				// BAT is project configuration and may still be executing this check.
 				next.Files[toName] = targetHash
 				next.Launchers[name] = toolLauncherHash(oldData)
 				continue
@@ -618,6 +623,9 @@ func makeToolRelease(root, html, version string) error {
 	}
 	for _, name := range []string{html, "VisualWaveDrom.bat", "VisualWaveDrom.sh", "ReadMe.md"} {
 		hash, err := hashToolFile(filepath.Join(root, name))
+		if name == "VisualWaveDrom.sh" && errors.Is(err, os.ErrNotExist) {
+			continue
+		}
 		if err != nil {
 			return err
 		}

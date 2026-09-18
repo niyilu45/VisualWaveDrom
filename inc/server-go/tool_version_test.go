@@ -133,6 +133,59 @@ func TestToolUpdatePreservesProjectAndData(t *testing.T) {
 	}
 }
 
+func TestToolUpdateIgnoresShellLauncher(t *testing.T) {
+	for _, sourceMode := range []string{"modified", "missing", "unlisted"} {
+		for _, targetMode := range []string{"modified", "missing"} {
+			t.Run(sourceMode+"-"+targetMode, func(t *testing.T) {
+				root := toolTestRoot(t)
+				source, target := filepath.Join(root, "new"), filepath.Join(root, "old")
+				toolTestRelease(t, source, "2026.9.12.2")
+				toolTestRelease(t, target, "2026.9.12.1")
+				const name = "VisualWaveDrom.sh"
+				const custom = "#!/bin/sh\n# Local launcher; do not synchronize.\n"
+				for _, item := range []struct{ root, mode string }{{source, sourceMode}, {target, targetMode}} {
+					if item.mode == "modified" {
+						toolTestWrite(t, item.root, name, custom)
+					} else if err := os.Remove(filepath.Join(item.root, name)); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if sourceMode == "unlisted" {
+					if err := makeToolRelease(source, "VisualWaveDrom.html", "2026.9.12.2"); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := updateToolDirectory(source, target, "VisualWaveDrom.html", "VisualWaveDrom.html"); err != nil {
+					t.Fatal(err)
+				}
+				data, err := os.ReadFile(filepath.Join(target, name))
+				if targetMode == "missing" {
+					if !errors.Is(err, os.ErrNotExist) {
+						t.Fatal("synchronization created the shell launcher", err)
+					}
+				} else if err != nil || string(data) != custom {
+					t.Fatal("local shell launcher changed", err)
+				}
+				release, err := readToolRelease(target)
+				if err != nil || release.Version != "2026.9.12.2" || release.Files[name] != "" || release.Launchers[name] != "" {
+					t.Fatal("updated manifest still requires shell launcher", release, err)
+				}
+				data, err = os.ReadFile(filepath.Join(target, "inc/app.js"))
+				if err != nil || string(data) != "// 2026.9.12.2\n" {
+					t.Fatal("program files were not updated", err)
+				}
+				destination := filepath.Join(root, "empty")
+				if err := updateToolDirectory(target, destination, "VisualWaveDrom.html", "VisualWaveDrom.html"); err != nil {
+					t.Fatal("updated directory cannot be synchronized again", err)
+				}
+				if _, err := os.Stat(filepath.Join(destination, name)); !errors.Is(err, os.ErrNotExist) {
+					t.Fatal("second synchronization created the shell launcher", err)
+				}
+			})
+		}
+	}
+}
+
 func TestToolUpdateFailureAndLocks(t *testing.T) {
 	root := toolTestRoot(t)
 	source, target := filepath.Join(root, "new"), filepath.Join(root, "old")
