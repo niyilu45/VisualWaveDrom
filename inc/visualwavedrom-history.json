@@ -1,5 +1,31 @@
 [
   {
+    "version": "2026.9.18.2",
+    "date": "2026-09-18T14:39:46Z",
+    "head": "56df3c057cce6d60f0973aa9831307e0b1dd38f6",
+    "notes": [
+      "修复参数引用跳转只高亮但未激活目标标签页的问题，从用户点击的页面复用并激活已有目标窗口，不重新加载时序图。",
+      "普通参数表和独立参数表统一采用跨标签页查找：优先匹配的单图窗口，其次其他完整波形库窗口，最后回到当前页。",
+      "核验窗口与波形库身份，不操作其他单图窗口，不重复打开波形图；浏览器限制自动激活时明确提示用户切换。",
+      "增加实际激活状态确认，区分已高亮和已激活；连续跳转或切换波形库时丢弃过期请求。",
+      "已在 Chrome、Edge 关闭焦点模拟后验证目标页真实获得焦点、来源页失去焦点，以及窗口优先级、当前页回退和无重复页。"
+    ],
+    "commits": [
+      {
+        "id": "56df3c057cce6d60f0973aa9831307e0b1dd38f6",
+        "date": "2026-09-18T22:38:52+08:00",
+        "title": "fix: activate target tabs during parameter reference jumps",
+        "body": "Use the same cross-tab target selection for embedded and standalone parameter tables. Prefer matching single-wave tabs, then other full-library tabs, with current-page fallback.\n\nReuse related named windows from the initiating click without reloading the target. Verify window and library identity, preserve other windows, and report when browser restrictions prevent activation.\n\nValidation: headed Chrome and Edge checks with focus emulation disabled verified real target focus, source blur, routing, fallback and no duplicate tabs; JavaScript syntax and diff checks passed."
+      },
+      {
+        "id": "8a145133240c99f632d5c00e20e9a00fe816b9e2",
+        "date": "2026-09-18T20:38:57+08:00",
+        "title": "chore: publish release 2026.9.18.1"
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.9.18.1",
     "date": "2026-09-18T12:37:12Z",
     "head": "585f04de116e28e03a69676f7bd3eeb5f572f641",
