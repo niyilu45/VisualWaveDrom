@@ -1,5 +1,28 @@
 [
   {
+    "version": "2026.9.18.3",
+    "date": "2026-09-18T15:31:59Z",
+    "head": "4c7157d7c68b248437a4bc0e0eb61588777d2c75",
+    "notes": [
+      "版本同步忽略 VisualWaveDrom.sh，源目录缺少或修改此文件均不阻止更新。",
+      "保留目标目录原有 SH 脚本，缺失时不自动补建，兼容旧版清单和后续再次同步。",
+      "更新 Windows/Linux 服务程序并验证版本更新、回滚及 Linux 静态运行库检查。"
+    ],
+    "commits": [
+      {
+        "id": "4c7157d7c68b248437a4bc0e0eb61588777d2c75",
+        "date": "2026-09-18T23:30:59+08:00",
+        "title": "fix: ignore shell launcher during version synchronization"
+      },
+      {
+        "id": "db02dea4211d982713d5eaf2f70290fa1288ef8b",
+        "date": "2026-09-18T22:41:27+08:00",
+        "title": "chore: publish release 2026.9.18.2"
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.9.18.2",
     "date": "2026-09-18T14:39:46Z",
     "head": "56df3c057cce6d60f0973aa9831307e0b1dd38f6",
