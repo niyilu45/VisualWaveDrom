@@ -1,5 +1,32 @@
 [
   {
+    "version": "2026.9.18.1",
+    "date": "2026-09-18T12:37:12Z",
+    "head": "585f04de116e28e03a69676f7bd3eeb5f572f641",
+    "notes": [
+      "参数表每行新增引用跳转图标，未被时序图引用的参数不可点击；多个时序图引用时可按名称选择目标。",
+      "按链接参数表的优先级识别实际引用，支持参数表达式，避免同名变量或相同显示值误判。",
+      "跳转后高亮目标时序图的标题、信号名、数据、分组、连接标签及说明中的引用；点击空白取消，高亮不进入截图。",
+      "独立参数表优先定位已打开的目标单图窗口，其次完整波形库窗口，均不存在时在当前标签页打开；其他单图窗口不受影响。",
+      "引用查找异步分批执行并缓存结果，支持大波形屏外引用定位；异常时序图不影响其余引用跳转。",
+      "已进行 Chrome、Edge 跨窗口、优先级、禁用状态、各类标签高亮、取消高亮及大波形跳转验证。"
+    ],
+    "commits": [
+      {
+        "id": "585f04de116e28e03a69676f7bd3eeb5f572f641",
+        "date": "2026-09-18T20:36:03+08:00",
+        "title": "feat: navigate from parameters to waveform references",
+        "body": "Add per-row reference jump controls with table-priority resolution and multi-diagram selection. Highlight referenced labels, clear highlights on blank clicks, and locate offscreen data in large waveforms.\n\nRoute standalone parameter-table jumps to an existing matching single-wave window, then a full-library window, with current-tab fallback. Cache reference scans and keep unrelated windows and screenshot exports unaffected.\n\nValidation: focused Chrome and Edge checks for routing, disabled controls, parameter precedence, all label types, large-wave navigation and clearing highlights; JavaScript syntax and diff checks passed."
+      },
+      {
+        "id": "241589fa6bc3defcc5475134d252ceb4946cdf0a",
+        "date": "2026-09-14T23:03:48+08:00",
+        "title": "chore: publish release 2026.9.14.8"
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.9.14.8",
     "date": "2026-09-14T15:02:23Z",
     "head": "a46c64bfdbb60061fbe190311aa9b41402d30a21",
