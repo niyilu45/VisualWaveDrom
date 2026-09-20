@@ -11795,14 +11795,16 @@ ${lines.join('\n')}`;
       document.querySelectorAll('.wave-text-edit-overlay').forEach((prev) => {
         if (prev !== overlay && prev.parentElement) prev.remove();
       });
-      document.body.appendChild(overlay);
+      // Coordinates include panel scroll offsets, so keep the editor in that panel.
+      wavePanel.appendChild(overlay);
       trackInlineEditorHistoryState(overlay, oldValue);
       attachInlineTextInputAutoWidth(overlay, {
+        container: wavePanel,
         minWidth: overlayWidth,
         left: overlayLeft
       });
       requestAnimationFrame(() => {
-        overlay.focus();
+        if (overlay.isConnected) overlay.focus({ preventScroll: true });
       });
       overlay.select();
 
@@ -11972,7 +11974,7 @@ ${lines.join('\n')}`;
             groupIndex: idx,
             sinceOpenMs: Math.round(performance.now() - openedAt)
           });
-          overlay.focus();
+          overlay.focus({ preventScroll: true });
           return;
         }
         vwdDebugLog('group-label', {
