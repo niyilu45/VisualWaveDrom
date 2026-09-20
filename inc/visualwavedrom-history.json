@@ -1,5 +1,27 @@
 [
   {
+    "version": "2026.9.20.1",
+    "date": "2026-09-20T09:10:48Z",
+    "head": "3b82b06e63ab3929eba85ea57015dfc0f977ee37",
+    "notes": [
+      "修复完整波形库滚动后编辑分组标签导致页面跳移、黑屏的问题；编辑框定位在波形面板内，获取焦点时不滚动整页。",
+      "通过 Chrome、Edge 多图及单图模式验证，包含文字输入、回车保存和 Esc 取消。"
+    ],
+    "commits": [
+      {
+        "id": "3b82b06e63ab3929eba85ea57015dfc0f977ee37",
+        "date": "2026-09-20T17:10:10+08:00",
+        "title": "fix: prevent page blackout when editing group labels"
+      },
+      {
+        "id": "88f7ee44b3b4ed5a1e9b92561aed63dd080b7e8c",
+        "date": "2026-09-18T23:34:17+08:00",
+        "title": "chore: publish release 2026.9.18.3"
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.9.18.3",
     "date": "2026-09-18T15:31:59Z",
     "head": "4c7157d7c68b248437a4bc0e0eb61588777d2c75",
