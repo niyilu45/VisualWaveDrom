@@ -45,14 +45,84 @@
     /* Sidebar */
     .sidebar {
       order: 3;
-      width: var(--sidebar-width);
-      min-width: var(--sidebar-width);
+      width: calc(var(--sidebar-width) * var(--sidebar-menu-count, 2) + 1px);
+      min-width: 0;
+      max-width: 50vw;
+      flex-shrink: 0;
       background: var(--surface);
       border-left: 1px solid var(--border);
       display: flex;
       flex-direction: column;
-      overflow-y: auto;
+      overflow: hidden;
       transition: transform 0.2s ease;
+    }
+
+    .sidebar > .sidebar-header {
+      flex-shrink: 0;
+    }
+
+    .sidebar-menu-visibility {
+      display: flex;
+      flex-wrap: wrap;
+      flex-shrink: 0;
+      gap: 4px 16px;
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.8125rem;
+    }
+
+    .sidebar-menu-toggle {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 28px;
+      cursor: pointer;
+    }
+
+    .sidebar-menu-toggle input {
+      width: 1rem;
+      height: 1rem;
+      flex-shrink: 0;
+      accent-color: var(--accent);
+    }
+
+    .sidebar-menu-toggle input:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 3px;
+    }
+
+    .sidebar-menu-toggle input:disabled + span {
+      color: var(--text-muted);
+    }
+
+    .sidebar-menus {
+      display: flex;
+      flex: 1;
+      min-height: 0;
+      overflow-x: auto;
+      overflow-y: hidden;
+      overscroll-behavior: contain;
+    }
+
+    .sidebar-menu-column {
+      flex: 1 0 var(--sidebar-width);
+      min-width: var(--sidebar-width);
+      overflow-x: hidden;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      scrollbar-gutter: stable;
+    }
+
+    .sidebar-menu-column[hidden] {
+      display: none;
+    }
+
+    .sidebar-menu-column:not([hidden]) ~ .sidebar-menu-column {
+      border-left: 1px solid var(--border);
+    }
+
+    .parameter-page-active .sidebar {
+      width: calc(var(--sidebar-width) + 1px);
     }
 
     .sidebar-header {
@@ -3685,6 +3755,98 @@
       touch-action: none;
     }
 
+    .wave-class-menu-layer {
+      position: fixed;
+      inset: 0;
+      z-index: 16000;
+    }
+
+    .wave-class-menu {
+      position: absolute;
+      display: flex;
+      width: max-content;
+      max-width: calc(100vw - 16px);
+      max-height: min(28rem, calc(100vh - 16px));
+      box-sizing: border-box;
+      overflow: auto;
+      overscroll-behavior: contain;
+      padding: 4px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--surface);
+      color: var(--text);
+    }
+
+    .wave-class-column {
+      flex: 0 0 auto;
+      width: min(18rem, calc(100vw - 26px));
+    }
+
+    .wave-class-column + .wave-class-column {
+      border-left: 1px solid var(--border);
+    }
+
+    .wave-class-heading {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      padding: 6px 8px;
+      background: var(--surface);
+      color: var(--text-muted);
+      font-size: 13px;
+      line-height: 20px;
+      font-weight: 600;
+    }
+
+    .wave-class-empty {
+      padding: 10px 8px;
+      color: var(--text-muted);
+    }
+
+    .wave-class-option {
+      display: grid;
+      grid-template-columns: 1.5em minmax(0, 1fr) 7rem;
+      align-items: center;
+      gap: 8px;
+      width: 100%;
+      min-height: 44px;
+      padding: 6px 8px;
+      border: 0;
+      border-radius: 4px;
+      color: inherit;
+      background: transparent;
+      font: inherit;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .wave-class-option span {
+      overflow-wrap: anywhere;
+    }
+
+    .wave-class-option[aria-checked="true"] {
+      background: var(--surface-2);
+      color: var(--accent);
+    }
+
+    .wave-class-option:hover {
+      background: var(--surface-hover);
+    }
+
+    .wave-class-option:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: -2px;
+    }
+
+    .wave-class-option-preview {
+      display: block;
+      width: 100%;
+      height: 28px;
+      object-fit: contain;
+      border-radius: 2px;
+      background: white;
+    }
+
     .wave-data-fill-hit {
       fill: transparent;
       pointer-events: all;
@@ -4477,6 +4639,7 @@
 
     .sidebar {
       border-left-color: #2c3640;
+      scrollbar-gutter: auto;
     }
 
     .sidebar-header {

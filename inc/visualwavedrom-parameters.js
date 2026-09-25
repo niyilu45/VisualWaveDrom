@@ -1470,11 +1470,12 @@
     $('wave-directory-tab').setAttribute('aria-selected', String(page === 'wave'));
     $('parameter-directory-tab').setAttribute('aria-selected', String(page === 'parameters'));
     document.body.classList.toggle('parameter-page-active', page === 'parameters');
-    document.querySelectorAll('#sidebar > .menu-section').forEach((section, index) => {
-      if (index === 0) return;
+    document.querySelectorAll('#sidebar-wave-column').forEach(section => {
       if (page === 'parameters') { menuHiddenStates.set(section, section.hidden); section.hidden = true; }
       else if (menuHiddenStates.has(section)) { section.hidden = menuHiddenStates.get(section); menuHiddenStates.delete(section); }
     });
+    const waveMenuToggle = $('sidebar-wave-visible');
+    if (waveMenuToggle) waveMenuToggle.disabled = page === 'parameters';
     if (page === 'wave' && bridge) bridge.changed();
     if (page === 'parameters' && referenceRefresh) referenceRefresh();
     notifyParameterHistory();

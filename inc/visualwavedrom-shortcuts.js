@@ -58,9 +58,11 @@
 
   function createClassifier(waveItems) {
     const key = 'visualwavedrom.wave.classes.v1';
-    const defaults = ['23456789', '01x|'];
     const supported = new Set(waveItems.map(item => item.char));
+    const dataClass = '2345678=';
+    const defaults = [dataClass, Array.from(supported).filter(char => !dataClass.includes(char)).join('')];
     let classes = defaults.slice();
+    let enabled = true;
 
     function validate(candidate) {
       if (!Array.isArray(candidate) || candidate.length > supported.size) {
@@ -81,29 +83,38 @@
     function read() {
       try {
         const stored = JSON.parse(root.localStorage.getItem(key));
-        const result = stored && stored.version === 1 ? validate(stored.classes) : {};
-        classes = result.classes || defaults.slice();
-      } catch (_error) { classes = defaults.slice(); }
+        const supportedVersion = stored && [1, 2].includes(stored.version);
+        const result = supportedVersion ? validate(stored.classes) : {};
+        enabled = !supportedVersion || stored.enabled !== false;
+        // Upgrade only the old built-in classes; retain every custom configuration.
+        const oldDefaults = stored && stored.version === 1 && result.classes
+          && result.classes.length === 2 && result.classes[0] === '23456789' && result.classes[1] === '01x|';
+        classes = oldDefaults ? defaults.slice() : result.classes || defaults.slice();
+      } catch (_error) { classes = defaults.slice(); enabled = true; }
     }
     read();
     if (root.addEventListener) root.addEventListener('storage', event => {
       if (event.key === key || event.key === null) read();
     });
 
-    function save(candidate) {
+    function save(candidate, nextEnabled = enabled) {
       const result = validate(candidate);
       if (result.error) return result;
       classes = result.classes;
+      enabled = nextEnabled !== false;
       let persisted = true;
-      try { root.localStorage.setItem(key, JSON.stringify({ version: 1, classes })); }
+      try { root.localStorage.setItem(key, JSON.stringify({ version: 2, classes, enabled })); }
       catch (_error) { persisted = false; }
       return { persisted };
     }
 
-    return { defaults, validate, save, maxClasses: supported.size, snapshot: () => classes.slice(),
+    const members = char => Array.from(char && classes.find(value => value.includes(char)) || '');
+    return { defaults, validate, save, members, maxClasses: supported.size, snapshot: () => classes.slice(),
+      isEnabled: () => enabled,
       next(char) {
-        const group = char && classes.find(value => value.includes(char));
-        return group ? group[(group.indexOf(char) + 1) % group.length] : null;
+        if (!enabled) return null;
+        const group = members(char);
+        return group.length ? group[(group.indexOf(char) + 1) % group.length] : null;
       } };
   }
 

@@ -26,9 +26,9 @@
       if (presenterActive) document.documentElement.classList.add('presenter-bootstrap-document');
     })();
   </script>
-  <script src="inc/visualwavedrom-settings.js?v=20260908-shortcut-settings-v1"></script>
+  <script src="inc/visualwavedrom-settings.js?v=20260926-sidebar-columns-v1"></script>
   <link rel="stylesheet" href="inc/codemirror.css?v=5.65.21">
-  <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260908-wave-shortcuts-v1">
+  <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260926-sidebar-columns-v1">
   <link rel="stylesheet" href="inc/visualwavedrom-scope.css?v=20260817-legend-drag-v1">
   <link rel="stylesheet" href="inc/visualwavedrom-presenter.css?v=20260901-presenter-settings-nav-v1">
   <link rel="stylesheet" href="inc/visualwavedrom-settings.css?v=20260908-shortcut-settings-v1">
@@ -121,7 +121,19 @@
         <button class="tool-version-label" id="tool-version-label" type="button" title="版本管理" aria-haspopup="dialog" aria-controls="tool-version-modal">版本加载中</button>
       </div>
 
+      <div class="sidebar-menu-visibility" role="group" aria-label="菜单显示">
+        <label class="sidebar-menu-toggle">
+          <input type="checkbox" id="sidebar-functions-visible" aria-controls="sidebar-functions-column" checked autocomplete="off">
+          <span>功能菜单</span>
+        </label>
+        <label class="sidebar-menu-toggle">
+          <input type="checkbox" id="sidebar-wave-visible" aria-controls="sidebar-wave-column" checked autocomplete="off">
+          <span>波形菜单</span>
+        </label>
+      </div>
+      <div class="sidebar-menus">
       <!-- Function Menu -->
+      <div class="sidebar-menu-column" id="sidebar-functions-column" role="region" aria-label="功能菜单">
       <div class="menu-section">
         <div class="menu-section-title">功能菜单</div>
         <button class="menu-btn" id="btn-settings" type="button" title="设置" aria-haspopup="dialog" aria-expanded="false" aria-controls="ui-settings-modal">
@@ -235,7 +247,9 @@
         </div>
       </div>
 
+      </div>
       <!-- Waveform Menu -->
+      <div class="sidebar-menu-column" id="sidebar-wave-column" role="region" aria-label="波形菜单和连接关系">
       <div class="menu-section">
         <div class="menu-section-title">波形菜单</div>
         <div class="wave-add-delete-row">
@@ -410,6 +424,8 @@
         </div>
       </div>
 
+      </div>
+      </div>
     </aside>
 
     <!-- Main -->
@@ -980,7 +996,7 @@
     <script src="inc/visualwavedrom-version-ui.js?v=20260912-local-version-v1"></script>
     <script src="inc/visualwavedrom-wave-clipboard.js?v=20260909-cross-wave-copy-v1"></script>
     <script src="inc/visualwavedrom-image-clipboard.js?v=20260909-linked-image-compat-v1"></script>
-    <script src="inc/visualwavedrom-parameters.js?v=20260912-parameters-v1"></script>
+    <script src="inc/visualwavedrom-parameters.js?v=20260926-sidebar-columns-v1"></script>
     <script src="inc/visualwavedrom-app.js?v=20260912-parameters-v1"></script>
 </body>
 </html>

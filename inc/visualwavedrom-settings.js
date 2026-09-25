@@ -196,6 +196,11 @@
           <div class="modal-dialog ui-settings-dialog wave-classifier-dialog" role="dialog" aria-modal="true" aria-labelledby="wave-classifier-title">
             <div class="modal-header" id="wave-classifier-title">\u6ce2\u5f62\u5206\u7c7b\u5668</div>
             <div class="modal-body">
+              <label class="ui-settings-auto" for="wave-classifier-enabled">
+                <span>\u542f\u7528\u6ce2\u5f62\u5206\u7c7b\u5668</span>
+                <input type="checkbox" id="wave-classifier-enabled" checked>
+              </label>
+              <p class="wave-classifier-help" id="wave-classifier-help"></p>
               <label class="wave-classifier-row">\u5206\u7c7b\u6570\u91cf
                 <input id="wave-classifier-count" class="modal-input" type="number" min="0" step="1" required aria-describedby="wave-classifier-status">
               </label>
@@ -219,13 +224,14 @@
         });
         dialog.querySelector('#wave-classifier-reset').addEventListener('click', () => {
           draft = classifier().defaults.slice();
+          dialog.querySelector('#wave-classifier-enabled').checked = true;
           count.value = String(draft.length);
           renderRows();
         });
         dialog.querySelector('#wave-classifier-cancel').addEventListener('click', closeClassifier);
         dialog.querySelector('#wave-classifier-save').addEventListener('click', () => {
           if (validateDraft().error) return;
-          const result = classifier().save(draft);
+          const result = classifier().save(draft, dialog.querySelector('#wave-classifier-enabled').checked);
           if (result.persisted) closeClassifier();
           else dialog.querySelector('#wave-classifier-status').textContent =
             '\u5206\u7c7b\u5df2\u5e94\u7528\uff0c\u4f46\u6d4f\u89c8\u5668\u672a\u5141\u8bb8\u4fdd\u5b58\u8bbe\u7f6e\uff1b\u5173\u95ed\u9875\u9762\u540e\u5c06\u6062\u590d\u539f\u914d\u7f6e\u3002';
@@ -249,7 +255,11 @@
         });
       }
       draft = classifier().snapshot();
+      dialog.querySelector('#wave-classifier-enabled').checked = classifier().isEnabled();
+      const cycleKey = window.visualWaveDromShortcuts.label('cycleWave') || '\u5206\u7c7b\u5207\u6362\u5feb\u6377\u952e';
+      dialog.querySelector('#wave-classifier-help').textContent = "\u9ed8\u8ba4\u5206\u4e3a 2345678= \u548c\u5176\u4f59\u5168\u90e8\u6ce2\u5f62\u4e24\u7c7b\u3002\u5355\u683c\u9009\u4e2d\u540e\u6309 {key} \u6216\u53cc\u51fb\uff0c\u53ef\u6309\u6240\u5c5e\u5206\u7c7b\u5faa\u73af\u5207\u6362\u3002\u53cc\u51fb\u65f6\u7b2c\u4e8c\u4e0b\u6309\u4f4f\u7ea6\u534a\u79d2\uff0c\u6253\u5f00\u5168\u90e8\u6ce2\u5f62\u83dc\u5355\uff1a\u6bcf\u4e2a\u5206\u7c7b\u5360\u4e00\u5217\uff0c\u672a\u5206\u7c7b\u7684\u653e\u5728\u6700\u540e\u4e00\u5217\u3002\u677e\u5f00\u540e\u53ef\u8de8\u5206\u7c7b\u70b9\u51fb\u9009\u62e9\uff1b\u5206\u7c7b\u8f83\u591a\u65f6\u53ef\u6a2a\u5411\u6eda\u52a8\u3002\u70b9\u51fb\u83dc\u5355\u5916\u6216\u6309 Esc \u53ef\u5173\u95ed\u83dc\u5355\u5e76\u53d6\u6d88\u9009\u533a\u3002\u672a\u5206\u7c7b\u6ce2\u5f62\u4e0d\u5faa\u73af\u5207\u6362\uff0c\u4f46\u53ef\u4ee5\u6253\u5f00\u83dc\u5355\u3002\u6587\u672c\u7f16\u8f91\u3001\u753b\u7b14\u3001\u5206\u7ec4\u53ca\u8fde\u63a5\u9009\u70b9\u65f6\u4e0d\u89e6\u53d1\u3002".replace('{key}', cycleKey);
       dialog.querySelector('#wave-classifier-count').value = String(draft.length);
+      dialog.querySelector('#wave-classifier-help').textContent += '\u5173\u95ed\u5206\u7c7b\u5668\u540e\uff0c\u4e0a\u8ff0\u5feb\u6377\u952e\u548c\u9f20\u6807\u5207\u6362\u5747\u4e0d\u89e6\u53d1\uff0c\u666e\u901a\u6ce2\u5f62\u6309\u94ae\u4ecd\u53ef\u4f7f\u7528\u3002\u70b9\u51fb\u4fdd\u5b58\u540e\u751f\u6548\u3002';
       renderRows();
       modal.hidden = true;
       dialog.hidden = false;
@@ -258,7 +268,33 @@
     });
   }
 
+  function initSidebarMenus() {
+    const sidebar = document.getElementById('sidebar');
+    const key = 'visualwavedrom.ui.menus.v1';
+    const menus = ['functions', 'wave'].map(name => ({
+      name,
+      checkbox: document.getElementById('sidebar-' + name + '-visible'),
+      column: document.getElementById('sidebar-' + name + '-column')
+    }));
+    if (!sidebar || menus.some(menu => !menu.checkbox || !menu.column)) return;
+    let saved = {};
+    try { saved = JSON.parse(localStorage.getItem(key)) || {}; } catch (_error) { /* Both menus default to visible. */ }
+    menus.forEach(menu => { menu.checkbox.checked = saved[menu.name] !== false; });
+    const applyMenus = () => {
+      // Parameter tables retain their own wave-menu visibility until the user returns.
+      menus.forEach(menu => { if (!menu.checkbox.disabled) menu.column.hidden = !menu.checkbox.checked; });
+      sidebar.style.setProperty('--sidebar-menu-count', Math.max(1, menus.filter(menu => menu.checkbox.checked).length));
+    };
+    menus.forEach(menu => menu.checkbox.addEventListener('change', () => {
+      applyMenus();
+      try { localStorage.setItem(key, JSON.stringify(Object.fromEntries(menus.map(item => [item.name, item.checkbox.checked])))); }
+      catch (_error) { /* Visibility still works when browser storage is unavailable. */ }
+    }));
+    applyMenus();
+  }
+
   function init() {
+    initSidebarMenus();
     const probes = document.createElement('div');
     probes.className = 'ui-font-probes';
     probes.setAttribute('aria-hidden', 'true');

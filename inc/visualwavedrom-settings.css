@@ -119,6 +119,13 @@
   width: min(100%, 30rem);
 }
 
+.wave-classifier-help {
+  margin: 0;
+  color: var(--text-muted);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
 .wave-classifier-row {
   display: grid;
   grid-template-columns: minmax(4.5em, max-content) minmax(0, 1fr);

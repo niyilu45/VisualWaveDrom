@@ -427,6 +427,10 @@ if (!window.VWDCodeEditorPairs) {
     const waveSelectionClipboard = window.VisualWaveDromWaveClipboard.create(receiveWaveClipboardSelection);
     let waveSelectionDrag = null;
     let waveDataFillDrag = null;
+    let waveClassLastClick = null;
+    let waveClassGesture = null;
+    let waveClassMenu = null;
+    const waveClassPreviewImages = new Map();
     let waveCellTooltip = null;
     let waveCellTooltipName = null;
     let waveCellTooltipValue = null;
@@ -6334,7 +6338,12 @@ ${lines.join('\n')}`;
       const text = editor.value;
       const wave = entry.signal.wave || '';
       const safeStart = Math.max(0, Math.floor(startCol));
-      let newWave = replaceWaveRangePreservingContinuation(wave, safeStart, replacement);
+      // Classifier changes at a data-segment head keep its literal continuation dots.
+      const keepDataContinuations = options && options.keepDataContinuations
+        && replacement.length === 1 && /[2-9=]/.test(wave[safeStart] || '') && wave[safeStart + 1] === '.';
+      let newWave = keepDataContinuations
+        ? replaceWaveCharAt(wave, safeStart, replacement)
+        : replaceWaveRangePreservingContinuation(wave, safeStart, replacement);
       if (options && options.mergeBinaryLevels) {
         newWave = mergePastedBinaryLevels(newWave, safeStart, replacement.length);
       }
@@ -13565,6 +13574,9 @@ ${lines.join('\n')}`;
                 || waveSelectionDrag.anchorRow !== idx) return;
             const finished = waveSelectionDrag;
             waveSelectionDrag = null;
+            waveClassLastClick = !cancelled && !finished.moved
+              ? { row: idx, col: finished.anchorCol, documentName: editingWaveDocumentName }
+              : null;
             window.removeEventListener('pointermove', moveWaveRangeSelection);
             window.removeEventListener('pointerup', completeWaveRangeSelection);
             window.removeEventListener('pointercancel', cancelWaveRangeSelection);
@@ -13701,6 +13713,18 @@ ${lines.join('\n')}`;
           });
 
           lane.addEventListener('pointermove', updateWaveCellHover, { passive: true });
+          lane.addEventListener('mousedown', (e) => {
+            if (e.detail !== 2 || !canStartWaveRangeSelection(e) || !waveSelectionDrag) return;
+            const col = resolveLaneColumnIndex(e.clientX, false);
+            const previous = waveClassLastClick;
+            if (!previous || previous.row !== idx || previous.col !== col
+                || previous.documentName !== editingWaveDocumentName) return;
+            const target = getWaveClassTarget(idx, col);
+            if (!target || !canUseWaveClassSwitch()) return;
+            const pointerId = waveSelectionDrag.pointerId;
+            finishWaveRangeSelection({ pointerId }, true);
+            beginWaveClassGesture(e, target, pointerId);
+          }, true);
           lane.addEventListener('pointerleave', cancelWaveCellHover);
           lane.addEventListener('pointerup', completeWaveRangeSelection);
           lane.addEventListener('pointercancel', cancelWaveRangeSelection);
@@ -18998,6 +19022,11 @@ ${lines.join('\n')}`;
     }
 
     function renderWaveform(jsonText, preparedAnalysis) {
+      const classTarget = waveClassMenu || (waveClassGesture && waveClassGesture.target);
+      if (classTarget && (classTarget.text !== jsonText || classTarget.documentName !== editingWaveDocumentName)) {
+        if (waveClassGesture) waveClassGesture.cancel();
+        closeWaveClassMenu(false, false);
+      }
       syncColumnNumberButtonFromJson(jsonText);
       if (isRenderingWaveform) {
         pendingRenderText = jsonText;
@@ -19432,34 +19461,248 @@ ${lines.join('\n')}`;
       return true;
     }
 
-    function handleWaveClassCycleShortcut(event) {
-      if (!matchesWaveActionShortcut('cycleWave', event) || event.defaultPrevented
-          || keyboardInputScope !== 'wave' || inlineEditActive || isVisibleModalOpen()
-          || app.classList.contains('reading-mode') || groupPickActive
+    function canUseWaveClassSwitch() {
+      if (!waveformClassifier.isEnabled() || inlineEditActive || isVisibleModalOpen() || isTextEditModeActive() || wavePaintModeActive
+          || waveDataFillDrag || app.classList.contains('reading-mode') || groupPickActive
           || isConnectionPickFlow() || connectionSelectActive || selectedEdgeIndex >= 0
           || selectedGroupIndex >= 0) return false;
-      const target = event.target;
-      if (!target || !target.closest || isJsonEditorTarget(target)
-          || target.closest('input, textarea, select, button, [contenteditable]:not([contenteditable="false"])')) return false;
       const vim = vimController && vimController.getState();
-      if (vim && vim.enabled && (vim.scope !== 'wave' || vim.mode !== 'normal' || vim.pending || vim.count)) return false;
+      return !(vim && vim.enabled && (vim.scope !== 'wave' || vim.mode !== 'normal' || vim.pending || vim.count));
+    }
+
+    function getWaveClassTarget(row, col) {
+      try {
+        JSON.parse(editor.value);
+        const entry = buildSignalSourceMap(editor.value)[row];
+        const char = entry && (entry.signal.wave || '')[col];
+        return LEGEND_ITEMS.some(item => item.char === char)
+          ? { row, col, char, text: editor.value, documentName: editingWaveDocumentName } : null;
+      } catch (_error) {
+        setStatus(false, 'JSON 错误，无法切换波形');
+        return null;
+      }
+    }
+
+    function applyWaveClassChoice(target, char) {
+      if (!canUseWaveClassSwitch() || target.text !== editor.value
+          || target.documentName !== editingWaveDocumentName || !LEGEND_ITEMS.some(item => item.char === char)) return;
+      setSelectedSignal(target.row, target.col);
+      setWaveClipboardShortcutActive(true, 'wave-class-choice');
+      wavePanel.focus({ preventScroll: true });
+      if (char !== target.char) applyWaveRangeReplacement(target.row, target.col, char, '切换波形类型', {
+        keepDataContinuations: true
+      });
+      refreshConnectionHighlightsFromDom();
+    }
+
+    function closeWaveClassMenu(clearSelection, restoreFocus = true) {
+      if (!waveClassMenu) return;
+      const menu = waveClassMenu;
+      waveClassMenu = null;
+      menu.layer.remove();
+      window.removeEventListener('resize', menu.dismiss);
+      window.removeEventListener('blur', menu.dismiss);
+      if (clearSelection && menu.documentName === editingWaveDocumentName) {
+        setSelectedSignal(-1, -1);
+        waveContainer.querySelectorAll('.wave-lane-selected').forEach(lane => lane.classList.remove('wave-lane-selected'));
+        setWaveClipboardShortcutActive(false, 'wave-class-cancel');
+        refreshConnectionHighlightsFromDom();
+      }
+      if (restoreFocus) wavePanel.focus({ preventScroll: true });
+    }
+
+    function openWaveClassMenu(target, x, y) {
+      closeWaveClassMenu(false, false);
+      const layer = document.createElement('div');
+      layer.className = 'wave-class-menu-layer';
+      const menu = document.createElement('div');
+      menu.className = 'wave-class-menu';
+      menu.setAttribute('role', 'menu');
+      menu.setAttribute('aria-label', '切换波形类型');
+      const groups = waveformClassifier.snapshot().map((chars, index) => ({ label: '分类 ' + (index + 1), chars }));
+      const classified = new Set(groups.flatMap(group => Array.from(group.chars)));
+      const unclassified = LEGEND_ITEMS.filter(item => !classified.has(item.char)).map(item => item.char).join('');
+      if (unclassified) groups.push({ label: '未分类', chars: unclassified });
+      const buttons = [];
+      const columns = [];
+      const createButton = char => {
+        const index = LEGEND_ITEMS.findIndex(item => item.char === char);
+        const item = LEGEND_ITEMS[index];
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'wave-class-option';
+        button.dataset.waveChar = char;
+        button.setAttribute('role', 'menuitemradio');
+        button.setAttribute('aria-checked', String(char === target.char));
+        button.setAttribute('aria-label', item.label + ' (' + char + ')');
+        button.title = item.desc;
+        const code = document.createElement('code');
+        code.textContent = char;
+        const label = document.createElement('span');
+        label.textContent = item.label;
+        const svg = document.querySelector('#legend-wave-' + index + ' svg');
+        const preview = document.createElement('img');
+        preview.className = 'wave-class-option-preview';
+        preview.alt = '';
+        if (svg) {
+          // Reuse the toolbar's real WaveDrom previews without duplicating SVG IDs.
+          if (!waveClassPreviewImages.has(char)) waveClassPreviewImages.set(char,
+            'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(new XMLSerializer().serializeToString(svg)));
+          preview.src = waveClassPreviewImages.get(char);
+        }
+        button.append(code, label, preview);
+        button.addEventListener('click', () => {
+          closeWaveClassMenu(false);
+          applyWaveClassChoice(target, char);
+        });
+        return button;
+      };
+      groups.forEach((group, index) => {
+        const column = document.createElement('div');
+        column.className = 'wave-class-column';
+        column.setAttribute('role', 'group');
+        const heading = document.createElement('div');
+        heading.className = 'wave-class-heading';
+        heading.id = 'wave-class-heading-' + index;
+        heading.textContent = group.label;
+        column.setAttribute('aria-labelledby', heading.id);
+        column.appendChild(heading);
+        const options = Array.from(group.chars, createButton);
+        if (options.length) {
+          column.append(...options);
+          columns.push(options);
+          buttons.push(...options);
+        } else {
+          const empty = document.createElement('div');
+          empty.className = 'wave-class-empty';
+          empty.textContent = '暂无波形';
+          column.appendChild(empty);
+        }
+        menu.appendChild(column);
+      });
+      layer.appendChild(menu);
+      document.body.appendChild(layer);
+      const dismiss = () => closeWaveClassMenu(true);
+      waveClassMenu = Object.assign({}, target, { layer, menu, buttons, columns, dismiss });
+      layer.addEventListener('click', event => { if (event.target === layer) dismiss(); });
+      layer.addEventListener('wheel', event => {
+        if (event.target === layer) { event.preventDefault(); dismiss(); }
+      }, { passive: false });
+      window.addEventListener('resize', dismiss);
+      window.addEventListener('blur', dismiss);
+      const rect = menu.getBoundingClientRect();
+      menu.style.left = Math.max(8, Math.min(x, window.innerWidth - rect.width - 8)) + 'px';
+      menu.style.top = Math.max(8, Math.min(y + 12, window.innerHeight - rect.height - 8)) + 'px';
+      focusWaveClassOption(buttons.find(button => button.dataset.waveChar === target.char));
+      hideWaveCellTooltip();
+    }
+
+    function focusWaveClassOption(button) {
+      if (!button || !waveClassMenu) return;
+      button.focus({ preventScroll: true });
+      const menu = waveClassMenu.menu;
+      const bounds = menu.getBoundingClientRect();
+      const rect = button.getBoundingClientRect();
+      const top = bounds.top + menu.clientTop + button.parentElement.firstElementChild.offsetHeight;
+      const bottom = bounds.top + menu.clientTop + menu.clientHeight;
+      const left = bounds.left + menu.clientLeft;
+      const right = left + menu.clientWidth;
+      // Scroll only the popup, never the waveform behind it.
+      if (rect.top < top) menu.scrollTop -= top - rect.top;
+      else if (rect.bottom > bottom) menu.scrollTop += rect.bottom - bottom;
+      if (rect.left < left) menu.scrollLeft -= left - rect.left;
+      else if (rect.right > right) menu.scrollLeft += rect.right - right;
+    }
+
+    function beginWaveClassGesture(event, target, pointerId) {
+      event.preventDefault();
+      event.stopPropagation();
+      const state = { target, opened: false, cancel: null };
+      waveClassGesture = state;
+      const swallowClick = e => { e.preventDefault(); e.stopImmediatePropagation(); };
+      const move = e => {
+        if (e.pointerId === pointerId && !state.opened
+            && Math.hypot(e.clientX - event.clientX, e.clientY - event.clientY) > 6) finish(true);
+      };
+      const up = e => { if (e.pointerId === pointerId) finish(false); };
+      const cancel = e => { if (e.pointerId === pointerId) finish(true); };
+      const blur = () => finish(true);
+      const finish = cancelled => {
+        if (waveClassGesture !== state) return;
+        waveClassGesture = null;
+        clearTimeout(timer);
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', up, true);
+        window.removeEventListener('pointercancel', cancel);
+        window.removeEventListener('blur', blur);
+        wavePanel.removeEventListener('lostpointercapture', cancel);
+        try { if (wavePanel.hasPointerCapture(pointerId)) wavePanel.releasePointerCapture(pointerId); } catch (_) { /* Pointer already released. */ }
+        // The release's click/dblclick must not select again or activate a menu item.
+        setTimeout(() => {
+          window.removeEventListener('click', swallowClick, true);
+          window.removeEventListener('dblclick', swallowClick, true);
+        }, 0);
+        if (cancelled) closeWaveClassMenu(true);
+        else if (!state.opened) applyWaveClassChoice(target, waveformClassifier.next(target.char));
+      };
+      state.cancel = blur;
+      const timer = setTimeout(() => {
+        if (!canUseWaveClassSwitch() || target.text !== editor.value || target.documentName !== editingWaveDocumentName) {
+          finish(true);
+          return;
+        }
+        state.opened = true;
+        openWaveClassMenu(target, event.clientX, event.clientY);
+      }, 450);
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', up, true);
+      window.addEventListener('pointercancel', cancel);
+      window.addEventListener('blur', blur);
+      window.addEventListener('click', swallowClick, true);
+      window.addEventListener('dblclick', swallowClick, true);
+      wavePanel.addEventListener('lostpointercapture', cancel);
+      try { wavePanel.setPointerCapture(pointerId); } catch (_) { /* Window listeners still finish the gesture. */ }
+    }
+
+    function handleWaveClassMenuKey(event) {
+      if (!waveClassMenu) return false;
+      event.stopPropagation();
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        if (waveClassGesture) waveClassGesture.cancel();
+        closeWaveClassMenu(true);
+      } else if (['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'Tab'].includes(event.key)) {
+        event.preventDefault();
+        const { buttons, columns } = waveClassMenu;
+        const index = buttons.indexOf(document.activeElement);
+        const columnIndex = Math.max(0, columns.findIndex(column => column.includes(document.activeElement)));
+        const column = columns[columnIndex];
+        const row = Math.max(0, column.indexOf(document.activeElement));
+        let next;
+        if (event.key === 'Tab') next = buttons[(index + (event.shiftKey ? -1 : 1) + buttons.length) % buttons.length];
+        else if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+          const adjacent = columns[(columnIndex + (event.key === 'ArrowLeft' ? -1 : 1) + columns.length) % columns.length];
+          next = adjacent[Math.min(row, adjacent.length - 1)];
+        } else if (event.key === 'Home' || event.key === 'End') next = column[event.key === 'Home' ? 0 : column.length - 1];
+        else next = column[(row + (event.key === 'ArrowUp' ? -1 : 1) + column.length) % column.length];
+        focusWaveClassOption(next);
+      }
+      return true;
+    }
+
+    function handleWaveClassCycleShortcut(event) {
+      if (!matchesWaveActionShortcut('cycleWave', event) || event.defaultPrevented
+          || keyboardInputScope !== 'wave' || !canUseWaveClassSwitch()) return false;
+      const element = event.target;
+      if (!element || !element.closest || isJsonEditorTarget(element)
+          || element.closest('input, textarea, select, button, [contenteditable]:not([contenteditable="false"])')) return false;
       const block = getSelectedWaveBlock();
       if (!block || block.startRow !== block.endRow || block.start !== block.end) return false;
       event.preventDefault();
       event.stopPropagation();
       if (event.repeat) return true;
-      let sourceMap;
-      try {
-        JSON.parse(editor.value);
-        sourceMap = buildSignalSourceMap(editor.value);
-      } catch (_error) {
-        setStatus(false, 'JSON 错误，无法切换波形');
-        return true;
-      }
-      const entry = sourceMap[block.startRow];
-      const char = entry && (entry.signal.wave || '')[block.start];
-      const next = waveformClassifier.next(char);
-      if (next && next !== char) applyWaveRangeReplacement(block.startRow, block.start, next, '切换波形类型');
+      const target = getWaveClassTarget(block.startRow, block.start);
+      if (target) applyWaveClassChoice(target, waveformClassifier.next(target.char));
       return true;
     }
 
@@ -23472,6 +23715,13 @@ ${lines.join('\n')}`;
 
     document.addEventListener('keydown', (e) => {
       if (presenterWaveViewActive) return;
+      if (handleWaveClassMenuKey(e)) return;
+      if (waveClassGesture) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.key === 'Escape') waveClassGesture.cancel();
+        return;
+      }
       if (waveDataFillDrag) {
         e.preventDefault();
         e.stopPropagation();
