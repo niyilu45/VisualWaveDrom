@@ -26,9 +26,10 @@
       if (presenterActive) document.documentElement.classList.add('presenter-bootstrap-document');
     })();
   </script>
-  <script src="inc/visualwavedrom-settings.js?v=20260926-sidebar-columns-v1"></script>
+  <script src="inc/visualwavedrom-settings.js?v=20260926-sidebar-docking-v1"></script>
+  <script src="inc/visualwavedrom-sidebar.js?v=20260926-sidebar-docking-v1"></script>
   <link rel="stylesheet" href="inc/codemirror.css?v=5.65.21">
-  <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260926-sidebar-columns-v1">
+  <link rel="stylesheet" href="inc/visualwavedrom.css?v=20260926-sidebar-docking-v1">
   <link rel="stylesheet" href="inc/visualwavedrom-scope.css?v=20260817-legend-drag-v1">
   <link rel="stylesheet" href="inc/visualwavedrom-presenter.css?v=20260901-presenter-settings-nav-v1">
   <link rel="stylesheet" href="inc/visualwavedrom-settings.css?v=20260908-shortcut-settings-v1">
@@ -114,23 +115,15 @@
     <section class="parameter-workspace" id="parameter-workspace" aria-label="参数表编辑器" hidden></section>
 
     <!-- Sidebar -->
-    <aside class="sidebar" id="sidebar">
+    <aside class="sidebar" id="sidebar" data-layout="horizontal">
       <div class="sidebar-header">
         <h1>VisualWaveDrom</h1>
         <p>波形可视化编辑器</p>
         <button class="tool-version-label" id="tool-version-label" type="button" title="版本管理" aria-haspopup="dialog" aria-controls="tool-version-modal">版本加载中</button>
       </div>
 
-      <div class="sidebar-menu-visibility" role="group" aria-label="菜单显示">
-        <label class="sidebar-menu-toggle">
-          <input type="checkbox" id="sidebar-functions-visible" aria-controls="sidebar-functions-column" checked autocomplete="off">
-          <span>功能菜单</span>
-        </label>
-        <label class="sidebar-menu-toggle">
-          <input type="checkbox" id="sidebar-wave-visible" aria-controls="sidebar-wave-column" checked autocomplete="off">
-          <span>波形菜单</span>
-        </label>
-      </div>
+      <div class="sidebar-dock" id="sidebar-dock">
+      <div class="sidebar-dock-tabs" id="sidebar-dock-tabs" role="tablist" aria-label="右侧菜单" hidden></div>
       <div class="sidebar-menus">
       <!-- Function Menu -->
       <div class="sidebar-menu-column" id="sidebar-functions-column" role="region" aria-label="功能菜单">
@@ -424,6 +417,7 @@
         </div>
       </div>
 
+      </div>
       </div>
       </div>
     </aside>
@@ -996,7 +990,7 @@
     <script src="inc/visualwavedrom-version-ui.js?v=20260912-local-version-v1"></script>
     <script src="inc/visualwavedrom-wave-clipboard.js?v=20260909-cross-wave-copy-v1"></script>
     <script src="inc/visualwavedrom-image-clipboard.js?v=20260909-linked-image-compat-v1"></script>
-    <script src="inc/visualwavedrom-parameters.js?v=20260926-sidebar-columns-v1"></script>
+    <script src="inc/visualwavedrom-parameters.js?v=20260926-sidebar-docking-v1"></script>
     <script src="inc/visualwavedrom-app.js?v=20260912-parameters-v1"></script>
 </body>
 </html>

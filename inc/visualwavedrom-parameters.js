@@ -24,7 +24,6 @@
   let parameterClipboard = null, clipboardRequest = 0;
   let parameterUndoStack = [], parameterRedoStack = [];
   let activeCellEdit = null;
-  const menuHiddenStates = new WeakMap();
   const expanded = new Set(['']);
   const $ = (id) => document.getElementById(id);
   const element = (tag, className, text) => {
@@ -1470,12 +1469,7 @@
     $('wave-directory-tab').setAttribute('aria-selected', String(page === 'wave'));
     $('parameter-directory-tab').setAttribute('aria-selected', String(page === 'parameters'));
     document.body.classList.toggle('parameter-page-active', page === 'parameters');
-    document.querySelectorAll('#sidebar-wave-column').forEach(section => {
-      if (page === 'parameters') { menuHiddenStates.set(section, section.hidden); section.hidden = true; }
-      else if (menuHiddenStates.has(section)) { section.hidden = menuHiddenStates.get(section); menuHiddenStates.delete(section); }
-    });
-    const waveMenuToggle = $('sidebar-wave-visible');
-    if (waveMenuToggle) waveMenuToggle.disabled = page === 'parameters';
+    window.dispatchEvent(new CustomEvent('vwd-directory-page-change'));
     if (page === 'wave' && bridge) bridge.changed();
     if (page === 'parameters' && referenceRefresh) referenceRefresh();
     notifyParameterHistory();

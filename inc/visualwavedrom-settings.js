@@ -268,33 +268,7 @@
     });
   }
 
-  function initSidebarMenus() {
-    const sidebar = document.getElementById('sidebar');
-    const key = 'visualwavedrom.ui.menus.v1';
-    const menus = ['functions', 'wave'].map(name => ({
-      name,
-      checkbox: document.getElementById('sidebar-' + name + '-visible'),
-      column: document.getElementById('sidebar-' + name + '-column')
-    }));
-    if (!sidebar || menus.some(menu => !menu.checkbox || !menu.column)) return;
-    let saved = {};
-    try { saved = JSON.parse(localStorage.getItem(key)) || {}; } catch (_error) { /* Both menus default to visible. */ }
-    menus.forEach(menu => { menu.checkbox.checked = saved[menu.name] !== false; });
-    const applyMenus = () => {
-      // Parameter tables retain their own wave-menu visibility until the user returns.
-      menus.forEach(menu => { if (!menu.checkbox.disabled) menu.column.hidden = !menu.checkbox.checked; });
-      sidebar.style.setProperty('--sidebar-menu-count', Math.max(1, menus.filter(menu => menu.checkbox.checked).length));
-    };
-    menus.forEach(menu => menu.checkbox.addEventListener('change', () => {
-      applyMenus();
-      try { localStorage.setItem(key, JSON.stringify(Object.fromEntries(menus.map(item => [item.name, item.checkbox.checked])))); }
-      catch (_error) { /* Visibility still works when browser storage is unavailable. */ }
-    }));
-    applyMenus();
-  }
-
   function init() {
-    initSidebarMenus();
     const probes = document.createElement('div');
     probes.className = 'ui-font-probes';
     probes.setAttribute('aria-hidden', 'true');
