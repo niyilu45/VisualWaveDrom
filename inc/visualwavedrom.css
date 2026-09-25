@@ -3680,6 +3680,37 @@
       pointer-events: none;
     }
 
+    .wave-data-fill-handle {
+      cursor: ew-resize;
+      touch-action: none;
+    }
+
+    .wave-data-fill-hit {
+      fill: transparent;
+      pointer-events: all;
+    }
+
+    .wave-data-fill-mark {
+      fill: #2563eb;
+      stroke: #fff;
+      stroke-width: 1.5;
+      pointer-events: none;
+      vector-effect: non-scaling-stroke;
+    }
+
+    .wave-data-fill-handle:hover .wave-data-fill-mark {
+      fill: #1d4ed8;
+    }
+
+    .wave-data-fill-preview {
+      fill: rgba(37, 99, 235, 0.08);
+      stroke: #2563eb;
+      stroke-width: 1.5;
+      stroke-dasharray: 5 3;
+      vector-effect: non-scaling-stroke;
+      pointer-events: none;
+    }
+
     .wave-col-highlight-to {
       fill: rgba(249, 115, 22, 0.22);
       stroke: rgba(249, 115, 22, 0.85);
@@ -4014,6 +4045,14 @@
       overflow: auto;
       line-height: 1.35;
       resize: none;
+    }
+
+    .wave-data-edit-overlay {
+      min-width: 0;
+      padding: 1px 4px;
+      border-width: 1px;
+      line-height: 1.2;
+      box-shadow: none;
     }
 
     .wave-description-overlay {

@@ -127,6 +127,137 @@
     autoInput.focus({ preventScroll: true });
   }
 
+  function addClassifierSettings() {
+    const button = document.createElement('button');
+    button.id = 'ui-settings-classifier';
+    button.type = 'button';
+    button.className = 'modal-btn ui-settings-shortcuts';
+    button.textContent = '\u6ce2\u5f62\u5206\u7c7b\u5668';
+    button.setAttribute('aria-haspopup', 'dialog');
+    button.setAttribute('aria-controls', 'wave-classifier-modal');
+    document.getElementById('ui-settings-shortcuts').after(button);
+    let dialog = null;
+    let draft = [];
+    let backdrop = false;
+    const classifier = () => window.visualWaveDromClassifier;
+
+    function closeClassifier() {
+      dialog.hidden = true;
+      modal.hidden = false;
+      button.focus({ preventScroll: true });
+    }
+
+    function validateDraft() {
+      const count = dialog.querySelector('#wave-classifier-count');
+      const result = count.value === '' || !count.validity.valid
+        ? { error: '\u5206\u7c7b\u6570\u91cf\u5e94\u4e3a 0 \u81f3 ' + classifier().maxClasses + ' \u7684\u6574\u6570', index: -1 }
+        : classifier().validate(draft);
+      dialog.querySelector('#wave-classifier-status').textContent = result.error || '';
+      dialog.querySelector('#wave-classifier-save').disabled = !!result.error;
+      count.setAttribute('aria-invalid', String(result.index === -1));
+      dialog.querySelectorAll('[data-class-index]').forEach(input => {
+        input.setAttribute('aria-invalid', String(Number(input.dataset.classIndex) === result.index));
+      });
+      return result;
+    }
+
+    function renderRows() {
+      const list = dialog.querySelector('#wave-classifier-list');
+      list.replaceChildren();
+      draft.forEach((value, index) => {
+        const label = document.createElement('label');
+        label.className = 'wave-classifier-row';
+        const name = document.createElement('span');
+        name.textContent = '\u5206\u7c7b ' + (index + 1);
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'modal-input';
+        input.dataset.classIndex = String(index);
+        input.value = value;
+        input.autocomplete = 'off';
+        input.spellcheck = false;
+        input.title = '\u6309\u5b57\u7b26\u6392\u5217\u987a\u5e8f\u5faa\u73af\u5207\u6362\uff1b\u7559\u7a7a\u4e0d\u53c2\u4e0e\u5207\u6362';
+        input.setAttribute('aria-describedby', 'wave-classifier-status');
+        input.addEventListener('input', () => { draft[index] = input.value; validateDraft(); });
+        label.append(name, input);
+        list.appendChild(label);
+      });
+      validateDraft();
+    }
+
+    button.addEventListener('click', () => {
+      if (!classifier()) return;
+      if (!dialog) {
+        dialog = document.createElement('div');
+        dialog.id = 'wave-classifier-modal';
+        dialog.className = 'modal-overlay ui-settings-overlay';
+        dialog.hidden = true;
+        dialog.innerHTML = `
+          <div class="modal-dialog ui-settings-dialog wave-classifier-dialog" role="dialog" aria-modal="true" aria-labelledby="wave-classifier-title">
+            <div class="modal-header" id="wave-classifier-title">\u6ce2\u5f62\u5206\u7c7b\u5668</div>
+            <div class="modal-body">
+              <label class="wave-classifier-row">\u5206\u7c7b\u6570\u91cf
+                <input id="wave-classifier-count" class="modal-input" type="number" min="0" step="1" required aria-describedby="wave-classifier-status">
+              </label>
+              <div id="wave-classifier-list"></div>
+            </div>
+            <div id="wave-classifier-status" class="wave-shortcut-feedback" role="status" aria-live="polite"></div>
+            <div class="modal-footer">
+              <button type="button" class="modal-btn" id="wave-classifier-reset">\u6062\u590d\u9ed8\u8ba4</button>
+              <button type="button" class="modal-btn" id="wave-classifier-cancel">\u53d6\u6d88</button>
+              <button type="button" class="modal-btn modal-btn-primary" id="wave-classifier-save">\u4fdd\u5b58</button>
+            </div>
+          </div>`;
+        document.body.appendChild(dialog);
+        const count = dialog.querySelector('#wave-classifier-count');
+        count.max = String(classifier().maxClasses);
+        count.addEventListener('input', () => {
+          if (count.value !== '' && count.validity.valid) {
+            draft = Array.from({ length: Number(count.value) }, (_, index) => draft[index] || '');
+            renderRows();
+          } else validateDraft();
+        });
+        dialog.querySelector('#wave-classifier-reset').addEventListener('click', () => {
+          draft = classifier().defaults.slice();
+          count.value = String(draft.length);
+          renderRows();
+        });
+        dialog.querySelector('#wave-classifier-cancel').addEventListener('click', closeClassifier);
+        dialog.querySelector('#wave-classifier-save').addEventListener('click', () => {
+          if (validateDraft().error) return;
+          const result = classifier().save(draft);
+          if (result.persisted) closeClassifier();
+          else dialog.querySelector('#wave-classifier-status').textContent =
+            '\u5206\u7c7b\u5df2\u5e94\u7528\uff0c\u4f46\u6d4f\u89c8\u5668\u672a\u5141\u8bb8\u4fdd\u5b58\u8bbe\u7f6e\uff1b\u5173\u95ed\u9875\u9762\u540e\u5c06\u6062\u590d\u539f\u914d\u7f6e\u3002';
+        });
+        dialog.addEventListener('pointerdown', event => { backdrop = event.target === dialog; });
+        dialog.addEventListener('click', event => {
+          if (backdrop && event.target === dialog) closeClassifier();
+          backdrop = false;
+        });
+        dialog.addEventListener('keydown', event => {
+          event.stopPropagation();
+          if (event.key === 'Escape') { event.preventDefault(); closeClassifier(); }
+          if (event.key !== 'Tab') return;
+          const controls = Array.from(dialog.querySelectorAll('input, button')).filter(el => !el.disabled);
+          const first = controls[0];
+          const last = controls[controls.length - 1];
+          if (document.activeElement === (event.shiftKey ? first : last)) {
+            event.preventDefault();
+            (event.shiftKey ? last : first).focus();
+          }
+        });
+      }
+      draft = classifier().snapshot();
+      dialog.querySelector('#wave-classifier-count').value = String(draft.length);
+      renderRows();
+      modal.hidden = true;
+      dialog.hidden = false;
+      dialog.querySelector('.modal-body').scrollTop = 0;
+      dialog.querySelector('input').focus({ preventScroll: true });
+    });
+  }
+
   function init() {
     const probes = document.createElement('div');
     probes.className = 'ui-font-probes';
@@ -181,6 +312,7 @@
           shortcutsButton.focus({ preventScroll: true });
         });
       });
+      if (shortcutsButton) addClassifierSettings();
       document.getElementById('ui-settings-reset').addEventListener('click', () => {
         settings = Object.assign({}, defaults);
         percentInput.value = String(settings.scale);

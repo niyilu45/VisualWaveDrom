@@ -339,6 +339,8 @@ if (!window.VWDCodeEditorPairs) {
       refreshWaveShortcutHints();
     });
     window.visualWaveDromShortcuts = waveformShortcuts;
+    const waveformClassifier = window.VisualWaveDromShortcuts.createClassifier(LEGEND_ITEMS);
+    window.visualWaveDromClassifier = waveformClassifier;
     const vimHelpBtn = document.getElementById('btn-vim-help');
     const vimModeButtonState = document.getElementById('vim-mode-button-state');
     const vimStatusBar = document.getElementById('vim-status-bar');
@@ -424,6 +426,7 @@ if (!window.VWDCodeEditorPairs) {
     let waveClipboardReadRequest = 0;
     const waveSelectionClipboard = window.VisualWaveDromWaveClipboard.create(receiveWaveClipboardSelection);
     let waveSelectionDrag = null;
+    let waveDataFillDrag = null;
     let waveCellTooltip = null;
     let waveCellTooltipName = null;
     let waveCellTooltipValue = null;
@@ -6200,6 +6203,113 @@ ${lines.join('\n')}`;
       );
     }
 
+    function createWaveDataFillSeries(values) {
+      const repeat = index => values[((index % values.length) + values.length) % values.length];
+      const strings = values.map(value => value == null ? '' : String(value));
+      const decimal = text => {
+        const match = /^([+-]?)(\d*)(?:\.(\d*))?(?:[eE]([+-]?\d+))?$/.exec(text);
+        if (!match || !(match[2] || match[3])) return null;
+        const places = (match[3] || '').length - Number(match[4] || 0);
+        if (Math.abs(places) > 100 || text.length > 1000) return null;
+        return { value: BigInt((match[1] === '-' ? '-' : '') + (match[2] || '0') + (match[3] || '')),
+          places, padding: /^0\d/.test(match[2]) ? match[2].length : 0 };
+      };
+      let numbers = strings.map(text => decimal(text.trim()));
+      let prefix = '';
+      let suffix = '';
+      let numberedText = false;
+      if (numbers.some(value => !value)) {
+        // Parameter expressions and base-prefixed numbers are literal labels, not serial numbers.
+        const parts = strings.map(text => /[{}]/.test(text) || /^[+-]?0[xob]/i.test(text)
+          ? null : /^(.*?)(\d+)(\D*)$/.exec(text));
+        if (parts.some(part => !part) || parts.some(part => part[1] !== parts[0][1] || part[3] !== parts[0][3])) return repeat;
+        prefix = parts[0][1];
+        suffix = parts[0][3];
+        numberedText = true;
+        numbers = parts.map(part => decimal(part[2]));
+        if (numbers.some(value => !value)) return repeat;
+      }
+      if (numbers.length === 1 && !numberedText) return repeat;
+      const places = numbers.reduce((maximum, value) => Math.max(maximum, value.places), 0);
+      const padding = numbers.reduce((maximum, value) => Math.max(maximum, value.padding), 0);
+      const scaled = numbers.map(value => value.value * 10n ** BigInt(places - value.places));
+      const step = scaled.length > 1 ? scaled[1] - scaled[0] : 10n ** BigInt(places);
+      if (scaled.some((value, index) => value !== scaled[0] + step * BigInt(index))) return repeat;
+      const numericValues = !numberedText && values.every(value => typeof value === 'number');
+      return index => {
+        const value = scaled[0] + step * BigInt(index);
+        const sign = value < 0n ? '-' : '';
+        const digits = (value < 0n ? -value : value).toString().padStart(places + 1, '0');
+        const whole = (places ? digits.slice(0, -places) : digits).padStart(padding, '0');
+        const result = sign + whole + (places ? '.' + digits.slice(-places) : '');
+        if (!numericValues) return prefix + result + suffix;
+        const numeric = Number(result);
+        if (!Number.isFinite(numeric)) throw new Error('推理结果超出数值范围');
+        return numeric;
+      };
+    }
+
+    function applyWaveDataFill(block, targetColumn, side) {
+      const targetStart = side === 'left' ? targetColumn : block.end + 1;
+      const targetEnd = side === 'left' ? block.start - 1 : targetColumn;
+      if (targetStart < 0 || targetEnd < targetStart) return false;
+      try {
+        const parsed = JSON.parse(editor.value);
+        const locations = collectSignalLocations(parsed.signal || []);
+        const updates = [];
+        let filled = 0;
+        for (let row = block.startRow; row <= block.endRow; row++) {
+          const location = locations[row];
+          const signal = location && location.signal;
+          const wave = String(signal && signal.wave || '');
+          if (block.end >= wave.length) throw new Error('选择的区域必须全都是数据波形（23456789）');
+          const sources = new Set();
+          const targets = new Set();
+          let dataIndex = -1;
+          let currentType = '';
+          for (let col = 0; col <= Math.min(wave.length - 1, Math.max(block.end, targetEnd)); col++) {
+            const char = wave[col];
+            if (/[2-9=]/.test(char)) dataIndex++;
+            if (char !== '.' && char !== '|') currentType = char;
+            const isData = /[2-9]/.test(currentType) && (char === '.' || /[2-9]/.test(char));
+            if (col >= block.start && col <= block.end) {
+              if (!isData) throw new Error('选择的区域必须全都是数据波形（23456789）');
+              sources.add(dataIndex);
+            }
+            if (isData && col >= targetStart && col <= targetEnd) targets.add(dataIndex);
+          }
+          const data = normalizeWaveDataValues(signal.data);
+          const seed = Array.from(sources, index => data[index] == null ? '' : data[index]);
+          const series = createWaveDataFillSeries(seed);
+          const indices = Array.from(targets).filter(index => !sources.has(index));
+          if (side === 'left') indices.reverse();
+          indices.forEach((index, offset) => {
+            while (data.length <= index) data.push('');
+            data[index] = series(side === 'left' ? -1 - offset : seed.length + offset);
+          });
+          filled += indices.length;
+          if (indices.length && JSON.stringify(data) !== JSON.stringify(normalizeWaveDataValues(signal.data))) {
+            updates.push({ location, signal: Object.assign({}, signal, { data }) });
+          }
+        }
+        if (!updates.length) {
+          setStatus(true, filled ? '推理填充完成，文本内容未变化' : '虚线选区内没有可填充的数据波形');
+          return false;
+        }
+        updates.forEach(update => { update.location.parent[update.location.index] = update.signal; });
+        pushUndoBeforeChange();
+        applyEditorChange(JSON.stringify(parsed, null, 2), editor.selectionStart, editor.selectionEnd, { skipFocus: true });
+        scheduleFormatAfterWaveChange();
+        setStatus(true, '已推理填充 ' + filled + ' 个数据波形');
+        vwdDebugLog('wave-data-fill', { phase: 'commit', block, targetStart, targetEnd, side, filled });
+        return true;
+      } catch (error) {
+        setStatus(false, error.message);
+        vwdDebugLog('wave-data-fill', { phase: 'rejected', reason: error.message });
+        return false;
+      }
+    }
+
     function applyWaveRangeReplacement(rowIndex, startCol, replacement, actionLabel, options) {
       if (rowIndex < 0 || startCol < 0 || !replacement) {
         setStatus(false, '请先选择要修改的波形格');
@@ -6884,6 +6994,7 @@ ${lines.join('\n')}`;
         item.title = (canUseLegend ? actionHint : '请先在波形区点击选中一行')
           + waveShortcutHint('wave:' + item.dataset.waveChar);
       });
+      refreshWaveDataFillControls();
     }
 
     function getSelectedWaveBlock() {
@@ -7076,6 +7187,191 @@ ${lines.join('\n')}`;
       rect.setAttribute('height', Math.max(20, height));
       rect.setAttribute('pointer-events', 'none');
       lane.appendChild(rect);
+    }
+
+    function refreshWaveDataFillControls(lanes, unitWidth) {
+      const svg = waveContainer.querySelector('svg');
+      if (!svg) return;
+      let controls = svg.querySelector('.wave-data-fill-controls');
+      const block = waveDataFillDrag ? waveDataFillDrag.block : getSelectedWaveBlock();
+      if (!block || inlineEditActive || waveSelectionDrag || isTextEditModeActive()
+          || app.classList.contains('reading-mode') || wavePaintModeActive || groupPickActive
+          || isConnectionPickFlow() || connectionSelectActive || selectedEdgeIndex >= 0 || selectedGroupIndex >= 0) {
+        if (controls) controls.remove();
+        return;
+      }
+      const rows = lanes || getWaveLaneGroups(svg);
+      const first = rows[block.startRow];
+      const last = rows[block.endRow];
+      if (!first || !last) { if (controls) controls.remove(); return; }
+      const step = getWaveColumnWidth(unitWidth || getWaveUnitWidth(editor.value));
+      const matrix = svg.getScreenCTM();
+      const firstRoot = first.querySelector('[id^="wavelane_draw_"]') || first;
+      const lastRoot = last.querySelector('[id^="wavelane_draw_"]') || last;
+      if (!matrix || !firstRoot.getScreenCTM() || !lastRoot.getScreenCTM()) return;
+      const inverse = matrix.inverse();
+      const point = (lane, col, y) => {
+        const origin = lane.querySelector('[id^="wavelane_draw_"]') || lane;
+        const value = svg.createSVGPoint();
+        value.x = col * step;
+        value.y = y;
+        return value.matrixTransform(origin.getScreenCTM()).matrixTransform(inverse);
+      };
+      if (!controls) {
+        controls = document.createElementNS(svg.namespaceURI, 'g');
+        controls.setAttribute('class', 'wave-data-fill-controls');
+        svg.insertBefore(controls, svg.querySelector(':scope > .vwd-frozen-label-layer'));
+      }
+      const windowStart = bigWaveViewportState.enabled && bigWaveViewportState.window
+        ? bigWaveViewportState.window.start : 0;
+      const signature = [block.startRow, block.endRow, block.start, block.end, windowStart, step].join(':');
+      if (controls.dataset.selection !== signature) {
+        controls.dataset.selection = signature;
+        controls.replaceChildren();
+        for (const side of ['left', 'right']) {
+          const local = getBigWaveVisibleBoundaryColumn(side === 'left' ? block.start : block.end + 1);
+          if (local === null) continue;
+          const anchor = point(last, local, 22);
+          const handle = document.createElementNS(svg.namespaceURI, 'g');
+          handle.setAttribute('class', 'wave-data-fill-handle');
+          handle.dataset.side = side;
+          handle.setAttribute('transform', 'translate(' + anchor.x + ',' + anchor.y + ')');
+          handle.setAttribute('aria-label', side === 'left' ? '向左推理填充' : '向右推理填充');
+          const title = document.createElementNS(svg.namespaceURI, 'title');
+          title.textContent = side === 'left' ? '向左拖动推理填充' : '向右拖动推理填充';
+          const hit = document.createElementNS(svg.namespaceURI, 'rect');
+          hit.setAttribute('class', 'wave-data-fill-hit');
+          hit.setAttribute('x', '-8'); hit.setAttribute('y', '-8');
+          hit.setAttribute('width', '16'); hit.setAttribute('height', '16');
+          const mark = document.createElementNS(svg.namespaceURI, 'rect');
+          mark.setAttribute('class', 'wave-data-fill-mark');
+          mark.setAttribute('x', '-4'); mark.setAttribute('y', '-4');
+          mark.setAttribute('width', '8'); mark.setAttribute('height', '8');
+          handle.append(title, hit, mark);
+          handle.addEventListener('pointerdown', event => beginWaveDataFillDrag(event, side));
+          handle.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); });
+          controls.appendChild(handle);
+        }
+        const preview = document.createElementNS(svg.namespaceURI, 'rect');
+        preview.setAttribute('class', 'wave-data-fill-preview');
+        preview.setAttribute('visibility', 'hidden');
+        controls.prepend(preview);
+      }
+      const preview = controls.querySelector('.wave-data-fill-preview');
+      const drag = waveDataFillDrag;
+      const start = drag && drag.side === 'left' ? drag.currentColumn : block.end + 1;
+      const end = drag && drag.side === 'right' ? drag.currentColumn : block.start - 1;
+      const range = drag && end >= start ? getBigWaveVisibleRange(start, end) : null;
+      if (!range) { preview.setAttribute('visibility', 'hidden'); return; }
+      const top = point(first, range.start, -2);
+      const bottom = point(last, range.end + 1, 22);
+      preview.setAttribute('x', Math.min(top.x, bottom.x));
+      preview.setAttribute('y', top.y);
+      preview.setAttribute('width', Math.abs(bottom.x - top.x));
+      preview.setAttribute('height', Math.max(1, bottom.y - top.y));
+      preview.setAttribute('visibility', 'visible');
+    }
+
+    function beginWaveDataFillDrag(event, side) {
+      if (event.button !== 0 || waveDataFillDrag) return;
+      const block = getSelectedWaveBlock();
+      if (!block || inlineEditActive || isVisibleModalOpen() || isTextEditModeActive()
+          || app.classList.contains('reading-mode') || wavePaintModeActive || groupPickActive
+          || isConnectionPickFlow() || connectionSelectActive || selectedEdgeIndex >= 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      hideWaveCellTooltip();
+      setWaveClipboardShortcutActive(true, 'data-fill');
+      const state = {
+        block, side, pointerId: event.pointerId, originalText: editor.value,
+        documentName: editingWaveDocumentName, clientX: event.clientX, startX: event.clientX,
+        currentColumn: side === 'left' ? block.start : block.end,
+        maxColumn: Math.max(0, getMaxWaveBoundaryIndex(buildSignalSourceMap(editor.value)) - 1),
+        frame: 0, moved: false
+      };
+      waveDataFillDrag = state;
+      const scroller = getWavePreviewScroller(waveContainer);
+      const updateColumn = () => {
+        const svg = waveContainer.querySelector('svg');
+        const lane = svg && getWaveLaneGroups(svg)[block.endRow];
+        if (!lane) return;
+        const origin = lane.querySelector('[id^="wavelane_draw_"]') || lane;
+        const matrix = origin.getScreenCTM();
+        if (!matrix) return;
+        const point = svg.createSVGPoint();
+        point.x = state.clientX;
+        point.y = matrix.f;
+        const start = bigWaveViewportState.enabled && bigWaveViewportState.window ? bigWaveViewportState.window.start : 0;
+        const column = Math.floor(point.matrixTransform(matrix.inverse()).x / getWaveColumnWidth(getWaveUnitWidth(editor.value))) + start;
+        state.currentColumn = Math.max(0, Math.min(state.maxColumn, column));
+        if (side === 'left') state.currentColumn = Math.min(block.start, state.currentColumn);
+        else state.currentColumn = Math.max(block.end, state.currentColumn);
+      };
+      const tick = () => {
+        state.frame = 0;
+        if (waveDataFillDrag !== state) return;
+        if (state.originalText !== editor.value || state.documentName !== editingWaveDocumentName) { finish(true); return; }
+        if (!state.moved) return;
+        const rect = scroller.getBoundingClientRect();
+        const distance = state.clientX < rect.left + 20 ? state.clientX - rect.left - 20
+          : state.clientX > rect.right - 20 ? state.clientX - rect.right + 20 : 0;
+        const previousLeft = scroller.scrollLeft;
+        let keepScrolling = false;
+        if (distance && bigWaveViewportState.enabled && bigWaveViewportState.window) {
+          const current = bigWaveViewportState.pendingStart >= 0 ? bigWaveViewportState.pendingStart : bigWaveViewportState.start;
+          const next = Math.max(0, Math.min(bigWaveViewportState.window.maxStart, current + Math.sign(distance)));
+          keepScrolling = next !== current;
+          if (keepScrolling && performance.now() - (state.lastWindowShift || 0) >= 100) {
+            state.lastWindowShift = performance.now();
+            scheduleBigWaveViewportStart(next, 'data-fill-drag', false);
+          }
+        } else if (distance) scroller.scrollLeft += Math.sign(distance) * Math.min(18, Math.abs(distance) / 3);
+        updateColumn();
+        refreshWaveDataFillControls();
+        if (keepScrolling || Math.abs(scroller.scrollLeft - previousLeft) > 0.1) state.frame = requestAnimationFrame(tick);
+      };
+      const schedule = () => { if (!state.frame) state.frame = requestAnimationFrame(tick); };
+      const move = e => {
+        if (e.pointerId !== state.pointerId) return;
+        state.clientX = e.clientX;
+        state.moved = state.moved || Math.abs(state.clientX - state.startX) >= 3;
+        schedule();
+        e.preventDefault();
+      };
+      const finish = cancelled => {
+        if (waveDataFillDrag !== state) return;
+        if (state.moved) updateColumn();
+        waveDataFillDrag = null;
+        if (state.frame) cancelAnimationFrame(state.frame);
+        if (bigWaveViewportState.pendingReason === 'data-fill-drag') {
+          clearBigWaveRenderTimer();
+          bigWaveViewportState.pendingStart = -1;
+          bigWaveViewportState.pendingReason = '';
+          updateBigWaveNavigatorReadout();
+        }
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', up);
+        window.removeEventListener('pointercancel', cancel);
+        window.removeEventListener('blur', blur);
+        scroller.removeEventListener('scroll', schedule);
+        wavePanel.removeEventListener('lostpointercapture', cancel);
+        try { if (wavePanel.hasPointerCapture(state.pointerId)) wavePanel.releasePointerCapture(state.pointerId); } catch (_) { /* The window may be closing. */ }
+        refreshWaveDataFillControls();
+        if (!cancelled && state.moved && state.originalText === editor.value && state.documentName === editingWaveDocumentName) {
+          applyWaveDataFill(block, state.currentColumn, side);
+        }
+      };
+      const up = e => { if (e.pointerId === state.pointerId) { state.clientX = e.clientX; finish(false); } };
+      const cancel = e => { if (e.pointerId === state.pointerId) finish(true); };
+      const blur = () => finish(true);
+      state.cancel = blur;
+      window.addEventListener('pointermove', move, { passive: false });
+      window.addEventListener('pointerup', up);
+      window.addEventListener('pointercancel', cancel);
+      window.addEventListener('blur', blur);
+      scroller.addEventListener('scroll', schedule, { passive: true });
+      wavePanel.addEventListener('lostpointercapture', cancel);
+      try { wavePanel.setPointerCapture(state.pointerId); } catch (_) { /* Window listeners still finish the drag. */ }
     }
 
     function updateColumnHighlight(lane, drawGroup, wave, colIndex, unitWidth, highlightClass) {
@@ -7657,6 +7953,7 @@ ${lines.join('\n')}`;
             }
         }
       });
+      refreshWaveDataFillControls(lanes, unitWidth);
     }
 
     function restoreWaveSelection(lanes, sourceMap) {
@@ -11199,9 +11496,6 @@ ${lines.join('\n')}`;
     }
 
     function createWaveDataSlotEditAnchor(drawGroup, wave, slot, svgRoot, preferredText, fallbackClientX) {
-      if (hasUsableInlineEditAnchor(preferredText)) return preferredText;
-
-      const drawRect = drawGroup.getBoundingClientRect();
       const columnWidth = getWaveColumnWidth(getWaveUnitWidth(editor.value));
       const waveValue = String(wave || '');
       let endCol = slot.col + 1;
@@ -11209,35 +11503,74 @@ ${lines.join('\n')}`;
         endCol++;
       }
 
-      let centerX = Number.isFinite(fallbackClientX)
-        ? fallbackClientX
-        : drawRect.left + (slot.col + 0.5) * columnWidth;
-      try {
-        const matrix = drawGroup.getScreenCTM();
-        if (matrix && svgRoot && typeof svgRoot.createSVGPoint === 'function') {
-          const point = svgRoot.createSVGPoint();
-          point.x = ((slot.col + endCol) / 2) * columnWidth;
-          point.y = 0;
-          centerX = point.matrixTransform(matrix).x;
-        }
-      } catch (_e) {
-        // Keep the click or bounding-box fallback when SVG transforms are unavailable.
-      }
-
-      const anchorHeight = Math.max(16, Math.min(22, drawRect.height || 20));
-      const rect = {
-        x: centerX - 24,
-        y: drawRect.top + Math.max(0, (drawRect.height - anchorHeight) / 2),
-        width: 0,
-        height: anchorHeight
-      };
-      rect.left = rect.x;
-      rect.top = rect.y;
-      rect.right = rect.x;
-      rect.bottom = rect.y + rect.height;
       return {
         __vwdAnchorKind: 'data-slot',
-        getBoundingClientRect: () => rect
+        getBoundingClientRect: () => {
+          try {
+            const matrix = drawGroup.getScreenCTM();
+            if (matrix && svgRoot && typeof svgRoot.createSVGPoint === 'function') {
+              const point = svgRoot.createSVGPoint();
+              point.x = slot.col * columnWidth;
+              point.y = 0;
+              const start = point.matrixTransform(matrix);
+              point.x = endCol * columnWidth;
+              point.y = 20;
+              const end = point.matrixTransform(matrix);
+              return {
+                left: start.x, top: start.y, right: end.x, bottom: end.y,
+                width: end.x - start.x, height: end.y - start.y,
+                columnWidth: (end.x - start.x) / (endCol - slot.col),
+                gridLeft: start.x - slot.col * columnWidth * matrix.a
+              };
+            }
+          } catch (_e) { /* Fall back to the visible label when SVG geometry is unavailable. */ }
+          if (hasUsableInlineEditAnchor(preferredText)) return preferredText.getBoundingClientRect();
+          const drawRect = drawGroup.getBoundingClientRect();
+          const left = Number.isFinite(fallbackClientX) ? fallbackClientX - 20 : drawRect.left + slot.col * columnWidth;
+          return { left, top: drawRect.top, width: columnWidth, height: 20 };
+        }
+      };
+    }
+
+    function attachWaveDataEditorLayout(input, anchor) {
+      const layout = () => {
+        if (!input.isConnected) return;
+        const rect = anchor.getBoundingClientRect();
+        const panel = wavePanel.getBoundingClientRect();
+        const step = Math.max(1, rect.columnWidth || rect.width || 40);
+        const viewportLeft = Math.max(panel.left + wavePanel.clientLeft + 8,
+          Number.isFinite(rect.gridLeft) ? rect.gridLeft : panel.left);
+        const viewportRight = panel.left + wavePanel.clientLeft + wavePanel.clientWidth - 8;
+        const available = Math.max(1, viewportRight - viewportLeft);
+        const measured = measureInlineTextInputWidth(input);
+        const columns = Math.min(Math.max(1, Math.floor(available / step)), Math.max(1, Math.ceil(measured / step)));
+        const width = Math.min(available, columns * step);
+        const first = Math.ceil((viewportLeft - rect.left) / step - 0.0001);
+        const last = Math.floor((viewportRight - width - rect.left) / step + 0.0001);
+        const centered = Math.floor((rect.width - width) / (2 * step));
+        // Keep both edges on cycle boundaries whenever a full cell fits on screen.
+        const left = first <= last ? rect.left + Math.max(first, Math.min(last, centered)) * step
+          : Math.max(viewportLeft, Math.min(rect.left, viewportRight - width));
+        const height = Math.max(22, rect.height);
+        input.style.left = (left - panel.left - wavePanel.clientLeft + wavePanel.scrollLeft) + 'px';
+        input.style.top = (rect.top + (rect.height - height) / 2 - panel.top - wavePanel.clientTop + wavePanel.scrollTop) + 'px';
+        input.style.width = width + 'px';
+        input.style.height = height + 'px';
+      };
+      let frame = 0;
+      const schedule = (event) => {
+        if (event && event.target === input) return;
+        if (!frame) frame = requestAnimationFrame(() => { frame = 0; layout(); });
+      };
+      input.addEventListener('input', layout);
+      window.addEventListener('scroll', schedule, true);
+      window.addEventListener('resize', schedule);
+      layout();
+      return () => {
+        cancelAnimationFrame(frame);
+        input.removeEventListener('input', layout);
+        window.removeEventListener('scroll', schedule, true);
+        window.removeEventListener('resize', schedule);
       };
     }
 
@@ -12534,6 +12867,7 @@ ${lines.join('\n')}`;
       overlay.className = isDescriptionField
         ? 'wave-text-edit-overlay wave-description-overlay'
         : 'wave-text-edit-overlay';
+      if (field === 'data') overlay.classList.add('wave-data-edit-overlay');
       if (!isDescriptionField) overlay.type = 'text';
       overlay.value = oldValue;
       overlay.autocomplete = 'off';
@@ -12599,7 +12933,8 @@ ${lines.join('\n')}`;
       }
       overlayParent.appendChild(overlay);
       trackInlineEditorHistoryState(overlay, oldValue);
-      if (!isDescriptionField) {
+      const stopDataEditorLayout = field === 'data' ? attachWaveDataEditorLayout(overlay, anchor) : null;
+      if (!isDescriptionField && field !== 'data') {
         attachInlineTextInputAutoWidth(overlay, {
           container: wavePanel,
           minWidth: Math.max(rect.width + 16, 48),
@@ -12644,6 +12979,7 @@ ${lines.join('\n')}`;
           oldValueLen: oldValue ? oldValue.length : 0,
           sameValue: newVal === oldValue
         });
+        if (stopDataEditorLayout) stopDataEditorLayout();
         overlay.remove();
         inlineEditActive = false;
         setActiveInlineEditState(null);
@@ -12696,6 +13032,7 @@ ${lines.join('\n')}`;
         }
         if (e.key === 'Escape') {
           committed = true;
+          if (stopDataEditorLayout) stopDataEditorLayout();
           overlay.remove();
           inlineEditActive = false;
           setActiveInlineEditState(null);
@@ -13291,7 +13628,7 @@ ${lines.join('\n')}`;
             const hover = pendingWaveCellHover;
             pendingWaveCellHover = null;
             if (!hover || (hover.pointerType && hover.pointerType !== 'mouse') || hover.buttons !== 0
-                || waveSelectionDrag || inlineEditActive) {
+                || waveSelectionDrag || waveDataFillDrag || inlineEditActive) {
               hideWaveCellTooltip();
               return;
             }
@@ -19095,6 +19432,37 @@ ${lines.join('\n')}`;
       return true;
     }
 
+    function handleWaveClassCycleShortcut(event) {
+      if (!matchesWaveActionShortcut('cycleWave', event) || event.defaultPrevented
+          || keyboardInputScope !== 'wave' || inlineEditActive || isVisibleModalOpen()
+          || app.classList.contains('reading-mode') || groupPickActive
+          || isConnectionPickFlow() || connectionSelectActive || selectedEdgeIndex >= 0
+          || selectedGroupIndex >= 0) return false;
+      const target = event.target;
+      if (!target || !target.closest || isJsonEditorTarget(target)
+          || target.closest('input, textarea, select, button, [contenteditable]:not([contenteditable="false"])')) return false;
+      const vim = vimController && vimController.getState();
+      if (vim && vim.enabled && (vim.scope !== 'wave' || vim.mode !== 'normal' || vim.pending || vim.count)) return false;
+      const block = getSelectedWaveBlock();
+      if (!block || block.startRow !== block.endRow || block.start !== block.end) return false;
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.repeat) return true;
+      let sourceMap;
+      try {
+        JSON.parse(editor.value);
+        sourceMap = buildSignalSourceMap(editor.value);
+      } catch (_error) {
+        setStatus(false, 'JSON 错误，无法切换波形');
+        return true;
+      }
+      const entry = sourceMap[block.startRow];
+      const char = entry && (entry.signal.wave || '')[block.start];
+      const next = waveformClassifier.next(char);
+      if (next && next !== char) applyWaveRangeReplacement(block.startRow, block.start, next, '切换波形类型');
+      return true;
+    }
+
     function handleWaveSymbolShortcut(event) {
       if (!waveShortcutsCheckbox || !waveShortcutsCheckbox.checked || waveShortcutsCheckbox.disabled
           || (vimController && vimController.getState().enabled)
@@ -19999,6 +20367,7 @@ ${lines.join('\n')}`;
         '.wave-col-highlight',
         '.wave-col-highlight-from',
         '.wave-col-highlight-to',
+        '.wave-data-fill-controls',
         '.wave-edge-hit-target',
         '.wave-edge-label-move-handle',
         '.wave-name-click-zone',
@@ -23103,13 +23472,20 @@ ${lines.join('\n')}`;
 
     document.addEventListener('keydown', (e) => {
       if (presenterWaveViewActive) return;
+      if (waveDataFillDrag) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.key === 'Escape') waveDataFillDrag.cancel();
+        return;
+      }
       if (e.target && e.target.closest && e.target.closest('.wave-document-description-editor')) return;
-      if (e.target && e.target.closest && e.target.closest('#ui-settings-modal, #wave-shortcut-modal')) return;
+      if (e.target && e.target.closest && e.target.closest('#ui-settings-modal, #wave-shortcut-modal, #wave-classifier-modal')) return;
       if (e.target && e.target.closest && e.target.closest('.vwd-big-wave-jump')) return;
       if (e.target && e.target.closest && e.target.closest('#wave-collection-import-modal')) return;
       if (handleTextEditModeEscape(e)) return;
       if (handleTextEditToggleShortcut(e)) return;
       if (handleWaveDocumentClipboardShortcut(e)) return;
+      if (handleWaveClassCycleShortcut(e)) return;
       if (vimController && vimController.handleKeydown(e)) return;
       if (handleUndoRedoShortcut(e)) return;
       if (handleWaveClipboardShortcut(e)) return;

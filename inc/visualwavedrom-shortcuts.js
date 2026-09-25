@@ -6,7 +6,7 @@
 }(typeof globalThis !== 'undefined' ? globalThis : this, function (root) {
   'use strict';
   const storageKey = 'visualwavedrom.wave.shortcuts.v1';
-  const settingsVersion = 2;
+  const settingsVersion = 3;
   const modifiers = ['Ctrl', 'Alt', 'Shift'];
   const namedKeys = ['Space', 'Tab', 'Enter', 'Escape', 'Delete', 'Backspace', 'Insert',
     'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'];
@@ -56,9 +56,61 @@
     return /^(Ctrl\+(Shift\+)?[flnoprtuw]|Ctrl\+(Shift\+)?Tab|Alt\+(F4|Tab|ArrowLeft|ArrowRight)|F(?:1|3|5|6|7|10|11|12))$/.test(value);
   }
 
+  function createClassifier(waveItems) {
+    const key = 'visualwavedrom.wave.classes.v1';
+    const defaults = ['23456789', '01x|'];
+    const supported = new Set(waveItems.map(item => item.char));
+    let classes = defaults.slice();
+
+    function validate(candidate) {
+      if (!Array.isArray(candidate) || candidate.length > supported.size) {
+        return { error: '分类数量应为 0 至 ' + supported.size + ' 的整数', index: -1 };
+      }
+      const used = new Map();
+      for (let index = 0; index < candidate.length; index++) {
+        if (typeof candidate[index] !== 'string') return { error: '请输入波形字符', index };
+        for (const char of candidate[index]) {
+          if (!supported.has(char)) return { error: '分类 ' + (index + 1) + '：不支持字符“' + char + '”', index };
+          if (used.has(char)) return { error: '字符“' + char + '”已在分类 ' + (used.get(char) + 1) + ' 中，请勿重复', index };
+          used.set(char, index);
+        }
+      }
+      return { classes: candidate.slice() };
+    }
+
+    function read() {
+      try {
+        const stored = JSON.parse(root.localStorage.getItem(key));
+        const result = stored && stored.version === 1 ? validate(stored.classes) : {};
+        classes = result.classes || defaults.slice();
+      } catch (_error) { classes = defaults.slice(); }
+    }
+    read();
+    if (root.addEventListener) root.addEventListener('storage', event => {
+      if (event.key === key || event.key === null) read();
+    });
+
+    function save(candidate) {
+      const result = validate(candidate);
+      if (result.error) return result;
+      classes = result.classes;
+      let persisted = true;
+      try { root.localStorage.setItem(key, JSON.stringify({ version: 1, classes })); }
+      catch (_error) { persisted = false; }
+      return { persisted };
+    }
+
+    return { defaults, validate, save, maxClasses: supported.size, snapshot: () => classes.slice(),
+      next(char) {
+        const group = char && classes.find(value => value.includes(char));
+        return group ? group[(group.indexOf(char) + 1) % group.length] : null;
+      } };
+  }
+
   function create(waveItems, onChange) {
     const definitions = [
       { id: 'textEdit', label: '文本编辑模式', keys: ['t'], group: '编辑操作' },
+      { id: 'cycleWave', label: '按分类循环切换波形', keys: ['q'], group: '编辑操作' },
       { id: 'undo', label: '撤销', keys: ['Ctrl+z'], group: '编辑操作' },
       { id: 'redo', label: '重做', keys: ['Ctrl+Shift+z', 'Ctrl+y'], group: '编辑操作' },
       { id: 'copy', label: '复制波形 / 波形图', keys: ['Ctrl+c'], group: '编辑操作' },
@@ -101,7 +153,7 @@
 
     try {
       const stored = JSON.parse(root.localStorage.getItem(storageKey));
-      if (stored && (stored.version === 1 || stored.version === settingsVersion) && stored.bindings) {
+      if (stored && [1, 2, settingsVersion].includes(stored.version) && stored.bindings) {
         const candidate = Object.assign({}, defaults, stored.bindings);
         let migrated = false;
         if (stored.version === 1 && Array.isArray(candidate.textEdit)) {
@@ -120,10 +172,18 @@
             }
           }
         }
+        if (!Object.prototype.hasOwnProperty.call(stored.bindings, 'cycleWave')) {
+          // Claim the new default without discarding unrelated custom shortcuts.
+          for (const item of definitions) {
+            if (item.id !== 'cycleWave' && Array.isArray(candidate[item.id])) {
+              candidate[item.id] = candidate[item.id].map(key => normalize(key) === 'q' ? '' : key);
+            }
+          }
+        }
         const result = validate(candidate);
         if (result.bindings) {
           bindings = result.bindings;
-          if (stored.version === 1) root.localStorage.setItem(storageKey, JSON.stringify({ version: settingsVersion, bindings }));
+          if (stored.version !== settingsVersion) root.localStorage.setItem(storageKey, JSON.stringify({ version: settingsVersion, bindings }));
         }
       }
     } catch (_error) { /* A fresh or storage-restricted browser uses the defaults. */ }
@@ -258,5 +318,5 @@
       snapshot: () => Object.fromEntries(definitions.map(item => [item.id, bindings[item.id].slice()])) };
   }
 
-  return { create, normalize, fromEvent, display, browserReserved, storageKey };
+  return { create, createClassifier, normalize, fromEvent, display, browserReserved, storageKey };
 }));

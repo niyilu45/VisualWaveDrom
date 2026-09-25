@@ -115,6 +115,42 @@
   align-self: stretch;
 }
 
+.wave-classifier-dialog {
+  width: min(100%, 30rem);
+}
+
+.wave-classifier-row {
+  display: grid;
+  grid-template-columns: minmax(4.5em, max-content) minmax(0, 1fr);
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.35rem 0;
+}
+
+.wave-classifier-row .modal-input {
+  width: 100%;
+  min-width: 0;
+  min-height: 2.25rem;
+  font-size: inherit;
+}
+
+.wave-classifier-row input[type="text"] {
+  font-family: var(--font-mono, monospace);
+}
+
+.wave-classifier-row input[aria-invalid="true"] {
+  border-color: var(--error, #ef4444);
+}
+
+#wave-classifier-status {
+  color: var(--error, #ef4444);
+  font-size: 0.8125rem;
+}
+
+.wave-classifier-dialog .modal-footer {
+  flex-wrap: wrap;
+}
+
 .wave-shortcut-dialog {
   display: flex;
   flex-direction: column;
