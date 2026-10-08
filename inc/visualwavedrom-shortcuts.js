@@ -6,7 +6,7 @@
 }(typeof globalThis !== 'undefined' ? globalThis : this, function (root) {
   'use strict';
   const storageKey = 'visualwavedrom.wave.shortcuts.v1';
-  const settingsVersion = 3;
+  const settingsVersion = 4;
   const modifiers = ['Ctrl', 'Alt', 'Shift'];
   const namedKeys = ['Space', 'Tab', 'Enter', 'Escape', 'Delete', 'Backspace', 'Insert',
     'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'];
@@ -126,7 +126,7 @@
       { id: 'redo', label: '重做', keys: ['Ctrl+Shift+z', 'Ctrl+y'], group: '编辑操作' },
       { id: 'copy', label: '复制波形 / 波形图', keys: ['Ctrl+c'], group: '编辑操作' },
       { id: 'paste', label: '粘贴波形 / 波形图', keys: ['Ctrl+v'], group: '编辑操作' },
-      { id: 'delete', label: '删除选中的波形 / 分组 / 连线', keys: ['Delete'], group: '编辑操作' },
+      { id: 'delete', label: '删除选中的波形 / 分组 / 连线', keys: ['Delete', 'Backspace'], group: '编辑操作' },
       { id: 'indent', label: '目录降一级', keys: ['Tab'], group: '目录操作' },
       { id: 'outdent', label: '目录升一级', keys: ['Shift+Tab'], group: '目录操作' }
     ].concat(waveItems.map(item => ({ id: 'wave:' + item.char, label: item.label + ' (' + item.char + ')',
@@ -164,9 +164,14 @@
 
     try {
       const stored = JSON.parse(root.localStorage.getItem(storageKey));
-      if (stored && [1, 2, settingsVersion].includes(stored.version) && stored.bindings) {
+      if (stored && [1, 2, 3, settingsVersion].includes(stored.version) && stored.bindings) {
         const candidate = Object.assign({}, defaults, stored.bindings);
         let migrated = false;
+        if (stored.version < 4 && Array.isArray(candidate.delete) && candidate.delete.length === 1
+            && normalize(candidate.delete[0]) === 'Delete'
+            && !Object.entries(candidate).some(([id, keys]) => id !== 'delete' && Array.isArray(keys) && keys.some(key => normalize(key) === 'Backspace'))) {
+          candidate.delete = ['Delete', 'Backspace']; migrated = true;
+        }
         if (stored.version === 1 && Array.isArray(candidate.textEdit)) {
           const retained = candidate.textEdit.filter(key => !['Ctrl+t', 'F2'].includes(normalize(key)));
           if (retained.length !== candidate.textEdit.length) {

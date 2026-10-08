@@ -502,6 +502,7 @@ if (!window.VWDCodeEditorPairs) {
     let pendingRenderText = null;
     let pendingRenderAnalysis = null;
     let isInsertingEdge = false;
+    let pendingConnectionInsert = null;
     let connectionHighlightRaf = null;
     let pendingHighlightLanes = null;
     let pendingHighlightSourceMap = null;
@@ -9709,6 +9710,27 @@ ${lines.join('\n')}`;
       }
     }
 
+    function editSelectedConnectionLabelFromKeyboard(options) {
+      const opts = options || {};
+      const pending = pendingConnectionInsert;
+      if (pending && pending.fromPickFlow && pending.documentName === editingWaveDocumentName
+          && pending.sourceText === editor.value && connectionAddSessionActive && connectionPickActive) {
+        pending.labelEditOptions = opts;
+        vwdDebugLog('connection-label', { phase: 'keyboard-edit-queued', vimDirect: !!opts.vimDirect });
+        return true;
+      }
+      if (selectedEdgeIndex < 0) return false;
+      if (waveEditMode !== 'modify') setWaveEditMode('modify');
+      setTextEditMode(true);
+      if (!isTextEditModeActive()) return false;
+      const index = selectedEdgeIndex;
+      const opened = startSelectedEdgeLabelInlineEdit(getSelectedEdgeLabelEditAnchor(index), index, opts);
+      if (opened) setStatus(true, '正在编辑所选连接线标签');
+      else if (opts.vimDirect) vimDirectInlineEditActive = false;
+      vwdDebugLog('connection-label', { phase: 'keyboard-edit', edgeIndex: index, opened, vimDirect: !!opts.vimDirect });
+      return opened;
+    }
+
     function finishVimEdgeLabelEdit() {
       if (!vimDirectInlineEditActive) return;
       vimDirectInlineEditActive = false;
@@ -10288,6 +10310,8 @@ ${lines.join('\n')}`;
       const documentName = editingWaveDocumentName;
       const sourceText = editor.value;
       const fromPickFlow = connectionAddSessionActive && connectionPickActive;
+      const insertOperation = { documentName, sourceText, fromPickFlow, labelEditOptions: null };
+      pendingConnectionInsert = insertOperation;
 
       isInsertingEdge = true;
       setStatus(true, '正在插入连接…');
@@ -10403,12 +10427,19 @@ ${lines.join('\n')}`;
           // 新增连接时避免立即完整重绘大波形；现有 SVG 已追加轻量链路。 JSON 和列表已同步。
           clearTimeout(deferredEdgeRenderTimer);
           deferredEdgeRenderTimer = null;
+          pendingConnectionInsert = null;
+          if (insertOperation.labelEditOptions && fromPickFlow && selectedEdgeIndex === newEdgeIndex
+              && editingWaveDocumentName === documentName && keyboardInputScope === 'wave'
+              && !inlineEditActive && !isVisibleModalOpen()) {
+            editSelectedConnectionLabelFromKeyboard(insertOperation.labelEditOptions);
+          }
         } catch (e) {
           const message = e && e.message ? e.message : String(e);
           vwdDebugLog('connection', { phase: 'insert-error', message, stack: e && e.stack ? String(e.stack) : '' });
           setStatus(false, '连接生成失败: ' + message);
         } finally {
           isInsertingEdge = false;
+          if (pendingConnectionInsert === insertOperation) pendingConnectionInsert = null;
         }
       });
     }
@@ -19441,6 +19472,10 @@ ${lines.join('\n')}`;
       event.preventDefault();
       event.stopPropagation();
       if (!event.repeat) {
+        if (selectedEdgeIndex >= 0 || pendingConnectionInsert && pendingConnectionInsert.fromPickFlow) {
+          editSelectedConnectionLabelFromKeyboard();
+          return true;
+        }
         const button = document.getElementById('btn-wave-text-edit-mode');
         if (!button.disabled) button.click();
         else setStatus(false, '文本编辑模式仅可在修改模式下使用');
@@ -21216,6 +21251,75 @@ ${lines.join('\n')}`;
       }
     }
 
+    function openWaveTimingPreview(documentName) {
+      const libraryId = currentWaveLibraryId;
+      let lastMeta = null, prepared = null;
+      const getMeta = async () => {
+        if (currentWaveLibraryId !== libraryId) throw new Error('波形库已切换，请关闭并重新打开时延检查');
+        const tag = await ensureWaveDocumentLoaded(documentName);
+        if (!tag) throw new Error('波形图已删除或尚未加载');
+        if (currentWaveLibraryId !== libraryId) throw new Error('波形库已切换，请重新打开时延检查');
+        const meta = getWaveDocumentMeta(tag, true);
+        if (meta.error) throw new Error('波形 JSON 解析失败：' + meta.error.message);
+        if (!meta.source) throw new Error('波形内容为空');
+        return { tag, meta };
+      };
+      try {
+        window.VisualWaveDromTiming.open({
+          id: libraryId + ':' + documentName,
+          read: async () => {
+            const { tag, meta } = await getMeta();
+            if (meta !== lastMeta) {
+              const resolved = window.VisualWaveDromParameters.resolve(meta.source);
+              prepared = Object.assign({}, resolved, {
+                edge: (meta.source.edge || []).map((value) => window.VisualWaveDromParameters.text(value, meta.source))
+              });
+              lastMeta = meta;
+            }
+            return { source: prepared, title: getSavedTagTitle(tag) };
+          },
+          apply: async (config) => {
+            const { tag, meta } = await getMeta();
+            const parsed = JSON.parse(meta.content);
+            parsed.timingCheck = Object.assign({}, parsed.timingCheck, config);
+            if (!Object.prototype.hasOwnProperty.call(config, 'cycleTimeNs')) delete parsed.timingCheck.cycleTimeNs;
+            const next = JSON.stringify(parsed, null, 2);
+            if (next === meta.content) return;
+            if (documentName === editingWaveDocumentName) {
+              pushUndoBeforeChange(next);
+              applyEditorChange(next, editor.selectionStart, editor.selectionEnd, { skipFocus: true });
+            } else {
+              const before = captureWaveLibrarySnapshot();
+              upsertSavedTag(documentName, Object.assign({}, tag, { content: next }), { skipSort: true });
+              activeTagName = before.activeTagName;
+              pushWaveLibraryHistory(before, captureWaveLibrarySnapshot());
+              refreshWaveDocumentCard(documentName); renderNavTree();
+            }
+            vwdDebugLog('timing-check', { phase: 'config-applied', documentName, config });
+          },
+          locate: async (rowIndex, gapColumns) => {
+            await getMeta();
+            window.focus();
+            openWaveDocumentForEditing(documentName, { immediate: true });
+            if (editingWaveDocumentName !== documentName) throw new Error('无法切换到原图，请先结束当前编辑');
+            clearConnectionSelectionContext('timing-check-locate');
+            const col = gapColumns.length ? gapColumns[0] : 0;
+            setSelectedSignal(rowIndex, col);
+            if (ensureBigWaveColumnVisible(col, 'timing-check')) {
+              await new Promise((resolve) => scheduleRenderWaveform(editor.value, resolve));
+            }
+            const svg = waveContainer.querySelector('svg');
+            if (svg) {
+              const lanes = getWaveLaneGroups(svg);
+              restoreWaveSelection(lanes, buildSignalSourceMap(editor.value));
+              if (lanes[rowIndex]) lanes[rowIndex].scrollIntoView({ block: 'center', inline: 'nearest' });
+            }
+          },
+          log: (event) => vwdDebugLog('timing-check', Object.assign({ documentName }, event))
+        });
+      } catch (error) { setStatus(false, '无法打开时延检查：' + error.message); }
+    }
+
     function createWaveDocumentCard(documentName) {
       const sequence = ++waveLibraryCardSequence;
       const card = document.createElement('article');
@@ -21315,6 +21419,13 @@ ${lines.join('\n')}`;
       header.appendChild(title);
       header.appendChild(screenshotButton);
       header.appendChild(scopeButton);
+      const timingButton = document.createElement('button');
+      timingButton.type = 'button';
+      timingButton.className = 'wave-document-scope wave-document-timing';
+      timingButton.textContent = '时延检查';
+      timingButton.title = '根据连接标签推算间隔时延，并在独立窗口检查和展开';
+      timingButton.addEventListener('click', () => openWaveTimingPreview(documentName));
+      header.appendChild(timingButton);
       header.appendChild(presenterButton);
       const parameterButton = document.createElement('button');
       parameterButton.type = 'button';
@@ -23199,17 +23310,8 @@ ${lines.join('\n')}`;
     }
 
     function editVimSelectedText() {
-      if (selectedEdgeIndex >= 0) {
-        if (waveEditMode !== 'modify') setWaveEditMode('modify');
-        setTextEditMode(true);
-        if (!isTextEditModeActive()) return false;
-        const anchor = getSelectedEdgeLabelEditAnchor(selectedEdgeIndex);
-        if (startSelectedEdgeLabelInlineEdit(anchor, selectedEdgeIndex, { vimDirect: true })) {
-          setStatus(true, 'TEXT：正在编辑所选连接线标签');
-          return true;
-        }
-        vimDirectInlineEditActive = false;
-        return false;
+      if (selectedEdgeIndex >= 0 || pendingConnectionInsert && pendingConnectionInsert.fromPickFlow) {
+        return editSelectedConnectionLabelFromKeyboard({ vimDirect: true });
       }
       if (selectedGroupIndex >= 0) {
         setTextEditMode(true);
