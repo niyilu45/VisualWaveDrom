@@ -2,7 +2,12 @@
   'use strict';
   const sessions = new Map();
   const statusNames = { ok: '已确定', unknown: '无法判断', conflict: '时延冲突' };
-  const rowStatusName = (row) => row.status === 'ok' && row.alignments.length ? '上行对齐' : statusNames[row.status];
+  const alignmentNames = { 'previous-row': '上行对齐', 'next-row': '下行对齐', 'adjacent-rows': '上下行对齐' };
+  const rowStatusName = (row) => {
+    if (row.status !== 'ok' || !row.alignments.length) return statusNames[row.status];
+    const directions = new Set(row.alignments.map((entry) => entry.direction));
+    return alignmentNames[directions.size > 1 ? 'adjacent-rows' : row.alignments[0].direction];
+  };
   const icons = {
     plus: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3M8 11h6m-3-3v6"/>',
     minus: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3M8 11h6"/>',
@@ -151,11 +156,11 @@
       const paragraph = (text, type) => { const p = doc.createElement('p'); p.textContent = text; if (type) p.className = type; detail.appendChild(p); };
       paragraph(rowStatusName(row), row.status);
       if (!row.reasons.length) paragraph(row.empty ? '空行，未发现连接时延冲突。'
-        : row.alignments.length ? '已有连接约束保持不变；其余位置按上一行推算。'
+        : row.alignments.length ? '已有连接约束保持不变；其余位置优先按上一行推算，下一行补充。'
         : '时间已确定；已提供的时延约束一致。没有连接约束的部分仅确定自身时间。');
       row.reasons.forEach((reason) => paragraph(reason));
       row.alignments.forEach((alignment) => paragraph('第' + (alignment.row + 1) + '行原列' + alignment.col
-        + ' 按上一行（第' + (alignment.referenceRow + 1) + '行）展开后的同原列时刻对齐至 ' + fmt(alignment.time) + ' cycle'
+        + ' 按' + (alignment.direction === 'next-row' ? '下一行' : '上一行') + '（第' + (alignment.referenceRow + 1) + '行）展开后的同原列时刻对齐至 ' + fmt(alignment.time) + ' cycle'
         + (alignment.referenceExpanded ? '（同值展开区域）' : '')
         + (alignment.row === row.index ? '；连接时延优先。' : '，并经连接约束传递至本行。')));
       if (row.referenceRuns.length) paragraph('原序列参考与主图共用 cycle 轴；实线按已知时刻对齐，虚线及 | ? 仅为未定位置的绘图占位，不参与时延测量。');
@@ -167,7 +172,7 @@
           : '同值区域（原时长 ' + fmt(gap.minimum) + ' cycle）') : ' |')
           + '：' + (gap.duration === undefined ? '未定' : fmt(gap.duration) + ' cycle')
           + '；起点 ' + (gap.start === null ? '?' : fmt(gap.start)) + '，终点 ' + (gap.end === null ? '?' : fmt(gap.end))
-          + (gap.durationSource === 'previous-row' ? '；来源：上一行对齐' : gap.durationSource === 'connection' ? '；来源：连接时延' : ''));
+          + (alignmentNames[gap.durationSource] ? '；来源：' + alignmentNames[gap.durationSource] : gap.durationSource === 'connection' ? '；来源：连接时延' : ''));
       });
       model.edges.filter((edge) => edge.fromNode && edge.fromNode.row === index || edge.toNode && edge.toNode.row === index).forEach((edge) => {
         paragraph('连接 ' + (edge.index + 1) + ' ' + edge.from + '→' + edge.to + '：' + (edge.label || '(无标签)')
@@ -311,10 +316,10 @@
           if (gap.duration !== undefined && gap.start !== null && gap.end !== null && gap.end > gap.start && row.status !== 'conflict') {
             const x1 = Math.max(left, x(gap.start)), x2 = Math.min(width - 8, x(gap.end));
             if (x2 > x1) {
-              const inferred = gap.durationSource === 'previous-row';
+              const inferred = !!alignmentNames[gap.durationSource];
               context.strokeStyle = inferred ? '#237963' : '#5277b4'; context.lineWidth = 1; context.setLineDash([4, 3]); context.strokeRect(x1, mid - 16, x2 - x1, 33); context.setLineDash([]);
               context.fillStyle = inferred ? '#21634f' : '#294c81';
-              if (x2 - x1 > 45) context.fillText((gap.kind === 'stretch' ? gap.omissions.length ? '未知展开 = ' : '同值展开 = ' : '| = ') + fmt(gap.duration) + (inferred ? ' · 上行' : ''), x1 + 4, top + 55);
+              if (x2 - x1 > 45) context.fillText((gap.kind === 'stretch' ? gap.omissions.length ? '未知展开 = ' : '同值展开 = ' : '| = ') + fmt(gap.duration) + (inferred ? ' · ' + alignmentNames[gap.durationSource] : ''), x1 + 4, top + 55);
             }
           }
           if (gap.duration === undefined || row.status === 'conflict') {
@@ -438,7 +443,7 @@
       const alignedCount = model.rows.filter((row) => row.alignments.length).length;
       const orphan = model.issues.filter((item) => !item.rows.length).map((item) => item.reason);
       message('已确定 ' + counts.ok + ' 行 · 时延冲突 ' + counts.conflict + ' 行 · 无法判断 ' + counts.unknown + ' 行'
-        + (alignedCount ? ' · 上行对齐 ' + alignedCount + ' 行' : '')
+        + (alignedCount ? ' · 相邻行对齐 ' + alignedCount + ' 行' : '')
         + (orphan.length ? ' · ' + orphan.join('；') : '') + (counts.conflict ? ' · 冲突行仅供定位，不能作为对齐结论' : ''), false);
       listRows();
       if (selected >= model.rows.length) selected = -1;

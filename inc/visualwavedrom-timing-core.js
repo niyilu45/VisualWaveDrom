@@ -330,7 +330,10 @@
         row.gaps.forEach((id) => {
           const gap = gaps[id]; gap.start = time(gap.a, gap.offset); gap.end = time(gap.b);
           if (!gap.ignored && gap.durationSource !== 'connection' && gap.start !== null && gap.end !== null && gap.end > gap.start) {
-            gap.duration = gap.end - gap.start; gap.durationSource = 'previous-row';
+            gap.duration = gap.end - gap.start;
+            const sources = [gap.a, gap.b].map((block) => alignmentSources.get(groups[block])).filter(Boolean);
+            const directions = new Set(sources.map((entry) => entry.direction));
+            gap.durationSource = directions.size > 1 ? 'adjacent-rows' : sources.length ? sources[0].direction : undefined;
           }
         });
         row.runs.forEach((run) => {
@@ -346,53 +349,111 @@
         const gap = gaps[run.gap - 1];
         if (gap.kind !== 'stretch') return null;
         if (col === run.col) return 0;
-        return gap.duration > 0 ? (col - run.col) * gap.duration / (run.end - run.col) : null;
+        const start = time(gap.a, gap.offset), end = time(gap.b);
+        return start !== null && end !== null && end > start ? (col - run.col) * (end - start) / (run.end - run.col) : null;
       }
-      const alignmentFailures = [];
-      function alignRow(row, index) {
-        const previous = rows[index - 1];
-        if (!previous || !row.supported || !previous.supported || conflictRows.has(index) || conflictRows.has(index - 1)) return;
-        let previousIndex = 0;
-        const rejected = new Set();
+      const directionName = (direction) => direction === 'previous-row' ? '上一行' : '下一行';
+      function alignmentCandidates(row, reference, eligible, visit, checkEnds) {
+        if (!reference || !row.supported || !reference.supported || conflictRows.has(row.index) || conflictRows.has(reference.index)) return;
+        let referenceIndex = 0;
         for (const run of row.runs) {
           const group = groups[run.block];
-          if (shifts[group] !== null || blockedGroups.has(group) || run.gap && gaps[run.gap - 1].kind !== 'stretch' || run.state.toLowerCase() === 'x'
+          if (!eligible(group) || run.gap && gaps[run.gap - 1].kind !== 'stretch' || run.state.toLowerCase() === 'x'
               || run.col >= row.sourceLength || run.col > row.checkUntil) continue;
-          while (previousIndex < previous.runs.length && previous.runs[previousIndex].end <= run.col) previousIndex++;
-          for (let j = previousIndex; j < previous.runs.length && previous.runs[j].col < run.end; j++) {
-            const anchor = previous.runs[j], col = Math.max(run.col, anchor.col);
-            if (anchor.state.toLowerCase() === 'x' || col >= previous.sourceLength || col > previous.checkUntil || col > row.checkUntil) continue;
-            const anchorOffset = columnOffset(previous, anchor, col), offset = columnOffset(row, run, col);
-            if (anchor.start === null || anchorOffset === null || offset === null) continue;
-            const target = anchor.start + anchorOffset;
-            const shift = target - values[run.block] - run.offset - offset;
-            if (!Number.isFinite(shift)) continue;
-            const attempt = alignGroup(group, shift);
-            if (attempt.ok) {
-              alignmentSources.set(group, { row: index, referenceRow: index - 1, col, time: target,
-                referenceExpanded: !!anchor.gap && gaps[anchor.gap - 1].kind === 'stretch' });
-              rejected.delete(group); break;
+          while (referenceIndex < reference.runs.length && reference.runs[referenceIndex].end <= run.col) referenceIndex++;
+          for (let j = referenceIndex; j < reference.runs.length && reference.runs[j].col < run.end; j++) {
+            const anchor = reference.runs[j], first = Math.max(run.col, anchor.col);
+            const last = Math.min(run.end, anchor.end, row.sourceLength, reference.sourceLength, row.checkUntil + 1, reference.checkUntil + 1) - 1;
+            if (anchor.state.toLowerCase() === 'x' || last < first) continue;
+            const anchorStart = time(anchor.block, anchor.offset);
+            if (anchorStart === null) continue;
+            // Both mappings are affine within a run; checking the ends covers long continuations.
+            let stop = false;
+            for (const col of checkEnds && last > first ? [first, last] : [first]) {
+              const anchorOffset = columnOffset(reference, anchor, col), offset = columnOffset(row, run, col);
+              if (anchorOffset === null || offset === null) continue;
+              const target = anchorStart + anchorOffset;
+              const shift = target - values[run.block] - run.offset - offset;
+              if (!Number.isFinite(shift)) continue;
+              stop = visit({ group, col, target, shift, referenceExpanded: !!anchor.gap && gaps[anchor.gap - 1].kind === 'stretch' });
+              if (stop) break;
             }
-            rejected.add(group);
-            if (attempt.reason === 'limit') break;
+            if (stop) break;
           }
         }
-        if (rejected.size) alignmentFailures.push({ row: index, groups: rejected });
       }
-      // Finalize each row before the following row reads its expanded column times.
+      const componentRows = components.map(() => new Set());
+      rows.forEach((row) => row.blocks.forEach((block) => componentRows[groups[block.id]].add(row.index)));
+      const aboveQueue = [], belowQueue = [], abovePending = new Set(), belowPending = new Set();
+      let aboveHead = 0, belowHead = 0;
+      function enqueue(index, below) {
+        if (index < 0 || index >= rows.length) return;
+        const pending = below ? belowPending : abovePending;
+        if (pending.has(index)) return;
+        pending.add(index); (below ? belowQueue : aboveQueue).push(index);
+      }
+      // Drain upper-row work first. Only newly positioned components wake their own
+      // rows and neighbours, including rows sharing a cross-row connection.
       rows.forEach((row, index) => {
-        if (feasible.ok) alignRow(row, index);
-        resolveRowTimes(row);
+        enqueue(index, false); enqueue(rows.length - index - 1, true);
       });
-      alignmentFailures.forEach((failure) => {
-        if (Array.from(failure.groups).some((group) => shifts[group] === null)) issue('unknown', boundWork > 2000000
-          ? '上一行对齐检查超出计算上限，保留未定位置'
-          : '上一行同列对齐会违反连接时延或间隔正时长要求，已保留连接约束和未定位置', [failure.row]);
+      while (feasible.ok && (aboveHead < aboveQueue.length || belowHead < belowQueue.length) && boundWork <= 2000000) {
+        const below = aboveHead >= aboveQueue.length;
+        const index = below ? belowQueue[belowHead++] : aboveQueue[aboveHead++];
+        (below ? belowPending : abovePending).delete(index);
+        const row = rows[index], reference = rows[index + (below ? 1 : -1)];
+        const direction = below ? 'next-row' : 'previous-row';
+        alignmentCandidates(row, reference, (group) => shifts[group] === null && !blockedGroups.has(group), (candidate) => {
+          const { group, col, target, shift, referenceExpanded } = candidate;
+          const attempt = alignGroup(group, shift);
+          if (attempt.ok) {
+            alignmentSources.set(group, { row: index, referenceRow: reference.index, direction, col, time: target, referenceExpanded });
+            componentRows[group].forEach((id) => {
+              for (const neighbour of [id - 1, id, id + 1]) { enqueue(neighbour, false); enqueue(neighbour, true); }
+            });
+          } else {
+            blockedGroups.add(group);
+            issue(attempt.reason === 'limit' ? 'unknown' : 'conflict', attempt.reason === 'limit'
+              ? '相邻行对齐检查超出计算上限，保留未定位置'
+              : '第' + (index + 1) + '行原列' + col + '按' + directionName(direction) + '（第' + (reference.index + 1)
+                + '行）对齐至 ' + format(target) + ' cycle 会违反连接时延或间隔时长要求；未采用该推算',
+            [index, reference.index], [], row.gaps.filter((id) => !gaps[id].ignored));
+          }
+          return true;
+        });
+      }
+      // Known connection times are authoritative. Audit only inferred positions,
+      // so disagreement is reported instead of silently replacing an upper anchor.
+      const auditedConflicts = new Set();
+      rows.forEach((row) => {
+        for (const direction of ['previous-row', 'next-row']) {
+          const reference = rows[row.index + (direction === 'previous-row' ? -1 : 1)];
+          alignmentCandidates(row, reference, (group) => alignmentSources.has(group), ({ group, col, target, shift }) => {
+            const key = group + ':' + row.index + ':' + direction;
+            if (Math.abs(shift - shifts[group]) <= Math.max(EPS, tolerance) || auditedConflicts.has(key)) return false;
+            auditedConflicts.add(key);
+            const chosen = alignmentSources.get(group), actual = target + shifts[group] - shift;
+            issue('conflict', '第' + (row.index + 1) + '行原列' + col + '对齐冲突：按'
+              + directionName(chosen.direction) + '（第' + (chosen.referenceRow + 1) + '行）推算为 ' + format(actual)
+              + ' cycle，但' + directionName(direction) + '（第' + (reference.index + 1) + '行）同原列为 '
+              + format(target) + ' cycle，相差 ' + format(Math.abs(actual - target)) + ' cycle；未覆盖已采用的时刻，冲突结果仅供定位',
+            [row.index, chosen.row, chosen.referenceRow, reference.index], [], row.gaps.filter((id) => !gaps[id].ignored));
+            return true;
+          }, true);
+        }
+      });
+      const consumers = rows.map(() => new Set());
+      alignmentSources.forEach((entry, group) => componentRows[group].forEach((id) => consumers[entry.referenceRow].add(id)));
+      const invalidRows = new Set(issues.filter((entry) => entry.kind === 'conflict').flatMap((entry) => entry.rows));
+      const invalidQueue = Array.from(invalidRows);
+      for (let head = 0; head < invalidQueue.length; head++) consumers[invalidQueue[head]].forEach((id) => {
+        if (invalidRows.has(id)) return;
+        invalidRows.add(id); invalidQueue.push(id);
+        issue('conflict', '本行对齐所依据的第' + (invalidQueue[head] + 1) + '行存在时延冲突，推算结果仅供定位', [id]);
       });
       let minimum = 0, maximum = 1;
       rows.forEach((row) => {
-        // A later row can anchor a shared connection component; refresh its display
-        // everywhere without performing backwards automatic row alignment.
+        // Refresh every shared component after bidirectional propagation.
         resolveRowTimes(row);
         row.alignments = Array.from(new Set(row.blocks.map((block) => alignmentSources.get(groups[block.id])).filter(Boolean)));
         row.gaps.forEach((id) => {
