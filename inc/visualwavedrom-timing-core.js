@@ -39,6 +39,13 @@
       return result;
     }
     function format(value) { return Number(Number(value).toPrecision(10)).toString(); }
+    function seriesLabel(value, style) {
+      const number = Number.isInteger(value) ? value : Number(value.toPrecision(15));
+      let text = style.radix === 10 ? String(number) : Math.abs(number).toString(style.radix);
+      if (style.upper) text = text.toUpperCase();
+      if (Number.isInteger(number)) text = text.replace(/^-/, '').padStart(style.width, '0');
+      return style.prefix + (number < 0 ? '-' : style.plus ? '+' : '') + style.marker + text.replace(/^-/, '') + style.suffix;
+    }
     function analyze(source) {
       if (!source || !Array.isArray(source.signal)) throw new Error('signal 必须是波形数组');
       const config = source.timingCheck || {};
@@ -329,11 +336,11 @@
         row.blocks.forEach((block) => { block.time = time(block.id); });
         row.gaps.forEach((id) => {
           const gap = gaps[id]; gap.start = time(gap.a, gap.offset); gap.end = time(gap.b);
-          if (!gap.ignored && gap.durationSource !== 'connection' && gap.start !== null && gap.end !== null && gap.end > gap.start) {
+          if (!gap.ignored && gap.durationSource !== 'connection' && gap.durationSource !== 'data-series' && gap.start !== null && gap.end !== null && gap.end > gap.start) {
             gap.duration = gap.end - gap.start;
             const sources = [gap.a, gap.b].map((block) => alignmentSources.get(groups[block])).filter(Boolean);
             const directions = new Set(sources.map((entry) => entry.direction));
-            gap.durationSource = directions.size > 1 ? 'adjacent-rows' : sources.length ? sources[0].direction : undefined;
+            gap.durationSource = directions.size > 1 ? directions.has('data-series') ? 'mixed-sources' : 'adjacent-rows' : sources.length ? sources[0].direction : undefined;
           }
         });
         row.runs.forEach((run) => {
@@ -352,7 +359,7 @@
         const start = time(gap.a, gap.offset), end = time(gap.b);
         return start !== null && end !== null && end > start ? (col - run.col) * (end - start) / (run.end - run.col) : null;
       }
-      const directionName = (direction) => direction === 'previous-row' ? '上一行' : '下一行';
+      const directionName = (direction) => direction === 'data-series' ? '数据等差推断' : direction === 'previous-row' ? '上一行' : '下一行';
       function alignmentCandidates(row, reference, eligible, visit, checkEnds) {
         if (!reference || !row.supported || !reference.supported || conflictRows.has(row.index) || conflictRows.has(reference.index)) return;
         let referenceIndex = 0;
@@ -392,12 +399,36 @@
         if (pending.has(index)) return;
         pending.add(index); (below ? belowQueue : aboveQueue).push(index);
       }
+      const seriesLinks = components.map(() => []);
+      function recordAlignment(group, entry) {
+        alignmentSources.set(group, entry);
+        componentRows[group].forEach((id) => {
+          for (const neighbour of [id - 1, id, id + 1]) { enqueue(neighbour, false); enqueue(neighbour, true); }
+        });
+      }
+      function positionSeries(seeds) {
+        const queue = seeds.slice();
+        for (let head = 0; head < queue.length; head++) {
+          const group = queue[head];
+          if (shifts[group] === null) continue;
+          for (const link of seriesLinks[group]) {
+            if (shifts[link.to] !== null) continue;
+            const attempt = alignGroup(link.to, shifts[group] + link.delta);
+            if (!attempt.ok) {
+              issue(attempt.reason === 'limit' ? 'unknown' : 'conflict', '等差补全位置无法满足连接时延或间隔时长要求', [link.gap.row], [], [link.gap.index]);
+              continue;
+            }
+            recordAlignment(link.to, { row: link.gap.row, referenceRow: link.gap.row, direction: 'data-series', gap: link.gap.index });
+            queue.push(link.to);
+          }
+        }
+      }
       // Drain upper-row work first. Only newly positioned components wake their own
       // rows and neighbours, including rows sharing a cross-row connection.
       rows.forEach((row, index) => {
         enqueue(index, false); enqueue(rows.length - index - 1, true);
       });
-      while (feasible.ok && (aboveHead < aboveQueue.length || belowHead < belowQueue.length) && boundWork <= 2000000) {
+      function alignNeighbours() { while (feasible.ok && (aboveHead < aboveQueue.length || belowHead < belowQueue.length) && boundWork <= 2000000) {
         const below = aboveHead >= aboveQueue.length;
         const index = below ? belowQueue[belowHead++] : aboveQueue[aboveHead++];
         (below ? belowPending : abovePending).delete(index);
@@ -407,10 +438,8 @@
           const { group, col, target, shift, referenceExpanded } = candidate;
           const attempt = alignGroup(group, shift);
           if (attempt.ok) {
-            alignmentSources.set(group, { row: index, referenceRow: reference.index, direction, col, time: target, referenceExpanded });
-            componentRows[group].forEach((id) => {
-              for (const neighbour of [id - 1, id, id + 1]) { enqueue(neighbour, false); enqueue(neighbour, true); }
-            });
+            recordAlignment(group, { row: index, referenceRow: reference.index, direction, col, time: target, referenceExpanded });
+            positionSeries([group]);
           } else {
             blockedGroups.add(group);
             issue(attempt.reason === 'limit' ? 'unknown' : 'conflict', attempt.reason === 'limit'
@@ -421,11 +450,12 @@
           }
           return true;
         });
-      }
+      } }
+      alignNeighbours();
       // Known connection times are authoritative. Audit only inferred positions,
       // so disagreement is reported instead of silently replacing an upper anchor.
       const auditedConflicts = new Set();
-      rows.forEach((row) => {
+      function auditAlignments() { rows.forEach((row) => {
         for (const direction of ['previous-row', 'next-row']) {
           const reference = rows[row.index + (direction === 'previous-row' ? -1 : 1)];
           alignmentCandidates(row, reference, (group) => alignmentSources.has(group), ({ group, col, target, shift }) => {
@@ -441,16 +471,99 @@
             return true;
           }, true);
         }
+      }); }
+      auditAlignments();
+      function propagateConflicts() {
+        const consumers = rows.map(() => new Set());
+        alignmentSources.forEach((entry, group) => componentRows[group].forEach((id) => consumers[entry.referenceRow].add(id)));
+        const invalidRows = new Set(issues.filter((entry) => entry.kind === 'conflict').flatMap((entry) => entry.rows));
+        const invalidQueue = Array.from(invalidRows);
+        for (let head = 0; head < invalidQueue.length; head++) consumers[invalidQueue[head]].forEach((id) => {
+          if (invalidRows.has(id)) return;
+          invalidRows.add(id); invalidQueue.push(id);
+          issue('conflict', '本行对齐所依据的第' + (invalidQueue[head] + 1) + '行存在时延冲突，推算结果仅供定位', [id]);
+        });
+        return invalidRows;
+      }
+      const invalidRows = propagateConflicts();
+      // Infer only inside uninterrupted numeric bus sections with an observed
+      // adjacent step and cadence. Keep omitted samples compressed for rendering.
+      function numericLabel(label) {
+        const text = String(label).trim();
+        const matches = Array.from(text.matchAll(/[+-]?(?:0[xX][\da-fA-F]+|0[bB][01]+|0[oO][0-7]+|(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)/g));
+        if (matches.length !== 1) return null;
+        const match = matches[0], raw = match[0], unsigned = raw.replace(/^[+-]/, '');
+        const marker = unsigned.match(/^0[xXbBoO]/)?.[0] || '';
+        const radix = marker ? { x: 16, b: 2, o: 8 }[marker[1].toLowerCase()] : 10;
+        const value = Number(unsigned) * (raw[0] === '-' ? -1 : 1);
+        if (!Number.isFinite(value) || Math.abs(value) > Number.MAX_SAFE_INTEGER) return null;
+        const digits = unsigned.slice(marker.length);
+        const style = { prefix: text.slice(0, match.index), suffix: text.slice(match.index + raw.length), radix, marker,
+          upper: /[A-FXBO]/.test(unsigned), plus: raw[0] === '+', width: /^0\d+$/.test(digits) || marker ? digits.length : 0 };
+        return { value, style, key: JSON.stringify([style.prefix, style.suffix, radix]) };
+      }
+      const nearNumber = (a, b) => Math.abs(a - b) <= 32 * Number.EPSILON * Math.max(1, Math.abs(a), Math.abs(b));
+      const seriesCandidates = [];
+      rows.forEach((row) => {
+        if (!row.supported || invalidRows.has(row.index)) return;
+        const labels = new Map(); let section = [];
+        function flushSection() {
+          if (!section.length) return;
+          let step = null, columns = null, inconsistent = false;
+          for (let i = 1; i < section.length; i++) {
+            const previous = section[i - 1], current = section[i];
+            if (previous.run.gap || current.run.gap || previous.run.slot === current.run.slot) continue;
+            const delta = current.label.value - previous.label.value, width = previous.run.end - previous.run.col;
+            if (step === null) { step = delta; columns = width; }
+            else if (!nearNumber(step, delta) || columns !== width) inconsistent = true;
+          }
+          for (let i = 0; i < section.length; i++) {
+            const item = section[i]; if (!item.run.gap) continue;
+            const gap = gaps[item.run.gap - 1], left = section[i - 1], right = section[i + 1];
+            if (gap.ignored || gap.kind === 'stretch' || gap.duration !== undefined) continue;
+            gap.seriesReason = '数据文本不足以确定等差公差和每项宽度';
+            if (step === null || step === 0 || inconsistent || !left || !right || left.run.gap || right.run.gap
+                || left.run.slot === right.run.slot || left.run.end - left.run.col !== columns) continue;
+            const ratio = (right.label.value - left.label.value) / step, steps = Math.round(ratio), count = steps - 1;
+            if (!Number.isSafeInteger(steps) || count < 1 || Math.abs(ratio - steps) > Math.min(1e-7, 32 * Number.EPSILON * Math.max(1, Math.abs(ratio)))) {
+              gap.seriesReason = '两侧数据与已知公差不符，不能确定正整数个省略数据'; continue;
+            }
+            const cellDuration = columns * row.period, duration = count * cellDuration;
+            if (!Number.isFinite(duration) || !(duration > 0) || !Number.isSafeInteger(count * columns)) continue;
+            seriesCandidates.push({ gap, duration, series: { first: left.label.value + step, step, count, cellDuration,
+              before: left.run.value, after: right.run.value, style: left.label.style } });
+          }
+          section = [];
+        }
+        row.runs.forEach((run) => {
+          if (!labels.has(run.slot)) labels.set(run.slot, run.state === 'bus' ? numericLabel(run.value) : null);
+          const label = run.state === 'bus' ? labels.get(run.slot) : null;
+          if (!label || run.col >= row.sourceLength || run.gap && gaps[run.gap - 1].kind === 'stretch') { flushSection(); return; }
+          if (section.length && (section[section.length - 1].label.key !== label.key || section[section.length - 1].run.end !== run.col)) flushSection();
+          section.push({ run, label });
+        });
+        flushSection();
       });
-      const consumers = rows.map(() => new Set());
-      alignmentSources.forEach((entry, group) => componentRows[group].forEach((id) => consumers[entry.referenceRow].add(id)));
-      const invalidRows = new Set(issues.filter((entry) => entry.kind === 'conflict').flatMap((entry) => entry.rows));
-      const invalidQueue = Array.from(invalidRows);
-      for (let head = 0; head < invalidQueue.length; head++) consumers[invalidQueue[head]].forEach((id) => {
-        if (invalidRows.has(id)) return;
-        invalidRows.add(id); invalidQueue.push(id);
-        issue('conflict', '本行对齐所依据的第' + (invalidQueue[head] + 1) + '行存在时延冲突，推算结果仅供定位', [id]);
-      });
+      for (const { gap, duration, series } of seriesCandidates) {
+        if (!feasible.ok || boundWork > 2000000 || invalidRows.has(gap.row)) continue;
+        resolveRowTimes(rows[gap.row]);
+        if (gap.duration !== undefined || [gap.a, gap.b].some((block) => shifts[groups[block]] === null && blockedGroups.has(groups[block]))) continue;
+        const a = groups[gap.a], b = groups[gap.b], delta = duration + values[gap.a] + gap.offset - values[gap.b];
+        const additions = [{ from: a, to: b, weight: delta, strict: 0 }, { from: b, to: a, weight: -delta, strict: 0 }];
+        additions.forEach((bound) => outgoing[bound.from].push(bound));
+        const attempt = relaxBounds([a, b], true);
+        if (!attempt.ok) {
+          additions.forEach((bound) => outgoing[bound.from].pop());
+          issue(attempt.reason === 'limit' ? 'unknown' : 'conflict', '第' + (gap.row + 1) + '行第' + gap.col + '列等差补全 '
+            + countText(series) + '，但与连接时延或间隔时长要求冲突；未采用该推算', [gap.row], [], [gap.index]);
+          invalidRows.add(gap.row); continue;
+        }
+        gap.duration = duration; gap.durationSource = 'data-series'; gap.series = series; delete gap.seriesReason;
+        seriesLinks[a].push({ to: b, delta, gap }); seriesLinks[b].push({ to: a, delta: -delta, gap });
+        positionSeries([a, b]); alignNeighbours();
+      }
+      function countText(series) { return series.count + ' 项（公差 ' + format(series.step) + '，每项 ' + format(series.cellDuration) + ' cycle）'; }
+      auditAlignments(); propagateConflicts();
       let minimum = 0, maximum = 1;
       rows.forEach((row) => {
         // Refresh every shared component after bidirectional propagation.
@@ -458,7 +571,7 @@
         row.alignments = Array.from(new Set(row.blocks.map((block) => alignmentSources.get(groups[block.id])).filter(Boolean)));
         row.gaps.forEach((id) => {
           const gap = gaps[id];
-          if (!gap.ignored && gap.duration === undefined) issue('unknown', spanName(gap) + '时长无法唯一确定', [row.index], [], [id]);
+          if (!gap.ignored && gap.duration === undefined) issue('unknown', spanName(gap) + '时长无法唯一确定' + (gap.seriesReason ? '；' + gap.seriesReason : ''), [row.index], [], [id]);
         });
         row.runs.forEach((run) => {
           if (run.start !== null) minimum = Math.min(minimum, run.start);
@@ -481,9 +594,10 @@
         const sorted = row.runs.filter((run) => run.start !== null && run.finish !== null && run.finish > run.start).sort((p, q) => p.start - q.start);
         sorted.forEach((original) => {
           const run = Object.assign({}, original);
-          if (run.gap && gaps[run.gap - 1].kind !== 'stretch' && config.gapContent === 'unknown' || /[pPnN]/.test(run.state) && run.clockOrigin === null) { run.state = 'x'; run.value = 'x'; run.slot = -1; }
+          if (run.gap && gaps[run.gap - 1].series) run.series = gaps[run.gap - 1].series;
+          if (!run.series && run.gap && gaps[run.gap - 1].kind !== 'stretch' && config.gapContent === 'unknown' || /[pPnN]/.test(run.state) && run.clockOrigin === null) { run.state = 'x'; run.value = 'x'; run.slot = -1; }
           const previous = row.drawRuns[row.drawRuns.length - 1];
-          if (previous && Math.abs(previous.finish - run.start) < EPS && previous.state === run.state && previous.value === run.value && previous.slot === run.slot
+          if (previous && !previous.series && !run.series && Math.abs(previous.finish - run.start) < EPS && previous.state === run.state && previous.value === run.value && previous.slot === run.slot
               && (!/[pPnN]/.test(run.state) || previous.clockOrigin === run.clockOrigin)) previous.finish = run.finish;
           else row.drawRuns.push(run);
         });
@@ -556,7 +670,7 @@
       });
       return { rows, gaps, edges, issues, minimum, maximum, viewMinimum, viewMaximum, tolerance, config };
     }
-    return { analyze, parseDelay, edgeParts, format };
+    return { analyze, parseDelay, edgeParts, format, seriesLabel };
   }
   global.createVisualWaveDromTimingEngine = createTimingEngine;
   global.VisualWaveDromTimingCore = createTimingEngine();

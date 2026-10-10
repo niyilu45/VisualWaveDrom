@@ -2,11 +2,11 @@
   'use strict';
   const sessions = new Map();
   const statusNames = { ok: '已确定', unknown: '无法判断', conflict: '时延冲突' };
-  const alignmentNames = { 'previous-row': '上行对齐', 'next-row': '下行对齐', 'adjacent-rows': '上下行对齐' };
+  const alignmentNames = { 'previous-row': '上行对齐', 'next-row': '下行对齐', 'adjacent-rows': '上下行对齐', 'data-series': '等差补全', 'mixed-sources': '混合推算' };
   const rowStatusName = (row) => {
     if (row.status !== 'ok' || !row.alignments.length) return statusNames[row.status];
     const directions = new Set(row.alignments.map((entry) => entry.direction));
-    return alignmentNames[directions.size > 1 ? 'adjacent-rows' : row.alignments[0].direction];
+    return alignmentNames[directions.size > 1 ? directions.has('data-series') ? 'mixed-sources' : 'adjacent-rows' : row.alignments[0].direction];
   };
   const icons = {
     plus: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3M8 11h6m-3-3v6"/>',
@@ -156,13 +156,19 @@
       const paragraph = (text, type) => { const p = doc.createElement('p'); p.textContent = text; if (type) p.className = type; detail.appendChild(p); };
       paragraph(rowStatusName(row), row.status);
       if (!row.reasons.length) paragraph(row.empty ? '空行，未发现连接时延冲突。'
-        : row.alignments.length ? '已有连接约束保持不变；其余位置优先按上一行推算，下一行补充。'
+        : row.alignments.length ? '已有连接约束保持不变；其余位置按上行、下行、数据等差规律依次补充。'
         : '时间已确定；已提供的时延约束一致。没有连接约束的部分仅确定自身时间。');
       row.reasons.forEach((reason) => paragraph(reason));
-      row.alignments.forEach((alignment) => paragraph('第' + (alignment.row + 1) + '行原列' + alignment.col
+      row.alignments.forEach((alignment) => {
+        if (alignment.direction === 'data-series') {
+          paragraph('第' + (alignment.row + 1) + '行第' + model.gaps[alignment.gap].col + '列按数据等差规律补全'
+            + (alignment.row === row.index ? '，仅为预览推断，不修改原始数据。' : '，并经连接关系传递至本行。')); return;
+        }
+        paragraph('第' + (alignment.row + 1) + '行原列' + alignment.col
         + ' 按' + (alignment.direction === 'next-row' ? '下一行' : '上一行') + '（第' + (alignment.referenceRow + 1) + '行）展开后的同原列时刻对齐至 ' + fmt(alignment.time) + ' cycle'
         + (alignment.referenceExpanded ? '（同值展开区域）' : '')
-        + (alignment.row === row.index ? '；连接时延优先。' : '，并经连接约束传递至本行。')));
+        + (alignment.row === row.index ? '；连接时延优先。' : '，并经连接约束传递至本行。'));
+      });
       if (row.referenceRuns.length) paragraph('原序列参考与主图共用 cycle 轴；实线按已知时刻对齐，虚线及 | ? 仅为未定位置的绘图占位，不参与时延测量。');
       row.gaps.forEach((id) => {
         const gap = model.gaps[id];
@@ -173,6 +179,12 @@
           + '：' + (gap.duration === undefined ? '未定' : fmt(gap.duration) + ' cycle')
           + '；起点 ' + (gap.start === null ? '?' : fmt(gap.start)) + '，终点 ' + (gap.end === null ? '?' : fmt(gap.end))
           + (alignmentNames[gap.durationSource] ? '；来源：' + alignmentNames[gap.durationSource] : gap.durationSource === 'connection' ? '；来源：连接时延' : ''));
+        if (gap.series) {
+          const series = gap.series;
+          paragraph('数据 ' + series.before + ' → ' + series.after + '；公差 ' + fmt(series.step) + '，省略 '
+            + series.count + ' 项，每项 ' + fmt(series.cellDuration) + ' cycle；补全 '
+            + core.seriesLabel(series.first, series.style) + (series.count > 1 ? ' … ' + core.seriesLabel(series.first + (series.count - 1) * series.step, series.style) : '') + '。');
+        }
       });
       model.edges.filter((edge) => edge.fromNode && edge.fromNode.row === index || edge.toNode && edge.toNode.row === index).forEach((edge) => {
         paragraph('连接 ' + (edge.index + 1) + ' ' + edge.from + '→' + edge.to + '：' + (edge.label || '(无标签)')
@@ -226,6 +238,14 @@
       const runs = reference ? row.referenceRuns : row.drawRuns, scale = (right - left) / (to - from);
       let previousPixel = -Infinity;
       context.save();
+      function paintBus(x1, x2, state, text) {
+        const cap = Math.min(4, (x2 - x1) / 3);
+        context.fillStyle = reference ? '#eef1f5' : state === 'bus' ? '#e2f1e8' : '#eceff2';
+        context.beginPath(); context.moveTo(x1, mid); context.lineTo(x1 + cap, mid - 12); context.lineTo(x2 - cap, mid - 12);
+        context.lineTo(x2, mid); context.lineTo(x2 - cap, mid + 12); context.lineTo(x1 + cap, mid + 12); context.closePath(); context.fill(); context.stroke();
+        context.fillStyle = reference ? '#364152' : '#173426';
+        if (x2 - x1 > 16) { context.save(); context.beginPath(); context.rect(x1 + 5, mid - 10, Math.max(0, x2 - x1 - 10), 20); context.clip(); context.textAlign = 'center'; context.fillText(text, (x1 + x2) / 2, mid + 4); context.restore(); }
+      }
       for (let j = firstRun(row, from, reference); j < runs.length; j++) {
         const run = runs[j]; if (run.start > to) break;
         const x1 = Math.max(left, x(run.start)), x2 = Math.min(right, x(run.finish));
@@ -241,6 +261,17 @@
         if (reference && run.gap && (!run.stretch || run.omission)) {
           context.setLineDash([]); context.fillStyle = '#8a5a08';
           context.fillText(run.provisional ? '| ?' : '|', (x1 + x2) / 2 - 2, mid + 4);
+        } else if (run.series && !reference) {
+          const series = run.series, cell = series.cellDuration;
+          const first = Math.max(0, Math.floor((Math.max(from, run.start) - run.start) / cell));
+          const last = Math.min(series.count, Math.ceil((Math.min(to, run.finish) - run.start) / cell));
+          if (cell * scale < 12) {
+            paintBus(x1, x2, 'bus', core.seriesLabel(series.first + first * series.step, series.style) + ' … '
+              + core.seriesLabel(series.first + (last - 1) * series.step, series.style) + ' [' + (last - first) + ']');
+          } else for (let sample = first; sample < last; sample++) {
+            paintBus(Math.max(x1, x(run.start + sample * cell)), Math.min(x2, x(run.start + (sample + 1) * cell)),
+              'bus', core.seriesLabel(series.first + sample * series.step, series.style));
+          }
         } else if (state === 'p' || state === 'n') {
           const half = row.period / 2, highFirst = state === 'p';
           if (half * scale < 2) { context.fillStyle = '#c1d4e4'; context.fillRect(x1, mid - 12, x2 - x1, 24); }
@@ -264,12 +295,7 @@
           }
           context.stroke();
         } else {
-          const cap = Math.min(4, (x2 - x1) / 3);
-          context.fillStyle = reference ? '#eef1f5' : state === 'bus' ? '#e2f1e8' : '#eceff2';
-          context.beginPath(); context.moveTo(x1, mid); context.lineTo(x1 + cap, mid - 12); context.lineTo(x2 - cap, mid - 12);
-          context.lineTo(x2, mid); context.lineTo(x2 - cap, mid + 12); context.lineTo(x1 + cap, mid + 12); context.closePath(); context.fill(); context.stroke();
-          const text = state === 'bus' ? run.value : 'x'; context.fillStyle = reference ? '#364152' : '#173426';
-          if (x2 - x1 > 16) { context.save(); context.beginPath(); context.rect(x1 + 5, mid - 10, Math.max(0, x2 - x1 - 10), 20); context.clip(); context.textAlign = 'center'; context.fillText(text, (x1 + x2) / 2, mid + 4); context.restore(); }
+          paintBus(x1, x2, state, state === 'bus' ? run.value : 'x');
         }
       }
       context.restore();
@@ -440,10 +466,12 @@
       layoutRows();
       if (!model.rows[selected]?.referenceRuns.length || selectedColumn >= model.rows[selected].sourceLength) selectedColumn = -1;
       const counts = { ok: 0, unknown: 0, conflict: 0 }; model.rows.forEach((row) => counts[row.status]++);
-      const alignedCount = model.rows.filter((row) => row.alignments.length).length;
+      const alignedCount = model.rows.filter((row) => row.alignments.some((entry) => entry.direction !== 'data-series')).length;
+      const seriesCount = model.rows.filter((row) => row.gaps.some((id) => model.gaps[id].series)).length;
       const orphan = model.issues.filter((item) => !item.rows.length).map((item) => item.reason);
       message('已确定 ' + counts.ok + ' 行 · 时延冲突 ' + counts.conflict + ' 行 · 无法判断 ' + counts.unknown + ' 行'
         + (alignedCount ? ' · 相邻行对齐 ' + alignedCount + ' 行' : '')
+        + (seriesCount ? ' · 等差补全 ' + seriesCount + ' 行' : '')
         + (orphan.length ? ' · ' + orphan.join('；') : '') + (counts.conflict ? ' · 冲突行仅供定位，不能作为对齐结论' : ''), false);
       listRows();
       if (selected >= model.rows.length) selected = -1;
@@ -549,6 +577,7 @@
         for (let i = firstRun(row, value - radius); i < row.drawRuns.length && row.drawRuns[i].start <= value + radius; i++) {
           const run = row.drawRuns[i], candidates = [run.start, run.finish];
           if (/[pn]/i.test(run.state)) candidates.push(run.clockOrigin + Math.round((value - run.clockOrigin) / (row.period / 2)) * row.period / 2);
+          if (run.series) candidates.push(Math.max(run.start, Math.min(run.finish, run.start + Math.round((value - run.start) / run.series.cellDuration) * run.series.cellDuration)));
           for (const candidate of candidates) if (Math.abs(candidate - value) < distance) { nearest = candidate; distance = Math.abs(candidate - value); }
         }
       }
