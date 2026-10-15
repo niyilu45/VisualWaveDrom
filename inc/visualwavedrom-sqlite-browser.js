@@ -5,6 +5,8 @@
   const SNAPSHOT_DB_NAME = 'VisualWaveDromSQLite';
   const SNAPSHOT_STORE_NAME = 'waveLibraries';
   const SNAPSHOT_KEY = 'active:' + encodeURIComponent(global.location.pathname || 'VisualWaveDrom.html');
+  const LIBRARY_KEY_PREFIX = SNAPSHOT_KEY + ':library:';
+  const CATALOG_KEY_PREFIX = SNAPSHOT_KEY + ':catalog:';
   const SQLITE_HEADER = 'SQLite format 3\0';
   const DOCUMENT_CHUNK_THRESHOLD = 256 * 1024;
   const DOCUMENT_CHUNK_SIZE = 64 * 1024;
@@ -110,10 +112,10 @@
     });
   }
 
-  function readSnapshot(database) {
+  function readSnapshot(database, key = SNAPSHOT_KEY) {
     return new Promise((resolve, reject) => {
       const transaction = database.transaction(SNAPSHOT_STORE_NAME, 'readonly');
-      const request = transaction.objectStore(SNAPSHOT_STORE_NAME).get(SNAPSHOT_KEY);
+      const request = transaction.objectStore(SNAPSHOT_STORE_NAME).get(key);
       request.onsuccess = () => resolve(request.result || null);
       request.onerror = () => reject(request.error || new Error('无法读取浏览器数据库'));
     });
@@ -124,7 +126,8 @@
       const transaction = database.transaction(SNAPSHOT_STORE_NAME, 'readwrite');
       transaction.oncomplete = resolve;
       transaction.onerror = () => reject(transaction.error || new Error('无法保存浏览器数据库'));
-      transaction.objectStore(SNAPSHOT_STORE_NAME).put(record);
+      const store = transaction.objectStore(SNAPSHOT_STORE_NAME);
+      (Array.isArray(record) ? record : [record]).forEach(item => store.put(item));
     });
   }
 
@@ -237,10 +240,11 @@
   }
 
   class BrowserWaveLibraryStore {
-    constructor(sqlite3, snapshotDatabase) {
+    constructor(sqlite3, snapshotDatabase, libraryId) {
       this.sqlite3 = sqlite3;
       this.snapshotDatabase = snapshotDatabase;
       this.db = null;
+      this.libraryId = String(libraryId || '');
       this.fileName = 'VisualWaveDrom-library.sqlite';
       this.openEmpty();
     }
@@ -557,34 +561,92 @@
       }
       if (previous) previous.close();
       this.fileName = String(fileName || this.fileName || 'VisualWaveDrom-library.sqlite');
-      return this.readSummary();
+      const summary = this.readSummary();
+      this.libraryId = summary.libraryId;
+      return summary;
     }
 
     async loadPersisted() {
-      const record = await readSnapshot(this.snapshotDatabase);
+      let record = this.libraryId
+        ? await readSnapshot(this.snapshotDatabase, LIBRARY_KEY_PREFIX + this.libraryId)
+        : await readSnapshot(this.snapshotDatabase);
+      // Migrate the old single-library snapshot without replacing another library.
+      if (!record && this.libraryId) {
+        const legacy = await readSnapshot(this.snapshotDatabase);
+        if (legacy && legacy.bytes) record = legacy;
+      }
+      if (record && !record.bytes && record.libraryId) {
+        record = await readSnapshot(this.snapshotDatabase, LIBRARY_KEY_PREFIX + record.libraryId);
+      }
       if (!record || !record.bytes) return false;
+      const expectedId = this.libraryId;
       await this.importBytes(new Uint8Array(record.bytes), record.fileName);
+      if (expectedId && this.libraryId !== expectedId) {
+        this.openEmpty();
+        this.libraryId = expectedId;
+        return false;
+      }
+      if (record.id === SNAPSHOT_KEY) await this.persist({ makeActive: true });
       return true;
     }
 
-    persist() {
+    persist(options) {
+      const summary = this.readSummary();
+      this.libraryId = summary.libraryId;
       const bytes = this.exportBytes();
       const copy = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
       const record = {
-        id: SNAPSHOT_KEY,
+        id: LIBRARY_KEY_PREFIX + this.libraryId,
+        libraryId: this.libraryId,
         fileName: this.fileName,
         bytes: copy,
         updatedAt: new Date().toISOString()
       };
-      return writeSnapshot(this.snapshotDatabase, record);
+      const records = [record, {
+        id: CATALOG_KEY_PREFIX + this.libraryId,
+        libraryId: this.libraryId,
+        name: this.fileName,
+        documentCount: summary.documents.length,
+        updatedAt: record.updatedAt
+      }];
+      if (options && options.makeActive) records.push({ id: SNAPSHOT_KEY, libraryId: this.libraryId });
+      return writeSnapshot(this.snapshotDatabase, records);
+    }
+
+    remember() {
+      return writeSnapshot(this.snapshotDatabase, { id: SNAPSHOT_KEY, libraryId: this.libraryId });
+    }
+
+    close() {
+      if (this.db) this.db.close();
+      this.db = null;
+      this.snapshotDatabase.close();
     }
   }
 
   global.VWDSqliteLibrary = {
     kind: LIBRARY_KIND,
-    async createStore() {
+    async createStore(libraryId) {
       const results = await Promise.all([loadSqlite(), openSnapshotDatabase()]);
-      return new BrowserWaveLibraryStore(results[0], results[1]);
+      return new BrowserWaveLibraryStore(results[0], results[1], libraryId);
+    },
+    async listLibraries() {
+      const database = await openSnapshotDatabase();
+      try {
+        return await new Promise((resolve, reject) => {
+          const result = [];
+          const transaction = database.transaction(SNAPSHOT_STORE_NAME, 'readonly');
+          const range = IDBKeyRange.bound(CATALOG_KEY_PREFIX, CATALOG_KEY_PREFIX + '\uffff');
+          const request = transaction.objectStore(SNAPSHOT_STORE_NAME).openCursor(range);
+          request.onsuccess = () => {
+            const cursor = request.result;
+            if (!cursor) { resolve(result.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))); return; }
+            result.push(cursor.value);
+            cursor.continue();
+          };
+          request.onerror = () => reject(request.error);
+        });
+      } finally { database.close(); }
     }
   };
 })(window);

@@ -1119,15 +1119,19 @@
       this.finishGesture(false);
       this.document = Object.assign({}, rawDocument);
       this.source = source;
-      this.renderSource = prepareRenderSource(source);
-      this.rowKeys = collectSignalKeys(this.renderSource.signal, [], new Map());
+      const parameters = root.VisualWaveDromParameters;
+      const resolved = parameters ? parameters.resolve(source) : source;
+      this.renderSource = prepareRenderSource(resolved);
+      // Keep annotation anchors tied to raw names, not changing parameter values.
+      this.rowKeys = collectSignalKeys(source.signal, [], new Map());
       this.rowKeyIndices = new Map(this.rowKeys.map(function (key, index) { return [key, index]; }));
       const bigApi = root.VisualWaveDromBigData;
       this.metrics = bigApi && typeof bigApi.measureSource === 'function'
         ? bigApi.measureSource(this.renderSource)
         : { maxWaveLength: 0, signalCount: 0 };
-      this.sourceDescription = sourceDescription(source);
-      this.titleEl.textContent = sourceTitle(source, rawDocument.name);
+      this.sourceDescription = sourceDescription(resolved);
+      this.titleEl.textContent = sourceTitle(resolved, rawDocument.name);
+      if (parameters) parameters.decorateText(this.titleEl, sourceTitle(source, rawDocument.name), source);
       document.title = this.titleEl.textContent + ' - 演讲者模式';
       if (this.notesWindow) this.notesWindow.refresh();
       // The source description seeds the first step; recorded notes are independent.
@@ -1244,6 +1248,9 @@
         const svg = this.display.querySelector('svg');
         if (!svg) throw new Error('WaveDrom 未生成波形 SVG');
         alignWaveDataToCycleGrid(svg, source);
+        if (root.VisualWaveDromParameters) {
+          root.VisualWaveDromParameters.decorate(this.display, this.source, this.renderWindow);
+        }
         this.svg = svg;
         this.svgMetrics = getSvgMetrics(svg);
         svg.style.width = this.svgMetrics.width + 'px';
@@ -1740,6 +1747,10 @@
           svg = display.querySelector('svg');
           if (!svg) throw new Error('missing-waveform');
           alignWaveDataToCycleGrid(svg, request.source);
+          if (root.VisualWaveDromParameters && request.parameterSource) {
+            root.VisualWaveDromParameters.decorate(display, request.parameterSource,
+              fullRender ? null : request.parameterWindow);
+          }
         } else {
           host.appendChild(svg);
         }
@@ -1792,6 +1803,7 @@
       this.finishTextEdit(true);
       const request = {
         mode: mode, svg: this.svg.cloneNode(true), source: this.renderSource,
+        parameterSource: this.source, parameterWindow: this.renderWindow,
         total: this.metrics.maxWaveLength,
         window: { start: this.renderWindow.start, end: this.renderWindow.end, size: this.renderWindow.size },
         rowKeys: this.rowKeys.slice(), annotations: cloneValue(this.annotations)
@@ -1931,6 +1943,7 @@
       }
       if (window.size * Math.max(1, context.rowKeys.length) > 50000) throw new Error('image-too-large');
       return this.createScreenshot({ mode: 'step', source, svg, total: context.total,
+        parameterSource: context.parameterSource, parameterWindow: window,
         window: { start: window.start, end: window.end, size: window.size }, rowKeys: context.rowKeys,
         annotations: step.annotations || emptyAnnotations() });
     }
@@ -1947,6 +1960,7 @@
       this.finishStepTitleEdit(true);
       const steps = indices.map(index => index === this.stepIndex ? this.captureStep() : cloneValue(this.steps[index]));
       const context = { source: this.renderSource, svg: this.svg.cloneNode(true), total: this.metrics.maxWaveLength,
+        parameterSource: this.source,
         metrics: this.metrics, rowKeys: this.rowKeys.slice(), windowSize: this.windowSize,
         window: { start: this.renderWindow.start, end: this.renderWindow.end, size: this.renderWindow.size } };
       const filename = (this.titleEl.textContent.replace(/[\\/:*?"<>|]+/g, '_').slice(0, 96) || 'VisualWaveDrom') + '-steps.gif';

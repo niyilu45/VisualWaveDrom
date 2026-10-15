@@ -155,6 +155,9 @@
           <span id="toggle-nav-sidebar-label">隐藏目录</span>
         </button>
         <div class="wave-library-file-status" id="wave-library-file-status">波形库：浏览器 SQLite</div>
+        <button class="menu-btn" id="btn-new-wave-library" type="button" title="创建空波形库并在新窗口打开">
+          <span>新增波形库</span>
+        </button>
         <button class="menu-btn" id="btn-import-wave-library" type="button" title="从 Wave 文件夹选择波形库">
           <span>导入波形库</span>
         </button>
@@ -671,11 +674,13 @@
 
   <div class="modal-overlay" id="wave-library-picker-modal" hidden>
     <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="wave-library-picker-title">
-      <div class="modal-header" id="wave-library-picker-title">选择 Wave 文件夹中的波形库</div>
+      <div class="modal-header" id="wave-library-picker-title">选择波形库</div>
       <div class="modal-body">
+        <label><input type="checkbox" id="wave-library-open-new-window" checked> 在新窗口打开</label>
         <div class="nav-move-options" id="wave-library-picker-options"></div>
       </div>
       <div class="modal-footer">
+        <button type="button" class="modal-btn" id="wave-library-picker-import" hidden>从文件导入</button>
         <button type="button" class="modal-btn" id="wave-library-picker-cancel">取消</button>
       </div>
     </div>
@@ -941,7 +946,7 @@
     <script src="inc/codemirror.js?v=5.65.21"></script>
     <script src="inc/codemirror-javascript.js?v=5.65.21"></script>
     <script src="inc/codemirror-vim.js?v=5.65.21"></script>
-    <script src="inc/visualwavedrom-sqlite-browser.js?v=20260912-parameters-v1"></script>
+    <script src="inc/visualwavedrom-sqlite-browser.js?v=20261015-multi-library-v1"></script>
     <script src="inc/visualwavedrom-vim.js?v=20260908-vim-modified-shortcuts-v1"></script>
     <script src="inc/visualwavedrom-bigdata.js?v=20260815-large-import-v1"></script>
     <script src="inc/visualwavedrom-json-bigdata.js?v=20260731-bigdata-fix-v1"></script>
@@ -954,7 +959,7 @@
     <script src="inc/visualwavedrom-presenter-gif.js?v=20260831-presenter-gif-v1"></script>
     <script src="inc/visualwavedrom-presenter-shortcuts.js?v=20260831-presenter-shortcuts-v1"></script>
     <script src="inc/visualwavedrom-presenter-split.js?v=20260901-presenter-settings-nav-v1"></script>
-    <script src="inc/visualwavedrom-presenter.js?v=20260901-data-cycle-align-v2"></script>
+    <script src="inc/visualwavedrom-presenter.js?v=20261015-presenter-parameters-v1"></script>
     <script src="inc/visualwavedrom-import-collection.js?v=20260831-inc-layout-v1"></script>
     <script src="inc/visualwavedrom-shortcuts.js?v=20260930-backspace-v1"></script>
   <div class="modal-overlay" id="tool-version-modal" hidden>
@@ -993,6 +998,6 @@
     <script src="inc/visualwavedrom-parameters.js?v=20260926-sidebar-docking-v1"></script>
     <script src="inc/visualwavedrom-timing-core.js?v=20261010-timing-series-v1"></script>
     <script src="inc/visualwavedrom-timing.js?v=20261010-timing-series-v1"></script>
-    <script src="inc/visualwavedrom-app.js?v=20261002-connection-label-keyboard-v1"></script>
+  <script src="inc/visualwavedrom-app.js?v=20261015-presenter-parameters-v1"></script>
 </body>
 </html>
