@@ -1,5 +1,63 @@
 [
   {
+    "version": "2026.10.15.1",
+    "date": "2026-10-15T07:09:00Z",
+    "head": "22c200a3a6dfde6d586610fac29e9372d4a4a98d",
+    "notes": [
+      "支持跨目录搜索并独立保存波形库；新增独立波形库另存为按钮，隔离同名库与多窗口保存目标。"
+    ],
+    "commits": [
+      {
+        "id": "22c200a3a6dfde6d586610fac29e9372d4a4a98d",
+        "date": "2026-10-15T11:50:34+08:00",
+        "title": "feat: support multiple libraries and presenter parameter rendering",
+        "body": "Treat = as a data waveform in series filling and document shared data behavior.\n\nAdd empty-library creation and multi-window opening with per-library browser snapshots and editing state isolation.\n\nTransfer parameter catalogs to presenter windows, resolve expressions consistently, retain annotations during live updates, and decorate screenshot and GIF output.\n\nValidation: JavaScript syntax and diff checks; targeted Chrome and Edge tests for presenter values, live updates, library isolation, long-wave windows, and export frames."
+      },
+      {
+        "id": "fe2b9c6d5d6b758d6b7d9edafe29f91bbbabed56",
+        "date": "2026-10-10T14:34:59+08:00",
+        "title": "feat: infer omitted timing data from arithmetic sequences",
+        "body": "Use arithmetic data-label inference only after connection delays and adjacent-row alignment. Infer omitted item counts and cadence from known numeric bus labels, preserve continuation widths and numeric formatting, and report ambiguous or conflicting cases without changing source waveforms.\n\nKeep inferred samples compressed and render only visible items, with range summaries at low zoom. Show inference provenance and counts in timing details, propagate newly known times, and document behavior and limits.\n\nValidation: 32 targeted cases and Chrome/Edge UI checks passed during implementation, including billion-item compressed spans and zoomed values. Syntax and staged diff checks passed before commit. Excludes local waveform libraries, caches and unrelated changes."
+      },
+      {
+        "id": "c6ab6772fe1e50063b0753487dbfd15c83cc7cce",
+        "date": "2026-10-09T09:41:17+08:00",
+        "title": "feat: infer timing from adjacent rows with conflict checks",
+        "body": "Keep connection constraints authoritative and prefer the previous row. Use the next row to fill unresolved original-column times, propagating updates through adjacent rows and shared connection components.\n\nReport mismatched adjacent-row times, inconsistent continuation mappings and infeasible inferred gaps. Mark dependent rows when their alignment basis conflicts. Show previous-row, next-row and mixed sources in timing details and update the manual.\n\nValidation: 18 targeted timing cases and Chrome/Edge UI checks passed during implementation; JavaScript syntax and staged diff checks passed before commit. Local waveform libraries, runtime files and unrelated changes are excluded."
+      },
+      {
+        "id": "63a463f8cb92765dd3a8d9ba32153a079e6679e1",
+        "date": "2026-10-08T10:21:13+08:00",
+        "title": "feat: add timing expansion checks and connection label shortcuts",
+        "body": "Add a worker-backed timing preview with explicit delay constraints, sequential alignment using expanded times at original columns, same-value and unknown/gap expansion, conflict highlighting, row navigation and collapsible original references.\n\nSupport Backspace deletion without overriding custom shortcuts. Open the selected connection label with t in normal and Vim modes, including queued input during connection creation. Document the workflows.\n\nValidation: JavaScript syntax and staged diff checks; targeted timing-engine checks; prior Chrome and Edge checks for connection-label editing. Local waveform databases, runtime state, caches and unrelated deletions are excluded."
+      },
+      {
+        "id": "0af014e2f580b7e89a639dd87ed73ed5061ac7f6",
+        "date": "2026-09-26T03:41:58+08:00",
+        "title": "feat: support draggable right-sidebar menu layouts",
+        "body": "Replace sidebar visibility checkboxes with constrained docking for the function and waveform menus. Support horizontal, vertical, and tabbed layouts, drag previews, cancellation outside the sidebar, and persistent menu order and active tabs.\n\nKeep independent scrolling and existing menu actions, restore the selected layout after visiting parameter tables, and document pointer and keyboard interactions.\n\nValidation: Chrome and Edge targeted drag, tab, persistence, cancellation, parameter-page, edit/undo, narrow viewport, and font-scaling checks passed; JavaScript syntax and staged diff checks passed."
+      },
+      {
+        "id": "e4a4a3cef5d863281a45bd1cf13161b095062efa",
+        "date": "2026-09-26T03:14:39+08:00",
+        "title": "feat: add grouped waveform picker and configurable sidebar columns",
+        "body": "Support double-click cycling and hold-to-open waveform previews grouped into columns, with unclassified types last and a persistent classifier toggle. Update default classes while preserving custom settings, and keep continuation dots when switching a data-segment head.\n\nSplit function and waveform menus into independently scrolling columns with persistent visibility controls. Preserve parameter-page visibility behavior and document the new interactions.\n\nValidation: Chrome and Edge targeted checks for classifier gestures, data labels, undo/redo, disabled behavior, menu visibility, parameter tabs, narrow viewports, and font scaling; JavaScript syntax and diff checks passed."
+      },
+      {
+        "id": "9ca022ab08f506bb4ba19d1f54889b2989700040",
+        "date": "2026-09-26T01:28:45+08:00",
+        "title": "feat: add waveform cycling and series fill with a reorganized manual",
+        "body": "Add configurable waveform classes and the Q cycle shortcut, including validation and shortcut preference migration.\n\nAdd left/right selection fill handles, dashed previews, arithmetic and numbered-label inference, atomic source validation, auto-scroll, cancellation, and undo integration.\n\nKeep data label editors aligned with waveform cells and size short inputs compactly while allowing longer content.\n\nReorganize ReadMe by application scenario and interface, with linked feature sections, current save semantics, and the existing ten-step GIF tutorial.\n\nValidation: JavaScript syntax checks, focused series/classifier assertions, Markdown links and JSON examples, and git diff whitespace checks. Local deletions, waveform data, and temporary files are excluded."
+      },
+      {
+        "id": "cf28f8935642618c8b0bb525795df101e560e05f",
+        "date": "2026-09-20T17:13:19+08:00",
+        "title": "chore: publish release 2026.9.20.1"
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.9.20.1",
     "date": "2026-09-20T09:10:48Z",
     "head": "3b82b06e63ab3929eba85ea57015dfc0f977ee37",

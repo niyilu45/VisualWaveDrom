@@ -2294,6 +2294,20 @@
       font-weight: 600;
     }
 
+    .wave-library-result-path {
+      display: block;
+      font-weight: normal;
+      overflow-wrap: anywhere;
+      white-space: normal;
+      margin-top: 4px;
+    }
+
+    #wave-library-picker-options .nav-move-option { display: block; text-align: left; }
+    #wave-library-picker-modal .modal-dialog, #wave-library-save-as-modal .modal-dialog { width: min(100%, 640px); }
+    #wave-library-save-as-current { overflow-wrap: anywhere; min-width: 0; }
+    #wave-library-search-controls > button { margin-top: 8px; }
+    #wave-library-picker-status, #wave-library-save-as-status { overflow-wrap: anywhere; margin: 8px 0; }
+
     .row-import-path-controls {
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto;

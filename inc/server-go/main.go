@@ -28,7 +28,7 @@ import (
 const (
 	appID                      = "VisualWaveDrom"
 	protocolScheme             = "visualwavedrom"
-	serviceAPIVersion          = 24
+	serviceAPIVersion          = 25
 	defaultPort                = 4173
 	maxWaveLibraryRequestBytes = 256 * 1024 * 1024
 	importMaxUploadBytes       = 128 * 1024 * 1024
@@ -125,6 +125,7 @@ type config struct {
 }
 
 type libraryListItem struct {
+	Path          string  `json:"path,omitempty"`
 	Name          string  `json:"name"`
 	LibraryID     string  `json:"libraryId"`
 	DocumentCount int     `json:"documentCount"`
@@ -289,7 +290,7 @@ func newService(configuration config) (*service, error) {
 		config: configuration, store: store, imports: newImportManager(configuration.rootDir),
 		sqliteVersion: sqliteVersion, activeScheme: protocolScheme,
 		workingDir:       filepath.Join(configuration.tempDir, "sessions", stableID("server")),
-		workingLibraries: make(map[string]string), librarySources: make(map[string]string),
+		workingLibraries: make(map[string]string), librarySources: registeredExternalLibraries(configuration),
 		clients:                make(map[string]clientLease),
 		collectionSearchCache:  make(map[string]collectionSearchCacheEntry),
 		collectionPreviewCache: make(map[string]collectionSinglePreviewIndex),
@@ -391,14 +392,18 @@ func writeJSONAtomically(filePath string, value any) error {
 	return os.Rename(tempName, filePath)
 }
 
-func (s *service) rememberLibraryName(name string) {
+func (s *service) rememberLibraryName(name string, paths ...string) {
 	if name == "" || filepath.Base(name) != name {
 		return
 	}
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
+	path := ""
+	if len(paths) > 0 {
+		path = paths[0]
+	}
 	if err := writeOperationRecord(s.config.tempDir, "recent-library", map[string]any{
-		"version": 1, "recentLibrary": name, "updatedAt": isoNow(),
+		"version": 1, "recentLibrary": name, "recentLibraryPath": path, "updatedAt": isoNow(),
 	}); err != nil {
 		log.Printf("Could not remember the current library: %v", err)
 	}
@@ -433,6 +438,7 @@ func (s *service) listLibraries() []libraryListItem {
 			continue
 		}
 		libraries = append(libraries, libraryListItem{
+			Path: filePath,
 			Name: entry.Name(), LibraryID: info.LibraryID,
 			DocumentCount: info.DocumentCount, MtimeMS: float64(stat.ModTime().UnixNano()) / 1e6,
 		})
@@ -447,12 +453,19 @@ func (s *service) listLibraries() []libraryListItem {
 		if info, err := s.store.getLibraryInfo(configuredPath); err == nil {
 			if stat, statErr := os.Stat(configuredPath); statErr == nil {
 				libraries = append(libraries, libraryListItem{
+					Path: s.config.configuredLibrary,
 					Name: s.config.configuredName, LibraryID: info.LibraryID,
 					DocumentCount: info.DocumentCount,
 					MtimeMS:       float64(stat.ModTime().UnixNano()) / 1e6,
 				})
 				s.registerLibrarySource(info.LibraryID, s.config.configuredLibrary)
 			}
+		}
+	}
+	for id, path := range registeredExternalLibraries(s.config) {
+		if item, err := s.libraryEntry(path, id); err == nil {
+			s.registerLibrarySource(id, path)
+			libraries = append(libraries, item)
 		}
 	}
 	sort.Slice(libraries, func(i, j int) bool { return libraries[i].MtimeMS > libraries[j].MtimeMS })
@@ -506,7 +519,7 @@ func (s *service) sourceLibraryPathByID(id string) string {
 	}
 	for _, library := range s.listLibraries() {
 		if library.LibraryID == id {
-			return s.safeLibraryPath(library.Name)
+			return library.Path
 		}
 	}
 	return ""
@@ -539,6 +552,7 @@ func (s *service) ensureWorkingLibrary(sourcePath string) (string, error) {
 		return "", errors.New("wave library source path is empty")
 	}
 	sourcePath, _ = filepath.Abs(sourcePath)
+	identity := s.externalLibraryIdentity(sourcePath)
 	key := normalizedPath(sourcePath)
 	s.draftMu.Lock()
 	defer s.draftMu.Unlock()
@@ -566,7 +580,7 @@ func (s *service) ensureWorkingLibrary(sourcePath string) (string, error) {
 	}
 	workingPath := draftLibraryPath(s.config.tempDir, filepath.Base(s.workingDir), sourcePath)
 	if !s.store.isLibraryFile(workingPath) && s.store.isLibraryFile(sourcePath) {
-		if err := s.store.copyLibrary(sourcePath, workingPath); err != nil {
+		if err := s.store.copyLibraryWithIdentity(sourcePath, workingPath, identity); err != nil {
 			return "", err
 		}
 	}
@@ -602,11 +616,19 @@ func (s *service) commitWorkingLibraryLocked(id string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err = s.store.copyLibrary(workingPath, sourcePath); err != nil {
+	diskID := library.LibraryID
+	if strings.HasPrefix(id, "library-path-") {
+		if disk, readErr := s.store.getLibraryInfo(sourcePath); readErr == nil {
+			diskID = disk.LibraryID
+		} else {
+			return "", readErr
+		}
+	}
+	if err = s.store.copyLibraryWithIdentity(workingPath, sourcePath, diskID); err != nil {
 		return "", err
 	}
 	s.registerLibrarySource(library.LibraryID, sourcePath)
-	s.rememberLibraryName(s.libraryNameFromPath(sourcePath))
+	s.rememberLibraryName(s.libraryNameFromPath(sourcePath), sourcePath)
 	return sourcePath, nil
 }
 
@@ -891,8 +913,8 @@ func decodeJSONBody(writer http.ResponseWriter, request *http.Request, maxBytes 
 }
 
 func (s *service) resolveRequestSourceLibrary(requestURL *url.URL, configuredDefault bool) string {
-	if byID := s.sourceLibraryPathByID(requestURL.Query().Get("libraryId")); byID != "" {
-		return byID
+	if id := requestURL.Query().Get("libraryId"); id != "" {
+		return s.sourceLibraryPathByID(id)
 	}
 	if fileName := requestURL.Query().Get("file"); fileName != "" {
 		return s.safeLibraryPath(fileName)
@@ -1270,6 +1292,16 @@ func (s *service) handleLibraries(writer http.ResponseWriter, _ *http.Request) {
 	for _, library := range libraries {
 		if library.Name == currentName {
 			currentID = library.LibraryID
+			break
+		}
+	}
+	var recentState map[string]any
+	if readOperationRecord(s.config.tempDir, "recent-library", &recentState) == nil {
+		for _, library := range libraries {
+			if stringValue(recentState["recentLibraryPath"]) != "" && samePath(library.Path, stringValue(recentState["recentLibraryPath"])) {
+				currentID, currentName = library.LibraryID, library.Name
+				break
+			}
 		}
 	}
 	files := make([]string, len(libraries))
@@ -1278,6 +1310,7 @@ func (s *service) handleLibraries(writer http.ResponseWriter, _ *http.Request) {
 	}
 	sendJSON(writer, 200, map[string]any{
 		"files": files, "libraries": libraries, "current": currentName,
+		"directory":        s.config.waveDir,
 		"currentLibraryId": currentID, "protocolScheme": s.activeScheme,
 		"recovery": s.recoveryDetails(),
 	})
@@ -1328,7 +1361,8 @@ func (s *service) handleWaveLibrary(writer http.ResponseWriter, request *http.Re
 			sendJSON(writer, 400, map[string]any{"error": err.Error()})
 			return
 		}
-		s.rememberLibraryName(s.libraryNameFromPath(sourcePath))
+		s.rememberLibraryName(s.libraryNameFromPath(sourcePath), sourcePath)
+		library.SourcePath = sourcePath
 		sendJSON(writer, 200, library)
 	case http.MethodPost:
 		var incoming waveLibrary
@@ -1389,7 +1423,7 @@ func (s *service) handleWaveLibrary(writer http.ResponseWriter, request *http.Re
 			return
 		}
 		s.registerLibrarySource(incoming.LibraryID, sourcePath)
-		s.rememberLibraryName(s.libraryNameFromPath(sourcePath))
+		s.rememberLibraryName(s.libraryNameFromPath(sourcePath), sourcePath)
 		sendJSON(writer, 200, map[string]any{
 			"ok": true, "file": s.libraryNameFromPath(sourcePath),
 			"libraryId": incoming.LibraryID,
@@ -1445,6 +1479,7 @@ func (s *service) handleLibraryCommit(writer http.ResponseWriter, request *http.
 	sendJSON(writer, 200, map[string]any{
 		"ok": true, "libraryId": payload.LibraryID,
 		"file": s.libraryNameFromPath(sourcePath),
+		"path": sourcePath,
 	})
 }
 
@@ -1605,6 +1640,9 @@ func (s *service) routes() http.Handler {
 	mux.HandleFunc("/api/import-wave-row", method(http.MethodPost, s.handleImportRow))
 	mux.HandleFunc("/api/import-wave-collection", method(http.MethodPost, s.handleImportCollection))
 	mux.HandleFunc("/api/wave-libraries", method(http.MethodGet, s.handleLibraries))
+	mux.HandleFunc("/api/wave-library-search", method(http.MethodPost, s.handleLibrarySearch))
+	mux.HandleFunc("/api/wave-library-path-picker", method(http.MethodPost, s.handleLibraryPathPicker))
+	mux.HandleFunc("/api/wave-library-save-as", method(http.MethodPost, s.handleLibrarySaveAs))
 	mux.HandleFunc("/api/wave-library", s.handleWaveLibrary)
 	mux.HandleFunc("/api/wave-library-state", method(http.MethodPatch, s.handleLibraryState))
 	mux.HandleFunc("/api/wave-library-commit", method(http.MethodPost, s.handleLibraryCommit))

@@ -581,6 +581,7 @@
       if (!record || !record.bytes) return false;
       const expectedId = this.libraryId;
       await this.importBytes(new Uint8Array(record.bytes), record.fileName);
+      this.fileHandle = record.fileHandle || null;
       if (expectedId && this.libraryId !== expectedId) {
         this.openEmpty();
         this.libraryId = expectedId;
@@ -599,6 +600,7 @@
         id: LIBRARY_KEY_PREFIX + this.libraryId,
         libraryId: this.libraryId,
         fileName: this.fileName,
+        fileHandle: this.fileHandle || null,
         bytes: copy,
         updatedAt: new Date().toISOString()
       };
@@ -611,6 +613,16 @@
       }];
       if (options && options.makeActive) records.push({ id: SNAPSHOT_KEY, libraryId: this.libraryId });
       return writeSnapshot(this.snapshotDatabase, records);
+    }
+
+    async forkLibrary(identity, fileName) {
+      const copy = await global.VWDSqliteLibrary.createStore(identity);
+      try {
+        await copy.importBytes(this.exportBytes(), fileName);
+        copy.db.exec({sql: 'UPDATE vwd_library SET library_id=? WHERE singleton=1', bind: [identity]});
+        copy.libraryId = identity;
+        return copy;
+      } catch (error) { copy.close(); throw error; }
     }
 
     remember() {

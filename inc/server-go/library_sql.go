@@ -76,6 +76,10 @@ func (tx *libraryTx) QueryRow(query string, args ...any) *sql.Row {
 // SQLite copies the existing indexed rows/chunks without parsing large JSON
 // documents or materializing a second library-sized object in Go memory.
 func (s *sqliteStore) copyLibrary(source, target string) error {
+	return s.copyLibraryWithIdentity(source, target, "")
+}
+
+func (s *sqliteStore) copyLibraryWithIdentity(source, target, identity string) error {
 	if err := s.ensureSchema(target); err != nil {
 		return err
 	}
@@ -119,6 +123,11 @@ func (s *sqliteStore) copyLibrary(source, target string) error {
 	} {
 		query := "INSERT INTO main." + db.prefix + item.table + " (" + item.columns + ") SELECT " + item.columns + " FROM incoming." + sourcePrefix + item.table
 		if _, err = tx.Exec(query); err != nil {
+			return err
+		}
+	}
+	if identity != "" {
+		if _, err = tx.Exec("UPDATE main."+db.prefix+"vwd_library SET library_id=? WHERE singleton=1", identity); err != nil {
 			return err
 		}
 	}

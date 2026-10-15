@@ -21,7 +21,7 @@ func graphicalPickerCommand(kind, initialPath string) (string, []string, bool) {
 		}
 		if program == "kdialog" {
 			switch kind {
-			case "folder", "tool-folder":
+			case "folder", "tool-folder", "library-folder":
 				return executable, []string{
 					"--getexistingdirectory", initial, "--title", "选择波形数据文件夹",
 				}, true
@@ -35,11 +35,13 @@ func graphicalPickerCommand(kind, initialPath string) (string, []string, bool) {
 					"--getsavefilename", initial, "*.json|JSON presets",
 					"--title", "保存预设集合 JSON",
 				}, true
+			case "save-library":
+				return executable, []string{"--getsavefilename", initial, "*.sqlite|SQLite wave libraries", "--title", "波形库另存为"}, true
 			}
 		}
 		args := []string{"--file-selection"}
 		switch kind {
-		case "folder", "tool-folder":
+		case "folder", "tool-folder", "library-folder":
 			args = append(args, "--directory", "--title=选择波形数据文件夹")
 			if initial != "" {
 				args = append(args, "--filename="+filepath.Clean(initial)+string(os.PathSeparator))
@@ -64,6 +66,11 @@ func graphicalPickerCommand(kind, initialPath string) (string, []string, bool) {
 			if initial != "" {
 				args = append(args, "--filename="+initial)
 			}
+		case "save-library":
+			args = append(args, "--save", "--confirm-overwrite", "--title=波形库另存为", "--file-filter=SQLite wave libraries | *.sqlite")
+			if initial != "" {
+				args = append(args, "--filename="+initial)
+			}
 		}
 		return executable, args, true
 	}
@@ -72,7 +79,7 @@ func graphicalPickerCommand(kind, initialPath string) (string, []string, bool) {
 
 func pickLocalPathNative(kind, initialPath string) (string, bool, error) {
 	switch kind {
-	case "folder", "tool-folder", "preset", "save-preset":
+	case "folder", "tool-folder", "library-folder", "preset", "save-preset", "save-library":
 	default:
 		return "", false, fmt.Errorf("unsupported path picker kind %q", kind)
 	}

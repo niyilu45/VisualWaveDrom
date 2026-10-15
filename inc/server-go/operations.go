@@ -91,12 +91,13 @@ func (s *service) deleteOperationSession() error {
 }
 
 func validateRestartLibraries(configuration config, directory string, saved serverRestartState, legacy bool) error {
+	external := registeredExternalLibraries(configuration)
 	for source, working := range saved.WorkingLibraries {
 		valid := samePath(working, draftLibraryPath(configuration.tempDir, filepath.Base(directory), source))
 		if legacy {
 			valid = pathWithin(directory, working) && filepath.Base(working) == "library.sqlite"
 		}
-		if !valid || (!samePath(source, configuration.configuredLibrary) && !pathWithin(configuration.waveDir, source)) {
+		if !valid || (!samePath(source, configuration.configuredLibrary) && !pathWithin(configuration.waveDir, source) && !samePath(external[externalLibraryID(source)], source)) {
 			return errors.New("invalid recovery library path")
 		}
 		if !newSQLiteStore().isLibraryFile(working) {

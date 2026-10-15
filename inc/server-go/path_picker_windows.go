@@ -11,7 +11,7 @@ import (
 
 func pickLocalPathNative(kind, initialPath string) (string, bool, error) {
 	switch kind {
-	case "folder", "tool-folder", "preset", "save-preset":
+	case "folder", "tool-folder", "library-folder", "preset", "save-preset", "save-library":
 	default:
 		return "", false, fmt.Errorf("unsupported path picker kind %q", kind)
 	}
@@ -50,10 +50,11 @@ $owner.Activate()
 
 $selected = ''
 try {
-    if ($kind -eq 'folder' -or $kind -eq 'tool-folder') {
+    if ($kind -eq 'folder' -or $kind -eq 'tool-folder' -or $kind -eq 'library-folder') {
         $dialog = [System.Windows.Forms.FolderBrowserDialog]::new()
         $dialog.Description = '选择波形数据文件夹'
         if ($kind -eq 'tool-folder') { $dialog.Description = '选择最新版本存放目录' }
+        if ($kind -eq 'library-folder') { $dialog.Description = '选择波形库 Wave 文件夹' }
         $dialog.ShowNewFolderButton = $false
         $dialog.SelectedPath = $initialDirectory
         if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) {
@@ -75,6 +76,11 @@ try {
         $dialog.Title = '保存预设集合 JSON'
         $dialog.Filter = 'JSON 预设 (*.json)|*.json|所有文件 (*.*)|*.*'
         $dialog.DefaultExt = 'json'
+        if ($kind -eq 'save-library') {
+            $dialog.Title = '波形库另存为'
+            $dialog.Filter = 'SQLite 波形库 (*.sqlite)|*.sqlite'
+            $dialog.DefaultExt = 'sqlite'
+        }
         $dialog.AddExtension = $true
         $dialog.OverwritePrompt = $true
         $dialog.InitialDirectory = $initialDirectory

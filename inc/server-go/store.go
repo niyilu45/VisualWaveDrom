@@ -69,6 +69,7 @@ PRAGMA user_version=2;
 `
 
 type waveLibrary struct {
+	SourcePath          string           `json:"sourcePath,omitempty"`
 	Parameters          map[string]any   `json:"parameters,omitempty"`
 	Kind                string           `json:"kind"`
 	Version             int              `json:"version"`
