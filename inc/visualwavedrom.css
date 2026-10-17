@@ -2124,11 +2124,13 @@
     }
 
     .single-wave-loading,
+    .single-wave-load-error,
     .single-wave-not-found {
       width: 100%;
       padding: 24px;
       border-radius: 6px;
       font-size: 14px;
+      overflow-wrap: anywhere;
     }
 
     .single-wave-loading {
@@ -2137,10 +2139,16 @@
       color: #475569;
     }
 
+    .single-wave-load-error,
     .single-wave-not-found {
       border: 1px solid #fecaca;
       background: #fff7f7;
       color: #b91c1c;
+    }
+
+    .single-wave-retry {
+      display: block;
+      margin-top: 12px;
     }
 
     .modal-field-label {

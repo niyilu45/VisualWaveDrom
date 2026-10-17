@@ -1,5 +1,24 @@
 [
   {
+    "version": "2026.10.17.1",
+    "date": "2026-10-17T01:21:01Z",
+    "head": "6e2e99b57e7cdcffca08023f6f4ab5ad7b5fba49",
+    "notes": [
+      "时延检查支持补全数据序列与省略区间中的空白数据格，保留连接约束并报告相邻行时延冲突。",
+      "修复单独打开波形图时初始化、保存及库标识竞争导致的不存在提示，增加加载重试和错误反馈。",
+      "补全应用场景与界面功能说明，更新外部波形库、另存为及数据序列补全的使用方法。"
+    ],
+    "commits": [
+      {
+        "id": "6e2e99b57e7cdcffca08023f6f4ab5ad7b5fba49",
+        "date": "2026-10-15T15:11:31+08:00",
+        "title": "feat: support external wave libraries and independent save as",
+        "body": "Search SQLite libraries in user-selected Wave directories and isolate same-name or same-ID copies by their source paths. Preserve source identities when saving, remember recent paths, and restore external library sessions safely.\n\nAdd a dedicated Save As button that clones the complete library to a new file and switches only the current window. Protect existing targets, keep direct Save behavior, and serialize browser file saves across windows.\n\nUpdate documentation and release 2026.10.15.1 with rebuilt Windows and Linux servers. Validation: Go service tests, JavaScript syntax checks, Chrome multi-window and pure-HTML Save As checks, responsive dialog checks, and staged diff checks. Excludes local libraries, temporary files and unrelated changes."
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.10.15.1",
     "date": "2026-10-15T07:09:00Z",
     "head": "22c200a3a6dfde6d586610fac29e9372d4a4a98d",

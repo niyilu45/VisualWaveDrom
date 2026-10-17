@@ -451,7 +451,6 @@
           return true;
         });
       } }
-      alignNeighbours();
       // Known connection times are authoritative. Audit only inferred positions,
       // so disagreement is reported instead of silently replacing an upper anchor.
       const auditedConflicts = new Set();
@@ -472,7 +471,6 @@
           }, true);
         }
       }); }
-      auditAlignments();
       function propagateConflicts() {
         const consumers = rows.map(() => new Set());
         alignmentSources.forEach((entry, group) => componentRows[group].forEach((id) => consumers[entry.referenceRow].add(id)));
@@ -486,8 +484,8 @@
         return invalidRows;
       }
       const invalidRows = propagateConflicts();
-      // Infer only inside uninterrupted numeric bus sections with an observed
-      // adjacent step and cadence. Keep omitted samples compressed for rendering.
+      // Establish explicit data progressions before neighbour fallback can consume
+      // their omissions. Empty bus cells count as samples, not as missing time.
       function numericLabel(label) {
         const text = String(label).trim();
         const matches = Array.from(text.matchAll(/[+-]?(?:0[xX][\da-fA-F]+|0[bB][01]+|0[oO][0-7]+|(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)/g));
@@ -506,48 +504,73 @@
       const seriesCandidates = [];
       rows.forEach((row) => {
         if (!row.supported || invalidRows.has(row.index)) return;
-        const labels = new Map(); let section = [];
+        const labels = new Map(); let section = [], sectionKey = null;
         function flushSection() {
           if (!section.length) return;
           let step = null, columns = null, inconsistent = false;
           for (let i = 1; i < section.length; i++) {
             const previous = section[i - 1], current = section[i];
-            if (previous.run.gap || current.run.gap || previous.run.slot === current.run.slot) continue;
+            if (!previous.label || !current.label || previous.run.gap || current.run.gap || previous.run.slot === current.run.slot) continue;
             const delta = current.label.value - previous.label.value, width = previous.run.end - previous.run.col;
             if (step === null) { step = delta; columns = width; }
             else if (!nearNumber(step, delta) || columns !== width) inconsistent = true;
           }
+          let leftIndex = -1;
           for (let i = 0; i < section.length; i++) {
-            const item = section[i]; if (!item.run.gap) continue;
-            const gap = gaps[item.run.gap - 1], left = section[i - 1], right = section[i + 1];
-            if (gap.ignored || gap.kind === 'stretch' || gap.duration !== undefined) continue;
+            const right = section[i];
+            if (!right.label || right.run.gap) continue;
+            const previousIndex = leftIndex; leftIndex = i;
+            if (previousIndex < 0 || i === previousIndex + 1) continue;
+            const left = section[previousIndex], between = section.slice(previousIndex + 1, i);
+            const omissions = between.filter((item) => item.run.gap);
+            if (omissions.length !== 1) continue;
+            const gap = gaps[omissions[0].run.gap - 1], blanks = between.filter((item) => !item.run.gap);
+            if (gap.ignored || gap.kind === 'stretch') continue;
             gap.seriesReason = '数据文本不足以确定等差公差和每项宽度';
-            if (step === null || step === 0 || inconsistent || !left || !right || left.run.gap || right.run.gap
-                || left.run.slot === right.run.slot || left.run.end - left.run.col !== columns) continue;
-            const ratio = (right.label.value - left.label.value) / step, steps = Math.round(ratio), count = steps - 1;
+            if (step === null || step === 0 || inconsistent || left.run.slot === right.run.slot
+                || left.run.end - left.run.col !== columns
+                || new Set(blanks.map((item) => item.run.slot)).size !== blanks.length
+                || blanks.some((item) => item.run.end - item.run.col !== columns)) continue;
+            const ratio = (right.label.value - left.label.value) / step, steps = Math.round(ratio), count = steps - 1 - blanks.length;
             if (!Number.isSafeInteger(steps) || count < 1 || Math.abs(ratio - steps) > Math.min(1e-7, 32 * Number.EPSILON * Math.max(1, Math.abs(ratio)))) {
               gap.seriesReason = '两侧数据与已知公差不符，不能确定正整数个省略数据'; continue;
             }
             const cellDuration = columns * row.period, duration = count * cellDuration;
             if (!Number.isFinite(duration) || !(duration > 0) || !Number.isSafeInteger(count * columns)) continue;
-            seriesCandidates.push({ gap, duration, series: { first: left.label.value + step, step, count, cellDuration,
-              before: left.run.value, after: right.run.value, style: left.label.style } });
+            const beforeCount = blanks.filter((item) => item.run.col < gap.col).length;
+            const fills = blanks.map((item, index) => ({ run: item.run, value: seriesLabel(left.label.value
+              + step * (index + 1 + (item.run.col > gap.col ? count : 0)), left.label.style) }));
+            seriesCandidates.push({ gap, duration, fills, series: { first: left.label.value + step * (beforeCount + 1), step, count, cellDuration,
+              before: left.run.value, after: right.run.value, style: left.label.style, filledCount: fills.length } });
           }
-          section = [];
+          section = []; sectionKey = null;
         }
         row.runs.forEach((run) => {
           if (!labels.has(run.slot)) labels.set(run.slot, run.state === 'bus' ? numericLabel(run.value) : null);
           const label = run.state === 'bus' ? labels.get(run.slot) : null;
-          if (!label || run.col >= row.sourceLength || run.gap && gaps[run.gap - 1].kind === 'stretch') { flushSection(); return; }
-          if (section.length && (section[section.length - 1].label.key !== label.key || section[section.length - 1].run.end !== run.col)) flushSection();
+          const blank = run.state === 'bus' && !run.value.trim();
+          if ((!label && !blank) || run.col >= row.sourceLength || run.gap && gaps[run.gap - 1].kind === 'stretch') { flushSection(); return; }
+          if (section.length && (label && sectionKey !== null && sectionKey !== label.key || section[section.length - 1].run.end !== run.col)) flushSection();
+          if (label) sectionKey = label.key;
           section.push({ run, label });
         });
         flushSection();
       });
-      for (const { gap, duration, series } of seriesCandidates) {
+      for (const { gap, duration, series, fills } of seriesCandidates) {
         if (!feasible.ok || boundWork > 2000000 || invalidRows.has(gap.row)) continue;
         resolveRowTimes(rows[gap.row]);
-        if (gap.duration !== undefined || [gap.a, gap.b].some((block) => shifts[groups[block]] === null && blockedGroups.has(groups[block]))) continue;
+        if ([gap.a, gap.b].some((block) => shifts[groups[block]] === null && blockedGroups.has(groups[block]))) continue;
+        if (gap.duration !== undefined) {
+          if (Math.abs(gap.duration - duration) > Math.max(EPS, tolerance)) {
+            const origin = gap.durationSource === 'connection' ? '连接时延' : '已确定的时延';
+            issue('conflict', '第' + (gap.row + 1) + '行第' + gap.col + '列数据等差规律需要 ' + format(duration)
+              + ' cycle，但' + origin + '为 ' + format(gap.duration) + ' cycle；保留' + origin + '，未采用数据补全', [gap.row], [], [gap.index]);
+          } else {
+            gap.series = series; delete gap.seriesReason;
+            fills.forEach(({ run, value }) => { run.inferredValue = value; });
+          }
+          continue;
+        }
         const a = groups[gap.a], b = groups[gap.b], delta = duration + values[gap.a] + gap.offset - values[gap.b];
         const additions = [{ from: a, to: b, weight: delta, strict: 0 }, { from: b, to: a, weight: -delta, strict: 0 }];
         additions.forEach((bound) => outgoing[bound.from].push(bound));
@@ -559,10 +582,12 @@
           invalidRows.add(gap.row); continue;
         }
         gap.duration = duration; gap.durationSource = 'data-series'; gap.series = series; delete gap.seriesReason;
+        fills.forEach(({ run, value }) => { run.inferredValue = value; });
         seriesLinks[a].push({ to: b, delta, gap }); seriesLinks[b].push({ to: a, delta: -delta, gap });
-        positionSeries([a, b]); alignNeighbours();
+        positionSeries([a, b]);
       }
       function countText(series) { return series.count + ' 项（公差 ' + format(series.step) + '，每项 ' + format(series.cellDuration) + ' cycle）'; }
+      alignNeighbours();
       auditAlignments(); propagateConflicts();
       let minimum = 0, maximum = 1;
       rows.forEach((row) => {
@@ -594,6 +619,7 @@
         const sorted = row.runs.filter((run) => run.start !== null && run.finish !== null && run.finish > run.start).sort((p, q) => p.start - q.start);
         sorted.forEach((original) => {
           const run = Object.assign({}, original);
+          if (run.inferredValue !== undefined) run.value = run.inferredValue;
           if (run.gap && gaps[run.gap - 1].series) run.series = gaps[run.gap - 1].series;
           if (!run.series && run.gap && gaps[run.gap - 1].kind !== 'stretch' && config.gapContent === 'unknown' || /[pPnN]/.test(run.state) && run.clockOrigin === null) { run.state = 'x'; run.value = 'x'; run.slot = -1; }
           const previous = row.drawRuns[row.drawRuns.length - 1];

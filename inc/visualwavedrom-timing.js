@@ -156,7 +156,7 @@
       const paragraph = (text, type) => { const p = doc.createElement('p'); p.textContent = text; if (type) p.className = type; detail.appendChild(p); };
       paragraph(rowStatusName(row), row.status);
       if (!row.reasons.length) paragraph(row.empty ? '空行，未发现连接时延冲突。'
-        : row.alignments.length ? '已有连接约束保持不变；其余位置按上行、下行、数据等差规律依次补充。'
+        : row.alignments.length ? '已有连接约束保持不变；先按明确的数据等差规律补全，再按上行、下行补充未定位置。'
         : '时间已确定；已提供的时延约束一致。没有连接约束的部分仅确定自身时间。');
       row.reasons.forEach((reason) => paragraph(reason));
       row.alignments.forEach((alignment) => {
@@ -184,6 +184,7 @@
           paragraph('数据 ' + series.before + ' → ' + series.after + '；公差 ' + fmt(series.step) + '，省略 '
             + series.count + ' 项，每项 ' + fmt(series.cellDuration) + ' cycle；补全 '
             + core.seriesLabel(series.first, series.style) + (series.count > 1 ? ' … ' + core.seriesLabel(series.first + (series.count - 1) * series.step, series.style) : '') + '。');
+          if (series.filledCount) paragraph('同时补齐两端之间 ' + series.filledCount + ' 个已有空白数据格；保留原宽度，仅改变展开预览中的文本。');
         }
       });
       model.edges.filter((edge) => edge.fromNode && edge.fromNode.row === index || edge.toNode && edge.toNode.row === index).forEach((edge) => {
