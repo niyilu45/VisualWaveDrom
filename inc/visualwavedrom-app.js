@@ -5257,11 +5257,8 @@ ${lines.join('\n')}`;
     function replaceFieldInSource(text, entry, field, newValue, dataIdx) {
       const slice = text.slice(entry.start, entry.end);
       if (field === 'name') {
-        const re = /"name"\s*:\s*"([^"\\]|\\.)*"/;
-        const m = slice.match(re);
-        if (!m) return text;
-        const abs = entry.start + m.index;
-        return text.slice(0, abs) + '"name": ' + JSON.stringify(newValue) + text.slice(abs + m[0].length);
+        const replacement = replaceTopLevelStringFieldInSource(slice, 'name', newValue);
+        return text.slice(0, entry.start) + replacement + text.slice(entry.end);
       }
       if (field === 'wave') {
         const re = /"wave"\s*:\s*"([^"\\]|\\.)*"/;
@@ -11411,6 +11408,44 @@ ${lines.join('\n')}`;
       nameText.addEventListener('click', (e) => onNameClick(e, nameText));
     }
 
+    function reserveEmptySignalNameSpace(svg) {
+      const zones = svg.querySelectorAll('.wave-name-click-zone');
+      const box = svg.viewBox && svg.viewBox.baseVal;
+      if (!zones.length || !box || !(box.width > 0)) return;
+      const svgMatrix = svg.getCTM();
+      if (!svgMatrix) return;
+      const inverse = svgMatrix.inverse();
+      let left = box.x;
+      zones.forEach((zone) => {
+        if (zone.closest('.vwd-frozen-label-layer')) return;
+        const matrix = zone.getCTM();
+        if (!matrix) return;
+        const bounds = zone.getBBox();
+        const local = inverse.multiply(matrix);
+        left = Math.min(left, local.a * bounds.x + local.c * bounds.y + local.e - 4);
+      });
+      const padding = Math.ceil(box.x - left);
+      if (!(padding > 0)) return;
+      // Keep SVG coordinates rooted at zero so frozen labels and hit testing
+      // share the same transforms; reserve space without inventing a row name.
+      let content = svg.querySelector(':scope > .vwd-name-space');
+      if (!content) {
+        content = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        content.setAttribute('class', 'vwd-name-space');
+        [...svg.children].forEach((child) => {
+          if (!['defs', 'style', 'title', 'desc'].includes(child.localName)
+              && !child.classList.contains('vwd-frozen-label-layer')) content.appendChild(child);
+        });
+        svg.appendChild(content);
+      }
+      const total = Number(content.dataset.padding || 0) + padding;
+      content.dataset.padding = String(total);
+      content.setAttribute('transform', 'translate(' + total + ' 0)');
+      const width = box.width + padding;
+      svg.setAttribute('viewBox', [box.x, box.y, width, box.height].join(' '));
+      svg.setAttribute('width', String(width));
+    }
+
     function getWaveDataSlots(wave) {
       const slots = [];
       const value = String(wave || '');
@@ -13818,6 +13853,7 @@ ${lines.join('\n')}`;
         }
       });
 
+      reserveEmptySignalNameSpace(svg);
       restoreWaveSelection(lanes, sourceMap);
       attachGroupInteractivity(jsonText);
       attachEdgeInteractivity(jsonText, parsedSource);

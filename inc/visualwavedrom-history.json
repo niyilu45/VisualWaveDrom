@@ -1,5 +1,25 @@
 [
   {
+    "version": "2026.10.19.1",
+    "date": "2026-10-18T19:10:15Z",
+    "head": "79199b5a5bc03b43b849c7dff1551def317fd57b",
+    "notes": [
+      "完善时延检查的数据段、保持段与上下行对齐，跳过空行并保持连接时延优先。",
+      "冲突按具体位置编号，提供简洁说明、候选列数对比、详细展开与点击定位。",
+      "修复修改数据后等差补全仍显示未定，匹配已确定时延后补全，并保留其他真实冲突。",
+      "支持空行名称编辑，更新使用说明。"
+    ],
+    "commits": [
+      {
+        "id": "79199b5a5bc03b43b849c7dff1551def317fd57b",
+        "date": "2026-10-17T09:22:20+08:00",
+        "title": "fix: complete timing data sequences and harden single-wave loading",
+        "body": "Infer omitted bus data and blank sample slots before neighbour alignment, preserve explicit connection constraints, and report timing conflicts without modifying source waveforms.\n\nWait for library initialization and pending saves before opening single-wave windows. Validate library and document identity, recover transient loads, and distinguish retryable loading failures from missing documents.\n\nComplete workflow and interface documentation and publish release metadata for 2026.10.17.1. Validation includes 31 focused timing cases, Chrome rendering and library-isolation checks, JavaScript syntax, release hashes, and staged diff checks. Excludes local waveform data, caches, and unrelated changes."
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.10.17.1",
     "date": "2026-10-17T01:21:01Z",
     "head": "6e2e99b57e7cdcffca08023f6f4ab5ad7b5fba49",

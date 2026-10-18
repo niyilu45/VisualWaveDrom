@@ -26,7 +26,7 @@
     doc.write('<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>时延检查</title></head><body class="timing-view"></body></html>');
     doc.close();
     const stylesheet = doc.createElement('link'); stylesheet.rel = 'stylesheet';
-    stylesheet.href = new URL('inc/visualwavedrom-timing.css?v=20260930', document.baseURI).href;
+    stylesheet.href = new URL('inc/visualwavedrom-timing.css?v=20261019-problem-locate', document.baseURI).href;
     doc.head.appendChild(stylesheet);
     doc.documentElement.style.fontSize = getComputedStyle(document.documentElement).fontSize;
     doc.body.innerHTML = `
@@ -68,6 +68,7 @@
     let source = null, model = null, worker = null, version = 0, timer = 0, disposed = false, reading = false;
     let start = 0, end = 10, active = 'a', a = 0, b = 0, selected = -1, highlighted = new Set(), highlightedEdges = new Set();
     let frame = 0, drag = null, configKey = '', requestTime = 0, selectedColumn = -1, rowOffsets = [0];
+    let focusedProblem = null;
     let referenceDefault = null, displayMinimum = 0, displayMaximum = 1;
     const referenceOverrides = new Map(), referenceToggles = new Map();
     const rowHeight = 64, referenceHeight = 72, ruler = 34;
@@ -145,19 +146,130 @@
       start = nextStart; end = nextEnd; refreshControls(); drawSoon();
     }
     function fit() { if (model) range(displayMinimum, Math.max(displayMinimum + 1, displayMaximum)); }
+    function problemRange(row, target) {
+      if (!target) return null;
+      const marked = row.conflictRanges.concat(row.dataUnknownRanges).find((item) => item.col === target.col && item.end === target.end);
+      if (marked) return marked;
+      const gap = row.gaps.map((id) => model.gaps[id]).find((item) => item.col === target.gapCol);
+      if (!gap) return null;
+      const first = referenceCell(row, gap.col), last = referenceCell(row, (gap.endCol ?? gap.col + 1) - 1);
+      return { col: gap.col, end: gap.endCol ?? gap.col + 1, start: gap.start, finish: gap.end,
+        referenceStart: first?.start ?? null, referenceFinish: last?.finish ?? null };
+    }
+    function locateProblem(index, target) {
+      const row = model?.rows[index]; if (!row) return;
+      const interval = problemRange(row, target);
+      focusedProblem = target ? { row: index, target: { col: target.col, end: target.end, gapCol: target.gapCol } } : null;
+      const reference = !!interval && (!Number.isFinite(interval.start) || !Number.isFinite(interval.finish));
+      if (reference && !referenceOpen(row)) { referenceOverrides.set(index, true); layoutRows(); }
+      const from = interval && (reference ? interval.referenceStart : interval.start);
+      const to = interval && (reference ? interval.referenceFinish : interval.finish);
+      if (Number.isFinite(from) && Number.isFinite(to)) {
+        const low = Math.min(from, to), high = Math.max(from, to);
+        const minimum = Math.min(displayMinimum, low), maximum = Math.max(displayMaximum, high);
+        const span = Math.min(maximum - minimum, Math.max((high - low) * 1.5, Math.min(end - start, row.period * 8)));
+        const next = Math.max(minimum, Math.min(maximum - span, (low + high - span) / 2));
+        range(next, next + span);
+      }
+      const height = reference ? referenceHeight : rowHeight, available = Math.max(0, scroll.clientHeight - ruler);
+      scroll.scrollTop = Math.max(0, rowOffsets[index] + (reference ? rowHeight : 0) - Math.max(0, available - height) / 2);
+      selectedColumn = interval ? interval.col : -1;
+      $('position').textContent = '第' + (index + 1) + '行 ' + row.name + (interval ? ' · '
+        + (interval.number ? '[' + interval.number + '] ' : '') + '原列' + interval.col + (interval.end > interval.col ? '至' + interval.end : '')
+        + (reference ? ' · 原序列参考，时刻未定' : '') : ' · 冲突位置未定');
+      for (const button of $('detail').querySelectorAll('.timing-problem-link'))
+        button.setAttribute('aria-current', String(button.dataset.col === String(target?.col) && button.dataset.end === String(target?.end)));
+      drawSoon();
+    }
     function selectRow(index, locate = false) {
       if (!model || !model.rows[index]) return;
-      if (selected !== index || locate) selectedColumn = -1;
+      const keepDetailsOpen = selected === index && !!$('diagnostic-details')?.open;
+      if (selected !== index || locate) { selectedColumn = -1; focusedProblem = null; }
       selected = index; highlighted = new Set([index]); highlightedEdges = new Set();
       const row = model.rows[index], relevant = model.issues.filter((item) => item.rows.includes(index));
-      relevant.forEach((item) => { item.rows.forEach((id) => highlighted.add(id)); item.edges.forEach((id) => highlightedEdges.add(id)); });
+      relevant.forEach((item) => { (item.relatedRows || item.rows).forEach((id) => highlighted.add(id)); item.edges.forEach((id) => highlightedEdges.add(id)); });
       $('detail-title').textContent = '第' + (index + 1) + '行 · ' + row.name;
       const detail = $('detail'); detail.replaceChildren();
-      const paragraph = (text, type) => { const p = doc.createElement('p'); p.textContent = text; if (type) p.className = type; detail.appendChild(p); };
+      let detailTarget = detail;
+      const paragraph = (text, type) => { const p = doc.createElement('p'); p.textContent = text; if (type) p.className = type; detailTarget.appendChild(p); };
       paragraph(rowStatusName(row), row.status);
+      if (row.status !== 'ok') {
+        const shortNames = { 'previous-row': '上行', 'next-row': '下行', current: '已定时延', series: '等差' };
+        const summaries = [], describedConflicts = new Set();
+        row.comparisons.forEach((comparison) => {
+          const upper = comparison.estimates.find((item) => item.kind === 'previous-row');
+          const difference = comparison.differences.find((item) => item.a === upper?.label) || comparison.differences[0];
+          comparison.problemNumbers.forEach((number) => describedConflicts.add(number));
+          const prefix = comparison.problemNumbers.map((number) => '[' + number + ']').join('');
+          const location = (prefix ? prefix + ' ' : '') + '列' + comparison.col + (comparison.endCol === undefined ? '' : '至' + comparison.endCol);
+          const target = row.conflictRanges.find((item) => comparison.problemNumbers.includes(item.number))
+            || row.dataUnknownRanges.find((item) => item.col <= comparison.col && item.end > comparison.col)
+            || { col: comparison.col, end: comparison.endCol ?? comparison.col + 1, gapCol: comparison.col };
+          const estimateText = (item) => shortNames[item.kind] + (item.kind !== 'current' ? '候选' : '') + ' ' + fmt(item.columns) + ' 列';
+          if (difference) {
+            summaries.push({ col: comparison.col, target, text: location + '：' + estimateText(comparison.estimates.find((item) => item.label === difference.a))
+              + '，' + estimateText(comparison.estimates.find((item) => item.label === difference.b))
+              + '，差 ' + fmt(difference.columns) + ' 列' + (comparison.period !== 1 ? '（' + fmt(difference.duration) + ' cycle）' : '') + '。' });
+          } else {
+            const gap = model.gaps[comparison.gap];
+            const candidates = comparison.estimates.filter((item) => Number.isFinite(item.columns));
+            const timing = candidates.find((item) => item.kind === 'previous-row') || candidates.find((item) => item.kind !== 'series');
+            const data = candidates.find((item) => item.kind === 'series');
+            const counts = [timing, data].filter(Boolean).map(estimateText).join('，');
+            const reason = gap.seriesSummary || gap.seriesReason || (gap.duration === undefined ? '缺少时延依据' : '时延约束不一致');
+            summaries.push({ col: comparison.col, target, text: location + '：' + (counts ? counts + '；' : '') + reason + '。' });
+          }
+        });
+        row.conflictRanges.filter((range) => !describedConflicts.has(range.number)).forEach((range) => {
+          summaries.push({ col: range.col, target: range, text: '[' + range.number + '] 列' + range.col
+            + (range.end > range.col ? '至' + range.end + '：时延冲突。' : '：边沿对齐冲突。') });
+        });
+        if (!summaries.length) summaries.push({ col: 0, target: null, text: row.status === 'conflict' ? '时延约束不一致。' : '缺少可靠的时延或数据依据。' });
+        summaries.sort((a, b) => a.col - b.col).forEach((item) => {
+          const button = doc.createElement('button'); button.type = 'button'; button.className = 'timing-problem-link'; button.textContent = item.text;
+          button.title = '定位此处波形'; button.setAttribute('aria-label', '定位：' + item.text);
+          button.dataset.col = item.target?.col; button.dataset.end = item.target?.end;
+          button.setAttribute('aria-current', String(focusedProblem?.row === index && focusedProblem.target.col === item.target?.col && focusedProblem.target.end === item.target?.end));
+          button.onclick = () => locateProblem(index, item.target); detail.appendChild(button);
+        });
+        const disclosure = doc.createElement('details'), toggle = doc.createElement('summary');
+        disclosure.id = 'timing-diagnostic-details'; disclosure.open = keepDetailsOpen;
+        toggle.textContent = keepDetailsOpen ? '收起详情' : '展开详情';
+        disclosure.addEventListener('toggle', () => { toggle.textContent = disclosure.open ? '收起详情' : '展开详情'; });
+        detailTarget = doc.createElement('div');
+        disclosure.append(toggle, detailTarget); detail.appendChild(disclosure);
+      }
+      if (row.status === 'conflict') {
+        const references = Array.from(new Set(relevant.filter((item) => item.kind === 'conflict')
+          .flatMap((item) => item.relatedRows || item.rows))).filter((id) => id !== index).sort((a, b) => a - b);
+        paragraph('本次冲突标记在第' + (index + 1) + '行'
+          + (references.length ? '；相关参考：' + references.map((id) => '第' + (id + 1) + '行').join('、') : '') + '。');
+        paragraph(row.conflictRanges.length ? '冲突位置：' + row.conflictRanges.map((range) => '[' + range.number + '] ' + (range.end > range.col
+          ? '原列 ' + range.col + ' 至 ' + range.end + ' 的边界区间' : '原列 ' + range.col + ' 的边沿')).join('；') + '。'
+          : '冲突位置暂无法确定，请查看下方约束详情。');
+      }
       if (!row.reasons.length) paragraph(row.empty ? '空行，未发现连接时延冲突。'
         : row.alignments.length ? '已有连接约束保持不变；先按明确的数据等差规律补全，再按上行、下行补充未定位置。'
         : '时间已确定；已提供的时延约束一致。没有连接约束的部分仅确定自身时间。');
+      row.comparisons.forEach((comparison) => {
+        const heading = doc.createElement('p'), title = doc.createElement('strong');
+        const prefix = comparison.problemNumbers.map((number) => '[' + number + '] ').join('');
+        title.textContent = prefix + '原列 ' + comparison.col + (comparison.endCol === undefined
+          ? ' 的 |' + (comparison.blankCount ? '（含已有空白数据格）' : '（省略部分）')
+          : ' 至 ' + comparison.endCol + '（整个展开区间）') + '：推算列数对比';
+        heading.appendChild(title); detailTarget.appendChild(heading);
+        paragraph('本行 1 列 = ' + fmt(comparison.period) + ' cycle'
+          + (comparison.blankCount ? '；两端之间已有 ' + comparison.blankCount + ' 个空白数据格，共 ' + fmt(comparison.blankColumns)
+            + ' 列，计入以下候选列数；不包含两端已知数据' : '') + '。');
+        comparison.estimates.forEach((estimate) => {
+          paragraph(estimate.label + '：' + (estimate.reason ? '无法推算；' + estimate.reason
+            : '推算为 ' + fmt(estimate.columns) + ' 列（' + fmt(estimate.duration) + ' cycle）'
+              + (estimate.count !== undefined ? '；其中 | 省略 ' + estimate.count + ' 项，每项 ' + fmt(estimate.cellDuration) + ' cycle' : ''))
+            + (estimate.note ? '；' + estimate.note : '') + '。');
+        });
+        comparison.differences.forEach((difference) => paragraph(difference.a + ' 与 ' + difference.b + ' 相差 '
+          + fmt(difference.columns) + ' 列（' + fmt(difference.duration) + ' cycle）。', row.status === 'conflict' ? 'conflict' : 'unknown'));
+      });
       row.reasons.forEach((reason) => paragraph(reason));
       row.alignments.forEach((alignment) => {
         if (alignment.direction === 'data-series') {
@@ -174,7 +286,7 @@
         const gap = model.gaps[id];
         if (gap.ignored) { paragraph('第' + gap.col + '列 |：行尾省略，不影响后续波形或连接端点，无需推算时长。'); return; }
         paragraph('第' + gap.col + '列' + (gap.kind === 'stretch' ? '至' + gap.endCol + '列' + (gap.omissions.length
-          ? '未知与省略区域（固定部分 ' + fmt(gap.minimum) + ' cycle，含 ' + gap.omissions.length + ' 个 |）'
+          ? (gap.holdStart !== undefined ? '保持与省略区域' : '未知与省略区域') + '（固定部分 ' + fmt(gap.minimum) + ' cycle，含 ' + gap.omissions.length + ' 个 |）'
           : '同值区域（原时长 ' + fmt(gap.minimum) + ' cycle）') : ' |')
           + '：' + (gap.duration === undefined ? '未定' : fmt(gap.duration) + ' cycle')
           + '；起点 ' + (gap.start === null ? '?' : fmt(gap.start)) + '，终点 ' + (gap.end === null ? '?' : fmt(gap.end))
@@ -185,6 +297,7 @@
             + series.count + ' 项，每项 ' + fmt(series.cellDuration) + ' cycle；补全 '
             + core.seriesLabel(series.first, series.style) + (series.count > 1 ? ' … ' + core.seriesLabel(series.first + (series.count - 1) * series.step, series.style) : '') + '。');
           if (series.filledCount) paragraph('同时补齐两端之间 ' + series.filledCount + ' 个已有空白数据格；保留原宽度，仅改变展开预览中的文本。');
+          if (gap.seriesConfirmation) paragraph(gap.seriesConfirmation + '。');
         }
       });
       model.edges.filter((edge) => edge.fromNode && edge.fromNode.row === index || edge.toNode && edge.toNode.row === index).forEach((edge) => {
@@ -241,10 +354,10 @@
       context.save();
       function paintBus(x1, x2, state, text) {
         const cap = Math.min(4, (x2 - x1) / 3);
-        context.fillStyle = reference ? '#eef1f5' : state === 'bus' ? '#e2f1e8' : '#eceff2';
+        context.fillStyle = reference ? '#eef1f5' : state === 'unresolved' ? '#fff0c8' : state === 'bus' ? '#e2f1e8' : '#eceff2';
         context.beginPath(); context.moveTo(x1, mid); context.lineTo(x1 + cap, mid - 12); context.lineTo(x2 - cap, mid - 12);
         context.lineTo(x2, mid); context.lineTo(x2 - cap, mid + 12); context.lineTo(x1 + cap, mid + 12); context.closePath(); context.fill(); context.stroke();
-        context.fillStyle = reference ? '#364152' : '#173426';
+        context.fillStyle = reference ? '#364152' : state === 'unresolved' ? '#8a5a08' : '#173426';
         if (x2 - x1 > 16) { context.save(); context.beginPath(); context.rect(x1 + 5, mid - 10, Math.max(0, x2 - x1 - 10), 20); context.clip(); context.textAlign = 'center'; context.fillText(text, (x1 + x2) / 2, mid + 4); context.restore(); }
       }
       for (let j = firstRun(row, from, reference); j < runs.length; j++) {
@@ -257,8 +370,8 @@
         }
         previousPixel = x2;
         const state = run.state.toLowerCase();
-        context.strokeStyle = reference && run.provisional ? '#8a5a08' : row.status === 'conflict' ? '#c0393b' : '#235681'; context.lineWidth = 1.5;
-        context.setLineDash(reference && run.provisional ? [4, 2] : []);
+        context.strokeStyle = run.unresolvedData || reference && run.provisional ? '#8a5a08' : '#235681'; context.lineWidth = 1.5;
+        context.setLineDash(run.unresolvedData || reference && run.provisional ? [4, 2] : []);
         if (reference && run.gap && (!run.stretch || run.omission)) {
           context.setLineDash([]); context.fillStyle = '#8a5a08';
           context.fillText(run.provisional ? '| ?' : '|', (x1 + x2) / 2 - 2, mid + 4);
@@ -296,7 +409,33 @@
           }
           context.stroke();
         } else {
-          paintBus(x1, x2, state, state === 'bus' ? run.value : 'x');
+          paintBus(x1, x2, run.unresolvedData ? 'unresolved' : state, state === 'bus' ? run.value : 'x');
+        }
+      }
+      context.restore();
+    }
+    function paintProblemRanges(ranges, x, left, right, top, height, reference, unknown) {
+      context.save();
+      const color = unknown ? '#8a5a08' : '#b62e3b';
+      for (const range of ranges) {
+        const a = reference ? range.referenceStart : range.start, b = reference ? range.referenceFinish : range.finish;
+        if (a === null || b === null) continue;
+        const low = Math.min(x(a), x(b)), high = Math.max(x(a), x(b));
+        if (high < left || low > right) continue;
+        const x1 = Math.max(left, low - (high === low ? 3 : 0)), x2 = Math.min(right, Math.max(low + 6, high));
+        if (x2 <= x1) continue;
+        context.fillStyle = unknown ? '#fff0c8' : '#ffdddd'; context.globalAlpha = 0.5;
+        context.fillRect(x1, top + 4, x2 - x1, height - 8); context.globalAlpha = 1;
+        context.strokeStyle = color; context.lineWidth = 2; context.setLineDash([5, 4]);
+        context.strokeRect(x1, top + 4, x2 - x1, height - 8); context.setLineDash([]);
+        const label = '[' + range.number + '] ' + (unknown ? '数据未定' : '冲突') + ' · 列' + range.col + (range.end > range.col ? '至' + range.end : '');
+        if (context.measureText(label).width + 8 < x2 - x1) {
+          context.fillStyle = color; context.fillText(label, x1 + 4, top + height - 9);
+        } else {
+          const badge = '[' + range.number + ']', badgeWidth = context.measureText(badge).width + 6;
+          const badgeLeft = Math.max(left, Math.min(x1, right - badgeWidth));
+          context.fillStyle = '#ffffff'; context.fillRect(badgeLeft, top + height - 22, badgeWidth, 16);
+          context.fillStyle = color; context.fillText(badge, badgeLeft + 3, top + height - 9);
         }
       }
       context.restore();
@@ -325,8 +464,8 @@
       }
       for (let i = first; i < last; i++) {
         const row = model.rows[i], top = y(i), mid = top + 25;
-        if (row.status !== 'ok' || highlighted.has(i)) {
-          context.fillStyle = row.status === 'conflict' ? '#fff0f0' : row.status === 'unknown' ? '#fff9e9' : '#eaf3ff';
+        if (row.status === 'unknown' || highlighted.has(i)) {
+          context.fillStyle = row.status === 'unknown' ? '#fff9e9' : '#eaf3ff';
           context.fillRect(0, Math.max(top, ruler), width, rowHeight);
         }
         context.strokeStyle = '#e2e8ed'; context.beginPath(); context.moveTo(0, top + rowHeight); context.lineTo(width, top + rowHeight); context.stroke();
@@ -340,16 +479,21 @@
             }
             return;
           }
-          if (gap.duration !== undefined && gap.start !== null && gap.end !== null && gap.end > gap.start && row.status !== 'conflict') {
+          if (gap.conflict || gap.seriesReason && gap.duration !== undefined) return;
+          if (gap.duration !== undefined && gap.start !== null && gap.end !== null && gap.end > gap.start) {
             const x1 = Math.max(left, x(gap.start)), x2 = Math.min(width - 8, x(gap.end));
             if (x2 > x1) {
               const inferred = !!alignmentNames[gap.durationSource];
               context.strokeStyle = inferred ? '#237963' : '#5277b4'; context.lineWidth = 1; context.setLineDash([4, 3]); context.strokeRect(x1, mid - 16, x2 - x1, 33); context.setLineDash([]);
               context.fillStyle = inferred ? '#21634f' : '#294c81';
-              if (x2 - x1 > 45) context.fillText((gap.kind === 'stretch' ? gap.omissions.length ? '未知展开 = ' : '同值展开 = ' : '| = ') + fmt(gap.duration) + (inferred ? ' · ' + alignmentNames[gap.durationSource] : ''), x1 + 4, top + 55);
+              const prefix = gap.kind === 'stretch' ? gap.holdStart !== undefined ? '保持展开 = ' : gap.omissions.length ? '未知展开 = ' : '同值展开 = ' : '| = ';
+              let label = prefix + fmt(gap.duration) + (inferred ? ' · ' + alignmentNames[gap.durationSource] : '');
+              if (context.measureText(label).width > x2 - x1 - 8) label = prefix + fmt(gap.duration);
+              if (context.measureText(label).width > x2 - x1 - 8) label = '= ' + fmt(gap.duration);
+              if (context.measureText(label).width <= x2 - x1 - 8) context.fillText(label, x1 + 4, top + 55);
             }
           }
-          if (gap.duration === undefined || row.status === 'conflict') {
+          if (gap.duration === undefined) {
             if (gap.start === null) return;
             let nextAnchor = gap.end !== null ? gap : null;
             for (let nextIndex = gapIndex + 1; !nextAnchor && nextIndex < row.gaps.length; nextIndex++) {
@@ -358,21 +502,23 @@
             }
             const finish = nextAnchor ? nextAnchor.end : null;
             if (gap.start > end || finish !== null && Math.max(gap.start, finish) < start) return;
-            const px = x(gap.start), color = row.status === 'conflict' ? '#b62e3b' : '#8a5a08';
+            const px = x(gap.start), color = '#8a5a08';
             const far = finish === null ? width - 8 : x(finish);
             const boxLeft = Math.max(left, Math.min(px, far)), boxRight = Math.min(width - 8, Math.max(px + 5, far));
-            context.fillStyle = row.status === 'conflict' ? '#ffdddd' : '#ffefbc';
+            context.fillStyle = '#ffefbc';
             context.globalAlpha = 0.65; context.fillRect(boxLeft, top + 4, boxRight - boxLeft, rowHeight - 8); context.globalAlpha = 1;
             context.strokeStyle = color; context.lineWidth = 2; context.setLineDash([5, 4]);
             context.strokeRect(boxLeft, top + 4, boxRight - boxLeft, rowHeight - 8); context.setLineDash([]);
             context.fillStyle = color;
-            context.fillText((gap.kind === 'stretch' ? gap.omissions.length ? '未知区域 ' : '同值区域 ' : '| ') + (row.status === 'conflict' ? '冲突' : '? 时长分配未定') + ' · 列' + gap.col
+            context.fillText((gap.kind === 'stretch' ? gap.holdStart !== undefined ? '保持区域 ' : gap.omissions.length ? '未知区域 ' : '同值区域 ' : '| ') + '? 时长分配未定 · 列' + gap.col
               + (nextAnchor && nextAnchor !== gap ? '至' + nextAnchor.col : '') + (finish === null ? ' · 后续位置未定' : ''), boxLeft + 4, top + 55);
           }
         });
-        if (row.status !== 'ok') {
-          context.strokeStyle = row.status === 'conflict' ? '#c9434b' : '#a97923'; context.lineWidth = 1;
-          context.setLineDash(row.status === 'unknown' ? [5, 4] : []);
+        paintProblemRanges(row.dataUnknownRanges, x, left, width - 8, top, rowHeight, false, true);
+        paintProblemRanges(row.conflictRanges, x, left, width - 8, top, rowHeight, false, false);
+        if (row.status === 'unknown') {
+          context.strokeStyle = '#a97923'; context.lineWidth = 1;
+          context.setLineDash([5, 4]);
           context.strokeRect(left + 1, top + 1, width - left - 3, rowHeight - 2); context.setLineDash([]);
           if (row.hasUnpositionedContent && !row.gaps.some((id) => !model.gaps[id].ignored && (model.gaps[id].start !== null || model.gaps[id].end !== null))) {
             context.fillStyle = '#8a5a08'; context.fillText('时间位置未定', left + 8, mid + 4);
@@ -380,7 +526,7 @@
         }
         context.restore();
         context.save(); context.beginPath(); context.rect(0, Math.max(ruler, top), left - 1, rowHeight); context.clip();
-        context.fillStyle = row.status === 'conflict' ? '#ffe3e3' : row.status === 'unknown' ? '#fff0c8' : highlighted.has(i) ? '#eaf3ff' : '#f4f6f8'; context.fillRect(0, top, left - 1, rowHeight);
+        context.fillStyle = row.status === 'unknown' ? '#fff0c8' : highlighted.has(i) ? '#eaf3ff' : '#f4f6f8'; context.fillRect(0, top, left - 1, rowHeight);
         context.fillStyle = '#1b2732'; context.fillText((i + 1) + '. ' + row.name, 30, top + 23);
         context.fillStyle = row.status === 'conflict' ? '#b62e3b' : row.status === 'unknown' ? '#8a5a08' : '#21633d';
         context.fillText(rowStatusName(row), 10, top + 43); context.restore();
@@ -431,6 +577,8 @@
           context.fillText(fmt(tick), px + 3, top + 63);
         }
         paintRuns(row, x, start, end, left, right, top + 27, true);
+        paintProblemRanges(row.dataUnknownRanges, x, left, right, top, referenceHeight, true, true);
+        paintProblemRanges(row.conflictRanges, x, left, right, top, referenceHeight, true, false);
         if (selected === i && selectedColumn >= 0 && selectedColumn < row.sourceLength) {
           const cell = referenceCell(row, selectedColumn);
           if (cell) { context.strokeStyle = '#135bc5'; context.lineWidth = 2; context.strokeRect(x(cell.start), top + 10, Math.max(2, x(cell.finish) - x(cell.start)), 34); }
@@ -458,6 +606,17 @@
         context.setLineDash(i === selected ? [] : [5, 4]);
         context.strokeRect(2, y(i) + 2, width - 4, rowOffsets[i + 1] - rowOffsets[i] - 4);
       }
+      if (focusedProblem && focusedProblem.row >= first && focusedProblem.row < last) {
+        const row = model.rows[focusedProblem.row], interval = problemRange(row, focusedProblem.target);
+        if (interval) for (const reference of [false, true]) {
+          if (reference && !referenceOpen(row)) continue;
+          const a = reference ? interval.referenceStart : interval.start, b = reference ? interval.referenceFinish : interval.finish;
+          if (!Number.isFinite(a) || !Number.isFinite(b) || Math.max(a, b) < start || Math.min(a, b) > end) continue;
+          const x1 = Math.max(left + 1, x(Math.min(a, b)) - 3), x2 = Math.min(width - 2, x(Math.max(a, b)) + 4);
+          context.strokeStyle = '#135bc5'; context.lineWidth = 2.5; context.setLineDash([]);
+          context.strokeRect(x1, y(row.index) + (reference ? rowHeight : 0) + 2, Math.max(2, x2 - x1), (reference ? referenceHeight : rowHeight) - 4);
+        }
+      }
       context.restore();
     }
     function receive(result) {
@@ -473,7 +632,7 @@
       message('已确定 ' + counts.ok + ' 行 · 时延冲突 ' + counts.conflict + ' 行 · 无法判断 ' + counts.unknown + ' 行'
         + (alignedCount ? ' · 相邻行对齐 ' + alignedCount + ' 行' : '')
         + (seriesCount ? ' · 等差补全 ' + seriesCount + ' 行' : '')
-        + (orphan.length ? ' · ' + orphan.join('；') : '') + (counts.conflict ? ' · 冲突行仅供定位，不能作为对齐结论' : ''), false);
+        + (orphan.length ? ' · ' + orphan.join('；') : '') + (counts.conflict ? ' · 冲突部分仅供定位，不能作为对齐结论' : ''), false);
       listRows();
       if (selected >= model.rows.length) selected = -1;
       if (selected >= 0) selectRow(selected);
