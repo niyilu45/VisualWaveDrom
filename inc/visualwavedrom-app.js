@@ -15598,22 +15598,36 @@ ${lines.join('\n')}`;
       } catch (_e) { /* the browser may protect the temporary page */ }
     }
 
-    async function openWaveDocumentInSingleWindow(documentName) {
-      const opened = window.open('about:blank', '_blank');
-      if (!opened) {
-        setStatus(false, '浏览器阻止了新窗口，请允许此页面打开弹出式窗口');
-        vwdDebugLog('wave-library', { phase: 'open-single-window-blocked', documentName });
-        return false;
-      }
-      showSingleWindowLoadingPage(opened, documentName);
-      setStatus(true, '正在保存并打开波形图…');
+    async function openWaveDocumentInSingleWindow(documentName, report) {
+      let opened = null;
+      const notify = typeof report === 'function' ? report : () => {};
       try {
+        vwdDebugLog('wave-library', { phase: 'open-single-window-start', documentName,
+          userActivation: navigator.userActivation ? navigator.userActivation.isActive : null });
+        // Reserve the window before awaiting storage so the user gesture is retained.
+        try { opened = window.open('about:blank', '_blank'); }
+        catch (error) {
+          vwdDebugLog('wave-library', { phase: 'open-single-window-exception', documentName, message: String(error) });
+        }
+        if (opened) showSingleWindowLoadingPage(opened, documentName);
+        else {
+          notify('浏览器未能打开新窗口，正在准备直接打开链接…');
+          vwdDebugLog('wave-library', { phase: 'open-single-window-blocked', documentName });
+        }
+        setStatus(true, '正在保存并打开波形图…');
         await prepareWaveDocumentForSingleWindow(documentName);
         const url = getWaveDocumentSingleViewUrl(documentName);
         if (!url) throw new Error('无法生成单图地址');
+        if (!opened) {
+          notify('波形已准备好。浏览器未能自动打开新窗口，请点击：', url);
+          setStatus(false, '请点击波形图标题栏中的“在新标签页打开”链接');
+          vwdDebugLog('wave-library', { phase: 'open-single-window-link-ready', documentName, libraryId: currentWaveLibraryId, url });
+          return false;
+        }
         if (opened.closed) throw new Error('单图窗口已关闭');
         opened.location.replace(url);
         try { opened.opener = null; } catch (_e) { /* cross-window browser policy */ }
+        notify('');
         const tag = getSavedTagByName(documentName);
         setStatus(true, '已单独打开波形图：'
           + getSavedTagTitle(tag || { name: documentName, content: '{}' }));
@@ -15625,8 +15639,9 @@ ${lines.join('\n')}`;
         });
         return true;
       } catch (error) {
-        try { if (!opened.closed) opened.close(); } catch (_e) { /* already closed */ }
+        try { if (opened && !opened.closed) opened.close(); } catch (_e) { /* already closed */ }
         const message = error && error.message ? error.message : String(error);
+        notify('单独打开失败：' + message + '。请修正后再次点击“单独打开”。');
         setStatus(false, '单独打开失败：' + message);
         vwdDebugLog('wave-library', {
           phase: 'open-single-window-failed',
@@ -21685,15 +21700,35 @@ ${lines.join('\n')}`;
       singleOpenButton.className = 'wave-document-open-single';
       singleOpenButton.title = '在新窗口中单独打开并编辑此波形图';
       singleOpenButton.textContent = '单独打开';
+      const singleOpenFeedback = document.createElement('div');
+      singleOpenFeedback.className = 'wave-document-open-feedback';
+      singleOpenFeedback.setAttribute('role', 'status');
+      function reportSingleOpen(message, url) {
+        singleOpenFeedback.replaceChildren();
+        if (!message) { singleOpenFeedback.remove(); return; }
+        singleOpenFeedback.append(document.createTextNode(message));
+        if (url) {
+          const link = document.createElement('a');
+          link.href = url;
+          link.target = '_blank';
+          link.rel = 'noopener';
+          link.textContent = '在新标签页打开';
+          singleOpenFeedback.append(link);
+        }
+        header.append(singleOpenFeedback);
+      }
       singleOpenButton.addEventListener('click', async () => {
         if (singleOpenButton.disabled) return;
+        reportSingleOpen('');
         singleOpenButton.disabled = true;
         singleOpenButton.setAttribute('aria-busy', 'true');
+        singleOpenButton.textContent = '正在打开…';
         try {
-          await openWaveDocumentInSingleWindow(documentName);
+          await openWaveDocumentInSingleWindow(documentName, reportSingleOpen);
         } finally {
           singleOpenButton.disabled = false;
           singleOpenButton.removeAttribute('aria-busy');
+          singleOpenButton.textContent = '单独打开';
         }
       });
       const deleteButton = document.createElement('button');
@@ -25258,6 +25293,7 @@ ${lines.join('\n')}`;
       historyShortcut: (event) => isUndoShortcut(event) ? 'undo' : isRedoShortcut(event) ? 'redo' : '',
       currentSource: () => JSON.parse(editor.value || '{}'),
       status: (message) => setStatus(false, message),
+      download: downloadBlobFile,
       saveLibrary: () => singleParameterViewActive ? saveCurrentWaveLibrary() : performCurrentWaveLibrarySave(),
       source: async (name) => {
         const tag = await ensureWaveDocumentLoaded(name);

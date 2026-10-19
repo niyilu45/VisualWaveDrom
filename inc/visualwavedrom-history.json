@@ -1,5 +1,24 @@
 [
   {
+    "version": "2026.10.19.2",
+    "date": "2026-10-19T11:09:14Z",
+    "head": "1d83fa5d44cb5bc1dfa186056520784f6d91fe3c",
+    "notes": [
+      "参数表支持导出 TOML：导出公式计算结果，原公式与变量说明保留为注释，并校验异常行。",
+      "完善单独打开波形图的可见反馈，弹窗受阻时提供直接打开链接，增加调试信息。",
+      "修复含多个省略符的数据保持段扩展，XXX Wave 的 Fsm.Work 可依据 en 展开为 22 列。"
+    ],
+    "commits": [
+      {
+        "id": "1d83fa5d44cb5bc1dfa186056520784f6d91fe3c",
+        "date": "2026-10-19T03:11:07+08:00",
+        "title": "fix: refine timing alignment diagnostics and data rechecks",
+        "body": "Align data segments and level holds using expanded times at original columns, skip empty reference rows, preserve explicit connection constraints, and attribute conflicts only to affected later-row spans.\n\nNumber conflict and unresolved-data regions consistently. Add compact candidate comparisons, expandable details, and clickable navigation. Include existing blank data widths in completion counts and recheck deferred arithmetic candidates against independent timing after edits.\n\nAllow naming empty waveform rows without generating waveform fields. Update documentation, cache versions, release notes and checksums for 2026.10.19.1.\n\nValidation: targeted timing-engine checks, actual ZDS Wave edit/revert/reopen tests in Chrome, desktop/mobile layout checks, JavaScript syntax, staged diff checks and all 62 release hashes. Local libraries, temporary files and unrelated deletions are excluded."
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.10.19.1",
     "date": "2026-10-18T19:10:15Z",
     "head": "79199b5a5bc03b43b849c7dff1551def317fd57b",

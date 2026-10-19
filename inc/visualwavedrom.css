@@ -1547,6 +1547,22 @@
       white-space: nowrap;
     }
 
+    .wave-document-open-feedback {
+      flex: 0 0 100%;
+      min-width: 0;
+      color: #9d261d;
+      font-size: 13px;
+      line-height: 1.6;
+      overflow-wrap: anywhere;
+    }
+
+    .wave-document-open-feedback a {
+      margin-left: 8px;
+      color: #175b93;
+      text-decoration: underline;
+      text-underline-offset: 2px;
+    }
+
     .wave-document-scope {
       min-width: 54px;
       height: 26px;

@@ -104,8 +104,8 @@ svg text.parameter-reference-highlight tspan { paint-order: stroke fill; stroke:
 .wave-document-parameters svg { width: 14px; height: 14px; }
 .parameter-page-active #waveform-shortcuts-checkbox { pointer-events: none; }
 .parameter-library-save { display: none; }
-.parameter-open-single { display: inline-flex; align-items: center; gap: 6px; }
-.parameter-open-single svg { width: 16px; height: 16px; flex-shrink: 0; }
+.parameter-open-single, .parameter-export-toml { display: inline-flex; align-items: center; gap: 6px; }
+.parameter-open-single svg, .parameter-export-toml svg { width: 16px; height: 16px; flex-shrink: 0; }
 .single-parameter-view .nav-sidebar, .single-parameter-view .nav-resize-handle,
 .single-parameter-view #sidebar { display: none !important; }
 .single-parameter-view .parameter-library-save { display: inline-flex; }

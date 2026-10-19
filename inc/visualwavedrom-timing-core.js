@@ -154,17 +154,20 @@
       signals.forEach((signal, index) => {
         if (!rows[index].supported) return;
         const wave = String(signal.wave || ''), spans = [];
-        // A closed level hold containing omissions has one elastic duration.
-        // Repeated explicit levels start new holds, even when their values match.
+        // A closed hold can have one elastic duration across multiple omissions.
+        // Explicit symbols start new holds, even when their data values match.
         for (let col = 0; col < wave.length; col++) {
-          if (!/[01lLhH]/.test(wave[col])) continue;
+          if (!/[01lLhH2-9=]/.test(wave[col])) continue;
           let right = col + 1;
           const omissions = [];
           while (right < wave.length && /[. |]/.test(wave[right])) {
             if (wave[right] === '|') omissions.push(right);
             right++;
           }
-          if (omissions.length && right < wave.length) spans.push({ left: col, right, omissions });
+          // Keep a single bus omission available to arithmetic-series inference.
+          // Multiple omissions within one data value need only a total duration.
+          if (omissions.length && right < wave.length && (!/[2-9=]/.test(wave[col]) || omissions.length > 1))
+            spans.push({ left: col, right, omissions });
           col = right - 1;
         }
         if (spans.length) { heldSpans.set(index, spans); ranges.set(index, spans.slice()); }

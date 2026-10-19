@@ -43,6 +43,7 @@
     edit: '<path d="m16 3 5 5-12 12-6 1 1-6ZM14 5l5 5"/>',
     close: '<path d="m6 6 12 12M18 6 6 18"/>',
     copy: '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+    download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>',
     paste: '<rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>',
     up: '<path d="m6 14 6-6 6 6"/>', down: '<path d="m6 10 6 6 6-6"/>',
     grip: '<circle cx="9" cy="5" r="1"/><circle cx="15" cy="5" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="9" cy="19" r="1"/><circle cx="15" cy="19" r="1"/>',
@@ -925,6 +926,67 @@
     if (!name || /[{}\s$]/.test(name)) return '变量名不能为空或包含空白、{}、$';
     return counts.get(name) > 1 ? '变量名 ' + name + ' 重复' : '';
   }
+  function tomlText(value) {
+    const text = String(value);
+    for (const character of text) {
+      const point = character.codePointAt(0);
+      if (point >= 0xd800 && point <= 0xdfff) throw new Error('文本包含无效的 Unicode 字符');
+    }
+    return text;
+  }
+  function tomlString(value) { return JSON.stringify(tomlText(value)).replace(/\u007f/g, '\\u007f'); }
+  function tomlComment(value) {
+    return tomlText(value).replace(/\r\n?/g, '\n').split('\n').map((line) => '# ' + line.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g,
+      (character) => '\\u' + character.charCodeAt(0).toString(16).padStart(4, '0'))).join('\n');
+  }
+  function tomlValue(value) {
+    if (value === 'true' || value === 'false') return value;
+    if (/^(?:[+-]?\d+|0[xX][\da-fA-F]+|0[bB][01]+|0[oO][0-7]+)$/.test(value)) {
+      const integer = BigInt(value);
+      if (integer >= -9223372036854775808n && integer <= 9223372036854775807n) return integer.toString();
+    } else if (numericPattern.test(value) && Number.isFinite(Number(value))) {
+      // Normalize decimal syntax without rounding long numeric literals through Number.
+      return value.replace(/^([+-]?)0+(?=\d)/, '$1').replace(/^([+-]?)\./, (_match, sign) => sign + '0.')
+        .replace(/\.(?=[eE]|$)/, '.0');
+    }
+    return tomlString(value);
+  }
+  function parameterTableToml(table) {
+    const lines = [tomlComment('参数表：' + table.name), ''];
+    const names = parameterNameCounts(table.rows), source = { parameterTables: [table.id] };
+    const context = { stack: [], values: new Map() };
+    let count = 0;
+    table.rows.forEach((row, index) => {
+      if (['name', 'val', 'description'].every((field) => String(row[field] ?? '') === '')) return;
+      try {
+        const name = String(row.name ?? '');
+        const nameError = parameterRowNameError(row, names);
+        if (!name || nameError) throw new Error(nameError || '变量名不能为空');
+        const result = resolveParameterRow(table, row, source, context);
+        if (result.error) throw new Error(result.error);
+        if (result.description) lines.push(tomlComment(result.description));
+        if (result.formula) lines.push(tomlComment('公式：' + result.rawVal));
+        const key = /^[A-Za-z0-9_-]+$/.test(name) ? name : tomlString(name);
+        lines.push(key + ' = ' + tomlValue(result.val), ''); count++;
+      } catch (error) { throw new Error('第 ' + (index + 1) + ' 行：' + error.message); }
+    });
+    return { text: lines.join('\n'), count };
+  }
+  function exportParameterTableToml(tableId) {
+    try {
+      commitParameterCell();
+      const table = catalog.tables.find((item) => item.id === tableId);
+      if (!table) throw new Error('参数表不存在或已被删除');
+      const result = parameterTableToml(table);
+      let name = String(table.name || '参数表').trim().replace(/\.toml$/i, '')
+        .replace(/[<>:"/\\|?*\u0000-\u001f\u007f]/g, '_');
+      name = Array.from(name).slice(0, 100).join('').replace(/[. ]+$/g, '') || '参数表';
+      if (/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name)) name = '_' + name;
+      const filename = name + '.toml';
+      bridge.download(new Blob([result.text], { type: 'application/toml;charset=utf-8' }), filename);
+      status('已导出 ' + filename + '（' + result.count + ' 个变量）');
+    } catch (error) { status('导出 TOML 失败：' + error.message, true); }
+  }
   function validate(value) {
     const ids = new Set();
     ['directories', 'tables', 'presets'].forEach((key) => value[key].forEach((item) => {
@@ -1178,6 +1240,10 @@
       }, 'trash'));
       const compare = button('比较参数表', () => openComparison(table.id, compare));
       compare.classList.add('parameter-compare-open'); toolbar.append(compare);
+      const exportToml = button('导出 TOML', () => exportParameterTableToml(table.id));
+      exportToml.classList.add('parameter-export-toml');
+      exportToml.insertAdjacentHTML('afterbegin', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="lucide" aria-hidden="true">' + paths.download + '</svg>');
+      exportToml.disabled = standaloneLoading || !!standaloneError; toolbar.append(exportToml);
     } else if (!standaloneTableId) toolbar.append(button('新增参数表', addTable));
     if (table && !standaloneTableId) {
       const open = button('单独打开', async () => {
