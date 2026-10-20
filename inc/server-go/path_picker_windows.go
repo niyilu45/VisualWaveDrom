@@ -11,7 +11,7 @@ import (
 
 func pickLocalPathNative(kind, initialPath string) (string, bool, error) {
 	switch kind {
-	case "folder", "tool-folder", "library-folder", "preset", "save-preset", "save-library":
+	case "folder", "tool-folder", "library-folder", "preset", "save-preset", "save-library", "save-toml":
 	default:
 		return "", false, fmt.Errorf("unsupported path picker kind %q", kind)
 	}
@@ -80,6 +80,11 @@ try {
             $dialog.Title = '波形库另存为'
             $dialog.Filter = 'SQLite 波形库 (*.sqlite)|*.sqlite'
             $dialog.DefaultExt = 'sqlite'
+        }
+        if ($kind -eq 'save-toml') {
+            $dialog.Title = '导出参数表 TOML'
+            $dialog.Filter = 'TOML 参数表 (*.toml)|*.toml'
+            $dialog.DefaultExt = 'toml'
         }
         $dialog.AddExtension = $true
         $dialog.OverwritePrompt = $true

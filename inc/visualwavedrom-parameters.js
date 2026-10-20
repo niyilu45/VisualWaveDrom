@@ -993,7 +993,7 @@
     }
     return tomlString(value);
   }
-  function parameterTableToml(table) {
+  function parameterTableToml(table, includeDescriptions = false) {
     const lines = [tomlComment('参数表：' + table.name), ''];
     const names = parameterNameCounts(table.rows), source = { parameterTables: [table.id] };
     const context = { stack: [], values: new Map() };
@@ -1006,7 +1006,7 @@
         if (!name || nameError) throw new Error(nameError || '变量名不能为空');
         const result = resolveParameterRow(table, row, source, context);
         if (result.error) throw new Error(result.error);
-        if (result.description) lines.push(tomlComment(result.description));
+        if (includeDescriptions && result.description) lines.push(tomlComment(result.description));
         if (result.formula) lines.push(tomlComment('公式：' + result.rawVal));
         const key = /^[A-Za-z0-9_-]+$/.test(name) ? name : tomlString(name);
         lines.push(key + ' = ' + tomlValue(result.val), ''); count++;
@@ -1014,19 +1014,123 @@
     });
     return { text: lines.join('\n'), count };
   }
-  function exportParameterTableToml(tableId) {
+  function exportParameterTableToml(tableId, anchor) {
+    if (modal) return;
     try {
       commitParameterCell();
       const table = catalog.tables.find((item) => item.id === tableId);
       if (!table) throw new Error('参数表不存在或已被删除');
-      const result = parameterTableToml(table);
       let name = String(table.name || '参数表').trim().replace(/\.toml$/i, '')
         .replace(/[<>:"/\\|?*\u0000-\u001f\u007f]/g, '_');
       name = Array.from(name).slice(0, 100).join('').replace(/[. ]+$/g, '') || '参数表';
       if (/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name)) name = '_' + name;
       const filename = name + '.toml';
-      bridge.download(new Blob([result.text], { type: 'application/toml;charset=utf-8' }), filename);
-      status('已导出 ' + filename + '（' + result.count + ' 个变量）');
+      const identity = libraryId, serviceMode = bridge.tomlExportService && bridge.tomlExportService();
+      const canPick = typeof global.showSaveFilePicker === 'function';
+      const overlay = element('div', 'modal-overlay parameter-modal');
+      const dialog = element('form', 'modal-dialog parameter-export-dialog'); dialog.noValidate = true;
+      dialog.setAttribute('role', 'dialog'); dialog.setAttribute('aria-modal', 'true'); dialog.setAttribute('aria-labelledby', 'parameter-export-title');
+      let busy = false, closed = false, confirmedPath = '';
+      function close() {
+        if (busy || closed) return;
+        closed = true; overlay.remove(); modal = null;
+        if (anchor && anchor.isConnected) anchor.focus({ preventScroll: true });
+      }
+      const header = element('div', 'modal-header'), title = element('h2', '', '导出 TOML'); title.id = 'parameter-export-title';
+      const dismiss = button('关闭', close, 'close'); header.append(title, dismiss); dialog.append(header);
+      const body = element('div', 'modal-body');
+      const label = element('label', 'parameter-count-label', serviceMode ? '保存路径' : '文件名');
+      const path = element('input'); path.id = 'parameter-export-path'; path.value = filename; label.htmlFor = path.id;
+      path.autocomplete = 'off'; path.spellcheck = false;
+      const location = element('div', 'parameter-export-location'); location.append(path);
+      const choose = button('选择保存路径', async () => {
+        if (busy) return;
+        setBusy(true); error.textContent = '';
+        try {
+          let initial = path.value.trim() || filename;
+          if (!/\.toml$/i.test(initial)) initial += '.toml';
+          const result = await bridge.tomlExportRequest({ action: 'pick', path: initial });
+          if (!result.cancelled && result.path) {
+            path.value = result.path; confirmedPath = result.exists ? result.path : '';
+            overwrite.checked = false; overwriteLabel.hidden = true;
+          }
+          if (result.manual) { error.textContent = '文件窗口不可用，请直接输入保存路径'; path.focus(); }
+        } catch (cause) { error.textContent = cause.message; }
+        finally { setBusy(false); if (!closed) path.focus({ preventScroll: true }); }
+      }, 'external'); choose.hidden = !serviceMode; location.append(choose);
+      const option = element('label', 'parameter-export-option');
+      const descriptions = element('input'); descriptions.type = 'checkbox'; descriptions.id = 'parameter-export-descriptions';
+      option.append(descriptions, element('span', '', '导出变量说明'));
+      const error = element('p', 'parameter-count-error'); error.id = 'parameter-export-error'; error.setAttribute('role', 'alert');
+      path.setAttribute('aria-describedby', error.id);
+      if (!serviceMode && !canPick) body.append(element('p', 'parameter-export-note', '当前浏览器不支持页面选择保存目录，将使用浏览器下载设置。'));
+      const overwriteLabel = element('label', 'parameter-export-option'); overwriteLabel.hidden = true;
+      const overwrite = element('input'); overwrite.type = 'checkbox'; overwriteLabel.append(overwrite, element('span', '', '覆盖已有文件'));
+      path.addEventListener('input', () => { confirmedPath = ''; overwrite.checked = false; overwriteLabel.hidden = true; error.textContent = ''; path.removeAttribute('aria-invalid'); });
+      body.append(label, location, option, overwriteLabel, error); dialog.append(body);
+      const footer = element('div', 'modal-footer'), cancel = button('取消', close), save = button('导出', () => {});
+      save.type = 'submit'; save.classList.add('modal-btn-primary'); footer.append(cancel, save); dialog.append(footer);
+      function setBusy(value) {
+        busy = value; dialog.setAttribute('aria-busy', String(value));
+        [path, descriptions, overwrite, choose, cancel, dismiss, save].forEach((control) => { control.disabled = value; });
+        save.textContent = value ? '正在导出...' : '导出';
+      }
+      dialog.addEventListener('submit', async (event) => {
+        event.preventDefault(); if (busy || closed || event.isComposing) return;
+        error.textContent = ''; path.removeAttribute('aria-invalid');
+        let target = path.value.trim();
+        if (!target) { error.textContent = '请输入保存路径或文件名'; path.setAttribute('aria-invalid', 'true'); path.focus(); return; }
+        if (!/\.toml$/i.test(target)) target += '.toml';
+        if (!serviceMode && /[<>:"/\\|?*\u0000-\u001f\u007f]/.test(target)) {
+          error.textContent = '请输入文件名，保存目录将在浏览器保存窗口中选择'; path.setAttribute('aria-invalid', 'true'); path.focus(); return;
+        }
+        path.value = target;
+        setBusy(true);
+        try {
+          commitParameterCell();
+          const current = catalog.tables.find((item) => item.id === tableId);
+          if (!current || identity !== libraryId) throw new Error('目标参数表已变化，请关闭后重新导出');
+          const result = parameterTableToml(current, descriptions.checked);
+          let savedPath = target;
+          if (serviceMode) {
+            const response = await bridge.tomlExportRequest({ action: 'save', path: target, content: result.text,
+              overwrite: overwrite.checked || confirmedPath === target });
+            if (response.requiresOverwrite) {
+              error.textContent = '目标文件已存在，勾选“覆盖已有文件”后再次导出';
+              overwriteLabel.hidden = false; return;
+            }
+            savedPath = response.path;
+          } else {
+            const blob = new Blob([result.text], { type: 'application/toml;charset=utf-8' });
+            if (canPick) {
+              const handle = await global.showSaveFilePicker({ id: 'vwd-parameter-toml', suggestedName: target,
+                types: [{ description: 'TOML 参数表', accept: { 'application/toml': ['.toml'] } }] });
+              const writable = await handle.createWritable();
+              try { await writable.write(blob); await writable.close(); }
+              catch (cause) { try { await writable.abort(); } catch (_) {} throw cause; }
+              savedPath = handle.name;
+            } else bridge.download(blob, target);
+          }
+          setBusy(false); close(); status('已导出 ' + savedPath + '（' + result.count + ' 个变量）');
+        } catch (cause) {
+          if (cause.name !== 'AbortError') error.textContent = '导出 TOML 失败：' + cause.message;
+        } finally { setBusy(false); }
+      });
+      let startedOutside = false;
+      overlay.addEventListener('pointerdown', (event) => { startedOutside = event.target === overlay; });
+      overlay.addEventListener('click', (event) => { if (startedOutside && event.target === overlay) close(); });
+      overlay.addEventListener('keydown', (event) => {
+        event.stopPropagation();
+        if (event.key === 'Escape') { event.preventDefault(); close(); }
+        if (event.key === 'Enter' && event.isComposing) event.preventDefault();
+        if (event.key === 'Tab') {
+          const controls = Array.from(dialog.querySelectorAll('button:not(:disabled):not([hidden]),input:not(:disabled)')).filter((node) => !node.closest('[hidden]'));
+          if (!controls.length) { event.preventDefault(); return; }
+          if (event.shiftKey && document.activeElement === controls[0]) { event.preventDefault(); controls[controls.length - 1].focus(); }
+          else if (!event.shiftKey && document.activeElement === controls[controls.length - 1]) { event.preventDefault(); controls[0].focus(); }
+        }
+      });
+      clipboardRequest++; modal = overlay; overlay.append(dialog); document.body.append(overlay); path.focus(); path.select();
     } catch (error) { status('导出 TOML 失败：' + error.message, true); }
   }
   function validate(value) {
@@ -1282,7 +1386,7 @@
       }, 'trash'));
       const compare = button('比较参数表', () => openComparison(table.id, compare));
       compare.classList.add('parameter-compare-open'); toolbar.append(compare);
-      const exportToml = button('导出 TOML', () => exportParameterTableToml(table.id));
+      const exportToml = button('导出 TOML', (event) => exportParameterTableToml(table.id, event.currentTarget));
       exportToml.classList.add('parameter-export-toml');
       exportToml.insertAdjacentHTML('afterbegin', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="lucide" aria-hidden="true">' + paths.download + '</svg>');
       exportToml.disabled = standaloneLoading || !!standaloneError; toolbar.append(exportToml);

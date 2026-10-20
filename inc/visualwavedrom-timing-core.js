@@ -90,7 +90,7 @@
         const entry = { kind, reason, rows: markedRows, relatedRows, edges: Array.from(new Set(edgeIds || [])), gaps: gapIds || [], locations: locations || [] };
         issues.push(entry); return entry;
       }
-      const signals = flatten(source.signal, []), stretches = new Map(), holdStarts = new Map();
+      const signals = flatten(source.signal, []), stretches = new Map(), holdStarts = new Map(), dataEnds = [];
       function buildRows() { signals.forEach((signal, index) => {
         const wave = String(signal.wave || ''), node = String(signal.node || '');
         let lastNode = node.length - 1;
@@ -99,11 +99,17 @@
         while (lastWave >= 0 && /[|\s]/.test(wave[lastWave])) lastWave--;
         while (lastReferencedNode >= 0 && !referencedNodes.has(node[lastReferencedNode])) lastReferencedNode--;
         let lastKnownWave = -1, finalState = 'x';
+        const dataEndColumns = new Set();
         for (let col = 0; col < wave.length; col++) {
           const char = wave[col];
-          if (!/[. |]/.test(char)) finalState = char.toLowerCase();
+          if (!/[. |]/.test(char)) {
+            if (/[2-9=]/.test(finalState)) dataEndColumns.add(col - 1);
+            finalState = char.toLowerCase();
+          }
           if (char !== '|' && char !== ' ' && finalState !== 'x') lastKnownWave = col;
         }
+        if (/[2-9=]/.test(finalState)) dataEndColumns.add(wave.length - 1);
+        dataEnds[index] = dataEndColumns;
         const unknownTailStart = finalState === 'x' && wave.length ? lastKnownWave + 1
           : lastReferencedNode >= wave.length ? wave.length : undefined;
         const length = Math.max(wave.length, lastNode);
@@ -198,6 +204,10 @@
           if (omissions.length && right < wave.length && right <= rows[index].checkUntil
               && (!/[2-9=]/.test(wave[col]) || omissions.length > 1))
             spans.push({ left: col, right, omissions });
+          // Keep the final data cell fixed so its original column can anchor the
+          // end of a terminal hold without assigning times to interior dots.
+          else if (omissions.length && right === wave.length && /[2-9=]/.test(wave[col]) && /[. ]/.test(wave[right - 1]))
+            spans.push({ left: col, right: right - 1, omissions });
           col = right - 1;
         }
         if (spans.length) { heldSpans.set(index, spans); ranges.set(index, spans.slice()); }
@@ -475,6 +485,24 @@
         return start !== null && end !== null && end > start ? (col - run.col) * (end - start) / (run.end - run.col) : null;
       }
       const directionName = (direction) => direction === 'data-series' ? '数据等差推断' : direction === 'previous-row' ? '上一行' : '下一行';
+      function finalCellPoint(row, col, reference) {
+        if (col < 0 || col >= row.sourceLength || col > row.checkUntil) return null;
+        const wave = String(signals[row.index].wave || '');
+        if (wave[col] === '|') return null;
+        let lo = 0, hi = row.runs.length;
+        while (lo < hi) { const mid = (lo + hi) >> 1; if (row.runs[mid].end <= col) lo = mid + 1; else hi = mid; }
+        const run = row.runs[lo];
+        if (!run || run.col > col || run.state.toLowerCase() === 'x') return null;
+        if (reference && run.state === 'bus' && !dataEnds[row.index].has(col) && !/[2-9=]/.test(wave[col])) return null;
+        const gap = run.gap && gaps[run.gap - 1];
+        if (gap && gap.kind !== 'stretch') return null;
+        if (gap && run.state === 'bus' && dataEnds[row.index].has(col) && gap.endCol === col + 1)
+          return { block: gap.b, offset: -row.period, groups: [groups[gap.b]], expanded: true };
+        const offset = columnOffset(row, run, col);
+        if (offset === null) return null;
+        return { block: run.block, offset: run.offset + offset, groups: [groups[run.block]]
+          .concat(gap && col !== run.col && gap.durationSource !== 'connection' ? [groups[gap.b]] : []), expanded: !!gap };
+      }
       function alignmentCandidates(row, reference, eligible, visit, checkEnds) {
         if (!reference || !row.supported || !reference.supported || conflictRows.has(row.index) || conflictRows.has(reference.index)) return;
         const rowWave = String(signals[row.index].wave || '');
@@ -522,6 +550,18 @@
             }
             if (stop) break;
           }
+        }
+        for (const col of dataEnds[row.index]) {
+          if (!/[. ]/.test(rowWave[col] || '')) continue;
+          const point = finalCellPoint(row, col), anchor = finalCellPoint(reference, col, true);
+          if (!point || !anchor) continue;
+          const group = groups[point.block];
+          if (!eligible(group)) continue;
+          const target = time(anchor.block, anchor.offset);
+          if (target === null) continue;
+          const shift = target - values[point.block] - point.offset;
+          if (Number.isFinite(shift)) visit({ group, block: point.block, col, target, shift,
+            referenceGroups: anchor.groups, referenceExpanded: anchor.expanded, finalDataCell: true });
         }
       }
       const componentRows = components.map(() => new Set());
@@ -611,12 +651,12 @@
         const row = rows[index], reference = rows[below ? nextRows[index] : previousRows[index]];
         const direction = below ? 'next-row' : 'previous-row';
         alignmentCandidates(row, reference, (group) => shifts[group] === null && !blockedGroups.has(group), (candidate) => {
-          const { group, col, target, shift, referenceExpanded, referenceGroups } = candidate;
+          const { group, col, target, shift, referenceExpanded, referenceGroups, finalDataCell } = candidate;
           const key = alignmentKey(index, direction, candidate);
           if (rejectedAlignments.has(key)) return false;
           const attempt = alignGroup(group, shift);
           if (attempt.ok) {
-            recordAlignment(group, { row: index, referenceRow: reference.index, direction, col, time: target, referenceExpanded, referenceGroups });
+            recordAlignment(group, { row: index, referenceRow: reference.index, direction, col, time: target, referenceExpanded, referenceGroups, finalDataCell });
             positionSeries([group]);
           } else {
             // Do not block the other neighbour or another usable anchor.
@@ -952,7 +992,7 @@
           + details.join('；') + '；这些依据不能同时满足，未采用数据补全', [row.index], [], [gap.index]));
         return true;
       }
-      let minimum = 0, maximum = 1;
+      let minimum = 0, maximum = 1, longestWaveformEnd = -Infinity;
       rows.forEach((row) => {
         // Refresh every shared component after bidirectional propagation.
         resolveRowTimes(row);
@@ -979,7 +1019,10 @@
         });
         row.runs.forEach((run) => {
           if (run.start !== null) minimum = Math.min(minimum, run.start);
-          if (run.finish !== null) maximum = Math.max(maximum, run.finish);
+          if (run.finish !== null) {
+            maximum = Math.max(maximum, run.finish);
+            longestWaveformEnd = Math.max(longestWaveformEnd, run.finish);
+          }
         });
         row.hasUnpositionedContent = row.blocks.some((block) => block.time === null && block.col <= row.checkUntil);
         if (row.hasUnpositionedContent && !row.gaps.some((id) => !gaps[id].ignored && gaps[id].duration === undefined))
@@ -1137,11 +1180,25 @@
             run.unresolvedData = true; run.state = 'bus'; run.value = '?';
           }
           const previous = row.drawRuns[row.drawRuns.length - 1];
-          if (previous && !previous.series && !run.series && Math.abs(previous.finish - run.start) < EPS && previous.state === run.state && previous.value === run.value && previous.slot === run.slot
+          if (previous && !previous.series && !run.series && Math.abs(previous.finish - run.start) < EPS && previous.state === run.state && previous.symbol === run.symbol && previous.value === run.value && previous.slot === run.slot
               && previous.unresolvedData === run.unresolvedData
               && (!/[pPnN]/.test(run.state) || previous.clockOrigin === run.clockOrigin)) previous.finish = run.finish;
           else row.drawRuns.push(run);
         });
+        // Unknown tails are display padding only: never feed their common end
+        // back into alignment, constraints, reference anchors or the source JSON.
+        if (row.sourceLength && !row.empty && row.unknownTailStart !== undefined) {
+          const tail = row.runs.find((run) => run.col <= row.unknownTailStart && run.end > row.unknownTailStart);
+          const offset = tail && (tail.col === row.unknownTailStart ? 0 : columnOffset(row, tail, row.unknownTailStart));
+          const start = tail && tail.start !== null && offset !== null ? tail.start + offset : null;
+          if (start !== null && start < longestWaveformEnd) {
+            row.drawRuns = row.drawRuns.filter((run) => run.start < start);
+            row.drawRuns.forEach((run) => { run.finish = Math.min(run.finish, start); });
+            row.drawRuns.push({ col: row.unknownTailStart, end: row.sourceLength, start, finish: longestWaveformEnd,
+              state: 'x', symbol: 'x', value: 'x', slot: -1, gap: 0, clockOrigin: null });
+            row.unknownTailDisplay = { start, finish: longestWaveformEnd };
+          }
+        }
         let maxEnd = -Infinity;
         row.drawEnds = row.drawRuns.map((run) => (maxEnd = Math.max(maxEnd, run.finish)));
         // Only this display map uses provisional gap spacing; solved times remain untouched.
@@ -1180,7 +1237,7 @@
             const finish = run.gap ? referenceBlocks.get(gaps[run.gap - 1].b) : start + (end - run.col) * row.period;
             const provisional = !anchored || run.start === null || run.finish === null
               || /[pPnN]/.test(run.state) && run.clockOrigin === null;
-            const reference = { col: run.col, end, start, finish, state: run.state, provisional,
+            const reference = { col: run.col, end, start, finish, state: run.state, symbol: run.symbol, provisional,
               value: run.value, slot: run.slot, gap: run.gap,
               stretch: !!run.gap && gaps[run.gap - 1].kind === 'stretch',
               clockOrigin: run.clockBlock === null ? null : referenceBlocks.get(run.clockBlock) + run.clockOffset };

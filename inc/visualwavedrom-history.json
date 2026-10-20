@@ -1,5 +1,25 @@
 [
   {
+    "version": "2026.10.20.6",
+    "date": "2026-10-20T09:18:29Z",
+    "head": "8c8c2536fc507949547027abc1bd277e8ddba1c9",
+    "notes": [
+      "时延检查的未知尾段显示补齐到最长波形，数据段末列可用于上下行长度判断；原始数据不变。",
+      "时延展开、原序列参考、保持段和等差补全保留 =23456789 的原始数据类型配色。",
+      "参数表导出 TOML 增加保存路径选择、变量说明可选且默认关闭，保留公式结果与公式注释。",
+      "Windows/Linux 服务支持 TOML 文件选择和手填路径；直接打开 HTML 使用浏览器保存接口或下载回退，并处理取消和覆盖确认。"
+    ],
+    "commits": [
+      {
+        "id": "8c8c2536fc507949547027abc1bd277e8ddba1c9",
+        "date": "2026-10-20T16:34:05+08:00",
+        "title": "fix: clarify timing conflicts and bound zoom-out extent",
+        "body": "Associate localized conflict ranges with structured timing causes and show the original column, reference row, expanded time and difference.\n\nDistinguish equal candidate lengths from absolute-position conflicts, retain actual alignment causes and avoid misleading rounding. Clamp timing zoom, manual ranges and panning to the full waveform and expanded reference extent.\n\nUpdate documentation, browser cache keys and release metadata to 2026.10.20.5. Verified focused core cases, desktop/mobile browser regressions and all 65 release hashes. Exclude waveform libraries, temporary artifacts and unrelated local changes."
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.10.20.5",
     "date": "2026-10-20T08:33:04Z",
     "head": "2d3f74f4473ff880d407355f23d6c58a15029cba",

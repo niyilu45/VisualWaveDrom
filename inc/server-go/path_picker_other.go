@@ -37,6 +37,8 @@ func graphicalPickerCommand(kind, initialPath string) (string, []string, bool) {
 				}, true
 			case "save-library":
 				return executable, []string{"--getsavefilename", initial, "*.sqlite|SQLite wave libraries", "--title", "波形库另存为"}, true
+			case "save-toml":
+				return executable, []string{"--getsavefilename", initial, "*.toml|TOML parameters", "--title", "导出参数表 TOML"}, true
 			}
 		}
 		args := []string{"--file-selection"}
@@ -71,6 +73,11 @@ func graphicalPickerCommand(kind, initialPath string) (string, []string, bool) {
 			if initial != "" {
 				args = append(args, "--filename="+initial)
 			}
+		case "save-toml":
+			args = append(args, "--save", "--confirm-overwrite", "--title=导出参数表 TOML", "--file-filter=TOML parameters | *.toml")
+			if initial != "" {
+				args = append(args, "--filename="+initial)
+			}
 		}
 		return executable, args, true
 	}
@@ -79,7 +86,7 @@ func graphicalPickerCommand(kind, initialPath string) (string, []string, bool) {
 
 func pickLocalPathNative(kind, initialPath string) (string, bool, error) {
 	switch kind {
-	case "folder", "tool-folder", "library-folder", "preset", "save-preset", "save-library":
+	case "folder", "tool-folder", "library-folder", "preset", "save-preset", "save-library", "save-toml":
 	default:
 		return "", false, fmt.Errorf("unsupported path picker kind %q", kind)
 	}

@@ -28,7 +28,7 @@ import (
 const (
 	appID                      = "VisualWaveDrom"
 	protocolScheme             = "visualwavedrom"
-	serviceAPIVersion          = 25
+	serviceAPIVersion          = 26
 	defaultPort                = 4173
 	maxWaveLibraryRequestBytes = 256 * 1024 * 1024
 	importMaxUploadBytes       = 128 * 1024 * 1024
@@ -1645,6 +1645,7 @@ func (s *service) routes() http.Handler {
 	mux.HandleFunc("/api/server-info", method(http.MethodGet, s.handleServerInfo))
 	mux.HandleFunc("/api/tool-version", s.handleToolVersion)
 	mux.HandleFunc("/api/wave-parameters", s.handleWaveParameters)
+	mux.HandleFunc("/api/parameter-export-toml", method(http.MethodPost, s.handleParameterTomlExport))
 	mux.HandleFunc("/api/client-connect", method(http.MethodPost, s.handleClientConnect))
 	mux.HandleFunc("/api/client-disconnect", method(http.MethodPost, s.handleClientDisconnect))
 	mux.HandleFunc("/api/client-session", method(http.MethodGet, s.handleClientSession))

@@ -3,6 +3,9 @@
   const sessions = new Map();
   const statusNames = { ok: '已确定', unknown: '无法判断', conflict: '时延冲突' };
   const alignmentNames = { 'previous-row': '上行对齐', 'next-row': '下行对齐', 'adjacent-rows': '上下行对齐', 'data-series': '等差补全', 'mixed-sources': '混合推算' };
+  // Match the data fills in inc/skins/default.js; '=' uses type 2.
+  const dataColors = { '=': '#ffffff', '2': '#ffffff', '3': '#ffffb4', '4': '#ffe0b9', '5': '#b9e0ff',
+    '6': '#ccfdfe', '7': '#cdfdc5', '8': '#f0c1fb', '9': '#f5c2c0' };
   const rowStatusName = (row) => {
     if (row.status !== 'ok' || !row.alignments.length) return statusNames[row.status];
     const directions = new Set(row.alignments.map((entry) => entry.direction));
@@ -295,7 +298,8 @@
         : row.alignments.length ? '已有连接约束保持不变；先按明确的数据等差规律补全，再按上行、下行补充未定位置。'
         : '时间已确定；已提供的时延约束一致。没有连接约束的部分仅确定自身时间。');
       if (row.unknownTailStart !== undefined) paragraph('原列 ' + row.unknownTailStart
-        + ' 起为末尾未知段，长度未定，不按绘制列数约束相邻行；显式连接时延仍单独检查。');
+        + ' 起为末尾未知段，长度未定，不按绘制列数约束相邻行；显式连接时延仍单独检查。'
+        + (row.unknownTailDisplay ? '预览以未知波形补齐至最长波形的 ' + fmt(row.unknownTailDisplay.finish) + ' cycle，不参与时延推算。' : ''));
       (row.referenceChecks || []).forEach((check) => {
         const label = check.direction === 'previous-row' ? '上一行' : '下一行';
         const status = { available: '可以确定', partial: '仅部分可确定', unavailable: '无法确定', 'not-needed': '无需参考' }[check.status];
@@ -341,6 +345,7 @@
             + (alignment.row === row.index ? '，仅为预览推断，不修改原始数据。' : '，并经连接关系传递至本行。')); return;
         }
         paragraph('第' + (alignment.row + 1) + '行原列' + alignment.col
+        + (alignment.finalDataCell ? '（数据段末列）' : '')
         + ' 按' + (alignment.direction === 'next-row' ? '下一行' : '上一行') + '（第' + (alignment.referenceRow + 1) + '行）展开后的同原列时刻对齐至 ' + fmt(alignment.time) + ' cycle'
         + (alignment.referenceExpanded ? '（同值展开区域）' : '')
         + (alignment.row === row.index ? '；连接时延优先。' : '，并经连接约束传递至本行。'));
@@ -419,9 +424,10 @@
       const runs = reference ? row.referenceRuns : row.drawRuns, scale = (right - left) / (to - from);
       let previousPixel = -Infinity;
       context.save();
-      function paintBus(x1, x2, state, text) {
+      function paintBus(x1, x2, state, text, symbol) {
         const cap = Math.min(4, (x2 - x1) / 3);
-        context.fillStyle = reference ? '#eef1f5' : state === 'unresolved' ? '#fff0c8' : state === 'bus' ? '#e2f1e8' : '#eceff2';
+        context.fillStyle = state === 'bus' || state === 'unresolved' ? dataColors[symbol] || dataColors['=']
+          : reference ? '#eef1f5' : '#eceff2';
         context.beginPath(); context.moveTo(x1, mid); context.lineTo(x1 + cap, mid - 12); context.lineTo(x2 - cap, mid - 12);
         context.lineTo(x2, mid); context.lineTo(x2 - cap, mid + 12); context.lineTo(x1 + cap, mid + 12); context.closePath(); context.fill(); context.stroke();
         context.fillStyle = reference ? '#364152' : state === 'unresolved' ? '#8a5a08' : '#173426';
@@ -448,10 +454,10 @@
           const last = Math.min(series.count, Math.ceil((Math.min(to, run.finish) - run.start) / cell));
           if (cell * scale < 12) {
             paintBus(x1, x2, 'bus', core.seriesLabel(series.first + first * series.step, series.style) + ' … '
-              + core.seriesLabel(series.first + (last - 1) * series.step, series.style) + ' [' + (last - first) + ']');
+              + core.seriesLabel(series.first + (last - 1) * series.step, series.style) + ' [' + (last - first) + ']', run.symbol);
           } else for (let sample = first; sample < last; sample++) {
             paintBus(Math.max(x1, x(run.start + sample * cell)), Math.min(x2, x(run.start + (sample + 1) * cell)),
-              'bus', core.seriesLabel(series.first + sample * series.step, series.style));
+              'bus', core.seriesLabel(series.first + sample * series.step, series.style), run.symbol);
           }
         } else if (state === 'p' || state === 'n') {
           const half = row.period / 2, highFirst = state === 'p';
@@ -476,7 +482,7 @@
           }
           context.stroke();
         } else {
-          paintBus(x1, x2, run.unresolvedData ? 'unresolved' : state, state === 'bus' ? run.value : 'x');
+          paintBus(x1, x2, run.unresolvedData ? 'unresolved' : state, state === 'bus' ? run.value : 'x', run.symbol);
         }
       }
       context.restore();

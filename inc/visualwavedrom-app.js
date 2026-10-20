@@ -25388,6 +25388,8 @@ ${lines.join('\n')}`;
       currentSource: () => JSON.parse(editor.value || '{}'),
       status: (message) => setStatus(false, message),
       download: downloadBlobFile,
+      tomlExportService: () => waveLibraryServerMode,
+      tomlExportRequest: (payload) => libraryFileRequest('/api/parameter-export-toml', payload),
       saveLibrary: () => singleParameterViewActive ? saveCurrentWaveLibrary() : performCurrentWaveLibrarySave(),
       source: async (name) => {
         const tag = await ensureWaveDocumentLoaded(name);
