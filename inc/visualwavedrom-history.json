@@ -1,5 +1,25 @@
 [
   {
+    "version": "2026.10.20.7",
+    "date": "2026-10-20T09:55:14Z",
+    "head": "cdcf96009279b2f917e1eadccf18e8f5bb011cac",
+    "notes": [
+      "修复同值展开段的比例绘图位置被误用为时延锚点，消除 134 与 133.4210526 cycle 的虚假冲突。",
+      "真实对齐冲突区分同一参考行的不同原列锚点，简洁说明和展开详情均保留来源列号。",
+      "时延推算采用 0.5 cycle 精度，连接标签、公式、单位换算及行配置不符合精度时明确提示，不强行舍入。",
+      "保留省略符前后可确定的固定格子时刻，避免多省略段或比例示意位置向后续行传播错误时延。"
+    ],
+    "commits": [
+      {
+        "id": "cdcf96009279b2f917e1eadccf18e8f5bb011cac",
+        "date": "2026-10-20T17:22:38+08:00",
+        "title": "feat: add TOML export options and preserve timing data colors",
+        "body": "Extend located unknown tails to the longest waveform in the timing preview without changing source data or introducing alignment constraints. Use final data continuation cells as additional neighbour alignment evidence while preserving interior hold semantics.\n\nPreserve =23456789 type colors in main/reference timing views, held spans and both detailed and condensed arithmetic completions.\n\nAdd TOML export path selection and optional variable descriptions, disabled by default. Keep evaluated values and formula comments; handle cancellation, explicit overwrite consent, browser save/download fallback and Windows/Linux native path pickers. Add the scoped export endpoint and increment the service API to prevent reuse of older services.\n\nUpdate documentation, cache keys, Windows/Linux executables, checksums and release metadata to 2026.10.20.6. Verified focused timing cases, browser canvas colors and export flows, TOML parsing, scoped Go export tests and all 65 release hashes. Exclude waveform libraries, temporary artifacts and unrelated local changes."
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.10.20.6",
     "date": "2026-10-20T09:18:29Z",
     "head": "8c8c2536fc507949547027abc1bd277e8ddba1c9",

@@ -260,7 +260,13 @@
               const times = comparison.sources.map((source) => (source.direction === 'data-series'
                 ? '第' + (source.row + 1) + '行等差推算为 ' : '按第' + (source.row + 1) + '行对齐为 ')
                 + (precise ? String(source.time) : fmt(source.time)) + ' cycle');
-              text = location + context + '时间不一致：' + times.join('，') + '，差 ' + fmt(comparison.difference) + ' cycle。';
+              const [first, second] = comparison.sources;
+              const sameRow = first.row === second.row && first.direction !== 'data-series' && second.direction !== 'data-series';
+              const cause = sameRow ? '第' + (first.row + 1) + '行'
+                + (Number.isInteger(first.col) ? '原列' + first.col + '锚点' : '已采用锚点') + '推算本列为 '
+                + (precise ? String(first.time) : fmt(first.time)) + ' cycle，但该行原列' + second.col + '要求为 '
+                + (precise ? String(second.time) : fmt(second.time)) + ' cycle' : times.join('，');
+              text = location + context + '时间不一致：' + cause + '，差 ' + fmt(comparison.difference) + ' cycle。';
             }
             summaries.push({ col: range.col, target: range, text });
           });

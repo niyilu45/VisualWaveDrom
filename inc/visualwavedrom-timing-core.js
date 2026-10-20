@@ -3,6 +3,16 @@
   'use strict';
   function createTimingEngine() {
     const EPS = 1e-9;
+    function halfCycle(value) {
+      const tick = Math.round(value * 2);
+      return Number.isFinite(value) && Number.isSafeInteger(tick) && Math.abs(value - tick / 2) <= EPS ? tick / 2 : null;
+    }
+    function normalizeDelay(timing) {
+      if (timing.kind !== 'delay') return timing;
+      const value = halfCycle(timing.value);
+      return value === null ? { kind: 'unknown', reason: '时延结果必须为 0.5 cycle 的整数倍，未用于推算' }
+        : Object.assign({}, timing, { value });
+    }
     const numberPattern = '[+-]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:e[+-]?\\d+)?';
     const units = 'cycle[s]?|周期|s|ms|us|µs|μs|ns|ps';
     function parseDelay(label, cycleTimeNs, evaluateExpression) {
@@ -42,7 +52,7 @@
         const scale = { s: 1e9, ms: 1e6, us: 1e3, 'µs': 1e3, 'μs': 1e3, ns: 1, ps: 1e-3 };
         value *= scale[unit] / Number(cycleTimeNs);
       }
-      return Number.isFinite(value) ? { kind: 'delay', value } : { kind: 'unknown', reason: '时延数值超出范围' };
+      return Number.isFinite(value) ? normalizeDelay({ kind: 'delay', value }) : { kind: 'unknown', reason: '时延数值超出范围' };
     }
     function edgeParts(value) {
       const match = String(value || '').trim().match(/^(\S+)(?:\s+([\s\S]*))?$/);
@@ -70,7 +80,7 @@
       const tolerance = Number.isFinite(Number(config.tolerance)) && Number(config.tolerance) >= 0 ? Number(config.tolerance) : 1e-7;
       const rows = [], gaps = [], nodes = new Map(), duplicates = new Set(), graph = [[]], constraints = [], issues = [], edges = [];
       const sourceEdges = Array.isArray(source.edge) ? source.edge : [];
-      const edgeTiming = (raw, index) => edgeTimings && edgeTimings[index] || parseDelay(edgeParts(raw).label, config.cycleTimeNs);
+      const edgeTiming = (raw, index) => normalizeDelay(edgeTimings && edgeTimings[index] || parseDelay(edgeParts(raw).label, config.cycleTimeNs));
       const referencedNodes = new Set(sourceEdges.flatMap((raw) => {
         const parsed = edgeParts(raw);
         return [parsed.from, parsed.to].filter(Boolean);
@@ -122,6 +132,12 @@
         if (!(period > 0) || !Number.isFinite(period * length) || !Number.isFinite(phase)) {
           issue('unknown', 'period 必须为正有限数值，phase 必须为有限数值', [index]); row.supported = false;
           row.period = 1; row.phase = 0;
+        } else if (halfCycle(period) === null || halfCycle(period) <= 0 || halfCycle(phase) === null
+            || halfCycle(halfCycle(period) * length) === null || /[pPnN]/.test(wave) && halfCycle(halfCycle(period) / 2) === null) {
+          issue('unknown', '时延检查仅支持 0.5 cycle 的整数倍：请检查 period、phase；时钟半周期也须符合此精度', [index]);
+          row.supported = false; row.period = 1; row.phase = 0;
+        } else {
+          row.period = halfCycle(period); row.phase = halfCycle(phase);
         }
         if (/[<>]/.test(wave)) { row.supported = false; issue('unknown', '此行包含 < > 变步长符号，暂不能可靠推算', [index]); }
         let block = { id: makeBlock(), col: 0, end: 0 };
@@ -437,7 +453,7 @@
       shifts[0] = 0;
       function time(block, offset) {
         const shift = shifts[groups[block]], result = values[block] + (offset || 0) + shift;
-        return shift !== null && Number.isFinite(result) ? result : null;
+        return shift !== null ? halfCycle(result) : null;
       }
       const conflictRows = new Set(issues.filter((entry) => entry.kind === 'conflict').flatMap((entry) => entry.relatedRows));
       const blockedGroups = new Set();
@@ -470,21 +486,33 @@
           run.clockOrigin = run.clockBlock === null ? null : time(run.clockBlock, run.clockOffset);
         });
       }
-      // Use the same source-column mapping as the expanded reference strip, never
-      // provisional display positions. Ordinary omissions are not alignment anchors.
-      function columnOffset(row, run, col) {
+      // Proportional offsets are for drawing original-column locations only.
+      // They must never become solver anchors, even when they happen to land on a tick.
+      function displayColumnOffset(row, run, col) {
         if (!run.gap) return (col - run.col) * row.period;
         const gap = gaps[run.gap - 1];
         if (gap.kind !== 'stretch') return null;
         if (col === run.col) return 0;
-        // A connection can fix the span before either endpoint has an absolute
-        // time. Use that relative duration to break neighbouring-row dependencies.
+        // A known total duration can size the reference strip without assigning
+        // actual times to the interior original columns.
         if (Number.isFinite(gap.duration) && validDuration(gap, gap.duration))
           return (col - run.col) * gap.duration / (run.end - run.col);
         const start = time(gap.a, gap.offset), end = time(gap.b);
         return start !== null && end !== null && end > start ? (col - run.col) * (end - start) / (run.end - run.col) : null;
       }
       const directionName = (direction) => direction === 'data-series' ? '数据等差推断' : direction === 'previous-row' ? '上一行' : '下一行';
+      function alignmentPoint(row, run, col) {
+        const point = (block, offset) => ({ block, offset, groups: [groups[block]], expanded: !!run.gap });
+        if (!run.gap) return point(run.block, run.offset + (col - run.col) * row.period);
+        const gap = gaps[run.gap - 1];
+        if (gap.kind !== 'stretch') return null;
+        if (col === run.col) return point(gap.a, gap.offset);
+        // Fixed cells outside the omissions retain their width. Between multiple
+        // omissions only the total is known; their individual lengths are not.
+        if (gap.omissions.length && col <= gap.omissions[0]) return point(gap.a, gap.offset + (col - run.col) * row.period);
+        if (gap.omissions.length && col > gap.omissions[gap.omissions.length - 1]) return point(gap.b, -(run.end - col) * row.period);
+        return null;
+      }
       function finalCellPoint(row, col, reference) {
         if (col < 0 || col >= row.sourceLength || col > row.checkUntil) return null;
         const wave = String(signals[row.index].wave || '');
@@ -498,19 +526,16 @@
         if (gap && gap.kind !== 'stretch') return null;
         if (gap && run.state === 'bus' && dataEnds[row.index].has(col) && gap.endCol === col + 1)
           return { block: gap.b, offset: -row.period, groups: [groups[gap.b]], expanded: true };
-        const offset = columnOffset(row, run, col);
-        if (offset === null) return null;
-        return { block: run.block, offset: run.offset + offset, groups: [groups[run.block]]
-          .concat(gap && col !== run.col && gap.durationSource !== 'connection' ? [groups[gap.b]] : []), expanded: !!gap };
+        return alignmentPoint(row, run, col);
       }
-      function alignmentCandidates(row, reference, eligible, visit, checkEnds) {
+      function alignmentCandidates(row, reference, eligible, visit) {
         if (!reference || !row.supported || !reference.supported || conflictRows.has(row.index) || conflictRows.has(reference.index)) return;
         const rowWave = String(signals[row.index].wave || '');
         const referenceWave = String(signals[reference.index].wave || '');
         let referenceIndex = 0;
         for (const run of row.runs) {
-          const group = groups[run.block];
-          if (!eligible(group) || run.gap && gaps[run.gap - 1].kind !== 'stretch' || run.state.toLowerCase() === 'x'
+          if ((!eligible(groups[run.block]) && !(run.gap && eligible(groups[gaps[run.gap - 1].b])))
+              || run.gap && gaps[run.gap - 1].kind !== 'stretch' || run.state.toLowerCase() === 'x'
               || run.col >= row.sourceLength || run.col > row.checkUntil) continue;
           // Match data boundaries on both rows. A held value must not acquire a
           // fixed duration from an interior continuation before its next boundary.
@@ -526,26 +551,23 @@
             if (anchor.state.toLowerCase() === 'x' || last < first) continue;
             // A data value supplies one anchor at its original symbol, not at
             // continuation columns or fragments split off by an omission/stretch.
-            const referenceHoldStart = anchor.gap ? gaps[anchor.gap - 1].holdStart : undefined;
-            if (anchor.state === 'bus' || referenceHoldStart !== undefined) {
-              if (first !== anchor.col || (referenceHoldStart !== undefined ? anchor.col !== referenceHoldStart : !/[2-9=]/.test(referenceWave[anchor.col] || ''))) continue;
+            if (anchor.state === 'bus') {
+              if (first !== anchor.col || !/[2-9=]/.test(referenceWave[anchor.col] || '')) continue;
               last = first;
             }
-            const anchorStart = time(anchor.block, anchor.offset);
-            if (anchorStart === null) continue;
-            // Both mappings are affine within a run; checking the ends covers long continuations.
             let stop = false;
-            for (const col of checkEnds && last > first ? [first, last] : [first]) {
-              const anchorOffset = columnOffset(reference, anchor, col), offset = columnOffset(row, run, col);
-              if (anchorOffset === null || offset === null) continue;
-              const target = anchorStart + anchorOffset;
-              const shift = target - values[run.block] - run.offset - offset;
+            for (const col of last > first ? [first, last] : [first]) {
+              if (rowWave[col] === '|' || referenceWave[col] === '|') continue;
+              const point = alignmentPoint(row, run, col), referencePoint = alignmentPoint(reference, anchor, col);
+              if (!point || !referencePoint) continue;
+              const group = groups[point.block];
+              if (!eligible(group)) continue;
+              const target = halfCycle(time(referencePoint.block, referencePoint.offset));
+              if (target === null) continue;
+              const shift = target - values[point.block] - point.offset;
               if (!Number.isFinite(shift)) continue;
-              const referenceGroups = [groups[anchor.block]];
-              if (anchor.gap && col !== anchor.col && gaps[anchor.gap - 1].durationSource !== 'connection')
-                referenceGroups.push(groups[gaps[anchor.gap - 1].b]);
-              stop = visit({ group, block: run.block, col, target, shift, referenceGroups,
-                referenceExpanded: !!anchor.gap && gaps[anchor.gap - 1].kind === 'stretch' });
+              stop = visit({ group, block: point.block, col, target, shift, referenceGroups: referencePoint.groups,
+                referenceExpanded: referencePoint.expanded });
               if (stop) break;
             }
             if (stop) break;
@@ -557,7 +579,7 @@
           if (!point || !anchor) continue;
           const group = groups[point.block];
           if (!eligible(group)) continue;
-          const target = time(anchor.block, anchor.offset);
+          const target = halfCycle(time(anchor.block, anchor.offset));
           if (target === null) continue;
           const shift = target - values[point.block] - point.offset;
           if (Number.isFinite(shift)) visit({ group, block: point.block, col, target, shift,
@@ -691,19 +713,21 @@
             if (Math.abs(shift - shifts[group]) <= Math.max(EPS, tolerance) || auditedConflicts.has(key)) return false;
             auditedConflicts.add(key);
             const chosen = alignmentSources.get(group), actual = target + shifts[group] - shift;
-            const entry = issue('conflict', '第' + (row.index + 1) + '行原列' + col + '对齐冲突：按'
-              + directionName(chosen.direction) + '（第' + (chosen.referenceRow + 1) + '行）推算为 ' + format(actual)
-              + ' cycle，但' + directionName(direction) + '（第' + (reference.index + 1) + '行）同原列为 '
+            const chosenColumn = Number.isInteger(chosen.col) ? '原列' + chosen.col + '锚点' : '已采用锚点';
+            const sameReference = chosen.referenceRow === reference.index && chosen.direction !== 'data-series';
+            const entry = issue('conflict', '第' + (row.index + 1) + '行原列' + col + '对齐冲突：由'
+              + directionName(chosen.direction) + '（第' + (chosen.referenceRow + 1) + '行）' + chosenColumn + '推算本列为 ' + format(actual)
+              + ' cycle，但' + (sameReference ? '该参考行原列' + col : directionName(direction) + '（第' + (reference.index + 1) + '行）同原列') + '为 '
               + format(target) + ' cycle，相差 ' + format(Math.abs(actual - target)) + ' cycle；未覆盖已采用的时刻，冲突结果仅供定位',
             [row.index, chosen.row, chosen.referenceRow, reference.index], [], [],
             [{ row: row.index, col }, { row: reference.index, col },
               { row: chosen.row, col: chosen.col }, { row: chosen.referenceRow, col: chosen.col }]);
             entry.timeComparison = { row: row.index, col, difference: Math.abs(actual - target), sources: [
-              { direction: chosen.direction, row: chosen.referenceRow, time: actual },
-              { direction, row: reference.index, time: target }
+              { direction: chosen.direction, row: chosen.referenceRow, col: chosen.col, time: actual },
+              { direction, row: reference.index, col, time: target }
             ] };
             return true;
-          }, true);
+          });
         }
       }); }
       function conflictRegions(entry, row) {
@@ -1069,7 +1093,7 @@
             shiftsByGroup.set(candidate.group, candidate.shift);
             resolved.add(candidate.group);
             return false;
-          }, true);
+          });
           // Intrinsic series durations transmit an independent neighbouring anchor.
           const queue = Array.from(resolved);
           for (let head = 0; head < queue.length; head++) for (const link of seriesLinks[queue[head]]) {
@@ -1106,7 +1130,7 @@
               if (candidate.col > entry.last.col) entry.last = candidate;
             }
             return false;
-          }, true);
+          });
           return { direction, reference, anchors };
         });
         for (const id of affected) {
@@ -1189,8 +1213,8 @@
         // back into alignment, constraints, reference anchors or the source JSON.
         if (row.sourceLength && !row.empty && row.unknownTailStart !== undefined) {
           const tail = row.runs.find((run) => run.col <= row.unknownTailStart && run.end > row.unknownTailStart);
-          const offset = tail && (tail.col === row.unknownTailStart ? 0 : columnOffset(row, tail, row.unknownTailStart));
-          const start = tail && tail.start !== null && offset !== null ? tail.start + offset : null;
+          const point = tail && alignmentPoint(row, tail, row.unknownTailStart);
+          const start = tail && tail.col === row.unknownTailStart ? tail.start : point ? time(point.block, point.offset) : null;
           if (start !== null && start < longestWaveformEnd) {
             row.drawRuns = row.drawRuns.filter((run) => run.start < start);
             row.drawRuns.forEach((run) => { run.finish = Math.min(run.finish, start); });
@@ -1238,6 +1262,7 @@
             const provisional = !anchored || run.start === null || run.finish === null
               || /[pPnN]/.test(run.state) && run.clockOrigin === null;
             const reference = { col: run.col, end, start, finish, state: run.state, symbol: run.symbol, provisional,
+              mapped: !!run.gap && gaps[run.gap - 1].kind === 'stretch',
               value: run.value, slot: run.slot, gap: run.gap,
               stretch: !!run.gap && gaps[run.gap - 1].kind === 'stretch',
               clockOrigin: run.clockBlock === null ? null : referenceBlocks.get(run.clockBlock) + run.clockOffset };
@@ -1289,7 +1314,7 @@
           if (!run) return lo && col === runs[lo - 1].end ? runs[lo - 1].finish : null;
           if (col < run.col || run.start === null) return null;
           if (col === run.col) return run.start;
-          const offset = reference ? (col - run.col) * (run.finish - run.start) / (run.end - run.col) : columnOffset(row, run, col);
+          const offset = reference ? (col - run.col) * (run.finish - run.start) / (run.end - run.col) : displayColumnOffset(row, run, col);
           return offset === null ? null : run.start + offset;
         }
         row.gaps.forEach((id) => {
