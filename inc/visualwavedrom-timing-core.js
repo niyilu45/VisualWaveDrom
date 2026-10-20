@@ -100,7 +100,7 @@
         const entry = { kind, reason, rows: markedRows, relatedRows, edges: Array.from(new Set(edgeIds || [])), gaps: gapIds || [], locations: locations || [] };
         issues.push(entry); return entry;
       }
-      const signals = flatten(source.signal, []), stretches = new Map(), holdStarts = new Map(), dataEnds = [];
+      const signals = flatten(source.signal, []), stretches = new Map(), holdStarts = new Map(), dataEnds = [], terminalMarkers = new Map();
       function buildRows() { signals.forEach((signal, index) => {
         const wave = String(signal.wave || ''), node = String(signal.node || '');
         let lastNode = node.length - 1;
@@ -128,6 +128,7 @@
         const row = { index, name: String(signal.name || '(空行)'), length, sourceLength: wave.length, period, phase, blocks: [], runs: [], gaps: [],
           empty: lastWave < 0, checkUntil: Math.max(lastKnownWave, lastReferencedNode), unknownTailStart,
           known: false, supported: true, status: 'ok', reasons: [] };
+        if (terminalMarkers.has(index)) row.checkUntil = Math.min(row.checkUntil, terminalMarkers.get(index) - 1);
         rows.push(row);
         if (!(period > 0) || !Number.isFinite(period * length) || !Number.isFinite(phase)) {
           issue('unknown', 'period 必须为正有限数值，phase 必须为有限数值', [index]); row.supported = false;
@@ -205,25 +206,37 @@
       signals.forEach((signal, index) => {
         if (!rows[index].supported) return;
         const wave = String(signal.wave || ''), spans = [];
+        const runStarts = new Map(rows[index].runs.map((run) => [run.col, run]));
+        const lastEndpoint = Array.from(String(signal.node || '').matchAll(/[a-zA-Z0-9]/g))
+          .reduce((last, match) => referencedNodes.has(match[0]) ? match.index : last, -1);
         // A closed hold can have one elastic duration across multiple omissions.
-        // Explicit symbols start new holds, even when their data values match.
+        // Data symbols start new holds; identical clock symbols stay continuous.
         for (let col = 0; col < wave.length; col++) {
           if (/[.\s|<>]/.test(wave[col])) continue;
           let right = col + 1;
           const omissions = [];
-          while (right < wave.length && /[. |]/.test(wave[right])) {
+          while (right < wave.length && (/[. |]/.test(wave[right]) || /[pPnN]/.test(wave[col]) && wave[right] === wave[col])) {
             if (wave[right] === '|') omissions.push(right);
             right++;
           }
-          // Keep a single bus omission available to arithmetic-series inference.
-          // Multiple omissions within one data value need only a total duration.
-          if (omissions.length && right < wave.length && right <= rows[index].checkUntil
-              && (!/[2-9=]/.test(wave[col]) || omissions.length > 1))
+          // Dots after an omission still hold the same data item. Separate data
+          // symbols remain available to arithmetic-series inference.
+          const continuedData = /[2-9=]/.test(wave[col]) && /[. ]/.test(wave[omissions[omissions.length - 1] + 1] || '');
+          if (omissions.length && right < wave.length && right <= rows[index].checkUntil + 1
+              && (!/[2-9=]/.test(wave[col]) || omissions.length > 1 || continuedData))
+            spans.push({ left: col, right, omissions });
+          else if (omissions.length && right === wave.length && !/[2-9=]/.test(wave[col]))
             spans.push({ left: col, right, omissions });
           // Keep the final data cell fixed so its original column can anchor the
           // end of a terminal hold without assigning times to interior dots.
           else if (omissions.length && right === wave.length && /[2-9=]/.test(wave[col]) && /[. ]/.test(wave[right - 1]))
             spans.push({ left: col, right: right - 1, omissions });
+          if (omissions.length && spans[spans.length - 1]?.left === col) {
+            const current = runStarts.get(col), marker = runStarts.get(right);
+            if (current?.state === 'bus' && !current.value.trim() && marker?.state === 'bus'
+                && marker.end === wave.length && !marker.gap && !marker.value.trim() && lastEndpoint < right)
+              terminalMarkers.set(index, right);
+          }
           col = right - 1;
         }
         if (spans.length) { heldSpans.set(index, spans); ranges.set(index, spans.slice()); }
@@ -573,9 +586,12 @@
             if (stop) break;
           }
         }
-        for (const col of dataEnds[row.index]) {
-          if (!/[. ]/.test(rowWave[col] || '')) continue;
-          const point = finalCellPoint(row, col), anchor = finalCellPoint(reference, col, true);
+        // A held data cell's last column can anchor either neighbouring row;
+        // interior data continuations on either side are still not anchors.
+        for (const col of new Set([...dataEnds[row.index], ...dataEnds[reference.index]])) {
+          if (!(dataEnds[row.index].has(col) && /[. ]/.test(rowWave[col] || ''))
+              && !(dataEnds[reference.index].has(col) && /[. ]/.test(referenceWave[col] || ''))) continue;
+          const point = finalCellPoint(row, col, true), anchor = finalCellPoint(reference, col, true);
           if (!point || !anchor) continue;
           const group = groups[point.block];
           if (!eligible(group)) continue;
@@ -642,6 +658,40 @@
         enqueue(index, false); enqueue(rows.length - index - 1, true);
       });
       const rejectedAlignments = new Map();
+      const unusableReferences = new Set();
+      let seriesCoordinates;
+      function declineReference(row, reference, group) {
+        const root = seriesCoordinates[group].root;
+        seriesCoordinates.forEach((point, id) => {
+          if (point.root === root) unusableReferences.add(row + ':' + reference + ':' + id);
+        });
+      }
+      function unusableCandidate(row, reference, candidate) {
+        return reference && (unusableReferences.has(row.index + ':' + reference.index + ':' + candidate.group)
+          || candidate.referenceGroups.some((group) => unusableReferences.has(reference.index + ':' + row.index + ':' + group)));
+      }
+      function alignmentOptions(row, reference, eligible) {
+        if (!seriesCoordinates) {
+          seriesCoordinates = [];
+          components.forEach((_, root) => {
+            if (seriesCoordinates[root]) return;
+            const queue = [root]; seriesCoordinates[root] = { root, offset: 0 };
+            for (let head = 0; head < queue.length; head++) for (const link of seriesLinks[queue[head]]) {
+              if (seriesCoordinates[link.to]) continue;
+              seriesCoordinates[link.to] = { root, offset: seriesCoordinates[queue[head]].offset + link.delta };
+              queue.push(link.to);
+            }
+          });
+        }
+        const candidates = [], roots = new Map(), ambiguous = new Set();
+        alignmentCandidates(row, reference, eligible, (candidate) => {
+          if (unusableCandidate(row, reference, candidate)) return false;
+          const { root, offset } = seriesCoordinates[candidate.group], shift = candidate.shift - offset;
+          if (roots.has(root) && Math.abs(roots.get(root) - shift) > Math.max(EPS, tolerance)) ambiguous.add(root);
+          roots.set(root, shift); candidates.push(candidate); return false;
+        });
+        return { candidates, roots, ambiguous };
+      }
       const alignmentKey = (row, direction, candidate) => row + ':' + direction + ':' + candidate.group + ':' + candidate.col;
       const componentGaps = components.map(() => []);
       gaps.filter((gap) => !gap.ignored).forEach((gap) => {
@@ -672,20 +722,45 @@
         (below ? belowPending : abovePending).delete(index);
         const row = rows[index], reference = rows[below ? nextRows[index] : previousRows[index]];
         const direction = below ? 'next-row' : 'previous-row';
-        alignmentCandidates(row, reference, (group) => shifts[group] === null && !blockedGroups.has(group), (candidate) => {
+        const eligible = (group) => shifts[group] === null && !blockedGroups.has(group);
+        const options = alignmentOptions(row, reference, eligible);
+        const otherReference = rows[below ? previousRows[index] : nextRows[index]];
+        const alternative = options.candidates.length > 1 ? alignmentOptions(row, otherReference, eligible) : null;
+        for (const root of options.ambiguous) {
+          if (!alternative || !alternative.roots.has(root) || alternative.ambiguous.has(root)) continue;
+          const candidates = alternative.candidates.filter((candidate) => seriesCoordinates[candidate.group].root === root);
+          const targets = new Set(options.candidates.filter((candidate) => seriesCoordinates[candidate.group].root === root)
+            .map((candidate) => candidate.group));
+          // An inconsistent set of original-column anchors cannot determine this
+          // component. Check each independent span, not only single-span rows.
+          if (!candidates.length || !candidates.every((candidate) => meetsMinimum(candidate.group, candidate.shift)
+              && !dependsOn(candidate.referenceGroups, targets))) continue;
+          const candidate = candidates[0];
+          if (!alignGroup(candidate.group, candidate.shift).ok) continue;
+          recordAlignment(candidate.group, { row: index, referenceRow: otherReference.index,
+            direction: below ? 'previous-row' : 'next-row', col: candidate.col, time: candidate.target,
+            referenceExpanded: candidate.referenceExpanded, referenceGroups: candidate.referenceGroups,
+            finalDataCell: candidate.finalDataCell });
+          positionSeries([candidate.group]);
+          declineReference(index, reference.index, candidate.group);
+        }
+        for (const candidate of options.candidates) {
           const { group, col, target, shift, referenceExpanded, referenceGroups, finalDataCell } = candidate;
+          if (!eligible(group)) continue;
           const key = alignmentKey(index, direction, candidate);
-          if (rejectedAlignments.has(key)) return false;
+          if (rejectedAlignments.has(key)) continue;
           const attempt = alignGroup(group, shift);
           if (attempt.ok) {
             recordAlignment(group, { row: index, referenceRow: reference.index, direction, col, time: target, referenceExpanded, referenceGroups, finalDataCell });
             positionSeries([group]);
+            if (!options.ambiguous.has(seriesCoordinates[group].root) && alternative?.ambiguous.has(seriesCoordinates[group].root)) {
+              declineReference(index, otherReference.index, group);
+            }
           } else {
             // Do not block the other neighbour or another usable anchor.
             rejectedAlignments.set(key, { row: index, referenceRow: reference.index, direction, candidate, attempt });
           }
-          return attempt.ok;
-        });
+        }
       }
         const reported = new Set();
         rejectedAlignments.forEach(({ row: index, referenceRow, direction, candidate, attempt }) => {
@@ -703,14 +778,29 @@
       // so disagreement is reported instead of silently replacing an upper anchor.
       const auditedConflicts = new Set();
       function auditAlignments() { rows.forEach((row) => {
-        for (const direction of ['previous-row', 'next-row']) {
+        const eligible = (group) => !selfPositioned[group] && alignmentSources.has(group);
+        const required = new Set(row.blocks.filter((block) => block.col <= row.checkUntil && !selfPositioned[groups[block.id]])
+          .map((block) => groups[block.id]));
+        if (!Array.from(required).some(eligible)) return;
+        const roots = new Set(Array.from(required, (group) => seriesCoordinates[group].root));
+        const references = ['previous-row', 'next-row'].map((direction) => {
           const reference = rows[direction === 'previous-row' ? previousRows[row.index] : nextRows[row.index]];
-          alignmentCandidates(row, reference, (group) => alignmentSources.has(group), (candidate) => {
+          const options = alignmentOptions(row, reference, eligible);
+          const independent = new Set(options.candidates.filter((candidate) => !dependsOn(candidate.referenceGroups, required)
+            && meetsMinimum(candidate.group, candidate.shift) && !rejectedAlignments.has(alignmentKey(row.index, direction, candidate)))
+            .map((candidate) => seriesCoordinates[candidate.group].root));
+          return { direction, reference, options, complete: Array.from(roots).every((root) => independent.has(root) && !options.ambiguous.has(root)) };
+        });
+        for (const { direction, reference, options, complete } of references) {
+          // A partial fallback cannot overturn a complete, consistent reference.
+          // Two independently complete references still participate in the audit.
+          if (!complete && references.some((entry) => entry.complete)) continue;
+          for (const candidate of options.candidates) {
             const { group, col, target, shift, referenceGroups } = candidate;
             if (rejectedAlignments.has(alignmentKey(row.index, direction, candidate)) || !meetsMinimum(group, shift)
-                || dependsOn(referenceGroups, new Set([group]))) return false;
+                || dependsOn(referenceGroups, new Set([group]))) continue;
             const key = group + ':' + row.index + ':' + direction;
-            if (Math.abs(shift - shifts[group]) <= Math.max(EPS, tolerance) || auditedConflicts.has(key)) return false;
+            if (Math.abs(shift - shifts[group]) <= Math.max(EPS, tolerance) || auditedConflicts.has(key)) continue;
             auditedConflicts.add(key);
             const chosen = alignmentSources.get(group), actual = target + shifts[group] - shift;
             const chosenColumn = Number.isInteger(chosen.col) ? '原列' + chosen.col + '锚点' : '已采用锚点';
@@ -726,8 +816,7 @@
               { direction: chosen.direction, row: chosen.referenceRow, col: chosen.col, time: actual },
               { direction, row: reference.index, col, time: target }
             ] };
-            return true;
-          });
+          }
         }
       }); }
       function conflictRegions(entry, row) {
@@ -884,6 +973,7 @@
             if (omissions.length !== 1) continue;
             const gap = gaps[omissions[0].run.gap - 1], blanks = between.filter((item) => !item.run.gap);
             if (gap.ignored || gap.kind === 'stretch') continue;
+            if (left.run.slot === right.run.slot) continue;
             gap.seriesContext = { before: left.run.value, after: right.run.value, col: left.run.end, end: right.run.col,
               blankCount: blanks.length, blankColumns: blanks.reduce((total, item) => total + item.run.end - item.run.col, 0) };
             between.forEach((item) => { item.run.seriesGap = gap.index + 1; });
@@ -983,6 +1073,7 @@
         gap.duration = duration; gap.durationSource = 'data-series'; gap.series = series; delete gap.seriesReason;
         fills.forEach(({ run, value }) => { run.inferredValue = value; });
         seriesLinks[a].push({ to: b, delta, gap }); seriesLinks[b].push({ to: a, delta: -delta, gap });
+        seriesCoordinates = null;
         positionSeries([a, b]);
         return true;
       }
@@ -1055,6 +1146,13 @@
             && (edge.fromNode.row === row.index || edge.toNode.row === row.index)))
           issue('unknown', '无非未知波形或有效连接时延，无法判断对齐', [row.index]);
       });
+      const terminalDisplays = rows.map((row) => row.runs.find((run) => run.start !== null && run.finish === null
+        && run.gap && gaps[run.gap - 1].ignored && gaps[run.gap - 1].kind === 'stretch'
+        && run.state.toLowerCase() !== 'x'));
+      terminalDisplays.forEach((run, index) => {
+        if (run) longestWaveformEnd = Math.max(longestWaveformEnd, run.start + (rows[index].sourceLength - run.col) * rows[index].period);
+      });
+      maximum = Math.max(maximum, longestWaveformEnd);
       const seriesConflictRows = seriesConflicts.length ? propagateConflicts(seriesConflicts) : new Set();
       let viewMinimum = minimum, viewMaximum = maximum;
       const globalConversions = [];
@@ -1085,8 +1183,9 @@
           if (conflictRows.has(reference.index) || seriesConflictRows.has(reference.index)) { check.reason = '参考行的时延或数据等差约束存在冲突'; return check; }
           if (!reference.supported) { check.reason = '参考行的波形或周期配置不支持推算'; return check; }
           const resolved = new Set(), shiftsByGroup = new Map();
-          let circular = false, rejected = false, ambiguous = false;
+          let circular = false, rejected = false, ambiguous = false, unusable = false;
           alignmentCandidates(row, reference, (group) => required.has(group), (candidate) => {
+            if (unusableCandidate(row, reference, candidate)) { unusable = true; return false; }
             if (dependsOn(candidate.referenceGroups, required)) { circular = true; return false; }
             if (rejectedAlignments.has(alignmentKey(row.index, direction, candidate)) || !meetsMinimum(candidate.group, candidate.shift)) { rejected = true; return false; }
             if (shiftsByGroup.has(candidate.group) && Math.abs(shiftsByGroup.get(candidate.group) - candidate.shift) > Math.max(EPS, tolerance)) ambiguous = true;
@@ -1106,6 +1205,7 @@
             : [resolved.size ? '仅能确定部分位置' : '缺少可用的同原列已知时刻',
               reference.sourceLength < row.sourceLength ? '参考行较短，超出部分不能作为依据' : '',
               circular ? '部分参考时刻反向依赖本行，不能作为独立依据' : '',
+              unusable ? '部分同列锚点不能同时满足本行时长，已采用另一侧可确定的参考行' : '',
               rejected ? '候选不能满足本行连接时延或最小时长' : ''].filter(Boolean).join('；');
           check.used = row.alignments.some((entry) => entry.row === row.index && entry.direction === direction);
           return check;
@@ -1194,7 +1294,19 @@
         row.reasons = rowIssues[row.index].map((item) => item.reason);
         row.status = rowIssues[row.index].some((item) => item.kind === 'conflict') ? 'conflict' : row.reasons.length ? 'unknown' : 'ok';
         row.drawRuns = [];
-        const sorted = row.runs.filter((run) => run.start !== null && run.finish !== null && run.finish > run.start).sort((p, q) => p.start - q.start);
+        const terminal = terminalDisplays[row.index];
+        if (terminal) {
+          row.terminalDisplay = { col: terminal.col, end: terminal.end, start: terminal.start,
+            finish: longestWaveformEnd - (row.sourceLength - terminal.end) * row.period, gap: terminal.gap - 1 };
+        }
+        // An open terminal hold uses the preview extent only. Its graph times
+        // stay unknown, so neither clock repetition nor tail padding is an anchor.
+        const sorted = row.runs.map((run) => {
+          if (!terminal || run.start !== null && run.finish !== null || run.col < terminal.col) return run;
+          const start = run === terminal ? run.start : row.terminalDisplay.finish + (run.col - terminal.end) * row.period;
+          return Object.assign({}, run, { start, finish: run === terminal ? row.terminalDisplay.finish
+            : start + (run.end - run.col) * row.period, displayOnly: true });
+        }).filter((run) => run.start !== null && run.finish !== null && run.finish > run.start).sort((p, q) => p.start - q.start);
         sorted.forEach((original) => {
           const run = Object.assign({}, original);
           if (run.inferredValue !== undefined) run.value = run.inferredValue;
@@ -1255,14 +1367,16 @@
           }
           if (!anchored) referenceTimes = row.blocks.map((block) => -row.phase + block.col * row.period);
           const referenceBlocks = new Map(row.blocks.map((block, index) => [block.id, referenceTimes[index]]));
+          if (terminal) referenceBlocks.set(gaps[terminal.gap - 1].b, row.terminalDisplay.finish);
           row.runs.forEach((run) => {
             if (run.col >= row.sourceLength) return;
             const end = Math.min(run.end, row.sourceLength), start = referenceBlocks.get(run.block) + run.offset;
             const finish = run.gap ? referenceBlocks.get(gaps[run.gap - 1].b) : start + (end - run.col) * row.period;
-            const provisional = !anchored || run.start === null || run.finish === null
+            const displayOnly = !!terminal && run.col >= terminal.col;
+            const provisional = !anchored || !displayOnly && (run.start === null || run.finish === null)
               || /[pPnN]/.test(run.state) && run.clockOrigin === null;
             const reference = { col: run.col, end, start, finish, state: run.state, symbol: run.symbol, provisional,
-              mapped: !!run.gap && gaps[run.gap - 1].kind === 'stretch',
+              mapped: displayOnly || !!run.gap && gaps[run.gap - 1].kind === 'stretch', displayOnly,
               value: run.value, slot: run.slot, gap: run.gap,
               stretch: !!run.gap && gaps[run.gap - 1].kind === 'stretch',
               clockOrigin: run.clockBlock === null ? null : referenceBlocks.get(run.clockBlock) + run.clockOffset };

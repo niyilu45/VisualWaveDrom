@@ -300,12 +300,16 @@
           : '冲突位置暂无法确定，请查看下方约束详情。');
       }
       if (!row.reasons.length) paragraph(row.empty ? '空行，未发现连接时延冲突。'
+        : row.terminalDisplay ? '有效区间的时延约束一致；图尾仅按预览范围展示，不反推唯一时延。'
         : row.unknownTailStart === 0 && !row.known ? '本行仅有未知波形，不以绘制长度判断时延。'
         : row.alignments.length ? '已有连接约束保持不变；先按明确的数据等差规律补全，再按上行、下行补充未定位置。'
         : '时间已确定；已提供的时延约束一致。没有连接约束的部分仅确定自身时间。');
       if (row.unknownTailStart !== undefined) paragraph('原列 ' + row.unknownTailStart
         + ' 起为末尾未知段，长度未定，不按绘制列数约束相邻行；显式连接时延仍单独检查。'
         + (row.unknownTailDisplay ? '预览以未知波形补齐至最长波形的 ' + fmt(row.unknownTailDisplay.finish) + ' cycle，不参与时延推算。' : ''));
+      if (row.terminalDisplay) paragraph('原列 ' + row.terminalDisplay.col
+        + ' 起的末尾连续时钟、保持段或空白占位展示至最长波形的 ' + fmt(model.maximum)
+        + ' cycle；保留波形类型和颜色，展示宽度及重复符号不作为其他行的实际时延锚点。');
       (row.referenceChecks || []).forEach((check) => {
         const label = check.direction === 'previous-row' ? '上一行' : '下一行';
         const status = { available: '可以确定', partial: '仅部分可确定', unavailable: '无法确定', 'not-needed': '无需参考' }[check.status];
@@ -553,7 +557,7 @@
         row.gaps.forEach((id, gapIndex) => {
           const gap = model.gaps[id];
           if (gap.ignored) {
-            if (gap.start !== null && gap.start >= start && gap.start <= end) {
+            if (row.terminalDisplay?.gap !== id && gap.start !== null && gap.start >= start && gap.start <= end) {
               context.fillStyle = '#667085'; context.fillText('|', Math.min(width - 12, x(gap.start) + 2), mid + 4);
             }
             return;

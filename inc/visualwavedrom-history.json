@@ -1,5 +1,26 @@
 [
   {
+    "version": "2026.10.21.1",
+    "date": "2026-10-20T20:09:22Z",
+    "head": "306a96d8d6e89814d07f08c63b0b28eb907ed649",
+    "notes": [
+      "修复链接参数表应用后未立即写入工作库，刷新丢失链接或预设的问题；服务与直接打开 HTML 均在同步成功后关闭卡片。",
+      "参数值恢复、更新时同步刷新当前图和按需预览缓存，保留原始表达式、加载优先级与预设，并增加恢复和应用日志。",
+      "修复 RealWave 多区间参考、双向末列锚点、等差保持段及行尾连续时钟的时延误报；独立确定的行不受不完整邻行候选干扰，真实冲突仍保留。",
+      "修复演讲者模式无改动关闭、文字未改及波形同步后的未保存误报，保留真实修改和保存失败提醒。",
+      "更新使用说明和脚本缓存版本，不包含用户波形库、临时文件及本机设置。"
+    ],
+    "commits": [
+      {
+        "id": "306a96d8d6e89814d07f08c63b0b28eb907ed649",
+        "date": "2026-10-20T17:56:07+08:00",
+        "title": "fix: use exact half-cycle anchors for timing alignment",
+        "body": "Separate proportional original-column drawing positions from actual timing anchors. Preserve exact fixed prefixes and suffixes around omissions without propagating interpolated timing into neighbouring rows. Reproduce and remove the false 134 versus 133.4210526 cycle conflict.\n\nIdentify source columns when different anchors from the same reference row disagree. Enforce half-cycle precision for delay inputs, formulas, unit conversions and row configuration, reporting unsupported precision instead of rounding.\n\nUpdate documentation, cache keys and release metadata to 2026.10.20.7. Verified 43 focused timing cases, Chrome worker and desktop/mobile interactions, syntax and all 65 staged release hashes. Exclude waveform libraries, temporary artifacts and unrelated local changes."
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.10.20.7",
     "date": "2026-10-20T09:55:14Z",
     "head": "cdcf96009279b2f917e1eadccf18e8f5bb011cac",

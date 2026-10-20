@@ -460,6 +460,7 @@ if (!window.VWDCodeEditorPairs) {
     let pendingWaveDocumentOpenRaf = null;
     let waveDocumentOpenSequence = 0;
     let lastRenderedWaveText = null;
+    let lastRenderedParameterRevision = -1;
     let lastRenderedWaveSource = null;
     let bigWaveViewportState = {
       enabled: false,
@@ -14350,8 +14351,9 @@ ${lines.join('\n')}`;
       const useEditor = preferEditor !== false && tag.name === editingWaveDocumentName;
       const content = useEditor ? (editor.value || '') : (tag.content || '');
       const cacheKey = (useEditor ? 'editor:' : 'saved:') + tag.name;
+      const parameterRevision = window.VisualWaveDromParameters.getRevision();
       const cached = waveDocumentMetaCache.get(cacheKey);
-      if (cached && cached.content === content) return cached;
+      if (cached && cached.content === content && cached.parameterRevision === parameterRevision) return cached;
 
       let source = null;
       let error = null;
@@ -14366,6 +14368,7 @@ ${lines.join('\n')}`;
       const head = source && source.head && typeof source.head.text === 'string' ? source.head.text.trim() : '';
       const meta = {
         content,
+        parameterRevision,
         source,
         renderSource: source ? getWaveRenderSource(source) : null,
         title: title || head,
@@ -16181,6 +16184,10 @@ ${lines.join('\n')}`;
         }
         window.VisualWaveDromParameters.setCatalog(bundle.parameters, currentWaveLibraryId);
         savedTags = bundle.documents.map(normalizeSavedTag).filter(Boolean);
+        vwdDebugLog('parameters', { phase: 'catalog-restored', libraryId: currentWaveLibraryId,
+          revision: bundle.parameters && bundle.parameters.revision,
+          tableCount: bundle.parameters && Array.isArray(bundle.parameters.tables) ? bundle.parameters.tables.length : 0,
+          linkedDocumentCount: savedTags.filter((tag) => tag.parameterTables.length > 0).length });
         rebuildSavedTagIndex();
         persistSavedTags({ immediate: true });
         saveNavCustomTreeToStorage(
@@ -19455,7 +19462,9 @@ ${lines.join('\n')}`;
         pendingRenderAnalysis = preparedAnalysis && preparedAnalysis.text === jsonText ? preparedAnalysis : null;
         return false;
       }
-      if (lastRenderedWaveText === jsonText && waveContainer.querySelector('svg')) {
+      const parameterRevision = window.VisualWaveDromParameters.getRevision();
+      if (lastRenderedWaveText === jsonText && lastRenderedParameterRevision === parameterRevision
+          && waveContainer.querySelector('svg')) {
         syncHscaleInputFromJson(jsonText, lastRenderedWaveSource);
         applyNavVisibilityToWave();
         renderConnectionEdgeList(lastRenderedWaveSource);
@@ -19574,6 +19583,7 @@ ${lines.join('\n')}`;
           bindJsonWindowScroller(waveContainer);
           renderBigWaveNavigator();
           lastRenderedWaveText = jsonText;
+          lastRenderedParameterRevision = parameterRevision;
           lastRenderedWaveSource = fullSource;
           if (editingWaveDocumentName) {
             refreshWaveDocumentCard(editingWaveDocumentName);
@@ -21924,6 +21934,7 @@ ${lines.join('\n')}`;
         description,
         prefix,
         renderedContent: null,
+        renderedParameterRevision: -1,
         queuedContent: null,
         previewQueued: false,
         previewObserved: false,
@@ -22095,7 +22106,9 @@ ${lines.join('\n')}`;
       if (!entry || !tag || tag.deferred || tag.name === editingWaveDocumentName || !entry.card.isConnected) return false;
       if (!opts.forceSvg && entry.previewObserved && !entry.previewNearViewport) return false;
       const display = ensureWavePreviewDisplay(entry);
+      const parameterRevision = window.VisualWaveDromParameters.getRevision();
       if (entry.renderedContent === tag.content
+          && entry.renderedParameterRevision === parameterRevision
           && (display.querySelector('svg') || (!opts.forceSvg && display.querySelector('.wave-fast-preview, .wave-error')))) {
         entry.lastPreviewUse = ++waveLibraryPreviewUseSequence;
         return true;
@@ -22114,6 +22127,7 @@ ${lines.join('\n')}`;
       if (meta.error || !meta.renderSource) {
         showWaveError(display, '波形图渲染失败: ' + (meta.error && meta.error.message ? meta.error.message : '无效 JSON'));
         entry.renderedContent = tag.content;
+        entry.renderedParameterRevision = parameterRevision;
         entry.lastPreviewUse = ++waveLibraryPreviewUseSequence;
         setWavePreviewLoadingState(entry, false);
         trimRenderedWavePreviews(entry);
@@ -22137,6 +22151,7 @@ ${lines.join('\n')}`;
         window.VisualWaveDromParameters.decorate(display, meta.source || getWaveDocumentMeta(tag, false).source);
         if (!useCanvas) setupFrozenWaveLabels(display);
         entry.renderedContent = tag.content;
+        entry.renderedParameterRevision = parameterRevision;
         entry.lastPreviewUse = ++waveLibraryPreviewUseSequence;
         setWavePreviewLoadingState(entry, false);
         rememberWavePreviewHeight(entry, display);
@@ -22150,6 +22165,7 @@ ${lines.join('\n')}`;
       } catch (error) {
         showWaveError(display, '波形图渲染失败: ' + (error && error.message ? error.message : '无效 JSON'));
         entry.renderedContent = tag.content;
+        entry.renderedParameterRevision = parameterRevision;
         entry.lastPreviewUse = ++waveLibraryPreviewUseSequence;
         setWavePreviewLoadingState(entry, false);
         trimRenderedWavePreviews(entry);
@@ -22231,6 +22247,7 @@ ${lines.join('\n')}`;
       if (!entry || !tag || tag.name === editingWaveDocumentName) return;
       if (entry.previewObserved && !entry.previewNearViewport) return;
       if (!tag.deferred && entry.renderedContent === tag.content && entry.previewDisplay
+          && entry.renderedParameterRevision === window.VisualWaveDromParameters.getRevision()
           && entry.previewDisplay.querySelector('svg, .wave-fast-preview, .wave-error')) {
         entry.lastPreviewUse = ++waveLibraryPreviewUseSequence;
         return;
@@ -22355,7 +22372,10 @@ ${lines.join('\n')}`;
 
       ensureWavePreviewDisplay(entry);
       if (tag.deferred && entry.renderedContent === null) setWavePreviewLoadingState(entry, true);
-      const contentChanged = entry.renderedContent !== tag.content;
+      // Deferred summaries and invalidated previews both use null content.
+      // Include parameters so an unchanged JSON still gets observed and redrawn.
+      const contentChanged = entry.renderedContent !== tag.content
+        || entry.renderedParameterRevision !== window.VisualWaveDromParameters.getRevision();
       if (contentChanged) {
         rememberWavePreviewHeight(entry, entry.previewDisplay);
         entry.previewDisplay.innerHTML = '';
@@ -25433,8 +25453,12 @@ ${lines.join('\n')}`;
         });
       },
       bind: async (name, order, presetId) => {
+        const libraryId = currentWaveLibraryId;
         const tag = await ensureWaveDocumentLoaded(name);
+        if (libraryId !== currentWaveLibraryId) throw new Error('波形库已切换，请重新链接参数表');
         if (!tag) throw new Error('波形图不存在');
+        vwdDebugLog('parameters', { phase: 'link-apply-start', libraryId, documentName: name,
+          tableIds: order.slice(), presetId });
         const parsed = JSON.parse(name === editingWaveDocumentName ? editor.value : tag.content);
         parsed.parameterTables = order.slice();
         parsed.parameterPreset = typeof presetId === 'string' ? presetId : '';
@@ -25442,6 +25466,9 @@ ${lines.join('\n')}`;
         if (name === editingWaveDocumentName) {
           pushUndoBeforeChange(next);
           applyEditorChange(next, editor.selectionStart, editor.selectionEnd, { skipFocus: true });
+          // Applying editor text alone does not mark the working document dirty.
+          // Checkpoint it before flushing so refresh cannot restore the old links.
+          if (!saveCurrentWaveDocumentBeforeSwitch()) throw new Error('参数表链接尚未记录，请重试');
         } else {
           const before = captureWaveLibrarySnapshot();
           upsertSavedTag(name, Object.assign({}, tag, { content: next, parameterTables: order.slice() }), { skipSort: true });
@@ -25449,10 +25476,12 @@ ${lines.join('\n')}`;
           pushWaveLibraryHistory(before, captureWaveLibrarySnapshot());
           refreshWaveDocumentCard(name); renderNavTree();
         }
-        tag.parameterTables = order.slice();
+        getSavedTagByName(name).parameterTables = order.slice();
         if (waveLibraryServerMode) {
           if (!await flushScheduledWaveLibraryServerSave()) throw new Error('参数表链接尚未保存，请重试');
         } else if (!await flushBrowserWaveLibrarySave({ force: true })) throw new Error('参数表链接尚未保存，请重试');
+        vwdDebugLog('parameters', { phase: 'link-apply-saved', libraryId, documentName: name,
+          tableIds: order.slice(), presetId, revision: getSavedTagByName(name).revision });
         setStatus(true, '已更新参数表链接');
       },
       changed: () => {

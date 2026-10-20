@@ -366,6 +366,7 @@
       this.savedSignature = null;
       this.saving = false;
       this.savePromise = null;
+      this.savingSignature = null;
       this.allowClose = false;
       this.closeTimer = 0;
       this.beforeUnloadAttached = false;
@@ -1140,7 +1141,11 @@
       }
 
       const total = Math.max(0, Number(this.metrics.maxWaveLength) || 0);
-      this.keepAnnotationsInSourceBounds(total, Number(this.metrics.signalCount) || 0);
+      const signalCount = Number(this.metrics.signalCount) || 0;
+      this.keepAnnotationsInSourceBounds(total, signalCount);
+      this.steps.forEach((step) => this.keepAnnotationsInSourceBounds(total, signalCount, step.annotations));
+      this.savedSignature = this.signatureInSourceBounds(this.savedSignature);
+      this.savingSignature = this.signatureInSourceBounds(this.savingSignature);
       this.windowSize = total > MAX_DIRECT_COLUMNS ? Math.min(LARGE_WINDOW_COLUMNS, total) : total;
       if (!this.windowSize) this.windowSize = 1;
       const maxStart = Math.max(0, total - this.windowSize);
@@ -1152,12 +1157,14 @@
       if (!this.steps.length) {
         this.steps = [this.captureStep()];
         this.stepIndex = 0;
+        this.savedSignature = this.presentationSignature();
       }
       if (opts.initial && rawDocument.presentation) {
         this.savedPresentation = rawDocument.presentation;
         try {
           const stored = parsePresentation(rawDocument.presentation);
           this.steps = stored.steps;
+          this.steps.forEach((step) => this.keepAnnotationsInSourceBounds(total, signalCount, step.annotations));
           this.stepIndex = -1;
           this.steps.forEach((step) => step.annotations.marks.forEach((mark) => {
             const match = /^mark-(\d+)$/.exec(mark.id);
@@ -1182,15 +1189,16 @@
       return true;
     }
 
-    keepAnnotationsInSourceBounds(totalColumns, signalCount) {
+    keepAnnotationsInSourceBounds(totalColumns, signalCount, annotations) {
+      const state = annotations || this.annotations;
       if (totalColumns > 0) {
         ['cursorA', 'cursorB'].forEach((key) => {
-          if (Number.isFinite(this.annotations[key])) {
-            this.annotations[key] = clamp(this.annotations[key], 0, totalColumns);
+          if (Number.isFinite(state[key])) {
+            state[key] = clamp(state[key], 0, totalColumns);
           }
         });
       }
-      const focus = this.annotations.focus;
+      const focus = state.focus;
       if (focus) {
         [focus.start, focus.end].forEach((anchor) => {
           if (!anchor) return;
@@ -2399,9 +2407,13 @@
         const value = this.textInput.value;
         const index = this.annotations.marks.findIndex(function (mark) { return mark.id === edit.id; });
         if (value.trim()) {
-          const mark = { id: edit.id || 'mark-' + (++this.markSequence), kind: 'text', anchor: edit.anchor, text: value };
-          if (index >= 0) this.annotations.marks[index] = mark;
-          else this.annotations.marks.push(mark);
+          if (index >= 0) {
+            if (this.annotations.marks[index].text !== value) {
+              this.annotations.marks[index] = Object.assign({}, this.annotations.marks[index], { anchor: edit.anchor, text: value });
+            }
+          } else {
+            this.annotations.marks.push({ id: 'mark-' + (++this.markSequence), kind: 'text', anchor: edit.anchor, text: value });
+          }
         } else if (index >= 0) {
           this.annotations.marks.splice(index, 1);
         }
@@ -3138,6 +3150,17 @@
       }));
     }
 
+    signatureInSourceBounds(signature) {
+      if (signature === null) return null;
+      const steps = JSON.parse(signature);
+      // Source synchronization moves saved and working anchors alike; it is not an edit.
+      steps.forEach((step) => this.keepAnnotationsInSourceBounds(
+        Math.max(0, Number(this.metrics.maxWaveLength) || 0),
+        Number(this.metrics.signalCount) || 0, step.annotations
+      ));
+      return JSON.stringify(steps);
+    }
+
     hasUnsavedChanges() {
       if (!this.steps.length) return false;
       if (this.savedSignature !== this.presentationSignature()) return true;
@@ -3160,7 +3183,8 @@
       const dirty = this.hasUnsavedChanges();
       this.saveButton.disabled = this.saving || !this.steps.length;
       this.saveButton.setAttribute('aria-busy', String(this.saving));
-      this.saveState.textContent = this.saving ? '正在保存...' : !this.steps.length ? '' : dirty ? '未保存' : '已保存';
+      this.saveState.textContent = this.saving ? '正在保存...' : !this.steps.length ? '' : dirty ? '未保存'
+        : this.savedPresentation ? '已保存' : '无改动';
       this.saveState.classList.toggle('is-dirty', dirty);
       this.syncBeforeUnload(this.saving || dirty);
       if (this.exitDialog) this.exitDialog.querySelectorAll('button').forEach((button) => { button.disabled = this.saving; });
@@ -3173,7 +3197,7 @@
       this.finishGesture(false);
       this.finishTextEdit(true);
       this.storeCurrentStep();
-      const signature = this.presentationSignature();
+      this.savingSignature = this.presentationSignature();
       const serialized = JSON.stringify({ kind: 'VisualWaveDromPresentation', version: 1,
         steps: this.steps, activeStep: this.stepIndex });
       this.saving = true;
@@ -3185,7 +3209,7 @@
       }).then((result) => {
         if (!result || result.presentation !== serialized) throw new Error('未收到保存成功确认，请重试');
         this.savedPresentation = serialized;
-        this.savedSignature = signature;
+        this.savedSignature = this.signatureInSourceBounds(this.savingSignature);
         if (this.document) this.document.presentation = serialized;
         if (!this.destroyed) this.showToast(result.downloaded ? '演讲步骤已保存，已导出 SQLite 波形库。' : '演讲步骤已保存。');
         this.log('presenter-save', { phase: 'saved', changedDuringSave: this.hasUnsavedChanges() });
@@ -3200,6 +3224,7 @@
       }).finally(() => {
         this.saving = false;
         this.savePromise = null;
+        this.savingSignature = null;
         this.updateSaveControls();
       });
       return this.savePromise;
