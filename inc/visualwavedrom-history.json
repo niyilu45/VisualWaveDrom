@@ -1,5 +1,25 @@
 [
   {
+    "version": "2026.10.20.5",
+    "date": "2026-10-20T08:33:04Z",
+    "head": "2d3f74f4473ff880d407355f23d6c58a15029cba",
+    "notes": [
+      "时延检查的边沿冲突直接说明原始列、参考行、展开时刻及差值，并关联到对应异常位置。",
+      "区分候选列数相同与绝对时刻冲突，保留真实冲突原因，避免精度舍入后显示相同数值。",
+      "限制时延检查缩小范围为完整波形及已展开参考序列，统一按钮、滚轮、手动范围和横向浏览边界。",
+      "更新使用说明和浏览器缓存版本；通过针对性核心与桌面、移动端浏览器检查。"
+    ],
+    "commits": [
+      {
+        "id": "2d3f74f4473ff880d407355f23d6c58a15029cba",
+        "date": "2026-10-20T15:45:15+08:00",
+        "title": "fix: classify timing conflicts and preserve open page sessions",
+        "body": "Propagate arithmetic evidence across confirmed omissions and blank samples, include the full completion interval in preview frames, and distinguish omitted duration from total completed duration.\n\nReport contradictory series, connection and neighbour constraints as localized conflicts with concrete causes. Treat trailing unknown waveforms as unbounded without imposing drawn column counts on other rows, while retaining explicit delay checks and real interior conflicts.\n\nKeep an independent browser heartbeat and retain interrupted stream leases so browser Save Page does not stop the local service. Preserve explicit page-close shutdown, multi-tab isolation, reconnect and expiry behavior.\n\nUpdate documentation, cache keys, Windows/Linux service binaries, checksums and release 2026.10.20.4. Validate targeted timing and session regressions, Chrome worker and desktop/mobile rendering, JavaScript syntax, staged diffs and all 65 release hashes. Exclude waveform libraries, temporary files and unrelated changes."
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.10.20.4",
     "date": "2026-10-20T07:43:05Z",
     "head": "50231af9d14bfc7cdf7173f5123ef6b90211eef0",

@@ -106,7 +106,7 @@
       $('reference-all').dataset.expanded = String(allOpen);
       $('reference-all').title = (allOpen ? '收起' : '展开') + '全部原序列参考';
       if (!model.rows[selected] || !referenceOpen(model.rows[selected])) selectedColumn = -1;
-      refreshControls(); drawSoon();
+      range(start, end);
     }
     function updateReferenceToggles(first, last) {
       for (const [index, toggle] of referenceToggles) {
@@ -130,10 +130,14 @@
       }
     }
     function message(value, error) { $('status').textContent = value; $('status').classList.toggle('error', !!error); }
+    function fullSpan() { return Math.max(1, displayMaximum - displayMinimum); }
     function refreshControls() {
       $('start').value = fmt(start); $('end').value = fmt(end);
+      const fullyVisible = end - start >= fullSpan() * (1 - 1e-10);
+      $('zoom-out').disabled = !model || fullyVisible;
+      $('zoom-out').title = model && fullyVisible ? '已显示全部波形，不能继续缩小' : '缩小';
       if (model) {
-        const room = Math.max(0, displayMaximum - displayMinimum - (end - start));
+        const room = Math.max(0, fullSpan() - (end - start));
         $('pan').disabled = !room; $('pan').value = room ? Math.round((start - displayMinimum) / room * 100000) : 0;
       }
       $('a').value = fmt(a); $('b').value = fmt(b);
@@ -142,10 +146,19 @@
       $('delta').textContent = 'B-A = ' + value + ' cycle' + (model && Number(model.config.cycleTimeNs) > 0 ? ' / ' + fmt(delta * Number(model.config.cycleTimeNs)) + ' ns' : '');
     }
     function range(nextStart, nextEnd) {
-      if (!Number.isFinite(nextStart) || !Number.isFinite(nextEnd) || nextEnd <= nextStart || nextEnd - nextStart < 1e-8) return;
+      const width = nextEnd - nextStart;
+      if (!Number.isFinite(nextStart) || !Number.isFinite(nextEnd) || !Number.isFinite(width) || width < 1e-8) return;
+      if (model) {
+        const maximumWidth = fullSpan();
+        if (width >= maximumWidth) { nextStart = displayMinimum; nextEnd = displayMinimum + maximumWidth; }
+        else {
+          nextStart = Math.max(displayMinimum, Math.min(displayMinimum + maximumWidth - width, nextStart));
+          nextEnd = nextStart + width;
+        }
+      }
       start = nextStart; end = nextEnd; refreshControls(); drawSoon();
     }
-    function fit() { if (model) range(displayMinimum, Math.max(displayMinimum + 1, displayMaximum)); }
+    function fit() { if (model) range(displayMinimum, displayMinimum + fullSpan()); }
     function problemRange(row, target) {
       if (!target) return null;
       const marked = row.conflictRanges.concat(row.dataUnknownRanges).find((item) => item.col === target.col && item.end === target.end);
@@ -199,33 +212,61 @@
         row.comparisons.forEach((comparison) => {
           const upper = comparison.estimates.find((item) => item.kind === 'previous-row');
           const difference = comparison.differences.find((item) => item.a === upper?.label) || comparison.differences[0];
-          comparison.problemNumbers.forEach((number) => describedConflicts.add(number));
           const prefix = comparison.problemNumbers.map((number) => '[' + number + ']').join('');
           const location = (prefix ? prefix + ' ' : '') + '列' + comparison.col + (comparison.endCol === undefined ? '' : '至' + comparison.endCol);
           const target = row.conflictRanges.find((item) => comparison.problemNumbers.includes(item.number))
             || row.dataUnknownRanges.find((item) => item.col <= comparison.col && item.end > comparison.col)
             || { col: comparison.col, end: comparison.endCol ?? comparison.col + 1, gapCol: comparison.col };
-          const estimateText = (item) => (item.kind === 'series' && item.side ? item.side === 'left' ? '左侧等差' : '右侧等差' : shortNames[item.kind])
-            + (item.kind !== 'current' ? '候选' : '') + ' ' + fmt(item.columns) + ' 列';
+          const estimateText = (item, precise = false) => (item.kind === 'series' && item.side ? item.side === 'left' ? '左侧等差' : '右侧等差' : shortNames[item.kind])
+            + (item.kind !== 'current' ? '候选' : '') + ' ' + (precise ? String(item.columns) : fmt(item.columns)) + ' 列';
           if (difference) {
-            summaries.push({ col: comparison.col, target, text: location + '：' + estimateText(comparison.estimates.find((item) => item.label === difference.a))
-              + '，' + estimateText(comparison.estimates.find((item) => item.label === difference.b))
+            comparison.problemNumbers.forEach((number) => describedConflicts.add(number));
+            const first = comparison.estimates.find((item) => item.label === difference.a);
+            const second = comparison.estimates.find((item) => item.label === difference.b);
+            const precise = first.columns !== second.columns && fmt(first.columns) === fmt(second.columns);
+            summaries.push({ col: comparison.col, target, text: location + '：' + estimateText(first, precise)
+              + '，' + estimateText(second, precise)
               + '，差 ' + fmt(difference.columns) + ' 列' + (comparison.period !== 1 ? '（' + fmt(difference.duration) + ' cycle）' : '') + '。' });
           } else {
             const gap = model.gaps[comparison.gap];
             const candidates = comparison.estimates.filter((item) => Number.isFinite(item.columns));
             const timing = candidates.find((item) => item.kind === 'previous-row') || candidates.find((item) => item.kind !== 'series');
             const data = candidates.find((item) => item.kind === 'series');
-            const counts = [timing, data].filter(Boolean).map(estimateText).join('，');
-            const reason = gap.seriesSummary || gap.seriesReason || (gap.duration === undefined ? '缺少时延依据' : '时延约束不一致');
+            const counts = [timing, data].filter(Boolean).map((item) => estimateText(item)).join('，');
+            const sameLength = timing && data && Math.abs(timing.duration - data.duration) <= Math.max(1e-9, model.tolerance);
+            const reason = gap.seriesSummary || gap.seriesReason || (gap.duration === undefined ? '缺少时延依据'
+              : sameLength ? '列数一致，不是长度冲突' : '该区间时长已确定');
+            if (gap.seriesSummary || gap.seriesReason) comparison.problemNumbers.forEach((number) => describedConflicts.add(number));
             summaries.push({ col: comparison.col, target, text: location + '：' + (counts ? counts + '；' : '') + reason + '。' });
           }
         });
-        row.conflictRanges.filter((range) => !describedConflicts.has(range.number)).forEach((range) => {
-          summaries.push({ col: range.col, target: range, text: '[' + range.number + '] 列' + range.col
-            + (range.end > range.col ? '至' + range.end + '：时延冲突。' : '：边沿对齐冲突。') });
+        row.conflictRanges.forEach((range) => {
+          const location = '[' + range.number + '] 列' + range.col + (range.end > range.col ? '至' + range.end : '');
+          const described = describedConflicts.has(range.number);
+          const causes = (range.issueIds || []).map((id) => model.issues[id])
+            .filter((entry) => entry?.kind === 'conflict' && (!described || entry.timeComparison));
+          if (described && !causes.length) return;
+          if (!causes.length) summaries.push({ col: range.col, target: range,
+            text: location + '：该位置不能同时满足已有的时间要求，请展开详情查看依据。' });
+          causes.forEach((entry) => {
+            const comparison = entry.timeComparison;
+            let text = location + '：' + entry.reason;
+            if (comparison) {
+              const context = comparison.col === range.col ? '' : '（关联第' + (comparison.row + 1) + '行列' + comparison.col + '）';
+              const precise = comparison.difference > 0 && new Set(comparison.sources.map((source) => fmt(source.time))).size === 1;
+              const times = comparison.sources.map((source) => (source.direction === 'data-series'
+                ? '第' + (source.row + 1) + '行等差推算为 ' : '按第' + (source.row + 1) + '行对齐为 ')
+                + (precise ? String(source.time) : fmt(source.time)) + ' cycle');
+              text = location + context + '时间不一致：' + times.join('，') + '，差 ' + fmt(comparison.difference) + ' cycle。';
+            }
+            summaries.push({ col: range.col, target: range, text });
+          });
         });
-        if (!summaries.length) summaries.push({ col: 0, target: null, text: row.status === 'conflict' ? '时延约束不一致。' : '缺少可靠的时延或数据依据。' });
+        if (!summaries.length) {
+          const causes = relevant.filter((entry) => entry.kind === 'conflict');
+          if (causes.length) causes.forEach((entry) => summaries.push({ col: 0, target: null, text: entry.reason }));
+          else summaries.push({ col: 0, target: null, text: '缺少可靠的时延或数据依据。' });
+        }
         summaries.sort((a, b) => a.col - b.col).forEach((item) => {
           const button = doc.createElement('button'); button.type = 'button'; button.className = 'timing-problem-link'; button.textContent = item.text;
           button.title = '定位此处波形'; button.setAttribute('aria-label', '定位：' + item.text);
@@ -731,10 +772,14 @@
       if (!model) return;
       referenceDefault = $('reference-all').dataset.expanded !== 'true'; referenceOverrides.clear(); layoutRows();
     };
-    function zoom(factor) { const pivot = active === 'a' ? a : b, center = pivot >= start && pivot <= end ? pivot : (start + end) / 2; range(center - (center - start) * factor, center + (end - center) * factor); }
+    function zoom(factor) {
+      if (!model || factor > 1 && end - start >= fullSpan() * (1 - 1e-10)) return;
+      const pivot = active === 'a' ? a : b, center = pivot >= start && pivot <= end ? pivot : (start + end) / 2;
+      range(center - (center - start) * factor, center + (end - center) * factor);
+    }
     $('zoom-in').onclick = () => zoom(0.5); $('zoom-out').onclick = () => zoom(2);
     $('start').onchange = $('end').onchange = () => { range(Number($('start').value), Number($('end').value)); refreshControls(); };
-    $('pan').oninput = () => { if (!model) return; const width = end - start, room = Math.max(0, displayMaximum - displayMinimum - width); const next = displayMinimum + Number($('pan').value) / 100000 * room; range(next, next + width); };
+    $('pan').oninput = () => { if (!model) return; const width = end - start, room = Math.max(0, fullSpan() - width); const next = displayMinimum + Number($('pan').value) / 100000 * room; range(next, next + width); };
     ['a', 'b'].forEach((key) => {
       $('pick-' + key).onclick = () => { active = key; refreshControls(); drawSoon(); };
       $(key).onchange = () => { const value = Number($(key).value); if (!Number.isFinite(value)) return; if (key === 'a') a = value; else b = value; refreshControls(); drawSoon(); };

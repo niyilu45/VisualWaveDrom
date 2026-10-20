@@ -651,13 +651,17 @@
             if (Math.abs(shift - shifts[group]) <= Math.max(EPS, tolerance) || auditedConflicts.has(key)) return false;
             auditedConflicts.add(key);
             const chosen = alignmentSources.get(group), actual = target + shifts[group] - shift;
-            issue('conflict', '第' + (row.index + 1) + '行原列' + col + '对齐冲突：按'
+            const entry = issue('conflict', '第' + (row.index + 1) + '行原列' + col + '对齐冲突：按'
               + directionName(chosen.direction) + '（第' + (chosen.referenceRow + 1) + '行）推算为 ' + format(actual)
               + ' cycle，但' + directionName(direction) + '（第' + (reference.index + 1) + '行）同原列为 '
               + format(target) + ' cycle，相差 ' + format(Math.abs(actual - target)) + ' cycle；未覆盖已采用的时刻，冲突结果仅供定位',
             [row.index, chosen.row, chosen.referenceRow, reference.index], [], [],
             [{ row: row.index, col }, { row: reference.index, col },
               { row: chosen.row, col: chosen.col }, { row: chosen.referenceRow, col: chosen.col }]);
+            entry.timeComparison = { row: row.index, col, difference: Math.abs(actual - target), sources: [
+              { direction: chosen.direction, row: chosen.referenceRow, time: actual },
+              { direction, row: reference.index, time: target }
+            ] };
             return true;
           }, true);
         }
@@ -998,8 +1002,11 @@
         const errors = Array.from(new Set(conversion.expressions.filter((entry) => entry.error).map((entry) => entry.error)));
         if (errors.length) issue('unknown', '参数公式转换失败：' + conversion.raw + '；' + errors.join('；'), affected);
       });
-      const rowIssues = rows.map(() => []);
-      issues.forEach((entry) => entry.rows.forEach((id) => rowIssues[id].push(entry)));
+      const rowIssues = rows.map(() => []), issueIndices = new Map();
+      issues.forEach((entry, index) => {
+        issueIndices.set(entry, index);
+        entry.rows.forEach((id) => rowIssues[id].push(entry));
+      });
       rows.forEach((row) => {
         const required = new Set(row.blocks.filter((block) => block.col <= row.checkUntil && !selfPositioned[groups[block.id]])
           .map((block) => groups[block.id]));
@@ -1196,14 +1203,17 @@
         // Keep conflict geometry in original columns, then map only those spans
         // to time. Other gaps and waveform sections retain their normal rendering.
         const ranges = rowIssues[row.index].filter((entry) => entry.kind === 'conflict')
-          .flatMap((entry) => conflictRegions(entry, row)).map(({ col, end, gap }) => {
+          .flatMap((entry) => conflictRegions(entry, row).map(({ col, end, gap }) => {
             if (gap !== undefined) gaps[gap].conflict = true;
-            return { col, end };
-          });
+            return { col, end, issueIds: [issueIndices.get(entry)] };
+          }));
         const merged = [];
         ranges.sort((a, b) => a.col - b.col || a.end - b.end).forEach((range) => {
           const last = merged[merged.length - 1];
-          if (last && range.col <= last.end) last.end = Math.max(last.end, range.end);
+          if (last && range.col <= last.end) {
+            last.end = Math.max(last.end, range.end);
+            range.issueIds.forEach((id) => { if (!last.issueIds.includes(id)) last.issueIds.push(id); });
+          }
           else merged.push(range);
         });
         let conflictIndex = 0;
