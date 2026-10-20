@@ -1,5 +1,25 @@
 [
   {
+    "version": "2026.10.20.2",
+    "date": "2026-10-20T03:06:43Z",
+    "head": "9e67be8ce236ad85e76adf31c81aa648940992d4",
+    "notes": [
+      "修复各种波形与省略间隔的展开，保持多个点号和省略符连接的数据为同一段，并保留有效连接端点约束。",
+      "时延检查优先采用上下行中可确定的一侧，隔离无关冲突，判断详情分别说明两侧依据、原因及采用情况。",
+      "已确定的展开区间使用实线，原序列内部按比例示意，仅真正未定的位置显示虚线。",
+      "修复 Vim dd 后 p/P 粘贴整行，支持多行剪切、重复粘贴及撤销，并更新使用说明。"
+    ],
+    "commits": [
+      {
+        "id": "9e67be8ce236ad85e76adf31c81aa648940992d4",
+        "date": "2026-10-20T10:29:34+08:00",
+        "title": "feat: compare scope waveforms and resolve formula timing dependencies",
+        "body": "Add oscilloscope comparison with vertical, horizontal and overlay layouts, stable signal-name pairing, exact per-column and half-cycle differences, formula-result comparison, error navigation and renameable bookmarks. Keep comparison read-only and render only the visible range.\n\nUse connection-defined relative durations before absolute anchors are available so adjacent-row dependencies can resolve and propagate. Support parameter and constant delay expressions with arithmetic and max/min, report evaluation errors, and recheck after parameter catalog changes.\n\nUpdate usage documentation and release 2026.10.20.1. Validation: 180 timing dependency variations, saved-library regressions, Chrome worker and formula refresh checks, scope comparison and 70000-column checks, JavaScript syntax, staged diff checks and all 65 release hashes. Excludes local libraries, caches and unrelated changes."
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.10.20.1",
     "date": "2026-10-20T02:28:23Z",
     "head": "6c464f049150ad63c5c81035507bdb4eb5f57e7d",

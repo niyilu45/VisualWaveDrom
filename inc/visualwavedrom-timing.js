@@ -251,6 +251,12 @@
       if (!row.reasons.length) paragraph(row.empty ? '空行，未发现连接时延冲突。'
         : row.alignments.length ? '已有连接约束保持不变；先按明确的数据等差规律补全，再按上行、下行补充未定位置。'
         : '时间已确定；已提供的时延约束一致。没有连接约束的部分仅确定自身时间。');
+      (row.referenceChecks || []).forEach((check) => {
+        const label = check.direction === 'previous-row' ? '上一行' : '下一行';
+        const status = { available: '可以确定', partial: '仅部分可确定', unavailable: '无法确定', 'not-needed': '无需参考' }[check.status];
+        paragraph('根据' + label + (check.referenceRow === undefined ? '' : '（第' + (check.referenceRow + 1) + '行）')
+          + '：' + status + '；' + check.reason + (check.used ? '；已采用此侧的可用时刻' : '') + '。');
+      });
       row.comparisons.forEach((comparison) => {
         const heading = doc.createElement('p'), title = doc.createElement('strong');
         const prefix = comparison.problemNumbers.map((number) => '[' + number + '] ').join('');
@@ -281,12 +287,12 @@
         + (alignment.referenceExpanded ? '（同值展开区域）' : '')
         + (alignment.row === row.index ? '；连接时延优先。' : '，并经连接约束传递至本行。'));
       });
-      if (row.referenceRuns.length) paragraph('原序列参考与主图共用 cycle 轴；实线按已知时刻对齐，虚线及 | ? 仅为未定位置的绘图占位，不参与时延测量。');
+      if (row.referenceRuns.length) paragraph('原序列参考与主图共用 cycle 轴；实线表示已确定区间，区间内的原始 . 与 | 按比例示意，不表示各自时长已单独确定；虚线及 | ? 才表示未定位置，不参与时延测量。');
       row.gaps.forEach((id) => {
         const gap = model.gaps[id];
         if (gap.ignored) { paragraph('第' + gap.col + '列 |：行尾省略，不影响后续波形或连接端点，无需推算时长。'); return; }
         paragraph('第' + gap.col + '列' + (gap.kind === 'stretch' ? '至' + gap.endCol + '列' + (gap.omissions.length
-          ? (gap.holdStart !== undefined ? '保持与省略区域' : '未知与省略区域') + '（固定部分 ' + fmt(gap.minimum) + ' cycle，含 ' + gap.omissions.length + ' 个 |）'
+          ? (gap.holdStart !== undefined ? '保持与省略区域' : '延续与省略区域') + '（固定部分 ' + fmt(gap.minimum) + ' cycle，含 ' + gap.omissions.length + ' 个 |）'
           : '同值区域（原时长 ' + fmt(gap.minimum) + ' cycle）') : ' |')
           + '：' + (gap.duration === undefined ? '未定' : fmt(gap.duration) + ' cycle')
           + '；起点 ' + (gap.start === null ? '?' : fmt(gap.start)) + '，终点 ' + (gap.end === null ? '?' : fmt(gap.end))
@@ -484,9 +490,9 @@
             const x1 = Math.max(left, x(gap.start)), x2 = Math.min(width - 8, x(gap.end));
             if (x2 > x1) {
               const inferred = !!alignmentNames[gap.durationSource];
-              context.strokeStyle = inferred ? '#237963' : '#5277b4'; context.lineWidth = 1; context.setLineDash([4, 3]); context.strokeRect(x1, mid - 16, x2 - x1, 33); context.setLineDash([]);
+              context.strokeStyle = inferred ? '#237963' : '#5277b4'; context.lineWidth = 1; context.setLineDash([]); context.strokeRect(x1, mid - 16, x2 - x1, 33);
               context.fillStyle = inferred ? '#21634f' : '#294c81';
-              const prefix = gap.kind === 'stretch' ? gap.holdStart !== undefined ? '保持展开 = ' : gap.omissions.length ? '未知展开 = ' : '同值展开 = ' : '| = ';
+              const prefix = gap.kind === 'stretch' ? /[pPnN]/.test(gap.state) ? '时钟展开 = ' : gap.holdStart !== undefined ? '保持展开 = ' : '同值展开 = ' : '| = ';
               let label = prefix + fmt(gap.duration) + (inferred ? ' · ' + alignmentNames[gap.durationSource] : '');
               if (context.measureText(label).width > x2 - x1 - 8) label = prefix + fmt(gap.duration);
               if (context.measureText(label).width > x2 - x1 - 8) label = '= ' + fmt(gap.duration);
@@ -510,13 +516,13 @@
             context.strokeStyle = color; context.lineWidth = 2; context.setLineDash([5, 4]);
             context.strokeRect(boxLeft, top + 4, boxRight - boxLeft, rowHeight - 8); context.setLineDash([]);
             context.fillStyle = color;
-            context.fillText((gap.kind === 'stretch' ? gap.holdStart !== undefined ? '保持区域 ' : gap.omissions.length ? '未知区域 ' : '同值区域 ' : '| ') + '? 时长分配未定 · 列' + gap.col
+            context.fillText((gap.kind === 'stretch' ? gap.holdStart !== undefined ? '保持区域 ' : '同值区域 ' : '| ') + '? 时长分配未定 · 列' + gap.col
               + (nextAnchor && nextAnchor !== gap ? '至' + nextAnchor.col : '') + (finish === null ? ' · 后续位置未定' : ''), boxLeft + 4, top + 55);
           }
         });
         paintProblemRanges(row.dataUnknownRanges, x, left, width - 8, top, rowHeight, false, true);
         paintProblemRanges(row.conflictRanges, x, left, width - 8, top, rowHeight, false, false);
-        if (row.status === 'unknown') {
+        if (row.status === 'unknown' && row.hasUnpositionedContent && !row.drawRuns.length) {
           context.strokeStyle = '#a97923'; context.lineWidth = 1;
           context.setLineDash([5, 4]);
           context.strokeRect(left + 1, top + 1, width - left - 3, rowHeight - 2); context.setLineDash([]);
@@ -565,11 +571,12 @@
         const top = y(i) + rowHeight, right = width - 16;
         context.save(); context.beginPath(); context.rect(0, ruler, width, height - ruler); context.clip();
         context.fillStyle = '#f7f8fb'; context.fillRect(0, top, width, referenceHeight);
-        context.strokeStyle = '#c5cdd7'; context.lineWidth = 1; context.setLineDash([4, 3]);
+        context.strokeStyle = '#c5cdd7'; context.lineWidth = 1; context.setLineDash([]);
         context.beginPath(); context.moveTo(0, top); context.lineTo(width, top); context.stroke(); context.setLineDash([]);
         context.fillStyle = '#475569';
         context.save(); context.beginPath(); context.rect(8, top, left - 16, referenceHeight); context.clip();
-        context.fillText('原序列参考', 10, top + 24); context.fillText('虚线：位置未定', 10, top + 44); context.restore();
+        context.fillText('原序列参考', 10, top + 24);
+        context.fillText(row.referenceRuns.some((run) => run.provisional) ? '虚线：位置未定' : '实线：区间已确定', 10, top + 44); context.restore();
         context.save(); context.beginPath(); context.rect(left, top + 1, right - left, referenceHeight - 2); context.clip();
         context.fillStyle = '#475569'; context.strokeStyle = '#e5e9ee';
         for (let tick = Math.ceil(start / step) * step, count = 0; tick <= end && count++ < 100; tick += step) {
@@ -726,7 +733,8 @@
         const cellWidth = run && run.stretch ? (run.finish - run.start) / (run.end - run.col) : row.period;
         selectedColumn = run && run.start <= value ? Math.min(run.end - 1, run.col + (run.gap && !run.stretch ? 0 : Math.floor((value - run.start) / cellWidth))) : -1;
         $('position').textContent = '第' + (rowIndex + 1) + '行 ' + row.name + (selectedColumn < 0 ? ' · 该处没有参考波形'
-          : ' · 原列号 ' + selectedColumn + (run.provisional ? ' · 位置未定，仅绘图占位' : ' · ' + fmt(value) + ' cycle · 原序列参考'));
+          : ' · 原列号 ' + selectedColumn + (run.provisional ? ' · 位置未定，仅绘图占位'
+            : run.mapped ? ' · 区间已确定，内部列仅按比例示意' : ' · ' + fmt(value) + ' cycle · 原序列参考'));
         drawSoon(); return;
       }
       selectedColumn = -1;

@@ -23411,6 +23411,8 @@ ${lines.join('\n')}`;
       if (!locations.length) return false;
       const start = Math.max(0, Math.min(locations.length - 1, Math.min(startIndex, endIndex)));
       const end = Math.max(start, Math.min(locations.length - 1, Math.max(startIndex, endIndex)));
+      const deletedRows = locations.slice(start, end + 1)
+        .map((location) => cloneSignalForVimRegister(location.signal));
       for (let i = end; i >= start; i--) {
         const location = locations[i];
         const liveIndex = location.parent.indexOf(location.signal);
@@ -23428,6 +23430,7 @@ ${lines.join('\n')}`;
       }
 
       pushUndoBeforeChange();
+      vimRegister = { type: 'row', rows: deletedRows };
       const newText = JSON.stringify(parsed, null, 2);
       for (let i = end; i >= start; i--) {
         adjustConnectionPointAfterRowDelete(i);
@@ -24213,7 +24216,7 @@ ${lines.join('\n')}`;
           if (selectedEdgeIndex >= 0) { deleteEdgeAtIndex(selectedEdgeIndex); return true; }
           return false;
         case 'delete-row':
-          return deleteVimSignalRange(selectedSignalIndex, selectedSignalIndex);
+          return deleteVimSignalRange(selectedSignalIndex, selectedSignalIndex + Math.max(1, Math.floor(data.count || 1)) - 1);
         case 'new-row':
           return insertVimSignalRow(!!data.before);
         case 'move-row':
