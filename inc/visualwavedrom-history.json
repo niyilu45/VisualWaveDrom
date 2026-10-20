@@ -1,5 +1,27 @@
 [
   {
+    "version": "2026.10.20.4",
+    "date": "2026-10-20T07:43:05Z",
+    "head": "50231af9d14bfc7cdf7173f5123ef6b90211eef0",
+    "notes": [
+      "修复等差补全框遗漏首个补出数据；区分省略部分与完整补全范围的项数和时长。",
+      "等差推断可跨空白数据格和已确认的省略段传递，显示具体依据，保留真实时延冲突。",
+      "连接、相邻行与等差规律矛盾时显示局部时延冲突和具体原因，不再误报为无法判断。",
+      "末尾未知段按未知长度处理，不用绘制列数约束其他行；保留有效波形与显式时延的真实冲突检查。",
+      "修复 Ctrl+S 保存网页导致 BAT 服务误退出，增加独立心跳和临时断连宽限，保留正常关页退出行为。",
+      "更新使用说明、浏览器缓存标识及 Windows/Linux 免安装服务。"
+    ],
+    "commits": [
+      {
+        "id": "50231af9d14bfc7cdf7173f5123ef6b90211eef0",
+        "date": "2026-10-20T11:58:44+08:00",
+        "title": "feat: add symbolic parameter labels and improve table interactions",
+        "body": "Support colon-separated expression options and noTrans labels that display variable names without dollar signs or whitespace. Resolve the original expressions numerically for timing analysis before arithmetic completion, retain separate caches, and show conversion results or errors in timing details. Preserve source expressions, reference navigation and parameter tooltips.\n\nAdd external-open icons to both parameter-link lists, opening the chosen table in a new tab without applying checkbox or priority drafts. Keep missing-table actions disabled and report opening failures inside the card.\n\nReplace native variable-row drag with pointer capture so wheel scrolling remains available while holding a row. Refresh insertion markers during scroll, handle sticky headers, support cancellation, and preserve reorder undo and redo.\n\nPublish release 2026.10.20.3 and update documentation and cache versions. Validation: focused parameter and timing regression checks, actual Chrome display/worker and new-tab checks, held-mouse wheel scrolling, filtered reorder and undo/redo, desktop/mobile inspections, JavaScript syntax, staged diff checks and all 65 release hashes. Excludes local libraries, temporary files and unrelated changes."
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.10.20.3",
     "date": "2026-10-20T03:58:19Z",
     "head": "a25610b3cd8812d44aa79462895608c70b1d549b",

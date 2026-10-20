@@ -205,7 +205,8 @@
           const target = row.conflictRanges.find((item) => comparison.problemNumbers.includes(item.number))
             || row.dataUnknownRanges.find((item) => item.col <= comparison.col && item.end > comparison.col)
             || { col: comparison.col, end: comparison.endCol ?? comparison.col + 1, gapCol: comparison.col };
-          const estimateText = (item) => shortNames[item.kind] + (item.kind !== 'current' ? '候选' : '') + ' ' + fmt(item.columns) + ' 列';
+          const estimateText = (item) => (item.kind === 'series' && item.side ? item.side === 'left' ? '左侧等差' : '右侧等差' : shortNames[item.kind])
+            + (item.kind !== 'current' ? '候选' : '') + ' ' + fmt(item.columns) + ' 列';
           if (difference) {
             summaries.push({ col: comparison.col, target, text: location + '：' + estimateText(comparison.estimates.find((item) => item.label === difference.a))
               + '，' + estimateText(comparison.estimates.find((item) => item.label === difference.b))
@@ -249,8 +250,11 @@
           : '冲突位置暂无法确定，请查看下方约束详情。');
       }
       if (!row.reasons.length) paragraph(row.empty ? '空行，未发现连接时延冲突。'
+        : row.unknownTailStart === 0 && !row.known ? '本行仅有未知波形，不以绘制长度判断时延。'
         : row.alignments.length ? '已有连接约束保持不变；先按明确的数据等差规律补全，再按上行、下行补充未定位置。'
         : '时间已确定；已提供的时延约束一致。没有连接约束的部分仅确定自身时间。');
+      if (row.unknownTailStart !== undefined) paragraph('原列 ' + row.unknownTailStart
+        + ' 起为末尾未知段，长度未定，不按绘制列数约束相邻行；显式连接时延仍单独检查。');
       (row.referenceChecks || []).forEach((check) => {
         const label = check.direction === 'previous-row' ? '上一行' : '下一行';
         const status = { available: '可以确定', partial: '仅部分可确定', unavailable: '无法确定', 'not-needed': '无需参考' }[check.status];
@@ -312,10 +316,13 @@
           + (alignmentNames[gap.durationSource] ? '；来源：' + alignmentNames[gap.durationSource] : gap.durationSource === 'connection' ? '；来源：连接时延' : ''));
         if (gap.series) {
           const series = gap.series;
-          paragraph('数据 ' + series.before + ' → ' + series.after + '；公差 ' + fmt(series.step) + '，省略 '
-            + series.count + ' 项，每项 ' + fmt(series.cellDuration) + ' cycle；补全 '
+          if (series.evidence) paragraph('等差依据：' + series.evidence.map((item) => item.before + ' → ' + item.after
+            + (item.distance > 1 ? '（跨 ' + item.distance + ' 项，含已确认的省略或空白数据格）' : '')).join('；') + '。');
+          paragraph('数据 ' + series.before + ' → ' + series.after + '；公差 ' + fmt(series.step) + '；| 省略部分 '
+            + series.count + ' 项 × ' + fmt(series.cellDuration) + ' cycle/项 = ' + fmt(gap.duration) + ' cycle；补全 '
             + core.seriesLabel(series.first, series.style) + (series.count > 1 ? ' … ' + core.seriesLabel(series.first + (series.count - 1) * series.step, series.style) : '') + '。');
-          if (series.filledCount) paragraph('同时补齐两端之间 ' + series.filledCount + ' 个已有空白数据格；保留原宽度，仅改变展开预览中的文本。');
+          if (series.filledCount) paragraph('另补齐 ' + series.filledCount + ' 个已有空白数据格，保持原宽度；完整补全区间共 '
+            + (series.count + series.filledCount) + ' 项、' + fmt(gap.duration + gap.seriesContext.blankColumns * row.period) + ' cycle。');
           if (gap.seriesConfirmation) paragraph(gap.seriesConfirmation + '。');
         }
       });
@@ -500,15 +507,18 @@
           }
           if (gap.conflict || gap.seriesReason && gap.duration !== undefined) return;
           if (gap.duration !== undefined && gap.start !== null && gap.end !== null && gap.end > gap.start) {
-            const x1 = Math.max(left, x(gap.start)), x2 = Math.min(width - 8, x(gap.end));
+            const completion = gap.completionRange;
+            const x1 = Math.max(left, x(completion?.start ?? gap.start)), x2 = Math.min(width - 8, x(completion?.finish ?? gap.end));
             if (x2 > x1) {
               const inferred = !!alignmentNames[gap.durationSource];
               context.strokeStyle = inferred ? '#237963' : '#5277b4'; context.lineWidth = 1; context.setLineDash([]); context.strokeRect(x1, mid - 16, x2 - x1, 33);
               context.fillStyle = inferred ? '#21634f' : '#294c81';
               const prefix = gap.kind === 'stretch' ? /[pPnN]/.test(gap.state) ? '时钟展开 = ' : gap.holdStart !== undefined ? '保持展开 = ' : '同值展开 = ' : '| = ';
-              let label = prefix + fmt(gap.duration) + (inferred ? ' · ' + alignmentNames[gap.durationSource] : '');
-              if (context.measureText(label).width > x2 - x1 - 8) label = prefix + fmt(gap.duration);
-              if (context.measureText(label).width > x2 - x1 - 8) label = '= ' + fmt(gap.duration);
+              const summary = completion ? '等差补全 ' + (gap.series.count + gap.series.filledCount) + ' 项' : prefix + fmt(gap.duration);
+              let label = completion ? summary + ' · ' + fmt(completion.finish - completion.start) + ' cycle'
+                : summary + (inferred ? ' · ' + alignmentNames[gap.durationSource] : '');
+              if (context.measureText(label).width > x2 - x1 - 8) label = summary;
+              if (context.measureText(label).width > x2 - x1 - 8) label = completion ? '补全 ' + (gap.series.count + gap.series.filledCount) + ' 项' : '= ' + fmt(gap.duration);
               if (context.measureText(label).width <= x2 - x1 - 8) context.fillText(label, x1 + 4, top + 55);
             }
           }

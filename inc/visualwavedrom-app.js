@@ -16512,7 +16512,7 @@ ${lines.join('\n')}`;
     }
 
     function sendWaveLibraryClientHeartbeat() {
-      if (!waveLibraryServerMode) return;
+      if (!waveLibraryServerMode || waveLibraryClientDisconnectSent) return;
       fetch('/api/client-connect' + waveLibraryClientQuery(), {
         method: 'POST',
         keepalive: true
@@ -16540,17 +16540,21 @@ ${lines.join('\n')}`;
       if (!waveLibraryServerMode) return;
       stopWaveLibraryClientSession(false);
       waveLibraryClientDisconnectSent = false;
-      if (typeof window.EventSource === 'function') {
-        waveLibraryClientEventSource = new EventSource(
-          '/api/client-session' + waveLibraryClientQuery()
-        );
-        return;
-      }
       sendWaveLibraryClientHeartbeat();
       waveLibraryClientHeartbeatTimer = window.setInterval(
         sendWaveLibraryClientHeartbeat,
         WAVE_LIBRARY_CLIENT_HEARTBEAT_MS
       );
+      if (typeof window.EventSource === 'function') {
+        try {
+          waveLibraryClientEventSource = new EventSource(
+            '/api/client-session' + waveLibraryClientQuery()
+          );
+          waveLibraryClientEventSource.onerror = (event) => {
+            if (event.currentTarget === waveLibraryClientEventSource) sendWaveLibraryClientHeartbeat();
+          };
+        } catch (_error) { /* Independent heartbeats keep the page session alive. */ }
+      }
     }
 
     async function initializeServerWaveLibrary() {

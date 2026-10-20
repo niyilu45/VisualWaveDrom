@@ -1045,7 +1045,12 @@ func (s *service) touchClient(id, token string) int {
 	now := time.Now()
 	s.clientMu.Lock()
 	s.pruneExpiredClientsLocked(now)
-	s.clients[id] = clientLease{token: token, lastSeen: now}
+	lease, found := s.clients[id]
+	if !found || token != "heartbeat" {
+		lease.token = token
+	}
+	lease.lastSeen = now
+	s.clients[id] = lease
 	s.scheduleClientLeaseCheckLocked(now)
 	count := len(s.clients)
 	s.clientMu.Unlock()
@@ -1056,8 +1061,16 @@ func (s *service) removeClient(id, token string, force bool) int {
 	now := time.Now()
 	s.clientMu.Lock()
 	s.pruneExpiredClientsLocked(now)
-	if lease, found := s.clients[id]; found && (force || lease.token == token) {
-		delete(s.clients, id)
+	if lease, found := s.clients[id]; found {
+		if force {
+			delete(s.clients, id)
+		} else if lease.token == token {
+			// Saving or stopping a page can cancel its stream without closing the tab.
+			// Keep a heartbeat lease; only an explicit disconnect removes it at once.
+			lease.token = "heartbeat"
+			lease.lastSeen = now
+			s.clients[id] = lease
+		}
 	}
 	if len(s.clients) == 0 {
 		s.scheduleClientShutdownLocked(clientShutdownDelay)
@@ -1108,7 +1121,8 @@ func (s *service) handleClientSession(writer http.ResponseWriter, request *http.
 		case <-ticker.C:
 			s.clientMu.Lock()
 			lease, active := s.clients[id]
-			if active && lease.token == token {
+			active = active && lease.token == token
+			if active {
 				lease.lastSeen = time.Now()
 				s.clients[id] = lease
 				s.scheduleClientLeaseCheckLocked(lease.lastSeen)
