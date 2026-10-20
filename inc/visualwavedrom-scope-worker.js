@@ -10,6 +10,13 @@ if (typeof document === 'undefined' && typeof global.importScripts === 'function
 
 const FormulaEngine = global.VisualWaveDromFormula || null;
 
+if (typeof document === 'undefined' && typeof global.importScripts === 'function') {
+  global.importScripts('visualwavedrom-scope-compare-core.js?v=20261020');
+}
+let comparison = null;
+let comparisonGeneration = 0;
+let comparisonProgress = null;
+
 let activeSession = null;
 let latestWindowGeneration = 0;
 const DEFAULT_ROW_HEIGHT = 42;
@@ -2108,26 +2115,26 @@ function analogWindow(row, start, end, width, totalColumns) {
   };
 }
 
-async function createWindow(payload) {
-  if (!activeSession) throw new Error('Scope session has not been prepared');
+async function createWindow(payload, session = activeSession) {
+  if (!session) throw new Error('Scope session has not been prepared');
   const generation = Math.max(0, Math.floor(finiteNumber(payload.windowGeneration) || 0));
   latestWindowGeneration = Math.max(latestWindowGeneration, generation);
-  const total = activeSession.totalColumns;
+  const total = session.totalColumns;
   const start = clamp(finiteNumber(payload.start) || 0, 0, Math.max(0, total - 1));
   const end = clamp(finiteNumber(payload.end) || total, start + 1e-6, total);
   const width = clamp(Math.floor(finiteNumber(payload.width) || 1000), 32, 8192);
-  const rowStart = clamp(Math.floor(finiteNumber(payload.rowStart) || 0), 0, activeSession.rows.length);
+  const rowStart = clamp(Math.floor(finiteNumber(payload.rowStart) || 0), 0, session.rows.length);
   const rowEnd = clamp(
-    Math.ceil(finiteNumber(payload.rowEnd) || activeSession.rows.length),
+    Math.ceil(finiteNumber(payload.rowEnd) || session.rows.length),
     rowStart,
-    activeSession.rows.length
+    session.rows.length
   );
   const hasRequestedRows = Array.isArray(payload.rowIndices);
   const requestedRows = hasRequestedRows
     ? Array.from(new Set(payload.rowIndices.map((value) => Math.floor(Number(value)))
       .filter((value) => Number.isInteger(value)
         && value >= 0
-        && value < activeSession.rows.length)))
+        && value < session.rows.length)))
     : null;
   const rowIndices = requestedRows || Array.from(
     { length: Math.max(0, rowEnd - rowStart) },
@@ -2135,7 +2142,7 @@ async function createWindow(payload) {
   );
   const rows = [];
   for (let rowOffset = 0; rowOffset < rowIndices.length; rowOffset += 1) {
-    if (generation < latestWindowGeneration) {
+    if (!payload.comparison && generation < latestWindowGeneration) {
       return {
         cancelled: true,
         generation,
@@ -2149,13 +2156,13 @@ async function createWindow(payload) {
       };
     }
     const index = rowIndices[rowOffset];
-    const row = activeSession.rows[index];
+    const row = session.rows[index];
     const mode = row.multiWave
       ? 'analog'
       : (payload.modes && payload.modes[index] || row.mode);
     if (row.multiWave) {
       const series = row.multiWave.sources.map((source) => {
-        const sourceRow = activeSession.rows[source.rowIndex];
+        const sourceRow = session.rows[source.rowIndex];
         if (!sourceRow) return null;
         const analogRow = analogRowForFormat(
           sourceRow,
@@ -3476,15 +3483,15 @@ function createSimplifiedModel(payload) {
   };
 }
 
-function prepareResponse() {
+function prepareResponse(session = activeSession) {
   return {
-    title: activeSession.title,
-    totalColumns: activeSession.totalColumns,
-    samplePeriod: activeSession.samplePeriod,
-    timeUnit: activeSession.timeUnit,
-    cursorStep: sessionCursorStep(activeSession),
-    formulaStats: activeSession.formulaStats || null,
-    rows: activeSession.rows.map((row) => ({
+    title: session.title,
+    totalColumns: session.totalColumns,
+    samplePeriod: session.samplePeriod,
+    timeUnit: session.timeUnit,
+    cursorStep: sessionCursorStep(session),
+    formulaStats: session.formulaStats || null,
+    rows: session.rows.map((row) => ({
       index: row.index,
       rowId: row.rowId,
       transient: !!row.transient,
@@ -3498,7 +3505,7 @@ function prepareResponse() {
       busFormat: row.busFormat,
       analogFormat: row.analogFormat,
       rowHeight: row.rowHeight,
-      style: normalizeRowStyle(row.source.scope, activeSession.totalColumns),
+      style: normalizeRowStyle(row.source.scope, session.totalColumns),
       formula: row.formula || null,
       multiWave: row.multiWave || null,
       sampleStep: rowSampleStep(row),
@@ -3514,12 +3521,130 @@ function prepareResponse() {
   };
 }
 
+function comparisonLength(row, session) {
+  if (!row) return 0;
+  if (row.multiWave) return Math.max(0, ...row.multiWave.sources.map((item) => comparisonLength(session.rows[item.rowIndex], session)));
+  if (row.scopeValues) return row.scopeValues.length * rowSampleStep(row);
+  if (row.changePoints) return row.changePoints.totalSamples * rowSampleStep(row);
+  if (row.samples) return row.samples.length * rowSampleStep(row);
+  return row.wave.length;
+}
+
+function comparisonValue(row, column, session) {
+  if (!row) return null;
+  if (row.multiWave) return row.multiWave.sources.map((item) => comparisonValue(session.rows[item.rowIndex], column, session));
+  if (column >= comparisonLength(row, session)) return null;
+  return sourceValueAtHalfIndex(row, column * 2);
+}
+
+async function startComparison(request) {
+  if (!activeSession) throw new Error('示波器尚未加载完成');
+  const generation = ++comparisonGeneration;
+  comparison = null;
+  comparisonProgress = { phase: '正在解析比较图并计算公式', fraction: 0 };
+  const original = request.currentContent ? await createSession(request.currentContent, null) : activeSession;
+  const left = Object.assign({}, original, { rows: original.rows.map((row, index) => Object.assign({}, row, {
+    name: Array.isArray(request.currentNames) ? String(request.currentNames[index] || row.name) : row.name
+  })) });
+  const right = await createSession(request.content, request.transient);
+  const check = () => { if (generation !== comparisonGeneration) throw new Error('比较已取消'); };
+  check();
+  const result = await global.VisualWaveDromScopeCompareCore.compare(left, right, {
+    length: comparisonLength,
+    value: comparisonValue,
+    step: rowCursorStep,
+    check,
+    progress: (progress) => { comparisonProgress = Object.assign({ phase: '正在逐列比较' }, progress); }
+  });
+  check();
+  comparison = Object.assign(result, { left, right, generation });
+  return {
+    generation, total: result.total, errorCount: result.errors.length,
+    pairs: result.pairs.map(({ intervals, ...pair }) => pair),
+    left: prepareResponse(left), right: prepareResponse(right)
+  };
+}
+
+async function comparisonWindow(request) {
+  const snapshot = comparison;
+  if (!snapshot || request.generation !== snapshot.generation) throw new Error('比较数据已失效，请重新加载');
+  const pairs = snapshot.pairs.slice(request.rowStart, request.rowEnd);
+  const data = [];
+  for (const side of ['left', 'right']) {
+    const session = snapshot[side];
+    data.push(request.start >= session.totalColumns ? { rows: [] } : await createWindow(Object.assign({}, request, {
+      comparison: true, rowIndices: pairs.map((pair) => pair[side]).filter((index) => index >= 0),
+      modes: request[side + 'Modes'], busFormats: request[side + 'BusFormats'], analogFormats: request[side + 'AnalogFormats']
+    }), session));
+  }
+  const errors = pairs.flatMap((pair) => {
+    const first = findFirstSegment(pair.intervals, request.start);
+    const width = clamp(Math.ceil(Number(request.width) || 1000), 32, 8192);
+    const span = Math.max(1e-9, request.end - request.start);
+    const pixels = pair.intervals.length - first > width * 2 ? new Uint8Array(width) : null;
+    const visible = [];
+    for (let i = first; i < pair.intervals.length && pair.intervals[i].start < request.end; i += 1) {
+      const error = pair.intervals[i];
+      if (pixels) {
+        const x1 = clamp(Math.floor((error.start - request.start) / span * width), 0, width - 1);
+        const x2 = clamp(Math.ceil((error.end - request.start) / span * width), x1 + 1, width);
+        pixels.fill(1, x1, x2);
+      } else visible.push({ pair: error.pair, start: error.start, end: error.end });
+    }
+    // Reduce only the highlight raster; inspection/navigation retain every exact interval.
+    if (pixels) {
+      let firstPixel = -1;
+      for (let x = 0; x <= width; x += 1) {
+        if (pixels[x] && firstPixel < 0) firstPixel = x;
+        if (!pixels[x] && firstPixel >= 0) {
+          visible.push({ pair: pair.intervals[first].pair, start: request.start + firstPixel / width * span,
+            end: request.start + x / width * span });
+          firstPixel = -1;
+        }
+      }
+    }
+    return visible;
+  });
+  return { left: data[0], right: data[1], errors };
+}
+
+function inspectComparison(request) {
+  if (!comparison || request.generation !== comparison.generation) return null;
+  const pair = comparison.pairs[request.pair];
+  if (!pair) return null;
+  const left = comparison.left.rows[pair.left];
+  const right = comparison.right.rows[pair.right];
+  const step = Math.min(left ? rowCursorStep(left) : 1, right ? rowCursorStep(right) : 1);
+  const position = Math.max(0, Math.floor(Number(request.column) / step) * step);
+  if (!Number.isFinite(position)) return null;
+  const error = pair.intervals[findFirstSegment(pair.intervals, position)];
+  if (!error || position < error.start || position >= error.end) return null;
+  return Object.assign({}, error, { position,
+    leftValue: comparisonValue(left, position, comparison.left),
+    rightValue: comparisonValue(right, position, comparison.right) });
+}
+
 async function handleRequest(message) {
   const request = message || {};
   const requestId = request.requestId;
   try {
     let result;
-    if (request.type === 'cancel-window') {
+    if (request.type === 'compare-start') {
+      result = await startComparison(request);
+    } else if (request.type === 'compare-close') {
+      comparisonGeneration += 1;
+      comparison = null;
+      result = { cancelled: true };
+    } else if (request.type === 'compare-progress') {
+      result = comparisonProgress;
+    } else if (request.type === 'compare-window') {
+      result = await comparisonWindow(request);
+    } else if (request.type === 'compare-inspect') {
+      result = inspectComparison(request);
+    } else if (request.type === 'compare-error') {
+      result = comparison && comparison.generation === request.generation
+        ? comparison.errors[request.index] || null : null;
+    } else if (request.type === 'cancel-window') {
       latestWindowGeneration = Math.max(
         latestWindowGeneration,
         Math.max(0, Math.floor(finiteNumber(request.windowGeneration) || 0))

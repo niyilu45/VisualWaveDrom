@@ -2168,7 +2168,7 @@
     renderTable();
     if (error) status(error, true);
   }
-  global.VisualWaveDromParameters = { mount, setCatalog, finishSingleLoad, getCatalog: () => clone(catalog), resolve, text, details, decorate, decorateText, resolveName,
+  global.VisualWaveDromParameters = { mount, setCatalog, finishSingleLoad, getCatalog: () => clone(catalog), getRevision: () => generation, evaluate, resolve, text, details, decorate, decorateText, resolveName,
     revealReference, clearReferenceHighlight, matchesReference, referenceWindowInfo,
     openLinks, flush, refresh, page: () => activePage, pending: pendingParameterChanges,
     historyState: parameterHistoryState, undo: () => applyParameterHistory(false), redo: () => applyParameterHistory(true) };

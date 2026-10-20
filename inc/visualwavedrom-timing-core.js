@@ -5,17 +5,35 @@
     const EPS = 1e-9;
     const numberPattern = '[+-]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:e[+-]?\\d+)?';
     const units = 'cycle[s]?|周期|s|ms|us|µs|μs|ns|ps';
-    function parseDelay(label, cycleTimeNs) {
+    function parseDelay(label, cycleTimeNs, evaluateExpression) {
       const raw = String(label || '').trim().replace(/^:\s*/, '');
       if (!raw) return { kind: 'ignored', reason: '无时延标签' };
-      if (/[{}$]/.test(raw)) return { kind: 'unknown', reason: '时延参数未解析，请检查链接参数表' };
       if (/[<>≤≥≠]/.test(raw) || raw.includes('!=')) return { kind: 'unknown', reason: '仅支持确定时延，不支持时延不等式' };
       const parts = raw.split(/[=＝]/);
       if (parts.length > 2) return { kind: 'unknown', reason: '标签中有多个等号，无法确定时延' };
-      const text = parts.length === 2 ? parts[1].trim() : raw;
-      const match = text.match(new RegExp('^(' + numberPattern + ')\\s*(' + units + ')?$', 'i'))
+      let text = parts.length === 2 ? parts[1].trim() : raw;
+      function evaluate(expression) {
+        if (typeof evaluateExpression !== 'function') throw new Error('时延公式或参数未解析，请检查链接参数表');
+        const result = evaluateExpression(expression);
+        if (!result || result.error) throw new Error(result && result.error || '时延公式计算失败');
+        return result.value;
+      }
+      try {
+        text = text.replace(/\{([^{}]*)\}/g, (_, expression) => evaluate(expression));
+        if (/[{}$]/.test(text)) throw new Error('时延参数未解析，请使用 {$变量名} 并检查链接参数表');
+      } catch (error) { return { kind: 'unknown', reason: error.message }; }
+      let match = text.match(new RegExp('^(' + numberPattern + ')\\s*(' + units + ')?$', 'i'))
         || (parts.length === 1 && text.match(new RegExp('^[^\\d+\\-]*?(' + numberPattern + ')\\s*(' + units + ')$', 'i')));
-      if (!match) return { kind: /[\d=＝]/.test(raw) ? 'unknown' : 'ignored', reason: '标签没有唯一、明确的时延数值' };
+      if (!match && /[+*/()]|\d\s*-/.test(text)) {
+        const suffix = text.match(new RegExp('\\s*(' + units + ')$', 'i'));
+        const expression = suffix ? text.slice(0, suffix.index).trim() : text;
+        try {
+          const value = String(evaluate(expression)).trim();
+          if (!new RegExp('^' + numberPattern + '$', 'i').test(value)) throw new Error('时延公式结果不是有限数值');
+          match = [text, value, suffix && suffix[1]];
+        } catch (error) { return { kind: 'unknown', reason: '时延公式：' + error.message }; }
+      }
+      if (!match) return { kind: /[\d=＝{}$]/.test(raw) ? 'unknown' : 'ignored', reason: '标签没有唯一、明确的时延数值' };
       let value = Number(match[1]);
       const unit = (match[2] || 'cycle').toLowerCase();
       if (!['cycle', 'cycles', '周期'].includes(unit)) {
@@ -46,12 +64,13 @@
       if (Number.isInteger(number)) text = text.replace(/^-/, '').padStart(style.width, '0');
       return style.prefix + (number < 0 ? '-' : style.plus ? '+' : '') + style.marker + text.replace(/^-/, '') + style.suffix;
     }
-    function analyze(source) {
+    function analyze(source, edgeTimings) {
       if (!source || !Array.isArray(source.signal)) throw new Error('signal 必须是波形数组');
       const config = source.timingCheck || {};
       const tolerance = Number.isFinite(Number(config.tolerance)) && Number(config.tolerance) >= 0 ? Number(config.tolerance) : 1e-7;
       const rows = [], gaps = [], nodes = new Map(), duplicates = new Set(), graph = [[]], constraints = [], issues = [], edges = [];
       const sourceEdges = Array.isArray(source.edge) ? source.edge : [];
+      const edgeTiming = (raw, index) => edgeTimings && edgeTimings[index] || parseDelay(edgeParts(raw).label, config.cycleTimeNs);
       const referencedNodes = new Set(sourceEdges.flatMap((raw) => {
         const parsed = edgeParts(raw);
         return [parsed.from, parsed.to].filter(Boolean);
@@ -172,9 +191,9 @@
         }
         if (spans.length) { heldSpans.set(index, spans); ranges.set(index, spans.slice()); }
       });
-      sourceEdges.forEach((raw) => {
+      sourceEdges.forEach((raw, index) => {
         const parsed = edgeParts(raw), from = nodes.get(parsed.from), to = nodes.get(parsed.to);
-        const timing = parseDelay(parsed.label, config.cycleTimeNs);
+        const timing = edgeTiming(raw, index);
         if (!from || !to || from.row !== to.row || from.col === to.col || duplicates.has(parsed.from) || duplicates.has(parsed.to)
             || timing.kind !== 'delay') return;
         const row = rows[from.row], left = Math.min(from.col, to.col), right = Math.max(from.col, to.col);
@@ -253,7 +272,7 @@
       const validDuration = (gap, duration) => strictDuration(gap) ? duration > minimumDuration(gap) : duration >= gap.minimum - Math.max(EPS, tolerance);
       sourceEdges.forEach((raw, index) => {
         const parsed = edgeParts(raw), from = nodes.get(parsed.from), to = nodes.get(parsed.to);
-        const timing = parseDelay(parsed.label, config.cycleTimeNs);
+        const timing = edgeTiming(raw, index);
         const edge = Object.assign({ index, fromNode: from, toNode: to, timing, option: (source.edgeOptions || [])[index] || {} }, parsed);
         edges.push(edge);
         const rowIds = [from && from.row, to && to.row].filter((id) => id !== undefined);
@@ -403,6 +422,10 @@
         const gap = gaps[run.gap - 1];
         if (gap.kind !== 'stretch') return null;
         if (col === run.col) return 0;
+        // A connection can fix the span before either endpoint has an absolute
+        // time. Use that relative duration to break neighbouring-row dependencies.
+        if (Number.isFinite(gap.duration) && validDuration(gap, gap.duration))
+          return (col - run.col) * gap.duration / (run.end - run.col);
         const start = time(gap.a, gap.offset), end = time(gap.b);
         return start !== null && end !== null && end > start ? (col - run.col) * (end - start) / (run.end - run.col) : null;
       }

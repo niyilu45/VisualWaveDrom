@@ -658,7 +658,7 @@
         if (worker) worker.terminate();
         const current = ++version; requestTime = performance.now();
         message(model ? '正在重新检查，当前为上次结果...' : '正在计算连接时延...');
-        const script = 'const engine=(' + global.createVisualWaveDromTimingEngine.toString() + ')();onmessage=(e)=>{try{postMessage({result:engine.analyze(e.data)})}catch(error){postMessage({error:error.message})}};';
+        const script = 'const engine=(' + global.createVisualWaveDromTimingEngine.toString() + ')();onmessage=(e)=>{try{postMessage({result:engine.analyze(e.data.source,e.data.edgeTimings)})}catch(error){postMessage({error:error.message})}};';
         const url = URL.createObjectURL(new Blob([script], { type: 'text/javascript' }));
         try { worker = new Worker(url); } finally { URL.revokeObjectURL(url); }
         worker.onmessage = (event) => {
@@ -668,7 +668,7 @@
           worker.terminate(); worker = null;
         };
         worker.onerror = (event) => { if (current === version && !disposed) { message('后台检查失败：' + event.message, true); worker.terminate(); worker = null; } };
-        worker.postMessage(source);
+        worker.postMessage({ source, edgeTimings: snapshot.edgeTimings });
       } catch (error) {
         version++; if (worker) worker.terminate(); worker = null; source = null;
         message('无法检查：' + error.message + (model ? '（画面保留上次结果）' : ''), true);

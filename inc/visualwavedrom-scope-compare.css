@@ -1,0 +1,66 @@
+.scope-comparison {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: flex;
+  flex-direction: column;
+  color: #25282d;
+  background: #f3f5f7;
+  font: 13px "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
+}
+.scope-comparison * { box-sizing: border-box; }
+.scope-compare-toolbar, .scope-compare-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #ced5dd;
+  background: #fff;
+}
+.scope-compare-toolbar strong { font-size: 15px; }
+.scope-compare-source { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #176ca5; }
+.scope-comparison label { display: inline-flex; align-items: center; gap: 5px; }
+.scope-comparison button, .scope-comparison input, .scope-comparison select {
+  font: inherit;
+  color: inherit;
+  min-height: 30px;
+  border: 1px solid #b7c0cb;
+  border-radius: 4px;
+  background: #fff;
+  padding: 4px 7px;
+}
+.scope-comparison button { display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+.scope-comparison button:hover:not(:disabled) { background: #e9f1f8; border-color: #5487ac; }
+.scope-comparison button:disabled { opacity: 0.45; cursor: default; }
+.scope-comparison :focus-visible { outline: 2px solid #176ca5; outline-offset: 2px; }
+.scope-comparison svg { width: 18px; height: 18px; flex: none; }
+.scope-comparison input[type="number"] { width: 95px; }
+.scope-compare-source-select { max-width: 260px; }
+.scope-comparison [data-action="close"] { margin-left: auto; }
+.scope-compare-count { color: #9b2534; min-width: 85px; }
+.scope-compare-tags { display: flex; gap: 8px; flex-wrap: wrap; max-height: 84px; overflow: auto; padding: 5px 12px; }
+.scope-compare-tags:empty { display: none; }
+.scope-compare-tag { display: inline-flex; align-items: center; max-width: 100%; }
+.scope-compare-tag button { border-radius: 0; }
+.scope-compare-tag button:first-child { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-radius: 4px 0 0 4px; }
+.scope-compare-tag button:last-child { border-radius: 0 4px 4px 0; }
+.scope-compare-panes { display: grid; flex: 1; min-height: 0; min-width: 0; gap: 6px; padding: 6px; }
+.scope-compare-panes[data-layout="vertical"] { grid-template-rows: repeat(2, minmax(0, 1fr)); }
+.scope-compare-panes[data-layout="horizontal"] { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.scope-compare-pane { min-height: 0; min-width: 0; display: flex; flex-direction: column; background: #fff; border: 1px solid #c8d0d9; }
+.scope-compare-pane > header { min-height: 30px; display: flex; align-items: center; gap: 20px; flex-wrap: wrap; padding: 5px 9px; border-bottom: 1px solid #d9dfe6; }
+.scope-compare-pane > header span { min-width: 0; overflow-wrap: anywhere; }
+.scope-compare-canvas-wrap { position: relative; flex: 1; min-height: 0; min-width: 0; }
+.scope-compare-scroll { position: absolute; inset: 30px 0 0; overflow-y: scroll; overflow-x: hidden; }
+.scope-compare-canvas-wrap canvas { position: absolute; inset: 0 18px 0 0; width: calc(100% - 18px); height: 100%; touch-action: none; }
+.scope-comparison .scope-compare-pan { min-height: 20px; width: calc(100% - 24px); padding: 0; margin: 0 12px; accent-color: #176ca5; }
+.scope-compare-status { padding: 6px 12px; min-height: 30px; max-height: 90px; overflow: auto; border-top: 1px solid #ced5dd; overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+  .scope-compare-toolbar, .scope-compare-controls { gap: 5px; padding: 6px; }
+  .scope-compare-source { max-width: 125px; }
+  .scope-compare-source-select { max-width: 170px; }
+  .scope-comparison input[type="number"] { width: 74px; }
+  .scope-compare-panes { padding: 3px; gap: 3px; }
+  .scope-compare-pane > header { font-size: 12px; }
+}

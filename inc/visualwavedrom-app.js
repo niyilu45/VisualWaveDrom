@@ -15275,8 +15275,51 @@ ${lines.join('\n')}`;
         return scopeLibraryStatePromise;
       };
 
+      const requestComparisonFromOpener = (action, waveId) => {
+        if (!window.opener || window.opener.closed) return Promise.resolve(null);
+        return new Promise((resolve, reject) => {
+          const requestId = 'scope-compare-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+          const finish = (error, value) => {
+            clearTimeout(timer);
+            window.removeEventListener('message', receive);
+            if (error) reject(error); else resolve(value || null);
+          };
+          const receive = (event) => {
+            const message = event.data || {};
+            if (event.source !== window.opener || message.type !== 'visualwavedrom-scope-compare-response'
+                || message.requestId !== requestId) return;
+            if (message.libraryId !== (currentWaveLibraryId || requestedLibraryId)) return;
+            if (message.pending) {
+              clearTimeout(timer);
+              timer = setTimeout(() => finish(new Error('读取比较图超时，请稍后重新加载')), 120000);
+              return;
+            }
+            finish(message.error ? new Error(message.error) : null, message.result);
+          };
+          let timer = setTimeout(() => finish(null, null), 3000);
+          window.addEventListener('message', receive);
+          window.opener.postMessage({ type: 'visualwavedrom-scope-compare-request', requestId, action, waveId,
+            libraryId: currentWaveLibraryId || requestedLibraryId }, '*');
+        });
+      };
+
       await window.VisualWaveDromScope.mount({
         libraryName: currentWaveLibraryFile || 'SQLite 波形库',
+        comparisonLibraryId: currentWaveLibraryId || requestedLibraryId,
+        listComparisonDocuments: async () => {
+          const incoming = await requestComparisonFromOpener('list');
+          if (incoming) return incoming;
+          await ensureScopeLibraryState();
+          return savedTags.map((tag) => ({ name: tag.name, title: getSavedTagTitle(tag) }));
+        },
+        loadComparisonDocument: async (name) => {
+          const incoming = await requestComparisonFromOpener('load', name);
+          if (incoming) return incoming;
+          await ensureScopeLibraryState();
+          const tag = await ensureWaveDocumentLoaded(name);
+          if (!tag) throw new Error('比较波形图不存在或已被删除');
+          return Object.assign({}, tag, { transientState: scopeTransientStates.get(scopeTransientStateKey(currentWaveLibraryId, name)) || null });
+        },
         getDocument: async () => Object.assign({}, await resolveInitialTag()),
         getTransientState: async () => {
           await resolveInitialTag();
@@ -16750,6 +16793,42 @@ ${lines.join('\n')}`;
               error: error && error.message ? error.message : String(error)
             }, '*');
           });
+          return;
+        }
+        if (message.type === 'visualwavedrom-scope-compare-request') {
+          const knownWindow = Array.from(scopeWindowRefs.values()).some((refs) => refs.has(event.source));
+          if (!knownWindow || message.libraryId !== currentWaveLibraryId) return;
+          const libraryId = currentWaveLibraryId;
+          const respond = (result, error) => event.source.postMessage({ type: 'visualwavedrom-scope-compare-response',
+            requestId: message.requestId, libraryId, result, error }, '*');
+          if (message.action === 'list') {
+            respond(savedTags.map((tag) => ({ name: tag.name, title: getSavedTagTitle(tag) })));
+          } else if (message.action === 'load') {
+            event.source.postMessage({ type: 'visualwavedrom-scope-compare-response', requestId: message.requestId,
+              libraryId, pending: true }, '*');
+            void ensureWaveDocumentLoaded(String(message.waveId || '')).then(async (tag) => {
+              if (libraryId !== currentWaveLibraryId) throw new Error('波形库已切换，请重新打开示波器');
+              if (!tag) throw new Error('比较波形图不存在或已被删除');
+              const scopeRefs = scopeWindowRefs.get(tag.name);
+              if (scopeRefs) {
+                for (const ref of scopeRefs) {
+                  if (!ref || ref.closed) continue;
+                  let view;
+                  try { view = ref.__visualWaveDromScopeView; } catch (_error) { continue; }
+                  if (view && typeof view.getComparisonDocument === 'function') {
+                    const snapshot = await view.getComparisonDocument();
+                    if (libraryId !== currentWaveLibraryId) throw new Error('波形库已切换，请重新打开示波器');
+                    respond(snapshot);
+                    return;
+                  }
+                }
+              }
+              const snapshot = getWaveDocumentServerSnapshot(tag, tag.name === editingWaveDocumentName);
+              respond(Object.assign({}, snapshot, {
+                transientState: scopeTransientStates.get(scopeTransientStateKey(libraryId, tag.name)) || null
+              }));
+            }).catch((error) => respond(null, error.message));
+          }
           return;
         }
         if (message.type === 'visualwavedrom-scope-source-request') {
@@ -21561,7 +21640,7 @@ ${lines.join('\n')}`;
 
     function openWaveTimingPreview(documentName) {
       const libraryId = currentWaveLibraryId;
-      let lastMeta = null, prepared = null;
+      let lastMeta = null, lastParameterRevision = -1, prepared = null;
       const getMeta = async () => {
         if (currentWaveLibraryId !== libraryId) throw new Error('波形库已切换，请关闭并重新打开时延检查');
         const tag = await ensureWaveDocumentLoaded(documentName);
@@ -21577,14 +21656,20 @@ ${lines.join('\n')}`;
           id: libraryId + ':' + documentName,
           read: async () => {
             const { tag, meta } = await getMeta();
-            if (meta !== lastMeta) {
-              const resolved = window.VisualWaveDromParameters.resolve(meta.source);
-              prepared = Object.assign({}, resolved, {
-                edge: (meta.source.edge || []).map((value) => window.VisualWaveDromParameters.text(value, meta.source))
-              });
+            const parameters = window.VisualWaveDromParameters, core = window.VisualWaveDromTimingCore;
+            const parameterRevision = parameters.getRevision();
+            if (meta !== lastMeta || parameterRevision !== lastParameterRevision) {
+              const resolved = parameters.resolve(meta.source);
+              const edges = Array.isArray(meta.source.edge) ? meta.source.edge : [];
+              prepared = {
+                source: Object.assign({}, resolved, { edge: edges.map((value) => parameters.text(value, meta.source)) }),
+                edgeTimings: edges.map((value) => core.parseDelay(core.edgeParts(value).label,
+                  resolved.timingCheck && resolved.timingCheck.cycleTimeNs, (expression) => parameters.evaluate(expression, meta.source)))
+              };
               lastMeta = meta;
+              lastParameterRevision = parameterRevision;
             }
-            return { source: prepared, title: getSavedTagTitle(tag) };
+            return Object.assign({ title: getSavedTagTitle(tag) }, prepared);
           },
           apply: async (config) => {
             const { tag, meta } = await getMeta();

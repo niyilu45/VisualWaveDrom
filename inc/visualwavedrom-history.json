@@ -1,5 +1,25 @@
 [
   {
+    "version": "2026.10.20.1",
+    "date": "2026-10-20T02:28:23Z",
+    "head": "6c464f049150ad63c5c81035507bdb4eb5f57e7d",
+    "notes": [
+      "新增示波器比较：支持上下、左右分屏及信号重叠，按名称逐列比较，包含公式结果、错误跳转与可重命名错误标签。",
+      "修复已确定相对时延无法参与上下行推算导致互相等待的问题，保持连接约束优先并继续推算后续行。",
+      "时延标签支持参数公式、纯常数运算和 max/min；参数更新后自动重新检查，明确提示公式错误。",
+      "补充示波器比较及公式时延使用说明。"
+    ],
+    "commits": [
+      {
+        "id": "6c464f049150ad63c5c81035507bdb4eb5f57e7d",
+        "date": "2026-10-19T19:11:17+08:00",
+        "title": "feat: export parameter tables and refine timing hold expansion",
+        "body": "Add TOML export for complete parameter tables in main and standalone views. Export evaluated values with formula and description comments, validate invalid rows, preserve original expressions, and document the workflow.\n\nShow single-wave opening progress and visible failure feedback. Offer a direct tab link when script popups fail and log each opening stage.\n\nResolve multi-omission data holds as one elastic span while preserving single-gap arithmetic inference and explicit node constraints. XXX Wave Fsm.Work now expands from cycle 5 to 27 using en, for 22 columns.\n\nPublish release 2026.10.19.2. Validation: TOML parser and browser download checks, popup failure/retry checks, targeted timing cases and actual worker-rendered 22-column result, JavaScript syntax, staged diff checks, and 62 release hashes. Excludes local libraries, caches and unrelated changes."
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.10.19.2",
     "date": "2026-10-19T11:09:14Z",
     "head": "1d83fa5d44cb5bc1dfa186056520784f6d91fe3c",

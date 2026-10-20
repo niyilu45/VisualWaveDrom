@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20260901-analog-interpolation-v5';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20261020-comparison';
   const FormulaEngine = global.VisualWaveDromFormula || null;
   const DEFAULT_ROW_HEIGHT = 42;
   const DEFAULT_MULTI_WAVE_ROW_HEIGHT = 68;
@@ -862,6 +862,7 @@
             <span id="scope-library-name"></span>
           </div>
           <div class="scope-toolbar-group" aria-label="视图控制">
+            <button type="button" class="scope-command-btn" id="scope-compare">比较示波器</button>
             <button type="button" class="scope-command-btn" id="scope-add-signal"
                 title="新增一个仅在当前网页会话保留的空波形" disabled>新增波形</button>
             <button type="button" class="scope-command-btn" id="scope-add-multi-wave"
@@ -1452,6 +1453,14 @@
       this.root.querySelector('#scope-save-instance').addEventListener('click', () => this.saveInstance());
       this.saveSourceButton.addEventListener('click', () => this.saveChanges());
       this.root.querySelector('#scope-open-normal').addEventListener('click', () => this.adapter.openNormalView());
+      this.root.querySelector('#scope-compare').addEventListener('click', () => {
+        if (!this.meta || this.formulaRefreshInFlight || this.formulaApplyInFlight) {
+          this.setStatus('请等待当前公式计算完成后再比较');
+          return;
+        }
+        if (!this.comparison) this.comparison = new global.VisualWaveDromScopeComparison(this);
+        void this.comparison.open();
+      });
       this.pointApplyButton.addEventListener('click', () => this.applySelectedPoint());
       this.pointInsertButton.addEventListener('click', () => this.insertSelectedPoint());
       this.pointDeleteButton.addEventListener('click', () => this.deleteSelectedPoint());
@@ -1639,6 +1648,7 @@
       this.outputTitleInput.addEventListener('input', () => this.scheduleBuild());
 
       global.addEventListener('keydown', (event) => {
+        if (this.comparison && this.comparison.active) return;
         if (event.key === 'Escape' && this.signalRowDrag) {
           event.preventDefault();
           this.finishSignalRowDrag(null, true);
@@ -8240,6 +8250,17 @@
         this.setStatus('保存展示实例失败：' + (error.message || String(error)), true);
         this.log('scope-save', { phase: 'instance-error', message: error.message || String(error) });
       }
+    }
+
+    async getComparisonDocument() {
+      if (this.formulaRefreshInFlight || this.formulaApplyInFlight) throw new Error('该示波器正在计算公式，请稍后重新加载');
+      const content = this.dataDraftDirty ? await this.buildDraftSourceContent() : this.document.content;
+      const transientState = this.dataDraftDirty ? null : clone(this.transientFormulaState);
+      if (transientState) this.meta.rows.forEach((row) => {
+        transientState.signalNames[row.rowId] = this.signalDisplayName(row.index);
+      });
+      return Object.assign({}, this.document, { content, transientState,
+        display: { modes: clone(this.modes), busFormats: clone(this.busFormats), analogFormats: clone(this.analogFormats) } });
     }
 
     async buildDraftSourceContent() {
