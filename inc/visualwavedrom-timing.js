@@ -257,6 +257,19 @@
         paragraph('根据' + label + (check.referenceRow === undefined ? '' : '（第' + (check.referenceRow + 1) + '行）')
           + '：' + status + '；' + check.reason + (check.used ? '；已采用此侧的可用时刻' : '') + '。');
       });
+      const conversions = (model.parameterConversions || []).concat(row.parameterConversions || []);
+      if (conversions.length) {
+        const heading = doc.createElement('p'), title = doc.createElement('strong');
+        title.textContent = '公式转换结果'; heading.appendChild(title); detailTarget.appendChild(heading);
+        conversions.forEach((conversion) => {
+          const path = conversion.path || [], dataField = path.indexOf('data');
+          const label = path[0] === 'edge' ? '连接 ' + (Number(path[1]) + 1)
+            : dataField >= 0 ? '数据标签' + (path[dataField + 1] === undefined ? '' : ' ' + (Number(path[dataField + 1]) + 1))
+            : path[0] === 'signal' ? Number.isInteger(conversion.row) ? '本行 ' + path[path.length - 1] : '分组标签' : path.join('.');
+          const errors = conversion.expressions.filter((entry) => entry.error).map((entry) => entry.error);
+          paragraph(label + '：' + conversion.raw + ' → ' + (errors.length ? '转换失败：' + errors.join('；') : conversion.value), errors.length ? 'unknown' : '');
+        });
+      }
       row.comparisons.forEach((comparison) => {
         const heading = doc.createElement('p'), title = doc.createElement('strong');
         const prefix = comparison.problemNumbers.map((number) => '[' + number + '] ').join('');
@@ -665,7 +678,7 @@
         if (worker) worker.terminate();
         const current = ++version; requestTime = performance.now();
         message(model ? '正在重新检查，当前为上次结果...' : '正在计算连接时延...');
-        const script = 'const engine=(' + global.createVisualWaveDromTimingEngine.toString() + ')();onmessage=(e)=>{try{postMessage({result:engine.analyze(e.data.source,e.data.edgeTimings)})}catch(error){postMessage({error:error.message})}};';
+        const script = 'const engine=(' + global.createVisualWaveDromTimingEngine.toString() + ')();onmessage=(e)=>{try{postMessage({result:engine.analyze(e.data.source,e.data.edgeTimings,e.data.parameterConversions)})}catch(error){postMessage({error:error.message})}};';
         const url = URL.createObjectURL(new Blob([script], { type: 'text/javascript' }));
         try { worker = new Worker(url); } finally { URL.revokeObjectURL(url); }
         worker.onmessage = (event) => {
@@ -675,7 +688,7 @@
           worker.terminate(); worker = null;
         };
         worker.onerror = (event) => { if (current === version && !disposed) { message('后台检查失败：' + event.message, true); worker.terminate(); worker = null; } };
-        worker.postMessage({ source, edgeTimings: snapshot.edgeTimings });
+        worker.postMessage({ source, edgeTimings: snapshot.edgeTimings, parameterConversions: snapshot.parameterConversions });
       } catch (error) {
         version++; if (worker) worker.terminate(); worker = null; source = null;
         message('无法检查：' + error.message + (model ? '（画面保留上次结果）' : ''), true);

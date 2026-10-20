@@ -20,7 +20,8 @@
 .parameter-tree-label.active { color: #83bfff; }
 .parameter-tree-chevron { display: inline-block; width: 16px; color: var(--text-muted); }
 .parameter-count { margin: 0 8px; color: var(--text-muted); font-size: .8rem; }
-.parameter-grid-scroll { flex: 1; min-height: 0; overflow: auto; }
+.parameter-grid-scroll { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; }
+.parameter-row-reordering, .parameter-row-reordering * { cursor: grabbing; user-select: none; }
 .parameter-grid { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: .9rem; }
 .parameter-grid th { position: sticky; top: 0; z-index: 1; text-align: left; background: var(--surface-2); padding: 10px 12px; border-bottom: 1px solid var(--border); font-weight: 600; overflow-wrap: anywhere; }
 .parameter-grid th:nth-child(1) { width: 28%; }
@@ -49,7 +50,7 @@
 .parameter-reference-highlight { background: #fff0a6 !important; outline: 2px solid #aa6500; outline-offset: 2px; }
 svg text.parameter-reference-highlight { background: none !important; outline: none; paint-order: stroke fill; stroke: #ffd768; stroke-width: 6px; stroke-linejoin: round; }
 svg text.parameter-reference-highlight tspan { paint-order: stroke fill; stroke: #ffd768; stroke-width: 6px; }
-.parameter-row-select { display: inline-flex; align-items: center; gap: 2px; flex: 0 0 44px; min-height: 34px; padding: 0; border: 0; background: transparent; color: var(--text-muted); font: inherit; font-variant-numeric: tabular-nums; cursor: grab; user-select: none; }
+.parameter-row-select { display: inline-flex; align-items: center; gap: 2px; flex: 0 0 44px; min-height: 34px; padding: 0; border: 0; background: transparent; color: var(--text-muted); font: inherit; font-variant-numeric: tabular-nums; cursor: grab; user-select: none; touch-action: none; }
 .parameter-row-select:active { cursor: grabbing; }
 .parameter-row-number { flex: 1; min-width: 0; font-size: .8em; }
 .parameter-row-error { display: inline-flex; flex: 0 0 14px; width: 14px; height: 14px; color: var(--error); }
@@ -88,7 +89,9 @@ svg text.parameter-reference-highlight tspan { paint-order: stroke fill; stroke:
 .parameter-link-columns h3 { font-size: .9rem; margin-bottom: 10px; }
 .parameter-search { width: 100%; margin-bottom: 8px; }
 .parameter-choices, .parameter-priority { max-height: 42vh; overflow: auto; }
-.parameter-choice { display: flex; align-items: center; gap: 10px; padding: 8px 4px; border-bottom: 1px solid var(--border); cursor: pointer; }
+.parameter-choice-row { display: flex; align-items: center; gap: 4px; border-bottom: 1px solid var(--border); }
+.parameter-choice { display: flex; flex: 1; min-width: 0; align-items: center; gap: 10px; padding: 8px 4px; cursor: pointer; }
+.parameter-link-open { color: var(--accent); }
 .parameter-choice input { accent-color: var(--accent); width: 16px; height: 16px; flex: 0 0 16px; }
 .parameter-choice span { display: flex; flex-direction: column; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
 .parameter-choice strong { font-size: .88rem; font-weight: 500; }

@@ -1,5 +1,25 @@
 [
   {
+    "version": "2026.10.20.3",
+    "date": "2026-10-20T03:58:19Z",
+    "head": "a25610b3cd8812d44aa79462895608c70b1d549b",
+    "notes": [
+      "新增参数表达式 noTrans 配置：图上显示变量名和运算符，时延检查使用实际计算值，并在详情显示公式转换结果。",
+      "链接参数表卡片的参数表和加载顺序列表增加单独打开图标，可在新标签页打开对应参数表，并保留当前选择草稿。",
+      "参数表变量行改用按住拖动，支持拖动过程中滚轮上下浏览、实时更新插入提示，以及取消、撤销和重做。",
+      "更新使用说明及浏览器缓存标识。"
+    ],
+    "commits": [
+      {
+        "id": "a25610b3cd8812d44aa79462895608c70b1d549b",
+        "date": "2026-10-20T11:07:16+08:00",
+        "title": "fix: resolve timing hold references and preserve Vim line deletes",
+        "body": "Expand clocks and uniform waveform holds across omitted continuations, ignore unused node cuts, and isolate contradictory timing components. Try usable anchors from either neighbour before reporting failure, retain upper-row priority for valid references, and explain both reference directions without counting circular dependencies.\n\nRender determined expansion spans with solid boundaries and distinguish proportional original-column references from genuinely unknown positions. Preserve real internal connection constraints and update timing documentation.\n\nStore rows removed by Vim dd or visual-line deletion in the row register so p/P insert whole rows, preserving names and data labels without duplicating node endpoints. Support counted line deletion and document the commands.\n\nPublish release 2026.10.20.2. Validation: 912 focused timing variations, saved-library regressions, Chrome worker and desktop/mobile checks, Vim line-register/undo checks, JavaScript syntax, staged diffs and all 65 release hashes. Excludes local waveform libraries, temporary files and unrelated changes."
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.10.20.2",
     "date": "2026-10-20T03:06:43Z",
     "head": "9e67be8ce236ad85e76adf31c81aa648940992d4",

@@ -7,7 +7,7 @@
   const clone = (value) => JSON.parse(JSON.stringify(value));
   const empty = () => ({ revision: 0, directories: [], tables: [], presets: [] });
   let catalog = empty(), libraryId = '', bridge = null, generation = 0;
-  let cache = new WeakMap(), selectedFolder = '', selectedTable = '', activePage = 'wave';
+  let cache = new WeakMap(), calculationCache = new WeakMap(), selectedFolder = '', selectedTable = '', activePage = 'wave';
   const textDecorations = new WeakMap();
   const referenceDocuments = new Map();
   let referenceRefresh = null, referenceScan = 0, referenceHighlight = null;
@@ -67,11 +67,20 @@
   }
   function id() { return 'param-' + (global.crypto.randomUUID ? global.crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2)); }
   function linked(source) { return source && Array.isArray(source.parameterTables) ? source.parameterTables : []; }
+  function parseExpression(raw) {
+    const separator = raw.indexOf(':');
+    const expression = (separator < 0 ? raw : raw.slice(0, separator)).trim();
+    const options = separator < 0 ? [] : raw.slice(separator + 1).split(',').map((option) => option.trim());
+    const unsupported = options.filter((option) => option !== 'noTrans');
+    const error = !expression ? '参数表达式不能为空'
+      : unsupported.length ? '不支持的表达式配置：' + unsupported.map((option) => option || '(空配置)').join(', ') : '';
+    return { expression, options, noTrans: options.includes('noTrans'), error };
+  }
   function referenceNames(raw) {
     const names = new Set();
     if (typeof raw !== 'string' || !raw.includes('$')) return names;
     for (const match of raw.matchAll(tokenPattern)) {
-      for (const variable of match[1].matchAll(/\$[^{}\s$(),]+/g)) names.add(variable[0].slice(1));
+      for (const variable of parseExpression(match[1]).expression.matchAll(/\$[^{}\s$(),]+/g)) names.add(variable[0].slice(1));
     }
     return names;
   }
@@ -313,14 +322,22 @@
     }
     return null;
   }
-  function text(value, source) {
+  function text(value, source, options) {
     if (typeof value !== 'string' || !value.includes('$')) return value;
     return value.replace(tokenPattern, (raw, expression) => {
+      const parsed = parseExpression(expression);
+      if (parsed.noTrans && !parsed.error && (!options || options.mode !== 'calculate'))
+        return parsed.expression.replace(/[$\s]/g, '');
       const result = evaluate(expression, source);
+      if (options && options.onExpression) options.onExpression({ raw, expression: parsed.expression,
+        options: parsed.options, value: result.value, error: result.error || '' });
       return result.error ? raw : result.value;
     });
   }
   function evaluate(expression, source, state) {
+    const parsed = parseExpression(expression);
+    if (parsed.error) return { error: parsed.error, variables: [] };
+    expression = parsed.expression;
     const context = state || { stack: [], values: new Map() };
     const variables = new Map();
     const hasVariables = expression.includes('$');
@@ -418,25 +435,46 @@
       if (found.has(match[1])) return '';
       found.add(match[1]);
       const result = evaluate(match[1], source);
-      const summary = result.error ? '\n' + result.error : '\n结果：' + result.value;
-      return match[0] + summary + result.variables.map((item) => '\n\n$' + item.name + '\n参数表：' + item.table
+      const parsed = parseExpression(match[1]);
+      const summary = result.error ? '\n' + result.error : '\n' + (parsed.noTrans ? '时延计算结果：' : '结果：') + result.value;
+      return match[0] + (parsed.noTrans && !parsed.error ? '\n显示：' + parsed.expression.replace(/[$\s]/g, '') + '（noTrans）' : '')
+        + summary + result.variables.map((item) => '\n\n$' + item.name + '\n参数表：' + item.table
         + '\n值：' + item.val + (item.formula ? '\n公式：' + item.rawVal : '') + '\n说明：' + (item.description || '无')).join('');
     }).filter(Boolean).join('\n\n');
   }
-  function resolve(source) {
-    if (!source || typeof source !== 'object' || !linked(source).length) return source;
-    const old = cache.get(source);
-    if (old && old.generation === generation) return old.value;
-    function visit(value) {
-      if (typeof value === 'string') return text(value, source);
+  function resolve(source, options) {
+    if (!source || typeof source !== 'object') return source;
+    const calculate = options && options.mode === 'calculate', resolvedCache = calculate ? calculationCache : cache;
+    const conversions = [], indices = new WeakMap();
+    const publish = (entries) => { if (options && Array.isArray(options.conversions)) entries.forEach((entry) => options.conversions.push(entry)); };
+    const old = resolvedCache.get(source);
+    if (old && old.generation === generation) { publish(old.conversions); return old.value; }
+    if (calculate) {
+      let index = 0;
+      const indexRows = (items) => (items || []).forEach((item) => {
+        if (Array.isArray(item)) indexRows(item.slice(typeof item[0] === 'string' ? 1 : 0));
+        else if (item && typeof item === 'object') indices.set(item, index++);
+      });
+      indexRows(source.signal);
+    }
+    function resolveText(raw, path, row) {
+      if (!calculate) return text(raw, source);
+      const expressions = [];
+      const value = text(raw, source, { mode: 'calculate', onExpression: (entry) => expressions.push(entry) });
+      if (expressions.length) conversions.push({ row, path, raw, value, expressions });
+      return value;
+    }
+    function visit(value, path, row) {
+      if (typeof value === 'string') return resolveText(value, path, row);
       if (!value || typeof value !== 'object') return value;
+      if (indices.has(value)) row = indices.get(value);
       let next = value;
       Object.keys(value).forEach((key) => {
         if (key === 'parameterTables') return;
         const raw = value[key];
         const result = key === 'data' && typeof raw === 'string' && raw.includes('$') && raw.match(tokenPattern)
-          ? (raw.match(dataTokenPattern) || []).map((label) => text(label, source))
-          : visit(raw);
+          ? (raw.match(dataTokenPattern) || []).map((label, index) => resolveText(label, path.concat(key, index), row))
+          : visit(raw, calculate ? path.concat(key) : path, row);
         if (result !== value[key]) {
           if (next === value) next = Array.isArray(value) ? value.slice() : Object.assign({}, value);
           next[key] = result;
@@ -444,11 +482,13 @@
       });
       return next;
     }
-    const value = visit(source);
-    cache.set(source, { generation, value });
+    const value = visit(source, [], undefined);
+    const entry = { generation, value, conversions };
+    resolvedCache.set(source, entry);
     // Do not expand nested placeholders a second time when a render window
     // passes an already-resolved document through the rendering pipeline.
-    if (value !== source) cache.set(value, { generation, value });
+    if (value !== source) resolvedCache.set(value, entry);
+    publish(conversions);
     return value;
   }
   function decorateText(node, raw, source, options) {
@@ -469,8 +509,10 @@
     for (const match of value.matchAll(tokenPattern)) {
       rendered += value.slice(end, match.index);
       const result = evaluate(match[1], source);
-      const replacement = result.error ? match[0] : result.value;
-      if (!result.error && numericPattern.test(replacement.trim()) && Number.isFinite(Number(replacement)) && Number(replacement) < 0) {
+      const parsed = parseExpression(match[1]);
+      const symbolic = parsed.noTrans && !parsed.error;
+      const replacement = symbolic ? parsed.expression.replace(/[$\s]/g, '') : result.error ? match[0] : result.value;
+      if (!symbolic && !result.error && numericPattern.test(replacement.trim()) && Number.isFinite(Number(replacement)) && Number(replacement) < 0) {
         ranges.push({ start: rendered.length, end: rendered.length + replacement.length });
       }
       rendered += replacement;
@@ -1003,7 +1045,7 @@
     });
   }
   function invalidate() {
-    generation++; cache = new WeakMap();
+    generation++; cache = new WeakMap(); calculationCache = new WeakMap();
     if (bridge) bridge.changed();
   }
   function changed(render, applyingHistory) {
@@ -1307,30 +1349,47 @@
     const body = element('tbody');
     const rowViews = [];
     const rowDropViews = new Map();
-    const rowDragType = 'application/x-vwd-parameter-row', dragLibraryId = libraryId;
-    let draggedRow = null, draggedLine = null, dropTarget = null;
+    const dragLibraryId = libraryId;
+    let draggedRow = null, draggedLine = null, dropTarget = null, rowDrag = null, rowDragFrame = 0;
     function clearDropTarget() {
       if (dropTarget) dropTarget.view.line.classList.remove('parameter-drop-before', 'parameter-drop-after');
       dropTarget = null;
     }
     function clearRowDrag() {
+      const previous = rowDrag; rowDrag = null;
+      global.removeEventListener('keydown', cancelRowDrag, true);
+      global.removeEventListener('blur', clearRowDrag);
+      global.removeEventListener('lostpointercapture', rowPointerReleased, true);
+      if (rowDragFrame) { global.cancelAnimationFrame(rowDragFrame); rowDragFrame = 0; }
       clearDropTarget();
       if (draggedLine) draggedLine.classList.remove('parameter-row-dragging');
       draggedRow = draggedLine = null;
+      scroller.classList.remove('parameter-row-reordering');
+      if (previous && previous.handle.hasPointerCapture(previous.pointerId)) previous.handle.releasePointerCapture(previous.pointerId);
     }
-    function acceptsRowDrag(event) {
+    function cancelRowDrag(event) {
+      if (rowDrag && event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); clearRowDrag(); }
+    }
+    function rowPointerReleased(event) {
+      if (rowDrag && rowDrag.pointerId === event.pointerId) clearRowDrag();
+    }
+    function acceptsRowDrag() {
       return draggedRow && dragLibraryId === libraryId && activePage === 'parameters' && selectedTable === table.id
-        && catalog.tables.includes(table) && scroller.isConnected && event.dataTransfer && event.dataTransfer.types.includes(rowDragType);
+        && catalog.tables.includes(table) && scroller.isConnected;
     }
     function findRowDrop(event) {
-      if (!acceptsRowDrag(event)) return null;
-      let view = rowDropViews.get(event.target.closest('tr'));
+      if (!acceptsRowDrag()) return null;
+      const bounds = scroller.getBoundingClientRect();
+      const headerBottom = Math.max(bounds.top, ...Array.from(tr.children, (cell) => cell.getBoundingClientRect().bottom));
+      if (event.clientX < bounds.left || event.clientX >= bounds.right || event.clientY < headerBottom || event.clientY >= bounds.bottom) return null;
+      const underPointer = document.elementFromPoint(event.clientX, event.clientY);
+      let view = rowDropViews.get(underPointer && underPointer.closest('tr'));
       let after;
       if (view && !view.line.hidden) {
         const bounds = view.line.getBoundingClientRect(); after = event.clientY >= bounds.top + bounds.height / 2;
       } else {
         const visible = rowViews.filter((item) => !item.line.hidden);
-        if (!visible.length || event.clientY < head.getBoundingClientRect().bottom) return null;
+        if (!visible.length) return null;
         const first = visible[0], last = visible[visible.length - 1];
         if (event.clientY < first.line.getBoundingClientRect().top) { view = first; after = false; }
         else if (event.clientY >= last.line.getBoundingClientRect().bottom) { view = last; after = true; }
@@ -1340,22 +1399,21 @@
       let index = target + (after ? 1 : 0); if (from < index) index--;
       return from < 0 || target < 0 || from === index ? null : { view, after };
     }
-    scroller.addEventListener('dragover', (event) => {
-      if (!acceptsRowDrag(event)) return;
-      event.preventDefault(); event.stopPropagation(); event.dataTransfer.dropEffect = 'move';
+    function updateRowDrop(event) {
       const next = findRowDrop(event);
       if (dropTarget && next && dropTarget.view === next.view && dropTarget.after === next.after) return;
       clearDropTarget(); dropTarget = next;
       if (dropTarget) dropTarget.view.line.classList.add(dropTarget.after ? 'parameter-drop-after' : 'parameter-drop-before');
-    });
-    scroller.addEventListener('dragleave', (event) => { if (!scroller.contains(event.relatedTarget)) clearDropTarget(); });
-    scroller.addEventListener('drop', (event) => {
-      if (!acceptsRowDrag(event)) return;
-      event.preventDefault(); event.stopPropagation();
-      const target = findRowDrop(event), row = draggedRow;
-      clearRowDrag();
-      if (target) moveParameterRow(table, row, target.view.row, target.after);
-    });
+    }
+    // Pointer capture keeps wheel scrolling available while a row is held.
+    scroller.addEventListener('scroll', () => {
+      if (!rowDrag || !draggedRow || rowDragFrame) return;
+      rowDragFrame = global.requestAnimationFrame(() => {
+        rowDragFrame = 0;
+        if (rowDrag && acceptsRowDrag()) updateRowDrop({ clientX: rowDrag.x, clientY: rowDrag.y });
+        else clearRowDrag();
+      });
+    }, { passive: true });
     const valueSource = { parameterTables: [table.id] };
     function refreshValues() {
       const context = { stack: [], values: new Map() };
@@ -1400,15 +1458,35 @@
           fieldBox.append(jump);
           const handle = button('选中第 ' + (index + 1) + ' 行', () => selectRow(row, line));
           handle.className = 'parameter-row-select';
-          handle.draggable = true;
-          handle.addEventListener('dragstart', (event) => {
-            if (modal || activePage !== 'parameters' || selectedTable !== table.id || !catalog.tables.includes(table)) { event.preventDefault(); return; }
-            event.stopPropagation(); selectRow(row, line);
-            draggedRow = row; draggedLine = line;
-            event.dataTransfer.setData(rowDragType, table.id); event.dataTransfer.effectAllowed = 'move';
-            line.classList.add('parameter-row-dragging');
+          handle.addEventListener('pointerdown', (event) => {
+            if (event.button !== 0 || !event.isPrimary || modal || activePage !== 'parameters' || selectedTable !== table.id || !catalog.tables.includes(table)) return;
+            event.preventDefault(); event.stopPropagation(); clearRowDrag();
+            handle.focus({ preventScroll: true }); selectRow(row, line);
+            rowDrag = { handle, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, x: event.clientX, y: event.clientY };
+            global.addEventListener('keydown', cancelRowDrag, true);
+            global.addEventListener('blur', clearRowDrag);
+            global.addEventListener('lostpointercapture', rowPointerReleased, true);
+            try { handle.setPointerCapture(event.pointerId); }
+            catch (_) { clearRowDrag(); }
           });
-          handle.addEventListener('dragend', clearRowDrag);
+          handle.addEventListener('pointermove', (event) => {
+            if (!rowDrag || rowDrag.pointerId !== event.pointerId) return;
+            rowDrag.x = event.clientX; rowDrag.y = event.clientY;
+            if (!draggedRow) {
+              if (Math.hypot(event.clientX - rowDrag.startX, event.clientY - rowDrag.startY) < 4) return;
+              draggedRow = row; draggedLine = line;
+              line.classList.add('parameter-row-dragging'); scroller.classList.add('parameter-row-reordering');
+            }
+            event.preventDefault(); updateRowDrop(event);
+          });
+          handle.addEventListener('pointerup', (event) => {
+            if (!rowDrag || rowDrag.pointerId !== event.pointerId) return;
+            const target = findRowDrop(event), moving = draggedRow;
+            clearRowDrag();
+            if (target) moveParameterRow(table, moving, target.view.row, target.after);
+          });
+          handle.addEventListener('pointercancel', clearRowDrag);
+          handle.addEventListener('lostpointercapture', clearRowDrag);
           const marker = element('span', 'parameter-row-error'); marker.hidden = true; marker.setAttribute('aria-hidden', 'true');
           marker.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="lucide">' + paths.close + '</svg>';
           handle.replaceChildren(marker, element('span', 'parameter-row-number', index + 1));
@@ -1990,6 +2068,19 @@
     const search = element('input', 'parameter-search'); search.placeholder = '搜索参数表'; search.setAttribute('aria-label', '搜索参数表'); available.append(search);
     const choices = element('div', 'parameter-choices'), priority = element('div', 'parameter-priority'); available.append(choices); selected.append(priority); columns.append(available, selected); body.append(columns, message);
     function move(from, to) { if (to < 0 || to >= order.length || from === to) return; order.splice(to, 0, order.splice(from, 1)[0]); renderLists(); }
+    function openTableButton(table) {
+      const open = button(table ? '单独打开参数表：' + table.name : '参数表已删除，无法单独打开', async (event) => {
+        event.preventDefault(); event.stopPropagation();
+        open.disabled = true; message.textContent = '';
+        try { await bridge.openTable(table.id); }
+        catch (error) { message.textContent = error.message; }
+        finally { open.disabled = false; }
+      }, 'external');
+      open.classList.add('parameter-link-open'); open.disabled = !table;
+      if (table) open.dataset.tableId = table.id;
+      open.addEventListener('dragstart', (event) => { event.preventDefault(); event.stopPropagation(); });
+      return open;
+    }
     function renderLists() {
       const focused = document.activeElement;
       const focusRow = focused && focused.closest('.parameter-priority-row');
@@ -1997,10 +2088,12 @@
       const focusLabel = focused && focused.getAttribute('aria-label');
       choices.replaceChildren(); priority.replaceChildren();
       catalog.tables.filter((table) => (folderPath(table.parentId) + table.name).toLowerCase().includes(search.value.toLowerCase())).forEach((table) => {
+        const row = element('div', 'parameter-choice-row');
         const label = element('label', 'parameter-choice'); const check = element('input'); check.type = 'checkbox'; check.checked = order.includes(table.id); check.setAttribute('aria-label', table.name);
         check.dataset.tableId = table.id;
         check.addEventListener('change', () => { order = order.filter((entry) => entry !== table.id); if (check.checked) order.push(table.id); renderLists(); });
-        const caption = element('span'); caption.append(element('strong', '', table.name), element('small', '', folderPath(table.parentId) || '根目录')); label.append(check, caption); choices.append(label);
+        const caption = element('span'); caption.append(element('strong', '', table.name), element('small', '', folderPath(table.parentId) || '根目录')); label.append(check, caption);
+        row.append(label, openTableButton(table)); choices.append(row);
       });
       if (!choices.childNodes.length) choices.append(element('p', 'parameter-empty', '没有匹配的参数表'));
       order.forEach((tableId, index) => {
@@ -2014,7 +2107,7 @@
         if (!table) name.classList.add('error');
         const up = button('提高优先级', () => move(index, index - 1), 'up'); up.disabled = index === 0;
         const down = button('降低优先级', () => move(index, index + 1), 'down'); down.disabled = index === order.length - 1;
-        row.append(handle, name, up, down, button('取消加载', () => { order.splice(index, 1); renderLists(); }, 'close')); priority.append(row);
+        row.append(handle, name, up, down, button('取消加载', () => { order.splice(index, 1); renderLists(); }, 'close'), openTableButton(table)); priority.append(row);
       });
       if (!order.length) priority.append(element('p', 'parameter-empty', '未加载参数表'));
       if (focusId) {

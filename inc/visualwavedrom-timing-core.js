@@ -64,7 +64,7 @@
       if (Number.isInteger(number)) text = text.replace(/^-/, '').padStart(style.width, '0');
       return style.prefix + (number < 0 ? '-' : style.plus ? '+' : '') + style.marker + text.replace(/^-/, '') + style.suffix;
     }
-    function analyze(source, edgeTimings) {
+    function analyze(source, edgeTimings, parameterConversions) {
       if (!source || !Array.isArray(source.signal)) throw new Error('signal 必须是波形数组');
       const config = source.timingCheck || {};
       const tolerance = Number.isFinite(Number(config.tolerance)) && Number(config.tolerance) >= 0 ? Number(config.tolerance) : 1e-7;
@@ -880,6 +880,18 @@
           issue('unknown', '无非未知波形或有效连接时延，无法判断对齐', [row.index]);
       });
       let viewMinimum = minimum, viewMaximum = maximum;
+      const globalConversions = [];
+      rows.forEach((row) => { row.parameterConversions = []; });
+      (parameterConversions || []).forEach((conversion) => {
+        const path = conversion.path || [];
+        const edge = path[0] === 'edge' && edges[Number(path[1])];
+        const affected = Number.isInteger(conversion.row) && rows[conversion.row] ? [conversion.row]
+          : edge ? Array.from(new Set([edge.fromNode?.row, edge.toNode?.row].filter((index) => index !== undefined))) : [];
+        if (affected.length) affected.forEach((index) => rows[index].parameterConversions.push(conversion));
+        else globalConversions.push(conversion);
+        const errors = Array.from(new Set(conversion.expressions.filter((entry) => entry.error).map((entry) => entry.error)));
+        if (errors.length) issue('unknown', '参数公式转换失败：' + conversion.raw + '；' + errors.join('；'), affected);
+      });
       const rowIssues = rows.map(() => []);
       issues.forEach((entry) => entry.rows.forEach((id) => rowIssues[id].push(entry)));
       rows.forEach((row) => {
@@ -1136,7 +1148,7 @@
         edge.status = issues.some((item) => item.kind === 'conflict' && item.edges.includes(edge.index)) ? 'conflict'
           : edge.invalid || edge.timing.kind === 'unknown' || edge.start === null || edge.end === null ? 'unknown' : 'ok';
       });
-      return { rows, gaps, edges, issues, minimum, maximum, viewMinimum, viewMaximum, tolerance, config };
+      return { rows, gaps, edges, issues, minimum, maximum, viewMinimum, viewMaximum, tolerance, config, parameterConversions: globalConversions };
     }
     return { analyze, parseDelay, edgeParts, format, seriesLabel };
   }

@@ -21659,10 +21659,12 @@ ${lines.join('\n')}`;
             const parameters = window.VisualWaveDromParameters, core = window.VisualWaveDromTimingCore;
             const parameterRevision = parameters.getRevision();
             if (meta !== lastMeta || parameterRevision !== lastParameterRevision) {
-              const resolved = parameters.resolve(meta.source);
+              const parameterConversions = [];
+              const resolved = parameters.resolve(meta.source, { mode: 'calculate', conversions: parameterConversions });
               const edges = Array.isArray(meta.source.edge) ? meta.source.edge : [];
               prepared = {
-                source: Object.assign({}, resolved, { edge: edges.map((value) => parameters.text(value, meta.source)) }),
+                source: Object.assign({}, resolved),
+                parameterConversions,
                 edgeTimings: edges.map((value) => core.parseDelay(core.edgeParts(value).label,
                   resolved.timingCheck && resolved.timingCheck.cycleTimeNs, (expression) => parameters.evaluate(expression, meta.source)))
               };
