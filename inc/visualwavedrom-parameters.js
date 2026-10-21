@@ -442,6 +442,43 @@
         + '\n值：' + item.val + (item.formula ? '\n公式：' + item.rawVal : '') + '\n说明：' + (item.description || '无')).join('');
     }).filter(Boolean).join('\n\n');
   }
+  function diagnostics(source) {
+    const expressions = [];
+    let scanned = 0, rowIndex = 0;
+    function add(raw, path) {
+      if (++scanned > 20000 || expressions.length >= 32 || typeof raw !== 'string' || !raw.includes('$')) return;
+      for (const match of raw.matchAll(tokenPattern)) {
+        const result = evaluate(match[1], source);
+        expressions.push({ path, raw: match[0].slice(0, 240), display: String(text(match[0], source)).slice(0, 240),
+          value: result.value, error: result.error || '', variables: result.variables.map((variable) => ({
+            name: variable.name, tableId: variable.tableId, table: variable.table, value: String(variable.val).slice(0, 160)
+          })) });
+        if (expressions.length >= 32) break;
+      }
+    }
+    function rows(items) {
+      for (const item of items || []) {
+        if (scanned > 20000 || expressions.length >= 32) break;
+        if (Array.isArray(item)) { add(item[0], 'group'); rows(item.slice(1)); }
+        else if (item && typeof item === 'object') {
+          const path = 'signal[' + rowIndex++ + ']'; add(item.name, path + '.name');
+          if (Array.isArray(item.data)) {
+            for (let index = 0; index < item.data.length && scanned <= 20000 && expressions.length < 32; index++) add(item.data[index], path + '.data[' + index + ']');
+          } else add(item.data, path + '.data');
+        }
+      }
+    }
+    if (source) {
+      ['title', 'description'].forEach((key) => add(source[key], key));
+      ['head', 'foot'].forEach((key) => add(source[key] && source[key].text, key + '.text'));
+      (source.edge || []).forEach((edge, index) => add(edge, 'edge[' + index + ']'));
+      rows(source.signal);
+    }
+    return { build: '20261021-parameter-diagnostics-v1', libraryId, generation, revision: catalog.revision,
+      pending: pendingParameterChanges(), tableCount: catalog.tables.length,
+      links: linked(source).map((tableId) => { const table = catalog.tables.find((item) => item.id === tableId);
+        return { tableId, found: !!table, name: table && table.name, rowCount: table && table.rows.length }; }), expressions };
+  }
   function resolve(source, options) {
     if (!source || typeof source !== 'object') return source;
     const calculate = options && options.mode === 'calculate', resolvedCache = calculate ? calculationCache : cache;
@@ -2365,7 +2402,7 @@
     renderTable();
     if (error) status(error, true);
   }
-  global.VisualWaveDromParameters = { mount, setCatalog, finishSingleLoad, getCatalog: () => clone(catalog), getRevision: () => generation, evaluate, resolve, text, details, decorate, decorateText, resolveName,
+  global.VisualWaveDromParameters = { mount, setCatalog, finishSingleLoad, getCatalog: () => clone(catalog), getRevision: () => generation, evaluate, resolve, text, details, diagnostics, decorate, decorateText, resolveName,
     revealReference, clearReferenceHighlight, matchesReference, referenceWindowInfo,
     openLinks, flush, refresh, page: () => activePage, pending: pendingParameterChanges,
     historyState: parameterHistoryState, undo: () => applyParameterHistory(false), redo: () => applyParameterHistory(true) };

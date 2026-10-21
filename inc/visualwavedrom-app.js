@@ -703,6 +703,7 @@ if (!window.VWDCodeEditorPairs) {
       if (vwdDebugEnabled && typeof vwdDebugLog === 'function') {
         vwdDebugLog('mode', { enabled: true });
         vwdDebugLog('browser-compat', getBrowserCompatibilityState());
+        captureParameterDebugState('debug-enabled');
       }
     }
 
@@ -726,6 +727,40 @@ if (!window.VWDCodeEditorPairs) {
         console.debug('[VWD][' + category + ']');
       } else {
         console.debug('[VWD][' + category + ']', payload);
+      }
+    }
+
+    function captureParameterDebugState(reason, documentName) {
+      if (!vwdDebugEnabled) return;
+      try {
+        const name = documentName || editingWaveDocumentName;
+        const tag = getSavedTagByName(name);
+        const active = name === editingWaveDocumentName;
+        const text = active ? editor.value : tag && tag.content;
+        const source = text ? JSON.parse(text) : null;
+        const parameters = window.VisualWaveDromParameters;
+        const host = active ? waveContainer : waveLibraryCardCache.get(name)?.previewDisplay;
+        const labels = host ? Array.from(host.querySelectorAll('svg text'), (node) => node.textContent) : [];
+        const pending = readPendingWaveLibrarySave();
+        vwdDebugLog('parameter-state', { reason, build: '20261021-parameter-startup-v2',
+          version: window.VisualWaveDromVersion && window.VisualWaveDromVersion.version,
+          page: window.location.href, libraryId: currentWaveLibraryId, documentName: name,
+          initializing: waveLibraryInitializationPending, inlineEditActive,
+          initializationError: waveLibraryInitializationError && waveLibraryInitializationError.message,
+          recoveryError: waveLibraryRecoveryError,
+          legacyRecoveryPresent: !singleWaveViewActive && !singleParameterViewActive
+            && !!getWindowStateStorage()?.getItem(WAVE_LIBRARY_PENDING_SAVE_KEY),
+          pendingRecovery: pending && { libraryId: pending.libraryId, file: pending.file,
+            markedAt: pending.markedAt, documentCount: pending.state && pending.state.documents && pending.state.documents.length },
+          sourceLinks: source && source.parameterTables, storedLinks: tag && tag.parameterTables,
+          parsedLinks: active && jsonDocumentSource && jsonDocumentSource.parameterTables,
+          preset: source && source.parameterPreset,
+          parameters: typeof parameters.diagnostics === 'function' ? parameters.diagnostics(source) : { error: '参数模块版本过旧，缺少诊断接口' },
+          cachedRenderEdges: active && lastRenderedWaveSource && lastRenderedWaveSource.edge,
+          unresolvedLabels: labels.filter((label) => label.includes('{$')).slice(0, 20).map((label) => label.slice(0, 240)),
+          scripts: Array.from(document.scripts, (script) => script.src).filter((url) => /visualwavedrom-(app|parameters)\.js/.test(url)) });
+      } catch (error) {
+        vwdDebugLog('parameter-state', { reason, error: error.message });
       }
     }
 
@@ -976,6 +1011,7 @@ ${lines.join('\n')}`;
     }
 
     function copyDebugLogsToClipboard() {
+      captureParameterDebugState('copy-logs');
       const btn = document.getElementById('btn-copy-debug-log');
       const labelEl = btn && btn.querySelector('.btn-copy-label');
       const originalLabel = labelEl ? labelEl.textContent : '复制调试日志';
@@ -1065,6 +1101,7 @@ ${lines.join('\n')}`;
     let browserWaveLibrarySaveTimer = null;
     let waveLibraryInitializationPending = true;
     let waveLibraryInitializationError = null;
+    let waveLibraryRecoveryError = null;
     let waveLibraryInitializationOperation = null;
     const pageQuery = new URLSearchParams(window.location.search);
     const requestedLibraryId = String(pageQuery.get('libraryId') || '').trim();
@@ -14635,6 +14672,9 @@ ${lines.join('\n')}`;
         if (!raw) return null;
         const pending = JSON.parse(raw);
         if (!pending || !pending.file || !pending.libraryId || !pending.token) return null;
+        const identity = currentWaveLibraryId || requestedLibraryId;
+        if (identity && pending.libraryId !== identity) return null;
+        if (pending.state && pending.state.libraryId !== pending.libraryId) return null;
         return pending;
       } catch (_e) {
         return null;
@@ -14642,7 +14682,7 @@ ${lines.join('\n')}`;
     }
 
     function markWaveLibraryServerSavePending() {
-      if (!waveLibraryServerMode || applyingWaveLibraryBundle
+      if (!waveLibraryServerMode || applyingWaveLibraryBundle || waveLibraryInitializationPending || waveLibraryInitializationError
           || !currentWaveLibraryFile || !currentWaveLibraryId) return null;
       const pending = {
         file: currentWaveLibraryFile,
@@ -14676,6 +14716,7 @@ ${lines.join('\n')}`;
     }
 
     async function recoverPendingWaveLibraryServerSave() {
+      waveLibraryRecoveryError = null;
       const pending = readPendingWaveLibrarySave();
       if (!pending) return 'none';
       try {
@@ -14687,7 +14728,13 @@ ${lines.join('\n')}`;
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(incremental ? pending.state : buildPendingWaveLibraryBundle(pending))
         });
-        if (!response.ok) throw new Error('recovery save failed: ' + response.status);
+        if (!response.ok) {
+          const result = await response.json().catch(() => ({}));
+          const error = new Error(result.error || ('HTTP ' + response.status));
+          error.status = response.status;
+          error.waveId = result.waveId;
+          throw error;
+        }
         clearPendingWaveLibrarySave(pending);
         vwdDebugLog('persistence', {
           phase: 'pending-library-recovered',
@@ -14696,8 +14743,8 @@ ${lines.join('\n')}`;
         });
         return 'saved';
       } catch (error) {
-        currentWaveLibraryFile = pending.file;
-        currentWaveLibraryId = pending.libraryId;
+        waveLibraryRecoveryError = { libraryId: pending.libraryId, status: error.status || 0,
+          documentName: error.waveId || '', message: error.message };
         updateWaveLibraryFileStatus();
         setStatus(false, '上次刷新前的数据尚未写入波形库，已保留浏览器中的最新数据');
         vwdDebugLog('persistence', {
@@ -15983,7 +16030,8 @@ ${lines.join('\n')}`;
     }
 
     function scheduleWaveLibraryServerSave() {
-      if (!waveLibraryServerMode || applyingWaveLibraryBundle || !currentWaveLibraryFile) return;
+      if (!waveLibraryServerMode || applyingWaveLibraryBundle || waveLibraryInitializationPending
+          || waveLibraryInitializationError || !currentWaveLibraryFile) return;
       if (!singleWaveViewActive && !waveLibraryStructureDirty
           && dirtyWaveDocumentNames.size === 0 && deletedWaveDocumentNames.size === 0) return;
       const pendingMarker = markWaveLibraryServerSavePending();
@@ -15995,7 +16043,7 @@ ${lines.join('\n')}`;
     }
 
     function flushWaveLibraryServerSaveOnExit() {
-      if (!waveLibraryServerMode || applyingWaveLibraryBundle
+      if (!waveLibraryServerMode || applyingWaveLibraryBundle || waveLibraryInitializationPending || waveLibraryInitializationError
           || !currentWaveLibraryFile || !currentWaveLibraryId) return false;
       clearTimeout(waveLibrarySaveTimer);
       waveLibrarySaveTimer = null;
@@ -16586,11 +16634,26 @@ ${lines.join('\n')}`;
           : null;
         const fileName = requestedLibraryId ? (requestedLibrary && requestedLibrary.name) || ''
           : catalog.current || (catalog.files && catalog.files[0]);
+        // Bind the BAT entry to its library before looking up scoped recovery data.
+        // Legacy, unscoped drafts remain intact but must not override this library.
+        currentWaveLibraryId = requestedLibraryId || catalog.currentLibraryId || '';
+        currentWaveLibraryFile = fileName || '';
         if (requestedLibraryId && !requestedLibrary) vwdDebugLog('wave-library', {
           phase: 'catalog-miss-use-requested-id', libraryId: requestedLibraryId, documentName: requestedWaveDocumentName
         });
         const recovery = await recoverPendingWaveLibraryServerSave();
-        if (recovery === 'failed') throw new Error('上次编辑尚未成功恢复，请保留页面并重新加载');
+        if (recovery === 'failed') {
+          // Keep the browser's unsaved wave data, but restore its parameter catalog
+          // independently so a recovery conflict does not leave every value unresolved.
+          try {
+            await window.VisualWaveDromParameters.refresh();
+            vwdDebugLog('parameters', { phase: 'catalog-restored-after-recovery-failure', libraryId: currentWaveLibraryId });
+          } catch (error) {
+            vwdDebugLog('parameters', { phase: 'recovery-catalog-load-failed', libraryId: currentWaveLibraryId, message: error.message });
+          }
+          throw new Error('上次编辑恢复失败，恢复记录已保留，可刷新重试（'
+            + (waveLibraryRecoveryError && waveLibraryRecoveryError.message || '未知原因') + '）');
+        }
         if (requestedLibraryId || fileName) await loadServerWaveLibrary(fileName, requestedLibraryId || catalog.currentLibraryId);
         else updateWaveLibraryFileStatus();
       } catch (e) {
@@ -19156,6 +19219,7 @@ ${lines.join('\n')}`;
       refreshSavedTagsActiveState();
       refreshWaveDocumentCard(name);
       refreshWaveDocumentTitle(name, false);
+      captureParameterDebugState('document-loaded', name);
       updateUndoRedoButtons();
       setStatus(true, '已打开波形图: ' + getSavedTagTitle(tag));
     }
@@ -21673,6 +21737,7 @@ ${lines.join('\n')}`;
             const parameters = window.VisualWaveDromParameters, core = window.VisualWaveDromTimingCore;
             const parameterRevision = parameters.getRevision();
             if (meta !== lastMeta || parameterRevision !== lastParameterRevision) {
+              captureParameterDebugState('timing-read', documentName);
               const parameterConversions = [];
               const resolved = parameters.resolve(meta.source, { mode: 'calculate', conversions: parameterConversions });
               const edges = Array.isArray(meta.source.edge) ? meta.source.edge : [];
@@ -25457,6 +25522,7 @@ ${lines.join('\n')}`;
         const tag = await ensureWaveDocumentLoaded(name);
         if (libraryId !== currentWaveLibraryId) throw new Error('波形库已切换，请重新链接参数表');
         if (!tag) throw new Error('波形图不存在');
+        captureParameterDebugState('link-apply-before', name);
         vwdDebugLog('parameters', { phase: 'link-apply-start', libraryId, documentName: name,
           tableIds: order.slice(), presetId });
         const parsed = JSON.parse(name === editingWaveDocumentName ? editor.value : tag.content);
@@ -25482,6 +25548,7 @@ ${lines.join('\n')}`;
         } else if (!await flushBrowserWaveLibrarySave({ force: true })) throw new Error('参数表链接尚未保存，请重试');
         vwdDebugLog('parameters', { phase: 'link-apply-saved', libraryId, documentName: name,
           tableIds: order.slice(), presetId, revision: getSavedTagByName(name).revision });
+        captureParameterDebugState('link-apply-after', name);
         setStatus(true, '已更新参数表链接');
       },
       changed: () => {

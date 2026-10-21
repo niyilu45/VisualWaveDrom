@@ -1,5 +1,26 @@
 [
   {
+    "version": "2026.10.21.2",
+    "date": "2026-10-21T01:29:39Z",
+    "head": "8f03992df11a52abe711ec5c9fd16ecf821bf87a",
+    "notes": [
+      "修复 BAT 默认入口刷新后参数表未初始化，主时序图和时延检查必须重新点击链接参数表应用才能替换参数的问题。",
+      "启动时先确定当前波形库，再恢复该库专属临时记录；隔离旧全局记录和其他波形库数据，不删除原恢复记录。",
+      "临时恢复失败时独立加载参数表，并保留冲突数据；避免初始化期间或失败后自动保存覆盖恢复记录。",
+      "Debug Mode 新增参数状态快照，记录链接、表达式结果、缺失参数、启动及恢复错误，便于定位刷新问题。",
+      "更新使用说明和脚本缓存版本；验证 RealWave 主图、时延检查、连续刷新、单图窗口及直接打开 HTML 模式。"
+    ],
+    "commits": [
+      {
+        "id": "8f03992df11a52abe711ec5c9fd16ecf821bf87a",
+        "date": "2026-10-21T04:10:32+08:00",
+        "title": "fix: persist parameter links and stabilize timing checks",
+        "body": "Persist active waveform parameter table links and selected presets before reporting Apply success. Include parameter generations in metadata, active rendering and lazy preview cache validation, and log catalog restoration and link synchronization.\n\nCorrect RealWave timing inference for held data, terminal clocks and placeholders, per-component neighbour fallbacks and bidirectional final-cell anchors. Preserve independent series solutions and genuine conflicts while preferring complete usable references.\n\nAvoid false presenter unsaved warnings for initial views, unchanged text and source-bound adjustments, including save-in-flight synchronization. Update documentation, cache keys and release metadata to 2026.10.21.1.\n\nVerified service and file-mode link application with immediate reload and save-failure retry, RealWave core/Chrome Worker checks, presenter save protections, JavaScript syntax and all 65 release hashes. Exclude waveform libraries, temporary artifacts, local launcher edits and unrelated deletions."
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.10.21.1",
     "date": "2026-10-20T20:09:22Z",
     "head": "306a96d8d6e89814d07f08c63b0b28eb907ed649",
