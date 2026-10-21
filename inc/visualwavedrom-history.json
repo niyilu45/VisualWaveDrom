@@ -1,5 +1,25 @@
 [
   {
+    "version": "2026.10.22.1",
+    "date": "2026-10-21T19:49:27Z",
+    "head": "6383c874e7c9cffd4eae5f31270f55bf7df84a21",
+    "notes": [
+      "修复跨行连接的明确时延被默认共同起点覆盖的问题：连接标签优先，即使端点前没有 | 也能正确定位。",
+      "按自上而下顺序定位连接分量，保留每格周期宽度、显式 phase 和真正互相矛盾的连接约束，不修改原始波形数据。",
+      "时延检查详情显示默认起点的调整位置和偏移量，并更新使用说明及脚本缓存版本。",
+      "验证 RealWave 的 signal14 到 signal15 为 11 clk、19 行检查通过，覆盖无省略符、反向及半周期连接和浏览器后台计算。"
+    ],
+    "commits": [
+      {
+        "id": "6383c874e7c9cffd4eae5f31270f55bf7df84a21",
+        "date": "2026-10-21T09:30:45+08:00",
+        "title": "fix: restore parameter catalogs on default library startup",
+        "body": "Bind the BAT default entry to its selected library before reading recovery markers. Reject mismatched recovery identities and retain legacy unscoped records without replaying them into the current library.\n\nRestore parameter catalogs independently when pending recovery fails so preserved waveform data can resolve expressions in both timing diagrams and timing checks. Keep conflicting recovery records intact and prevent initialization-time or failed-startup autosaves from replacing them.\n\nAdd bounded, read-only parameter diagnostics for debug enable, log copying, document loads, timing reads and link application, including expression results, missing tables and startup/recovery failures. Update usage documentation, script cache keys and release metadata to 2026.10.21.2.\n\nVerified actual RealWave data through the default entry, scoped and stale recovery cases, conflict preservation, cross-library isolation, continuous reloads, service/file modes, standalone windows, JavaScript syntax and all 65 staged release hashes. Exclude user waveform libraries, temporary files, local launcher changes and unrelated deletions."
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.10.21.2",
     "date": "2026-10-21T01:29:39Z",
     "head": "8f03992df11a52abe711ec5c9fd16ecf821bf87a",

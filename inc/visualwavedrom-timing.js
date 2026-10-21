@@ -304,6 +304,10 @@
         : row.unknownTailStart === 0 && !row.known ? '本行仅有未知波形，不以绘制长度判断时延。'
         : row.alignments.length ? '已有连接约束保持不变；先按明确的数据等差规律补全，再按上行、下行补充未定位置。'
         : '时间已确定；已提供的时延约束一致。没有连接约束的部分仅确定自身时间。');
+      if (row.originAdjustment) paragraph('连接时延优先：本行默认起点 ' + fmt(row.originAdjustment.original)
+        + ' cycle 调整为 ' + fmt(row.originAdjustment.start) + ' cycle（偏移 '
+        + fmt(row.originAdjustment.offset) + ' cycle）。起始段按连接关系定位，不要求存在 |；各格仍保持 '
+        + fmt(row.period) + ' cycle，后续省略区间仍单独推算。');
       if (row.unknownTailStart !== undefined) paragraph('原列 ' + row.unknownTailStart
         + ' 起为末尾未知段，长度未定，不按绘制列数约束相邻行；显式连接时延仍单独检查。'
         + (row.unknownTailDisplay ? '预览以未知波形补齐至最长波形的 ' + fmt(row.unknownTailDisplay.finish) + ' cycle，不参与时延推算。' : ''));

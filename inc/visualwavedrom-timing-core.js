@@ -143,7 +143,8 @@
         if (/[<>]/.test(wave)) { row.supported = false; issue('unknown', '此行包含 < > 变步长符号，暂不能可靠推算', [index]); }
         let block = { id: makeBlock(), col: 0, end: 0 };
         row.blocks.push(block);
-        if (row.supported) constraint(0, block.id, -row.phase, { rows: [index], label: '第' + (index + 1) + '行起点/phase' });
+        if (row.supported && signal.phase !== undefined)
+          constraint(0, block.id, -row.phase, { rows: [index], label: '第' + (index + 1) + '行显式 phase' });
         const labels = Array.isArray(signal.data) ? signal.data : String(signal.data || '').trim().split(/\s+/).filter(Boolean);
         let dataIndex = 0, state = 'x', symbol = 'x', value = 'x', slot = -1, clockBlock = null, clockOffset = 0;
         const stretchEnds = stretches.get(index);
@@ -350,6 +351,33 @@
         if (timing.kind === 'unknown') issue('unknown', '连接 ' + (index + 1) + '：' + timing.reason, rowIds, [index]);
         if (timing.kind === 'delay') constraint(from.block, to.block, timing.value + from.offset - to.offset,
           { rows: rowIds, edge: index, label: parsed.from + '→' + parsed.to + '=' + timing.value + ' cycle' });
+      });
+      // Default row origins are fallback anchors, not extra delay constraints.
+      // Anchor each explicitly connected component once, in top-down row order;
+      // other default origins follow its delays even without an intervening |.
+      const originGroups = new Array(graph.length), originValues = new Array(graph.length);
+      let originGroup = 0;
+      for (let start = 0; start < graph.length; start++) {
+        if (originGroups[start] !== undefined) continue;
+        const queue = [start]; originGroups[start] = originGroup; originValues[start] = 0;
+        for (let head = 0; head < queue.length; head++) for (const arc of graph[queue[head]]) {
+          if (originGroups[arc.to] !== undefined) continue;
+          originGroups[arc.to] = originGroup; originValues[arc.to] = originValues[queue[head]] + arc.value; queue.push(arc.to);
+        }
+        originGroup++;
+      }
+      const originShifts = new Map([[originGroups[0], 0]]);
+      rows.forEach((row) => {
+        if (!row.supported) return;
+        const block = row.blocks[0].id, group = originGroups[block];
+        if (!originShifts.has(group)) {
+          originShifts.set(group, -row.phase - originValues[block]);
+          constraint(0, block, -row.phase, { rows: [row.index], label: '第' + (row.index + 1) + '行默认起点' });
+        } else if (signals[row.index].phase === undefined) {
+          const start = halfCycle(originValues[block] + originShifts.get(group));
+          if (start !== null && Math.abs(start + row.phase) > Math.max(EPS, tolerance))
+            row.originAdjustment = { original: -row.phase, start, offset: start + row.phase };
+        }
       });
       // A spanning forest supplies absolute or relative times and a concrete path for conflicts.
       const values = new Array(graph.length), groups = new Array(graph.length), parent = [], parentEdge = [];
