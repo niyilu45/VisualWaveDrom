@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20261020-comparison';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20261023-bus-defaults-v1';
   const FormulaEngine = global.VisualWaveDromFormula || null;
   const DEFAULT_ROW_HEIGHT = 42;
   const DEFAULT_MULTI_WAVE_ROW_HEIGHT = 68;
@@ -4439,6 +4439,7 @@
           resized.height
         );
       }
+      if (buffer.key !== 'current-frame') this.drawActiveRowHighlight(context, resized.width, resized.height);
       return true;
     }
 
@@ -5669,7 +5670,9 @@
       if (!this.selectedPoint || this.selectedPoint.rowIndex !== rowIndex
           || !this.simplified || !this.simplified.model) return;
       const pointIndex = this.selectedPoint.pointIndex;
-      const column = this.simplified.model.columns[pointIndex];
+      const selection = this.columnSelection;
+      const markerColumn = selection && selection.rowIndex === rowIndex ? this.selectionCursorColumn() : null;
+      const column = markerColumn == null ? this.simplified.model.columns[pointIndex] : markerColumn;
       if (!Number.isFinite(Number(column))
           || column < this.viewStart || column > this.viewEnd) return;
       const x = this.xForColumn(column, width);
@@ -6036,6 +6039,24 @@
       context.restore();
     }
 
+    drawActiveRowHighlight(context, width, height) {
+      const rowIndex = this.activeCursorRow;
+      if (!this.meta.rows[rowIndex] || this.isRowCollapsed(rowIndex)) return;
+      const top = this.rowTop(rowIndex) - this.plotViewport.scrollTop;
+      const rowHeight = this.rowHeight(rowIndex);
+      if (top >= height || top + rowHeight <= 0) return;
+      context.save();
+      context.beginPath();
+      context.rect(0, Math.max(0, top), width, Math.min(height, top + rowHeight) - Math.max(0, top));
+      context.clip();
+      context.fillStyle = 'rgba(47, 115, 191, 0.06)';
+      context.fillRect(0, top, width, rowHeight);
+      context.strokeStyle = '#2f73bf';
+      context.lineWidth = 1;
+      context.strokeRect(0.5, top + 0.5, Math.max(0, width - 1), Math.max(0, rowHeight - 1));
+      context.restore();
+    }
+
     draw(options) {
       if (!this.meta || !this.plotViewport.clientWidth) return;
       const requested = {
@@ -6123,6 +6144,7 @@
           width,
           height
         );
+        this.drawActiveRowHighlight(context, width, height);
         this.drawSelectedPointOverlay(context, width, height);
         this.drawColumnSelection(context, width, height);
         this.drawConnections(context, width, height);
@@ -6263,6 +6285,7 @@
         plotBaseContext.drawImage(this.plotCanvas, 0, 0);
         this.plotBaseCacheKey = plotBaseKey;
       }
+      if (!isolated) this.drawActiveRowHighlight(context, width, height);
       this.drawSelectedPointOverlay(context, width, height);
       this.drawColumnSelection(context, width, height);
       this.drawConnections(context, width, height);
@@ -6672,14 +6695,14 @@
       );
     }
 
-    updateColumnSelection(rowIndex, anchorColumn, currentColumn) {
+    updateColumnSelection(rowIndex, anchorColumn, currentColumn, cursorColumn) {
       const start = Math.min(anchorColumn, currentColumn);
       const end = Math.max(anchorColumn, currentColumn) + 1;
       this.columnSelection = {
         rowIndex,
         start,
         end,
-        cursorColumn: end - start === 1 ? start + 0.5 : null
+        cursorColumn: end - start === 1 ? (Number.isFinite(cursorColumn) ? cursorColumn : start + 0.5) : null
       };
       if (this.styleColumnsInput) {
         const first = start + 1;
@@ -6806,7 +6829,7 @@
       if (this.selectedConnectionId) this.selectedConnectionId = '';
       const columnIndex = this.columnIndexForX(x, rect.width);
       this.setActiveCursorRow(rowIndex);
-      this.updateColumnSelection(rowIndex, columnIndex, columnIndex);
+      this.updateColumnSelection(rowIndex, columnIndex, columnIndex, this.cursorColumnForRow(column, rowIndex));
       this.selectedPoint = null;
       this.updatePointEditor();
       const rowHeight = this.rowHeight(rowIndex);
@@ -6916,7 +6939,8 @@
         this.updateColumnSelection(
           this.drag.rowIndex,
           this.drag.anchorColumn,
-          columnIndex
+          columnIndex,
+          this.cursorColumnForRow(this.columnForX(x, rect.width), this.drag.rowIndex)
         );
         this.draw();
         return;
@@ -7205,9 +7229,8 @@
     selectionCursorColumn() {
       const selection = this.columnSelection;
       if (!selection || selection.end - selection.start !== 1) return null;
-      let column = Number(selection.cursorColumn);
-      if (!Number.isFinite(column)) column = Number(selection.start) + 0.5;
-      if (this.selectedPoint
+      let column = selection.cursorColumn == null ? NaN : Number(selection.cursorColumn);
+      if (!Number.isFinite(column) && this.selectedPoint
           && this.selectedPoint.rowIndex === selection.rowIndex
           && this.simplified
           && this.simplified.model) {
@@ -7216,6 +7239,7 @@
         );
         if (Number.isFinite(pointColumn)) column = pointColumn;
       }
+      if (!Number.isFinite(column)) column = Number(selection.start) + 0.5;
       if (!Number.isFinite(column)) return null;
       return clamp(column, 0, Math.max(0, this.meta.totalColumns - 1e-7));
     }
@@ -7408,13 +7432,20 @@
       );
       this.cursorNavigationSequence += 1;
       this.activeCursorRow = next;
+      if (this.columnSelection && this.columnSelection.rowIndex !== next) this.columnSelection = null;
+      if (this.selectedPoint && this.selectedPoint.rowIndex !== next) {
+        this.selectedPoint = null;
+        this.updatePointEditor();
+      }
       this.signalList.querySelectorAll('[data-scope-signal-row]').forEach((row) => {
         const start = Number(row.dataset.scopeRowStart || row.dataset.scopeSignalRow);
         const end = Number(row.dataset.scopeRowEnd || row.dataset.scopeSignalRow);
         row.classList.toggle('active', next >= start && next <= end);
       });
       this.updateCursorControls();
+      this.scheduleMeasurementUpdate();
       void this.updateCursorReadout();
+      this.draw({ overlayOnly: true });
       this.setStatus('游标跳转信号：' + (this.meta.rows[next] ? this.meta.rows[next].name : ''));
     }
 
@@ -7864,14 +7895,16 @@
         pointIndex -= 1;
       }
       this.selectedPoint = { rowIndex, pointIndex };
-      const selectedColumn = Number(columns[pointIndex]);
+      const selection = this.columnSelection;
+      const selectedColumn = selection && selection.rowIndex === rowIndex && selection.end - selection.start === 1
+        && Number.isFinite(selection.cursorColumn) ? selection.cursorColumn : Number(columns[pointIndex]);
       if (Number.isFinite(selectedColumn)) {
         const selectedColumnIndex = clamp(
           Math.floor(selectedColumn),
           0,
           Math.max(0, this.meta.totalColumns - 1)
         );
-        this.updateColumnSelection(rowIndex, selectedColumnIndex, selectedColumnIndex);
+        this.updateColumnSelection(rowIndex, selectedColumnIndex, selectedColumnIndex, selectedColumn);
       }
       this.updatePointEditor();
       this.updateMeasurements();

@@ -834,7 +834,7 @@
         <label class="wave-collection-path-field" for="wave-collection-root-path">
           <span>数据文件夹</span>
           <span class="wave-collection-path-controls">
-            <input type="text" class="modal-input" id="wave-collection-root-path"
+            <input type="text" class="modal-input" id="wave-collection-root-path" name="vwdCollectionDataRoot"
               autocomplete="off" spellcheck="false" placeholder="请选择或粘贴数据文件夹路径">
             <button type="button" class="modal-btn" id="wave-collection-pick-root">选择文件夹</button>
           </span>
@@ -842,7 +842,7 @@
         <label class="wave-collection-path-field" for="wave-collection-preset-search-path">
           <span>预设搜索目录</span>
           <span class="wave-collection-path-controls wave-collection-preset-search-controls">
-            <input type="text" class="modal-input" id="wave-collection-preset-search-path"
+            <input type="text" class="modal-input" id="wave-collection-preset-search-path" name="vwdCollectionPresetRoot"
               autocomplete="off" spellcheck="false" value="inc/import/SchemeCollection"
               placeholder="请选择或粘贴需要递归搜索的目录">
             <button type="button" class="modal-btn" id="wave-collection-pick-preset-root">选择目录</button>
@@ -854,7 +854,7 @@
         <label class="wave-collection-path-field" for="wave-collection-preset-path">
           <span>预设 JSON 文件</span>
           <span class="wave-collection-path-controls wave-collection-preset-controls">
-            <input type="text" class="modal-input" id="wave-collection-preset-path"
+            <input type="text" class="modal-input" id="wave-collection-preset-path" name="vwdCollectionPresetFile"
               autocomplete="off" spellcheck="false" placeholder="请选择或粘贴预设 JSON 路径">
             <button type="button" class="modal-btn" id="wave-collection-load-preset">读取预设</button>
             <button type="button" class="modal-btn" id="wave-collection-pick-preset">选择预设</button>
@@ -984,9 +984,9 @@
     <script src="inc/visualwavedrom-json-bigdata.js?v=20260731-bigdata-fix-v1"></script>
     <script src="inc/visualwavedrom-formula.js?v=20260815-large-import-v1"></script>
     <script src="inc/visualwavedrom-scope-compare-core.js?v=20261020"></script>
-    <script src="inc/visualwavedrom-scope-worker.js?v=20261020-comparison"></script>
+    <script src="inc/visualwavedrom-scope-worker.js?v=20261023-bus-defaults-v1"></script>
     <script src="inc/visualwavedrom-scope-compare.js?v=20261020"></script>
-    <script src="inc/visualwavedrom-scope.js?v=20261020-comparison"></script>
+    <script src="inc/visualwavedrom-scope.js?v=20261023-bus-defaults-v1"></script>
     <script src="inc/visualwavedrom-presenter-notes.js?v=20260831-presenter-notes-v1"></script>
     <script src="inc/visualwavedrom-presenter-export.js?v=20260831-presenter-gif-v1"></script>
     <script src="inc/gifenc.js?v=1.0.3"></script>
@@ -994,7 +994,7 @@
     <script src="inc/visualwavedrom-presenter-shortcuts.js?v=20260831-presenter-shortcuts-v1"></script>
     <script src="inc/visualwavedrom-presenter-split.js?v=20260901-presenter-settings-nav-v1"></script>
     <script src="inc/visualwavedrom-presenter.js?v=20261020-presenter-unsaved-v1"></script>
-    <script src="inc/visualwavedrom-import-collection.js?v=20260831-inc-layout-v1"></script>
+    <script src="inc/visualwavedrom-import-collection.js?v=20261023-selection-paths-v1"></script>
     <script src="inc/visualwavedrom-shortcuts.js?v=20260930-backspace-v1"></script>
   <div class="modal-overlay" id="tool-version-modal" hidden>
     <div class="modal-dialog tool-version-dialog" role="dialog" aria-modal="true" aria-labelledby="tool-version-title">

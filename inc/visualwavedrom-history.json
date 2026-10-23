@@ -1,5 +1,26 @@
 [
   {
+    "version": "2026.10.23.1",
+    "date": "2026-10-23T14:34:12Z",
+    "head": "5b2c8f38df6fbd5230ba7343a246b1478b6dda5e",
+    "notes": [
+      "示波器未指定显示方式的信号默认采用总线；完整数据含负数时自动使用有符号显示，否则采用无符号显示，公式按实际结果判断。保留已保存的显示和符号配置，多波形叠加仍用模拟显示。",
+      "修复示波器选中 0.5 cycle 后被取整的问题，分离 A/B/C 测量位置与数据点编辑位置，整周期信号仍读取所在周期的数值。",
+      "修复点击波形时右侧多行错误高亮的问题，仅高亮当前行，切换行时清理旧选区和编辑点，保持参考线及拖动预览一致。",
+      "修复导入预设集合搜索时数据目录和预设目录偶发串换；搜索期间锁定路径，忽略重复打开，分别保存路径并增加调试日志。",
+      "更新说明文档和脚本缓存版本；验证 7 万列末尾负数、采样、压缩变化点、公式、保存重开、后台 Worker 与回退模式，并回归半周期选点、目录搜索及示波器比较。"
+    ],
+    "commits": [
+      {
+        "id": "5b2c8f38df6fbd5230ba7343a246b1478b6dda5e",
+        "date": "2026-10-22T03:50:15+08:00",
+        "title": "fix: prioritize explicit cross-row connection delays",
+        "body": "Treat default row origins as fallback anchors rather than hard delay constraints. Anchor explicitly connected components once in top-down order so cross-row labels determine endpoint timing even without an intervening omission marker. Preserve per-cell periods, explicit phase constraints and genuine contradictory connection checks.\n\nShow connection-driven origin adjustments in timing details, update the usage guide and script cache keys, and publish release metadata 2026.10.22.1.\n\nVerified RealWave signal14/signal15 endpoints at cycles 6 and 17 with all 19 rows passing, 109 targeted connection-origin cases, Chrome Worker live updates and desktop/mobile views, JavaScript syntax and all 65 staged release hashes. Prior focused checks also cover half-cycle precision, neighbour independence and clock expansion. Exclude user waveform libraries, temporary files, local launcher changes and unrelated deletions."
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.10.22.1",
     "date": "2026-10-21T19:49:27Z",
     "head": "6383c874e7c9cffd4eae5f31270f55bf7df84a21",

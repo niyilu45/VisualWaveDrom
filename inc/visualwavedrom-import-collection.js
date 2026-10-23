@@ -96,6 +96,7 @@
     const rootPathInput = document.getElementById('wave-collection-root-path');
     const presetSearchPathInput = document.getElementById('wave-collection-preset-search-path');
     const presetPathInput = document.getElementById('wave-collection-preset-path');
+    const pathInputs = { rootPath: rootPathInput, presetSearchPath: presetSearchPathInput, presetPath: presetPathInput };
     const pickRootButton = document.getElementById('wave-collection-pick-root');
     const pickPresetRootButton = document.getElementById('wave-collection-pick-preset-root');
     const scanPresetsButton = document.getElementById('wave-collection-scan-presets');
@@ -912,6 +913,17 @@
       rememberStateTimer = setTimeout(() => {
         rememberState(reason);
       }, 250);
+    }
+
+    function capturePaths() {
+      return Object.fromEntries(Object.entries(pathInputs).map(([key, input]) => [key, input.value]));
+    }
+
+    function restoreSearchPaths(paths, reason) {
+      const changed = Object.keys(pathInputs).filter((key) => pathInputs[key].value !== paths[key]);
+      changed.forEach((key) => { pathInputs[key].value = paths[key]; });
+      if (changed.length) debug({ phase: 'search-paths-restored', reason, changed, paths });
+      rememberState(reason);
     }
 
     function restoreRememberedState() {
@@ -2176,9 +2188,10 @@
       const hasPresetSearchPath = !!String(presetSearchPathInput.value || '').trim();
       const hasPresetPath = !!String(presetPathInput.value || '').trim();
       const canSearch = !!parsedPreset && hasRoot;
-      rootPathInput.disabled = busy;
-      presetSearchPathInput.disabled = busy;
-      presetPathInput.disabled = busy;
+      Object.values(pathInputs).forEach((input) => {
+        input.disabled = false;
+        input.readOnly = busy;
+      });
       presetPathInput.classList.toggle('is-save-target', manualSavePathMode);
       presetEditor.disabled = busy;
       if (presetCodeEditor) {
@@ -3236,7 +3249,8 @@
     }
 
     async function scanPresets() {
-      const searchPath = String(presetSearchPathInput.value || '').trim();
+      const paths = capturePaths();
+      const searchPath = String(paths.presetSearchPath || '').trim();
       if (!searchPath || busy) {
         if (!searchPath) setHint('请先设置预设搜索目录', true);
         return;
@@ -3275,6 +3289,7 @@
         status(false, '搜索预设失败：' + (error.message || String(error)));
         debug({ phase: 'preset-scan-error', message: error.message || String(error) });
       } finally {
+        restoreSearchPaths(paths, 'preset-scan-finished');
         setBusy(false, '');
       }
     }
@@ -3407,8 +3422,10 @@
     }
 
     async function searchFiles() {
+      if (busy) return;
+      const paths = capturePaths();
       const preset = parseEditor(true);
-      if (!preset || busy) return;
+      if (!preset) return;
       let variables;
       try {
         variables = collectVariableValues().values;
@@ -3416,17 +3433,18 @@
         setHint(error.message, true);
         return;
       }
-      const rootPath = String(rootPathInput.value || '').trim();
+      const rootPath = String(paths.rootPath || '').trim();
       if (!rootPath) {
         setHint('请选择数据文件夹', true);
         return;
       }
       singlePreviewStates.clear();
+      rememberState('search-start');
       setBusy(true, 'search');
       startProgress('正在建立文件索引并匹配规则…');
       const startedAt = progressStartedAt;
       setEmptyResults('正在搜索…');
-      debug({ phase: 'search-start', rootPath, variables });
+      debug({ phase: 'search-start', rootPath, presetSearchPath: paths.presetSearchPath, presetPath: paths.presetPath, variables });
       try {
         const payload = await post('search', {
           rootPath,
@@ -3483,6 +3501,7 @@
         status(false, '搜索预设集合失败：' + (error.message || String(error)));
         debug({ phase: 'search-error', message: error.message || String(error) });
       } finally {
+        restoreSearchPaths(paths, 'data-search-finished');
         setBusy(false, '');
       }
     }
@@ -3728,6 +3747,10 @@
     }
 
     function open() {
+      if (!modal.hidden) {
+        debug({ phase: 'modal-open-ignored', reason: 'already-open', busy, busyAction });
+        return;
+      }
       if (typeof settings.isServerMode === 'function' && !settings.isServerMode()) {
         status(false, '预设集合导入需要服务模式，请通过 BAT 或 SH 启动');
         debug({ phase: 'open-blocked', reason: 'direct-html-mode' });

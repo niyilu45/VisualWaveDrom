@@ -178,9 +178,10 @@ function rowCursorStep(row) {
   return row && Array.isArray(row.clockRanges) && row.clockRanges.length ? 0.5 : 1;
 }
 
-function sessionCursorStep(session) {
-  const rows = session && Array.isArray(session.rows) ? session.rows : [];
-  return rows.some((row) => rowCursorStep(row) <= 0.5 + 1e-9) ? 0.5 : 1;
+function sessionCursorStep() {
+  // Measurement precision is independent of the selected signal's sample step.
+  // Whole-cycle signals still read the value of the containing cycle.
+  return 0.5;
 }
 
 function sampleColumn(row, sampleIndex) {
@@ -315,11 +316,33 @@ function getAnalogFormat(source, row, rowIndex, hasSamples) {
   return normalizeAnalogFormat(scopeConfig, hasSamples || hasFormula ? 'float' : 'unsigned');
 }
 
-function getBusFormat(source, row, rowIndex) {
+function hasNegativeBusValue(row) {
+  const values = row.samples || row.scopeValues
+    || (row.changePoints && row.changePoints.values);
+  const candidates = values || row.segments || [];
+  for (let index = 0; index < candidates.length; index += 1) {
+    const value = values ? candidates[index] : candidates[index].value;
+    const number = finiteNumber(value);
+    if (number != null) {
+      if (number < 0) return true;
+    } else if (typeof value === 'string' && value.trim()[0] === '-') {
+      const integer = parseIntegerToken(value);
+      if (integer != null && integer < 0n) return true;
+    }
+  }
+  return false;
+}
+
+function getBusFormat(source, row, rowIndex, dataRow) {
   const signal = row.source || {};
   const localScope = signal.scope && typeof signal.scope === 'object' ? signal.scope : null;
   const globalScope = getScopeSignalConfig(source, row, rowIndex);
-  return normalizeBusFormat(localScope || globalScope);
+  const config = localScope || globalScope || {};
+  const format = normalizeBusFormat(config);
+  if (config.busSigned == null && config.signed == null && dataRow) {
+    format.signed = hasNegativeBusValue(dataRow);
+  }
+  return format;
 }
 
 function normalizeValueTable(candidate) {
@@ -1208,13 +1231,12 @@ async function createSession(content, transientState, previousSession) {
       });
     }
     let analogSamples = getAnalogSamples(source, row, sourceIndex);
-    const requestedMode = localScope && localScope.mode
-      ? String(localScope.mode)
-      : '';
-    const detectedMode = analogSamples ? 'analog' : 'bus';
-    const mode = requestedMode === 'analog'
-      ? 'analog'
-      : (/^(digital|bus)$/.test(requestedMode) ? 'bus' : detectedMode);
+    const globalScope = getScopeSignalConfig(source, row, sourceIndex);
+    const requestedMode = String(
+      (localScope && localScope.mode) || (globalScope && globalScope.mode) || ''
+    );
+    const detectedMode = 'bus';
+    const mode = requestedMode === 'analog' ? 'analog' : detectedMode;
     const analogFormat = getAnalogFormat(source, row, sourceIndex, !!analogSamples);
     if (!analogSamples && scopeValues && mode === 'analog') {
       analogSamples = numericSamplesFromScopeValues(scopeValues, analogFormat);
@@ -1256,7 +1278,12 @@ async function createSession(content, transientState, previousSession) {
       conditionTransitionCache: new Map(),
       analogLevels: analogSamples ? buildAnalogLevels(analogSamples) : [],
       range: analogSamples ? analogRange(analogSamples) : null,
-      busFormat: getBusFormat(source, row, sourceIndex),
+      busFormat: getBusFormat(source, row, sourceIndex, {
+        samples: analogSamples,
+        scopeValues,
+        changePoints,
+        segments: parsedWave.segments
+      }),
       valueTable: getValueTable(source, row, sourceIndex, parsedWave.valueTable),
       analogFormat,
       analogCache: new Map(),
@@ -1533,6 +1560,12 @@ async function createSession(content, transientState, previousSession) {
       }
     });
   }
+  // Infer formula signedness from its output, not from the empty source row.
+  rows.forEach((row) => {
+    if (!row.formula) return;
+    const flatRow = flatById.get(String(row.rowId));
+    row.busFormat = getBusFormat(source, flatRow, flatRow.sourceIndex, row);
+  });
   configureMultiWaveRows(rows, transient, totalColumns);
   totalColumns = Math.max(1, Math.ceil(totalColumns));
   const scope = source.scope && typeof source.scope === 'object' ? source.scope : {};
