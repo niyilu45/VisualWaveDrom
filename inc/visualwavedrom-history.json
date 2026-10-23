@@ -1,5 +1,26 @@
 [
   {
+    "version": "2026.10.23.2",
+    "date": "2026-10-23T14:55:48Z",
+    "head": "55371eb536e8db33d3a6f39d87d8c52b7c8aa279",
+    "notes": [
+      "预设集合变量支持逗号数字列表和 MATLAB 风格区间，例如 0,1、1.:3、1:2:6；支持小数步长、降序、混合输入和去重，留空仍按 0，兼容单个字符串和补零编号。",
+      "多变量按预设变量顺序自动组合搜索，只有多候选变量追加 _变量名变量值 后缀；每组独立预览、导入和报错，保留原始预设模板。",
+      "表格信号、复数拆分、公式和多波形引用适配组合名称；按原始规则汇总导航搜索图标，保持解析配置、文件预览及缓存对应一致。",
+      "区间使用精确小数计算，拒绝零步长、错误方向和超限组合；共享目录只扫描一次，避免重复扫描及不受控展开。",
+      "更新 ReadMe 使用示例、变量输入提示和脚本缓存，服务接口升级至 27，重建 Windows/Linux 免安装程序；验证候选展开、组合命名、真实文件预览/导入、公式关联、缺失文件、重复搜索和浏览器操作。"
+    ],
+    "commits": [
+      {
+        "id": "55371eb536e8db33d3a6f39d87d8c52b7c8aa279",
+        "date": "2026-10-23T22:35:21+08:00",
+        "title": "fix: improve scope defaults and selection stability",
+        "body": "Default unconfigured scope signals to bus display and infer signedness from complete sample, value, change-point and formula data. Preserve explicit display settings and analog-only multi-wave rows, and retain saved mode choices on reopen.\n\nKeep A/B/C measurements at half-cycle positions independently of simplified editing points. Highlight only the active signal row and clear stale row selections while preserving cursor reference lines and pan previews.\n\nKeep data, preset-search and preset-file paths separate during collection searches. Lock path editing while busy, ignore repeated modal opens, snapshot search paths, persist them independently and add path-specific debug details.\n\nUpdate usage documentation, script cache keys and release metadata to 2026.10.23.1. Verify 70000-column signedness, formulas, cached sessions, save/reopen, real browser Worker and fallback modes, half-cycle selection, row highlighting, import path races and scope comparison. Validate all 65 staged release hashes. Exclude user libraries, temporary tests and unrelated launcher or deleted files."
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.10.23.1",
     "date": "2026-10-23T14:34:12Z",
     "head": "5b2c8f38df6fbd5230ba7343a246b1478b6dda5e",

@@ -158,6 +158,11 @@ type collectionFileMatch struct {
 
 type collectionSearchEntry struct {
 	Index            int                      `json:"index"`
+	SourceIndex      int                      `json:"sourceIndex,omitempty"`
+	Expanded         bool                     `json:"expanded,omitempty"`
+	CombinationIndex int                      `json:"combinationIndex,omitempty"`
+	Variables        map[string]string        `json:"variables,omitempty"`
+	NameSuffix       string                   `json:"nameSuffix,omitempty"`
 	Folder           string                   `json:"folder"`
 	SearchPath       string                   `json:"searchPath"`
 	GrepKeys         string                   `json:"grepKeys"`
@@ -2419,78 +2424,90 @@ func searchCollectionFiles(
 		Entries:     []collectionSearchEntry{},
 		RegexEngine: "python-re",
 	}
+	combinations, err := expandCollectionVariables(preset, variables)
+	if err != nil {
+		return collectionSearchResult{}, err
+	}
 	rules := make([]collectionCompiledRule, 0, len(preset.Paths))
 	for index, rule := range preset.Paths {
-		if rule.Formula != nil {
-			signalName, expandErr := expandCollectionTemplate(
-				rule.Name, preset, variables, false)
-			if expandErr != nil {
-				return collectionSearchResult{}, fmt.Errorf("paths[%d].name: %w", index, expandErr)
+		for combinationIndex, combination := range combinations {
+			variables := combination.values
+			expanded := len(combinations) > 1
+			if rule.Formula != nil {
+				signalName, expandErr := expandCollectionTemplate(
+					rule.Name, preset, variables, false)
+				if expandErr != nil {
+					return collectionSearchResult{}, fmt.Errorf("paths[%d].name: %w", index, expandErr)
+				}
+				signalName, expandErr = normalizeSignalName(signalName + combination.suffix)
+				if expandErr != nil {
+					return collectionSearchResult{}, fmt.Errorf("paths[%d].name: %w", index, expandErr)
+				}
+				result.Entries = append(result.Entries, collectionSearchEntry{
+					Index: len(result.Entries), SourceIndex: index, Expanded: expanded,
+					CombinationIndex: combinationIndex, Variables: variables, NameSuffix: combination.suffix,
+					Name: signalName, ImportMode: "formula",
+					Formula: rule.Formula, OutputNames: []string{signalName},
+					Status: "formula", Matches: []collectionFileMatch{},
+				})
+				result.ResultCount++
+				continue
 			}
-			signalName, expandErr = normalizeSignalName(signalName)
+			folder, expandErr := expandCollectionTemplate(rule.Folder, preset, variables, false)
 			if expandErr != nil {
-				return collectionSearchResult{}, fmt.Errorf("paths[%d].name: %w", index, expandErr)
+				return collectionSearchResult{}, fmt.Errorf("paths[%d].folder: %w", index, expandErr)
 			}
-			result.Entries = append(result.Entries, collectionSearchEntry{
-				Index: index, Name: signalName, ImportMode: "formula",
-				Formula: rule.Formula, OutputNames: []string{signalName},
-				Status: "formula", Matches: []collectionFileMatch{},
-			})
-			result.ResultCount++
-			continue
-		}
-		folder, expandErr := expandCollectionTemplate(rule.Folder, preset, variables, false)
-		if expandErr != nil {
-			return collectionSearchResult{}, fmt.Errorf("paths[%d].folder: %w", index, expandErr)
-		}
-		patternText, expandErr := expandCollectionTemplate(
-			rule.GrepKeys, preset, variables, true)
-		if expandErr != nil {
-			return collectionSearchResult{}, fmt.Errorf("paths[%d].grepKeys: %w", index, expandErr)
-		}
-		signalName := ""
-		if rule.Name != "" {
-			signalName, expandErr = expandCollectionTemplate(rule.Name, preset, variables, false)
+			patternText, expandErr := expandCollectionTemplate(
+				rule.GrepKeys, preset, variables, true)
 			if expandErr != nil {
-				return collectionSearchResult{}, fmt.Errorf("paths[%d].name: %w", index, expandErr)
+				return collectionSearchResult{}, fmt.Errorf("paths[%d].grepKeys: %w", index, expandErr)
 			}
-			signalName, expandErr = normalizeSignalName(signalName)
-			if expandErr != nil {
-				return collectionSearchResult{}, fmt.Errorf("paths[%d].name: %w", index, expandErr)
+			signalName := ""
+			if rule.Name != "" {
+				signalName, expandErr = expandCollectionTemplate(rule.Name, preset, variables, false)
+				if expandErr != nil {
+					return collectionSearchResult{}, fmt.Errorf("paths[%d].name: %w", index, expandErr)
+				}
+				signalName, expandErr = normalizeSignalName(signalName + combination.suffix)
+				if expandErr != nil {
+					return collectionSearchResult{}, fmt.Errorf("paths[%d].name: %w", index, expandErr)
+				}
 			}
-		}
-		if strings.TrimSpace(folder) == "" {
-			folder = "."
-		}
-		if filepath.IsAbs(folder) {
-			return collectionSearchResult{}, fmt.Errorf("paths[%d].folder must be relative", index)
-		}
-		searchPath, pathErr := filepath.Abs(filepath.Join(rootPath, filepath.FromSlash(folder)))
-		if pathErr != nil || !pathInside(rootPath, searchPath) {
-			return collectionSearchResult{}, fmt.Errorf("paths[%d].folder leaves the selected data folder", index)
-		}
-		entry := collectionSearchEntry{
-			Index: index, Folder: folder, SearchPath: searchPath,
-			GrepKeys: rule.GrepKeys, ResolvedPattern: patternText,
-			HasSeq: rule.HasSeq, Name: signalName, Matches: []collectionFileMatch{},
-		}
-		info, statErr := os.Stat(searchPath)
-		if statErr != nil || !info.IsDir() {
-			entry.Status = "folder-missing"
-			entry.Message = "搜索目录不存在"
+			if strings.TrimSpace(folder) == "" {
+				folder = "."
+			}
+			if filepath.IsAbs(folder) {
+				return collectionSearchResult{}, fmt.Errorf("paths[%d].folder must be relative", index)
+			}
+			searchPath, pathErr := filepath.Abs(filepath.Join(rootPath, filepath.FromSlash(folder)))
+			if pathErr != nil || !pathInside(rootPath, searchPath) {
+				return collectionSearchResult{}, fmt.Errorf("paths[%d].folder leaves the selected data folder", index)
+			}
+			entry := collectionSearchEntry{
+				Index: len(result.Entries), SourceIndex: index, Expanded: expanded,
+				CombinationIndex: combinationIndex, Variables: variables, NameSuffix: combination.suffix,
+				Folder: folder, SearchPath: searchPath,
+				GrepKeys: rule.GrepKeys, ResolvedPattern: patternText,
+				HasSeq: rule.HasSeq, Name: signalName, Matches: []collectionFileMatch{},
+			}
+			info, statErr := os.Stat(searchPath)
+			if statErr != nil || !info.IsDir() {
+				entry.Status = "folder-missing"
+				entry.Message = "搜索目录不存在"
+				result.Entries = append(result.Entries, entry)
+				continue
+			}
+			searchPath = canonicalExistingPath(searchPath)
+			entry.SearchPath = searchPath
+			if !pathInside(rootPath, searchPath) {
+				return collectionSearchResult{}, fmt.Errorf("paths[%d].folder resolves outside the selected folder", index)
+			}
+			entryIndex := len(result.Entries)
 			result.Entries = append(result.Entries, entry)
-			continue
+			rules = append(rules, collectionCompiledRule{
+				entryIndex: entryIndex, searchPath: searchPath, pattern: patternText,
+			})
 		}
-		searchPath = canonicalExistingPath(searchPath)
-		entry.SearchPath = searchPath
-		if !pathInside(rootPath, searchPath) {
-			return collectionSearchResult{}, fmt.Errorf("paths[%d].folder resolves outside the selected folder", index)
-		}
-		entryIndex := len(result.Entries)
-		result.Entries = append(result.Entries, entry)
-		rules = append(rules, collectionCompiledRule{
-			entryIndex: entryIndex, searchPath: searchPath, pattern: patternText,
-		})
 	}
 	if err = scanCollectionFiles(rootPath, rules, &result, runner); err != nil {
 		return collectionSearchResult{}, fmt.Errorf("collection search failed: %w", err)
@@ -2518,8 +2535,12 @@ func searchCollectionFiles(
 		if entry.Status != "matched" && entry.Status != "multiple" {
 			continue
 		}
-		runtimeRule := preset.Paths[entry.Index]
+		sourceIndex := collectionEntryRuleIndex(*entry)
+		runtimeRule := preset.Paths[sourceIndex]
 		runtimeRule.Name = entry.Name
+		if runtimeRule.Name == "" {
+			runtimeRule.Name = collectionDefaultSignalName(entry.Matches[0].FileName) + entry.NameSuffix
+		}
 		preparedRule, preparedEntry, prepareErr := prepareCollectionEntry(
 			runtimeRule, entry.Matches[0], 0)
 		if prepareErr != nil {
@@ -2533,8 +2554,8 @@ func searchCollectionFiles(
 			entry.Columns = runtimeRule.Columns
 			continue
 		}
-		preset.Paths[entry.Index] = effectiveCollectionPresetPath(
-			preset.Paths[entry.Index].UsrGen,
+		preset.Paths[sourceIndex] = effectiveCollectionPresetPath(
+			preset.Paths[sourceIndex].UsrGen,
 			preparedRule.AutoGen,
 		)
 		entry.Name = preparedEntry.Name
@@ -2547,6 +2568,7 @@ func searchCollectionFiles(
 		entry.Columns = preparedEntry.Columns
 		entry.SchemaHash = preparedEntry.SchemaHash
 		entry.OutputNames = preparedEntry.OutputNames
+		suffixCollectionTableNames(entry)
 		entry.ComplexDetected = preparedEntry.ComplexDetected
 		entry.ComplexSources = preparedEntry.ComplexSources
 		entry.PreviewColumns = preparedEntry.PreviewColumns
@@ -2808,6 +2830,11 @@ func (s *service) parseCollectionEntry(
 		}
 	}
 	fileUpdates, _ := result["updates"].([]map[string]any)
+	if preparedEntry.ImportMode == "table" && entry.NameSuffix != "" {
+		for _, update := range fileUpdates {
+			update["signal"] = stringValue(update["signal"]) + entry.NameSuffix
+		}
+	}
 	if len(fileUpdates) == 0 {
 		return collectionImportEntryResult{
 			err: fmt.Errorf("%s produced no signal updates", match.RelativePath),
@@ -3120,13 +3147,14 @@ func (s *service) importCollectionFiles(
 				}
 				entry := importEntries[index]
 				var result collectionImportEntryResult
-				if entry.Index < 0 || entry.Index >= len(preset.Paths) {
+				ruleIndex := collectionEntryRuleIndex(entry)
+				if ruleIndex < 0 || ruleIndex >= len(preset.Paths) {
 					result = collectionImportEntryResult{
 						err: errors.New("collection rule index is invalid"),
 					}
 				} else {
 					result = s.parseCollectionEntry(
-						ctx, catalog, search, entry, preset.Paths[entry.Index])
+						ctx, catalog, search, entry, preset.Paths[ruleIndex])
 				}
 				entryResults[index] = result
 				s.recordCollectionImportProgress(progressToken, result)
@@ -3191,7 +3219,7 @@ func (s *service) previewCollectionEntry(
 	ruleIndex int,
 	headerRow int,
 ) (map[string]any, error) {
-	if ruleIndex < 0 || ruleIndex >= len(preset.Paths) {
+	if ruleIndex < 0 {
 		return nil, errors.New("preview rule index is invalid")
 	}
 	if headerRow < 1 {
@@ -3212,15 +3240,19 @@ func (s *service) previewCollectionEntry(
 	if cachedEntry == nil {
 		return nil, errors.New("该规则没有可预览的匹配文件")
 	}
-	runtimeRule := preset.Paths[ruleIndex]
+	sourceIndex := collectionEntryRuleIndex(*cachedEntry)
+	if sourceIndex < 0 || sourceIndex >= len(preset.Paths) {
+		return nil, errors.New("preview source rule index is invalid")
+	}
+	runtimeRule := preset.Paths[sourceIndex]
 	runtimeRule.Name = cachedEntry.Name
 	preparedRule, preparedEntry, err := prepareCollectionEntry(
 		runtimeRule, cachedEntry.Matches[0], headerRow)
 	if err != nil {
 		return nil, err
 	}
-	preset.Paths[ruleIndex] = effectiveCollectionPresetPath(
-		preset.Paths[ruleIndex].UsrGen,
+	preset.Paths[sourceIndex] = effectiveCollectionPresetPath(
+		preset.Paths[sourceIndex].UsrGen,
 		preparedRule.AutoGen,
 	)
 	entry := *cachedEntry
@@ -3234,6 +3266,7 @@ func (s *service) previewCollectionEntry(
 	entry.Columns = preparedEntry.Columns
 	entry.SchemaHash = preparedEntry.SchemaHash
 	entry.OutputNames = preparedEntry.OutputNames
+	suffixCollectionTableNames(&entry)
 	entry.PreviewColumns = preparedEntry.PreviewColumns
 	entry.PreviewRows = preparedEntry.PreviewRows
 	entry.PreviewTruncated = preparedEntry.PreviewTruncated
@@ -3259,7 +3292,7 @@ func (s *service) previewCollectionSingleFile(
 	lineCount int,
 	quickMode ...bool,
 ) (map[string]any, error) {
-	if ruleIndex < 0 || ruleIndex >= len(preset.Paths) {
+	if ruleIndex < 0 {
 		return nil, errors.New("单文件预览规则序号无效")
 	}
 	if startLine == 0 {
@@ -3292,6 +3325,10 @@ func (s *service) previewCollectionSingleFile(
 	if selected.ImportMode != "single" {
 		return nil, errors.New("只有单波形文件支持文本范围预览")
 	}
+	sourceIndex := collectionEntryRuleIndex(*selected)
+	if sourceIndex < 0 || sourceIndex >= len(preset.Paths) {
+		return nil, errors.New("单文件预览原始规则序号无效")
+	}
 	match := selected.Matches[0]
 	quick := len(quickMode) > 0 && quickMode[0] && startLine == 1
 	if quick {
@@ -3299,9 +3336,9 @@ func (s *service) previewCollectionSingleFile(
 		if readErr != nil {
 			return nil, fmt.Errorf("读取文件快速预览失败：%w", readErr)
 		}
-		sequenceColumnHidden := preset.Paths[ruleIndex].HasSeq
+		sequenceColumnHidden := preset.Paths[sourceIndex].HasSeq
 		if sequenceColumnHidden {
-			delimiter := preset.Paths[ruleIndex].Delimiter
+			delimiter := preset.Paths[sourceIndex].Delimiter
 			if strings.TrimSpace(delimiter) == "" {
 				delimiter = selected.Delimiter
 			}
@@ -3329,9 +3366,9 @@ func (s *service) previewCollectionSingleFile(
 	if err != nil {
 		return nil, fmt.Errorf("读取文件预览失败：%w", err)
 	}
-	sequenceColumnHidden := preset.Paths[ruleIndex].HasSeq
+	sequenceColumnHidden := preset.Paths[sourceIndex].HasSeq
 	if sequenceColumnHidden {
-		delimiter := preset.Paths[ruleIndex].Delimiter
+		delimiter := preset.Paths[sourceIndex].Delimiter
 		if strings.TrimSpace(delimiter) == "" {
 			delimiter = selected.Delimiter
 		}

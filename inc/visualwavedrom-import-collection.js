@@ -514,6 +514,7 @@
 
     function searchEntryStatus(entry) {
       if (!entry || typeof entry !== 'object') return null;
+      if (entry.searchSummary) return entry.searchSummary;
       const matches = Array.isArray(entry.matches) ? entry.matches : [];
       if (entry.status === 'formula-ready') {
         return { state: 'matched', symbol: '✓', label: '公式有效，可以导入' };
@@ -604,9 +605,41 @@
       return indexed;
     }
 
+    function entrySourceIndex(entry) {
+      return Number(entry && entry.expanded ? entry.sourceIndex || 0 : entry && entry.index);
+    }
+
+    function searchEntriesBySourceIndex(payload) {
+      const grouped = new Map();
+      searchEntriesByIndex(payload).forEach((entry) => {
+        const index = entrySourceIndex(entry);
+        if (!grouped.has(index)) grouped.set(index, []);
+        grouped.get(index).push(entry);
+      });
+      const indexed = new Map();
+      grouped.forEach((entries, index) => {
+        if (entries.length === 1) {
+          indexed.set(index, Object.assign({}, entries[0], { index }));
+          return;
+        }
+        const states = entries.map(searchEntryStatus).filter(Boolean);
+        const failed = states.filter((state) => state.state === 'missing' || state.state === 'duplicate');
+        const warnings = states.filter((state) => state.state === 'multiple');
+        const state = failed.some((item) => item.state === 'duplicate') ? 'duplicate'
+          : (failed.length || warnings.length ? 'multiple' : 'matched');
+        indexed.set(index, { index, searchSummary: {
+          state, symbol: state === 'matched' ? '✓' : (state === 'duplicate' ? '×' : '!'),
+          label: entries.length + ' 组变量组合；' + (entries.length - failed.length) + ' 组成功'
+            + (failed.length || warnings.length
+              ? '；' + Array.from(new Set(failed.concat(warnings).map((item) => item.label))).join('；') : '')
+        } });
+      });
+      return indexed;
+    }
+
     function renderPresetNavigationSearchStates(payload) {
       if (!presetNavigation) return;
-      const entries = searchEntriesByIndex(payload);
+      const entries = searchEntriesBySourceIndex(payload);
       presetNavigation.querySelectorAll('.wave-collection-preset-nav-item').forEach((button) => {
         const previous = button.querySelector('.wave-collection-preset-nav-status');
         if (previous) previous.remove();
@@ -804,7 +837,7 @@
       renderPresetNavigationSearchStates(payload);
       if (!presetCodeEditor) return;
       const lines = findPresetPathObjectLines(getPresetEditorValue());
-      const entries = Array.from(searchEntriesByIndex(payload).values());
+      const entries = Array.from(searchEntriesBySourceIndex(payload).values());
       const markersByLine = new Map();
       entries.forEach((entry, fallbackIndex) => {
         const entryIndex = Number.isInteger(Number(entry.index))
@@ -1167,7 +1200,8 @@
         input.autocomplete = 'off';
         input.spellcheck = false;
         input.value = variableValues.get(name) || '';
-        input.placeholder = '留空按 0';
+        input.placeholder = '0,1 或 1:3 或 1:2:6；留空为 0';
+        input.title = '逗号分隔候选数字；起点:终点 或 起点:步长:终点。多个变量自动组合，重复数字只取一次。';
         input.addEventListener('input', () => {
           variableValues.set(name, input.value);
           invalidateSearch('variable-change');
@@ -1546,8 +1580,9 @@
             const source = String(column.source || '').trim();
             const name = String(column.name || source).trim();
             if (!name) return names;
-            if (complexSources.has(source)) names.push(name + '_I', name + '_Q');
-            else names.push(name);
+            const suffix = String(entry.nameSuffix || '');
+            if (complexSources.has(source)) names.push(name + '_I' + suffix, name + '_Q' + suffix);
+            else names.push(name + suffix);
             return names;
           }, []);
         return configured.length ? configured : existing;
@@ -1596,7 +1631,52 @@
       return result;
     }
 
+    function collectionAnalysisPreset(preset, payload) {
+      const entries = Array.isArray(payload && payload.entries) ? payload.entries : [];
+      if (!entries.some((entry) => entry.expanded)) return preset;
+      const bindings = new Map();
+      entries.forEach((entry) => {
+        const group = Number(entry.combinationIndex || 0);
+        if (!bindings.has(group)) bindings.set(group, new Map());
+        const names = bindings.get(group);
+        const suffix = String(entry.nameSuffix || '');
+        const name = String(entry.name || '');
+        if (suffix && name.endsWith(suffix)) {
+          const base = name.slice(0, -suffix.length);
+          names.set(base, name);
+          if (entry.importMode === 'single' && entry.complexDetected) {
+            names.set(base + '_I', name + '_I');
+            names.set(base + '_Q', name + '_Q');
+          }
+        }
+        collectionEntryOutputNames(entry).forEach((output) => {
+          if (suffix && output.endsWith(suffix)) names.set(output.slice(0, -suffix.length), output);
+        });
+      });
+      const paths = [];
+      entries.forEach((entry) => {
+        const original = preset.paths[entrySourceIndex(entry)];
+        if (!original) return;
+        const copy = JSON.parse(JSON.stringify(original));
+        copy.usrGen.name = String(entry.name || copy.usrGen.name || '');
+        const names = bindings.get(Number(entry.combinationIndex || 0)) || new Map();
+        const formula = presetPathFormula(copy);
+        if (formula) {
+          ['cycle0', 'cycle05'].forEach((field) => {
+            if (typeof formula[field] !== 'string') return;
+            formula[field] = formula[field].replace(/\{([^{}]+)\}/g, (match, name) =>
+              names.has(name) ? '{' + names.get(name) + '}' : match);
+          });
+        }
+        const sources = presetPathMultiWave(copy);
+        if (sources) copy.usrGen.multiWave = sources.map((name) => names.get(name) || name);
+        paths[entry.index] = copy;
+      });
+      return Object.assign({}, preset, { paths });
+    }
+
     function refreshFormulaDiagnostics(preset, payload) {
+      preset = collectionAnalysisPreset(preset, payload);
       formulaDiagnostics = new Map();
       multiWaveDiagnostics = new Map();
       const formulaEngine = window.VisualWaveDromFormula;
@@ -1656,6 +1736,7 @@
     }
 
     function refreshMultiWaveDiagnostics(preset, payload) {
+      preset = collectionAnalysisPreset(preset, payload);
       multiWaveDiagnostics = new Map();
       const knownNames = new Set(formulaSignalNames(preset, payload));
       formulaDiagnostics.forEach((diagnostic) => {
@@ -2001,7 +2082,7 @@
         const payload = await post('single-preview', {
           rootPath,
           preset: presetForCollectionService(
-            presetForRawSequencePreview(preset, entry.index)
+            presetForRawSequencePreview(preset, entrySourceIndex(entry))
           ),
           variables,
           searchToken: searchResult.searchToken || '',
@@ -2041,9 +2122,9 @@
     }
 
     function syncEntryAutoGen(entry, reason) {
-      if (!parsedPreset || !entry || !parsedPreset.paths[entry.index]) return;
+      if (!parsedPreset || !entry || !parsedPreset.paths[entrySourceIndex(entry)]) return;
       delete entry.importError;
-      const path = parsedPreset.paths[entry.index];
+      const path = parsedPreset.paths[entrySourceIndex(entry)];
       const importMode = entry.importMode || 'single';
       const autoGen = Object.assign({}, path.autoGen || {}, {
         importMode,
@@ -2085,6 +2166,15 @@
         if (autoGen[key] === '') delete autoGen[key];
       });
       path.autoGen = autoGen;
+      (searchResult && searchResult.entries || []).forEach((sibling) => {
+        if (sibling === entry || entrySourceIndex(sibling) !== entrySourceIndex(entry)) return;
+        ['hasSeq', 'importMode', 'delimiter', 'parser', 'headerRow', 'indexColumn', 'columns'].forEach((key) => {
+          if (entry[key] !== undefined) sibling[key] = JSON.parse(JSON.stringify(entry[key]));
+          else delete sibling[key];
+        });
+        sibling.outputNames = collectionEntryOutputNames(sibling);
+        delete sibling.importError;
+      });
       entry.outputNames = collectionEntryOutputNames(entry);
       if (entry.status === 'duplicate-name') {
         entry.status = Array.isArray(entry.matches) && entry.matches.length > 1
@@ -2391,6 +2481,9 @@
         } else {
           name.textContent = String(entry.name || '未命名信号')
             + (entry.hasSeq ? '（含序号）' : '（自动编号）');
+        }
+        if (entry.expanded) {
+          name.title = Object.entries(entry.variables || {}).map(([key, value]) => key + '=' + value).join(', ');
         }
         const path = document.createElement('div');
         path.className = 'wave-collection-result-path';
