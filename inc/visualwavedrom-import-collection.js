@@ -2516,6 +2516,12 @@
         } else {
           path.textContent = entry.message || entry.searchPath || '没有匹配文件';
           path.title = '正则：' + String(entry.resolvedPattern || '');
+          if (typeof entry.resolvedPattern === 'string') {
+            const expression = document.createElement('div');
+            expression.className = 'wave-collection-result-regex';
+            expression.textContent = '实际正则：' + entry.resolvedPattern;
+            path.appendChild(expression);
+          }
         }
         const state = document.createElement('span');
         state.className = 'wave-collection-result-state';

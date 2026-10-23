@@ -1,5 +1,25 @@
 [
   {
+    "version": "2026.10.24.1",
+    "date": "2026-10-23T19:31:34Z",
+    "head": "e5912c73ffa7629e4dd5f31353d33563900e1672",
+    "notes": [
+      "修复 RealWave 时延检查误报冲突：连接时延优先级沿中间行和空行传递，先传播明确约束，再补充等差或邻行推断；保留独立数据序列及真实连接、相位和等差冲突。",
+      "导入预设集合未匹配时，搜索结果直接显示变量替换后的实际 Python re 正则表达式；多变量组合分别显示，长表达式自动换行。",
+      "仓库 Wave 仅附带一张含 clk 和 signal 的波形图模板，清除附带的个人波形、目录及参数表；模板使用独立库标识。",
+      "更新使用说明和缓存版本；验证 RealWave 20 行、7 条连接、跨行优先级、半周期精度、真实冲突、浏览器后台分析、预设搜索及 SQLite 模板导入与导出重载。"
+    ],
+    "commits": [
+      {
+        "id": "e5912c73ffa7629e4dd5f31353d33563900e1672",
+        "date": "2026-10-23T22:57:40+08:00",
+        "title": "feat: expand preset variables into named import combinations",
+        "body": "Support comma-separated numeric candidates and MATLAB-style start:end and start:step:end ranges, including fractional and descending ranges. Use exact rational arithmetic, stable deduplication and bounded candidate/cartesian-product sizes while retaining legacy scalar strings and zero-padded identifiers.\n\nSearch all variable combinations in a single shared-folder scan. Append ordered variable/value suffixes only for variables with multiple candidates and keep expanded search entries mapped to their original preset rules. Preserve template configuration through cached previews and imports, missing matches, CSV columns, complex signal splits, formulas and multi-wave references.\n\nShow source-rule aggregate search markers, retain independent combination results and synchronize parser choices without expanding saved presets. Add variable input examples and documentation. Upgrade service API to 27, rebuild static Windows/Linux amd64 servers, refresh checksums and publish release 2026.10.23.2 metadata.\n\nVerified exact range parsing, candidate limits, name ordering, skipped matches, real Python regex searches, single-file and CSV previews/imports, repeated searches, unchanged templates, formula/multi-wave bindings and desktop/mobile browser interaction. Full Go suite and all 65 staged release hashes passed. Exclude user wave libraries, temporary tests, local launcher changes and unrelated deletions."
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.10.23.2",
     "date": "2026-10-23T14:55:48Z",
     "head": "55371eb536e8db33d3a6f39d87d8c52b7c8aa279",

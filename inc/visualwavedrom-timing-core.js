@@ -608,6 +608,7 @@
               const shift = target - values[point.block] - point.offset;
               if (!Number.isFinite(shift)) continue;
               stop = visit({ group, block: point.block, col, target, shift, referenceGroups: referencePoint.groups,
+                referenceBlocks: [referencePoint.block],
                 referenceExpanded: referencePoint.expanded });
               if (stop) break;
             }
@@ -627,7 +628,7 @@
           if (target === null) continue;
           const shift = target - values[point.block] - point.offset;
           if (Number.isFinite(shift)) visit({ group, block: point.block, col, target, shift,
-            referenceGroups: anchor.groups, referenceExpanded: anchor.expanded, finalDataCell: true });
+            referenceGroups: anchor.groups, referenceBlocks: [anchor.block], referenceExpanded: anchor.expanded, finalDataCell: true });
         }
       }
       const componentRows = components.map(() => new Set());
@@ -675,7 +676,8 @@
               issue(attempt.reason === 'limit' ? 'unknown' : 'conflict', '等差补全位置无法满足连接时延或间隔时长要求', [link.gap.row], [], [link.gap.index]);
               continue;
             }
-            recordAlignment(link.to, { row: link.gap.row, referenceRow: link.gap.row, direction: 'data-series', gap: link.gap.index, referenceGroups: [group] });
+            recordAlignment(link.to, { row: link.gap.row, referenceRow: link.gap.row, direction: 'data-series', gap: link.gap.index,
+              referenceGroups: [group], referenceBlocks: [link.to === groups[link.gap.b] ? link.gap.a : link.gap.b] });
             queue.push(link.to);
           }
         }
@@ -687,6 +689,38 @@
       });
       const rejectedAlignments = new Map();
       const unusableReferences = new Set();
+      const lowerPriorityReferences = new Set();
+      let connectionReachability = null;
+      function connectionBacked(block) {
+        if (!connectionReachability) {
+          // Use the graph before default row origins were joined through vertex 0.
+          // Otherwise an unrelated row would inherit every connection's authority.
+          const links = Array.from({ length: originGroup }, () => []);
+          gaps.filter((gap) => gap.series).forEach((gap) => {
+            const a = originGroups[gap.a], b = originGroups[gap.b];
+            links[a].push(b); links[b].push(a);
+          });
+          const seeds = [originGroups[0]];
+          edges.filter((edge) => edge.timing.kind === 'delay' && !edge.invalid).forEach((edge) => {
+            if (edge.fromNode && edge.toNode) seeds.push(originGroups[edge.fromNode.block], originGroups[edge.toNode.block]);
+          });
+          connectionReachability = new Set(seeds);
+          const queue = Array.from(connectionReachability);
+          for (let head = 0; head < queue.length; head++) for (const next of links[queue[head]]) {
+            if (!connectionReachability.has(next)) { connectionReachability.add(next); queue.push(next); }
+          }
+        }
+        const pending = [block], seen = new Set();
+        while (pending.length) {
+          const current = pending.pop(), group = groups[current];
+          if (connectionReachability.has(originGroups[current])) return true;
+          if (seen.has(group)) continue;
+          seen.add(group);
+          pending.push(...(alignmentSources.get(group)?.referenceBlocks || []));
+        }
+        return false;
+      }
+      const connectionReference = (candidate) => (candidate.referenceBlocks || []).some((block) => connectionBacked(block));
       let seriesCoordinates;
       function declineReference(row, reference, group) {
         const root = seriesCoordinates[group].root;
@@ -698,7 +732,7 @@
         return reference && (unusableReferences.has(row.index + ':' + reference.index + ':' + candidate.group)
           || candidate.referenceGroups.some((group) => unusableReferences.has(reference.index + ':' + row.index + ':' + group)));
       }
-      function alignmentOptions(row, reference, eligible) {
+      function alignmentOptions(row, reference, eligible, connectionOnly) {
         if (!seriesCoordinates) {
           seriesCoordinates = [];
           components.forEach((_, root) => {
@@ -713,7 +747,7 @@
         }
         const candidates = [], roots = new Map(), ambiguous = new Set();
         alignmentCandidates(row, reference, eligible, (candidate) => {
-          if (unusableCandidate(row, reference, candidate)) return false;
+          if (unusableCandidate(row, reference, candidate) || connectionOnly && !connectionReference(candidate)) return false;
           const { root, offset } = seriesCoordinates[candidate.group], shift = candidate.shift - offset;
           if (roots.has(root) && Math.abs(roots.get(root) - shift) > Math.max(EPS, tolerance)) ambiguous.add(root);
           roots.set(root, shift); candidates.push(candidate); return false;
@@ -744,17 +778,23 @@
         }
         return false;
       }
-      function alignNeighbours() { while (feasible.ok && (aboveHead < aboveQueue.length || belowHead < belowQueue.length) && boundWork <= 2000000) {
+      function alignNeighbours(connectionOnly) { while (feasible.ok && (aboveHead < aboveQueue.length || belowHead < belowQueue.length) && boundWork <= 2000000) {
         const below = aboveHead >= aboveQueue.length;
         const index = below ? belowQueue[belowHead++] : aboveQueue[aboveHead++];
         (below ? belowPending : abovePending).delete(index);
         const row = rows[index], reference = rows[below ? nextRows[index] : previousRows[index]];
         const direction = below ? 'next-row' : 'previous-row';
         const eligible = (group) => shifts[group] === null && !blockedGroups.has(group);
-        const options = alignmentOptions(row, reference, eligible);
+        const options = alignmentOptions(row, reference, eligible, connectionOnly);
         const otherReference = rows[below ? previousRows[index] : nextRows[index]];
-        const alternative = options.candidates.length > 1 ? alignmentOptions(row, otherReference, eligible) : null;
-        for (const root of options.ambiguous) {
+        const alternative = alignmentOptions(row, otherReference, eligible, connectionOnly);
+        const preferredRoots = new Set(options.ambiguous);
+        const connectionRoots = new Set(options.candidates.filter(connectionReference).map((candidate) => seriesCoordinates[candidate.group].root));
+        alternative.candidates.filter(connectionReference).forEach((candidate) => {
+          const root = seriesCoordinates[candidate.group].root;
+          if (options.roots.has(root) && !connectionRoots.has(root)) preferredRoots.add(root);
+        });
+        for (const root of preferredRoots) {
           if (!alternative || !alternative.roots.has(root) || alternative.ambiguous.has(root)) continue;
           const candidates = alternative.candidates.filter((candidate) => seriesCoordinates[candidate.group].root === root);
           const targets = new Set(options.candidates.filter((candidate) => seriesCoordinates[candidate.group].root === root)
@@ -768,18 +808,20 @@
           recordAlignment(candidate.group, { row: index, referenceRow: otherReference.index,
             direction: below ? 'previous-row' : 'next-row', col: candidate.col, time: candidate.target,
             referenceExpanded: candidate.referenceExpanded, referenceGroups: candidate.referenceGroups,
+            referenceBlocks: candidate.referenceBlocks,
             finalDataCell: candidate.finalDataCell });
           positionSeries([candidate.group]);
           declineReference(index, reference.index, candidate.group);
+          if (!options.ambiguous.has(root)) lowerPriorityReferences.add(index + ':' + reference.index);
         }
         for (const candidate of options.candidates) {
-          const { group, col, target, shift, referenceExpanded, referenceGroups, finalDataCell } = candidate;
+          const { group, col, target, shift, referenceExpanded, referenceGroups, referenceBlocks, finalDataCell } = candidate;
           if (!eligible(group)) continue;
           const key = alignmentKey(index, direction, candidate);
           if (rejectedAlignments.has(key)) continue;
           const attempt = alignGroup(group, shift);
           if (attempt.ok) {
-            recordAlignment(group, { row: index, referenceRow: reference.index, direction, col, time: target, referenceExpanded, referenceGroups, finalDataCell });
+            recordAlignment(group, { row: index, referenceRow: reference.index, direction, col, time: target, referenceExpanded, referenceGroups, referenceBlocks, finalDataCell });
             positionSeries([group]);
             if (!options.ambiguous.has(seriesCoordinates[group].root) && alternative?.ambiguous.has(seriesCoordinates[group].root)) {
               declineReference(index, otherReference.index, group);
@@ -790,6 +832,7 @@
           }
         }
       }
+        if (connectionOnly) return;
         const reported = new Set();
         rejectedAlignments.forEach(({ row: index, referenceRow, direction, candidate, attempt }) => {
           const { group, col, target } = candidate;
@@ -829,8 +872,13 @@
                 || dependsOn(referenceGroups, new Set([group]))) continue;
             const key = group + ':' + row.index + ':' + direction;
             if (Math.abs(shift - shifts[group]) <= Math.max(EPS, tolerance) || auditedConflicts.has(key)) continue;
-            auditedConflicts.add(key);
             const chosen = alignmentSources.get(group), actual = target + shifts[group] - shift;
+            if (connectionReference(chosen) && !connectionReference(candidate)) {
+              declineReference(row.index, reference.index, group);
+              lowerPriorityReferences.add(row.index + ':' + reference.index);
+              continue;
+            }
+            auditedConflicts.add(key);
             const chosenColumn = Number.isInteger(chosen.col) ? '原列' + chosen.col + '锚点' : '已采用锚点';
             const sameReference = chosen.referenceRow === reference.index && chosen.direction !== 'data-series';
             const entry = issue('conflict', '第' + (row.index + 1) + '行原列' + col + '对齐冲突：由'
@@ -1081,7 +1129,7 @@
             issue('conflict', '第' + (gap.row + 1) + '行第' + gap.col + '列 ' + seriesCandidateText({ gap, duration, series })
               + '，但' + origin + '确定的 | 时长为 ' + format(gap.duration) + ' cycle；保留' + origin + '，未采用数据补全', [gap.row], [], [gap.index]);
           } else {
-            gap.series = series; delete gap.seriesReason;
+            gap.series = series; connectionReachability = null; delete gap.seriesReason;
             fills.forEach(({ run, value }) => { run.inferredValue = value; });
           }
           return !!gap.series;
@@ -1098,7 +1146,7 @@
             + seriesCandidateText({ duration, series }) + '，但与连接时延或间隔时长要求冲突；未采用该推算', [gap.row], [], [gap.index]);
           invalidRows.add(gap.row); return false;
         }
-        gap.duration = duration; gap.durationSource = 'data-series'; gap.series = series; delete gap.seriesReason;
+        gap.duration = duration; gap.durationSource = 'data-series'; gap.series = series; connectionReachability = null; delete gap.seriesReason;
         fills.forEach(({ run, value }) => { run.inferredValue = value; });
         seriesLinks[a].push({ to: b, delta, gap }); seriesLinks[b].push({ to: a, delta: -delta, gap });
         seriesCoordinates = null;
@@ -1106,6 +1154,10 @@
         return true;
       }
       const selfPositioned = shifts.map((shift) => shift !== null);
+      // Propagate authoritative times through intermediate rows before allowing
+      // a nearby, weaker inference to lock those rows to another timeline.
+      alignNeighbours(true);
+      rows.forEach((row, index) => { enqueue(index, false); enqueue(rows.length - index - 1, true); });
       alignNeighbours();
       auditAlignments(); propagateConflicts();
       const conflictedRegions = rows.map(() => []);
@@ -1139,7 +1191,8 @@
       rows.forEach((row) => {
         // Refresh every shared component after bidirectional propagation.
         resolveRowTimes(row);
-        row.alignments = Array.from(new Set(row.blocks.map((block) => alignmentSources.get(groups[block.id])).filter(Boolean)));
+        row.alignments = Array.from(new Set(row.blocks.map((block) => alignmentSources.get(groups[block.id])).filter(Boolean)))
+          .map(({ referenceBlocks, ...entry }) => entry);
         row.gaps.forEach((id) => {
           const gap = gaps[id];
           const candidate = deferredSeriesCandidates.get(id);
@@ -1233,7 +1286,8 @@
             : [resolved.size ? '仅能确定部分位置' : '缺少可用的同原列已知时刻',
               reference.sourceLength < row.sourceLength ? '参考行较短，超出部分不能作为依据' : '',
               circular ? '部分参考时刻反向依赖本行，不能作为独立依据' : '',
-              unusable ? '部分同列锚点不能同时满足本行时长，已采用另一侧可确定的参考行' : '',
+              lowerPriorityReferences.has(row.index + ':' + reference.index) ? '该侧为等差或邻行推断，已优先采用另一侧连接时延确定的参考'
+                : unusable ? '部分同列锚点不能同时满足本行时长，已采用另一侧可确定的参考行' : '',
               rejected ? '候选不能满足本行连接时延或最小时长' : ''].filter(Boolean).join('；');
           check.used = row.alignments.some((entry) => entry.row === row.index && entry.direction === direction);
           return check;
