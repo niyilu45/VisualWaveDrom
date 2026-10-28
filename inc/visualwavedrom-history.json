@@ -1,5 +1,33 @@
 [
   {
+    "version": "2026.10.29.1",
+    "date": "2026-10-28T20:01:16Z",
+    "head": "2858028dbd9980d31b1344da07d9069becfce22d",
+    "notes": [
+      "参数表改用实时引用：在当前表下方分区显示来源表，不新建合并表、不删除来源；变量选择支持全选和半选，引用顺序可拖动调整并支持撤销重做。",
+      "参数表仅保留变量名、变量值、变量说明三列，移除场景功能；旧场景转换为普通参数表，保留原标识、数值、公式和波形链接。",
+      "引用区可直接修改源表的变量名、值、说明及公式，支持多级引用、延后提交、Esc 放弃与当前页撤销；点击引用表名跳转，右侧图标单独打开。",
+      "本表优先于引用表，引用表按从上到下的顺序取值；同名未使用项标灰并默认折叠，源表修改实时同步参数表和波形，跨标签页更新保护正在输入的内容。",
+      "引用选择及优先级保存在同一 SQLite 波形库中；保留缺失变量的稳定标识以支持删除后恢复，拒绝循环引用；更新 ReadMe 和 QuickStart 使用说明。",
+      "验证三列显示、旧数据转换、源表原地编辑、嵌套引用、双向跨页同步、公式上下文、优先级、撤销、筛选、TOML 导出、保存重开及浏览器 SQLite 往返。"
+    ],
+    "commits": [
+      {
+        "id": "2858028dbd9980d31b1344da07d9069becfce22d",
+        "date": "2026-10-28T09:56:23+08:00",
+        "title": "docs: add an illustrated quick start guide",
+        "body": "Add QuickStart.md covering service and HTML startup, waveform and label editing, connections, a runnable JSON example, explicit library saves, screenshots, file imports, oscilloscope analysis, advanced feature entry points and troubleshooting.\n\nInclude eight current-interface screenshots captured with an isolated sample library, with highlighted controls, captions and descriptive alternative text. Add a README entry and refresh its existing release checksum without changing the application version.\n\nVerified all 30 local links, eight loaded images, two-column tables and desktop/mobile overflow. Rendered the JSON example in Chrome and checked all 65 indexed release hashes. Keep personal Wave libraries, launcher edits, unrelated deletions and temporary files out of the commit."
+      },
+      {
+        "id": "346954921d64fa25bf7a904f887551d994eda2e2",
+        "date": "2026-10-24T03:32:24+08:00",
+        "title": "fix: preserve connection timing priority and ship a clean template",
+        "body": "Propagate explicit connection authority through intermediate rows before weaker neighbour and arithmetic references can lock their positions. Keep self-contained sequences intact, explain declined lower-priority references and preserve real delay, phase and same-row arithmetic conflicts.\n\nShow the actual substituted Python regex directly for unmatched preset collection entries, including individual variable combinations and wrapped long expressions.\n\nReplace the tracked Wave database with one fresh two-signal template, empty directory and parameter catalogs and an independent library identity. Keep personal libraries and backups out of the commit and version updater. Update usage documentation, browser cache keys and release metadata to 2026.10.24.1.\n\nVerified 167 focused timing cases, RealWave's 20 rows and 7 exact delays, Chrome Worker live updates, actual preset search/import and missing patterns, SQLite template import/export roundtrip, source syntax and all 65 staged release hashes. Exclude local BAT edits, unrelated deletions, runtime state and temporary files."
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.10.24.1",
     "date": "2026-10-23T19:31:34Z",
     "head": "e5912c73ffa7629e4dd5f31353d33563900e1672",

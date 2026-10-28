@@ -5,6 +5,7 @@
   const dataTokenPattern = /(?:\{(?=[^{}]*\$)\s*(?:[$+\-.\d(]|(?:max|min)\s*\()[^{}]*\}|\S)+/g;
   const numericPattern = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
   const clone = (value) => JSON.parse(JSON.stringify(value));
+  const matrix = global.VWDParameterMatrix;
   const empty = () => ({ revision: 0, directories: [], tables: [], presets: [] });
   let catalog = empty(), libraryId = '', bridge = null, generation = 0;
   let cache = new WeakMap(), calculationCache = new WeakMap(), selectedFolder = '', selectedTable = '', activePage = 'wave';
@@ -20,10 +21,13 @@
   let tableViewId = '', selectedRow = null;
   let standaloneTableId = '', standaloneLoading = false, standaloneError = '';
   const rowFilters = { name: '', val: '' };
+  let matrixTables = [], matrixGeneration = -1;
   const clipboardKind = 'VisualWaveDromParametersClipboard';
   let parameterClipboard = null, clipboardRequest = 0;
   let parameterUndoStack = [], parameterRedoStack = [];
   let activeCellEdit = null;
+  let matrixDispose = null;
+  let pendingCatalog = null, syncedCatalog = null;
   const expanded = new Set(['']);
   const $ = (id) => document.getElementById(id);
   const element = (tag, className, text) => {
@@ -47,6 +51,7 @@
     paste: '<rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>',
     up: '<path d="m6 14 6-6 6 6"/>', down: '<path d="m6 10 6 6 6-6"/>',
     grip: '<circle cx="9" cy="5" r="1"/><circle cx="15" cy="5" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="9" cy="19" r="1"/><circle cx="15" cy="19" r="1"/>',
+    maximize: '<path d="M8 3H5a2 2 0 0 0-2 2v3m13-5h3a2 2 0 0 1 2 2v3M3 16v3a2 2 0 0 0 2 2h3m13-5v3a2 2 0 0 1-2 2h-3"/>',
     link: '<path d="m10 13 4-4M8 16l-1 1a4 4 0 0 1-6-6l5-5a4 4 0 0 1 6 0m4 2 1-1a4 4 0 0 1 6 6l-5 5a4 4 0 0 1-6 0"/>'
   };
   function button(label, action, icon) {
@@ -62,11 +67,19 @@
       next[key] = Array.isArray(next[key]) ? clone(next[key]).filter((item) => item && typeof item.id === 'string') : [];
     });
     next.tables.forEach((table) => { table.rows = Array.isArray(table.rows) ? table.rows : []; });
+    matrix.normalize(next.tables);
     next.revision = Number(next.revision) || 0;
     return next;
   }
   function id() { return 'param-' + (global.crypto.randomUUID ? global.crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2)); }
   function linked(source) { return source && Array.isArray(source.parameterTables) ? source.parameterTables : []; }
+  function effectiveTables() {
+    if (matrixGeneration !== generation) {
+      matrix.normalize(catalog.tables); matrixTables = matrix.all(catalog.tables); matrixGeneration = generation;
+    }
+    return matrixTables;
+  }
+  function effectiveTable(tableId) { return effectiveTables().find((table) => table.id === tableId); }
   function parseExpression(raw) {
     const separator = raw.indexOf(':');
     const expression = (separator < 0 ? raw : raw.slice(0, separator)).trim();
@@ -89,10 +102,20 @@
     const keys = [];
     for (const name of names) {
       const tableId = linked(source).find((tableId) => {
-        const table = catalog.tables.find((item) => item.id === tableId);
+        const table = effectiveTable(tableId);
         return table && table.rows.some((row) => String(row.name || '') === name);
       });
-      if (tableId) keys.push(referenceKey(tableId, name));
+      if (tableId) {
+        keys.push(referenceKey(tableId, name));
+        const owner = matrix.owner(catalog.tables, tableId);
+        if (owner && owner.id !== tableId) keys.push(referenceKey(owner.id, name));
+        const row = effectiveTable(tableId).rows.find((item) => String(item.name || '') === name);
+        if (row && row.referenceSource) {
+          keys.push(referenceKey(row.referenceSource.tableId, name));
+          const original = matrix.owner(catalog.tables, row.referenceSource.tableId);
+          if (original) keys.push(referenceKey(original.id, name));
+        }
+      }
     }
     return keys;
   }
@@ -252,7 +275,8 @@
       const documents = await bridge.referenceDocuments();
       for (const document of documents) {
         if (!current()) return;
-        if (!document.content && Array.isArray(document.parameterTables) && !document.parameterTables.includes(table.id)) continue;
+        if (!document.content && Array.isArray(document.parameterTables)
+          && !document.parameterTables.some((key) => matrix.owner(catalog.tables, key) === table)) continue;
         const key = identity + ':' + document.name;
         const stamp = document.content || JSON.stringify([document.revision, document.savedAt, document.contentLength]);
         let cached = referenceDocuments.get(key);
@@ -292,6 +316,9 @@
     const name = String(row.name || '');
     const rawVal = row.val == null ? '' : String(row.val);
     const result = { name, table: table.name, tableId: table.id, val: rawVal, rawVal, description: String(row.description || ''), formula: false, error: '' };
+    if (row.referenceSource) {
+      result.inherited = true; result.sourceTableId = row.referenceSource.tableId; result.sourceTable = row.referenceSource.name;
+    }
     const cycle = context.stack.findIndex((entry) => entry.row === row);
     if (cycle >= 0) {
       return Object.assign(result, { formula: true, error: '变量循环引用：' + context.stack.slice(cycle).map((entry) => entry.name).concat(name).join(' -> ') });
@@ -316,8 +343,16 @@
   }
   function resolveName(name, source, state) {
     for (const tableId of linked(source)) {
-      const table = state && state.tables ? state.tables.get(tableId) : catalog.tables.find((item) => item.id === tableId);
-      const row = table && table.rows.find((item) => String(item.name || '') === name);
+      const table = state && state.tables ? state.tables.get(tableId) : effectiveTable(tableId);
+      let row;
+      if (table && state) {
+        if (!state.nameIndexes) state.nameIndexes = new Map();
+        if (!state.nameIndexes.has(table)) {
+          const index = new Map(); table.rows.forEach((item) => { const key = String(item.name || ''); if (!index.has(key)) index.set(key, item); });
+          state.nameIndexes.set(table, index);
+        }
+        row = state.nameIndexes.get(table).get(name);
+      } else row = table && table.rows.find((item) => String(item.name || '') === name);
       if (row) return resolveParameterRow(table, row, source, state);
     }
     return null;
@@ -439,6 +474,7 @@
       const summary = result.error ? '\n' + result.error : '\n' + (parsed.noTrans ? '时延计算结果：' : '结果：') + result.value;
       return match[0] + (parsed.noTrans && !parsed.error ? '\n显示：' + parsed.expression.replace(/[$\s]/g, '') + '（noTrans）' : '')
         + summary + result.variables.map((item) => '\n\n$' + item.name + '\n参数表：' + item.table
+        + (item.sourceTable ? '\n定义来源：' + item.sourceTable : '')
         + '\n值：' + item.val + (item.formula ? '\n公式：' + item.rawVal : '') + '\n说明：' + (item.description || '无')).join('');
     }).filter(Boolean).join('\n\n');
   }
@@ -476,7 +512,7 @@
     }
     return { build: '20261021-parameter-diagnostics-v1', libraryId, generation, revision: catalog.revision,
       pending: pendingParameterChanges(), tableCount: catalog.tables.length,
-      links: linked(source).map((tableId) => { const table = catalog.tables.find((item) => item.id === tableId);
+      links: linked(source).map((tableId) => { const table = effectiveTable(tableId);
         return { tableId, found: !!table, name: table && table.name, rowCount: table && table.rows.length }; }), expressions };
   }
   function resolve(source, options) {
@@ -685,7 +721,7 @@
     const table = catalog.tables.find((item) => item.id === selectedTable);
     if (!table || type === 'row' && !table.rows.includes(selectedRow)) throw new Error(type === 'table' ? '请先选中参数表' : '请先选中一行');
     const payload = { kind: clipboardKind, version: 1, type };
-    if (type === 'table') payload.table = { name: table.name, rows: table.rows };
+    if (type === 'table') payload.table = table;
     else payload.row = selectedRow;
     return clone(payload);
   }
@@ -732,17 +768,20 @@
   }
   function applyClipboard(payload, type) {
     if (type === 'table') {
-      const table = { id: id(), name: uniqueCopyName(payload.table.name, new Set(catalog.tables.map((item) => item.name)), true), parentId: selectedFolder, rows: clone(payload.table.rows) };
+      const source = clone(payload.table); source.id = source.id || 'clipboard'; matrix.normalize([source]);
+      const table = matrix.cloneTable(source, id);
+      table.name = uniqueCopyName(payload.table.name, new Set(catalog.tables.map((item) => item.name)), true); table.parentId = selectedFolder;
       insertTable(table); return;
     }
     const table = catalog.tables.find((item) => item.id === selectedTable);
     if (!table) throw new Error('请先选中目标参数表');
-    const row = clone(payload.row);
+    const row = clone(payload.row); row.id = id();
     if (row.name) row.name = uniqueCopyName(row.name, new Set(table.rows.map((item) => item.name)), false);
     const index = table.rows.indexOf(selectedRow);
-    table.rows.splice(index < 0 ? table.rows.length : index + 1, 0, row);
+    const rows = table.rows.slice(); rows.splice(index < 0 ? rows.length : index + 1, 0, row);
     selectedRow = row; rowFilters.name = ''; rowFilters.val = '';
-    changed(true);
+    const patches = [{ target: table, field: 'rows', value: rows }];
+    patchMatrix(table, patches, true);
     const handle = $('parameter-workspace').querySelector('tr.selected .parameter-row-select');
     if (handle) { handle.focus({ preventScroll: true }); handle.scrollIntoView({ block: 'nearest', inline: 'nearest' }); }
   }
@@ -801,14 +840,159 @@
     const edit = activeCellEdit;
     if (!edit) return false;
     activeCellEdit = null;
+    if (edit.commit) { edit.commit(); notifyParameterHistory(); return true; }
     const { table, row, field, input, refresh } = edit;
-    if (!catalog.tables.includes(table) || !table.rows.includes(row) || String(row[field] ?? '') === input.value) return false;
+    if (!catalog.tables.includes(table) || !table.rows.includes(row)
+      || String(row[field] ?? '') === input.value) return false;
     recordParameterHistory({ kind: 'row-edit', tableId: table.id, row, field,
       before: row[field], beforePresent: Object.prototype.hasOwnProperty.call(row, field), after: input.value });
-    row[field] = input.value;
-    changed(false);
+    row[field] = input.value; changed(false);
     refresh();
     return true;
+  }
+  function patchMatrix(table, patches, render) {
+    commitParameterCell();
+    const changes = patches.map((patch) => Object.assign({}, patch, {
+      before: patch.target[patch.field], beforePresent: matrix.own(patch.target, patch.field), present: patch.present !== false
+    }));
+    if (!changes.length) return;
+    recordParameterHistory({ kind: 'matrix-patch', tableId: table.id, changes });
+    changes.forEach((patch) => { if (patch.present) patch.target[patch.field] = patch.value; else delete patch.target[patch.field]; });
+    const scroller = $('parameter-workspace').querySelector('.parameter-grid-scroll');
+    const position = scroller ? [scroller.scrollLeft, scroller.scrollTop] : [0, 0];
+    changed(!!render);
+    if (render) {
+      const next = $('parameter-workspace').querySelector('.parameter-grid-scroll');
+      if (next) { next.scrollLeft = position[0]; next.scrollTop = position[1]; }
+    }
+  }
+  function openTableReferences(table, anchor, ordering) {
+    if (modal) return;
+    commitParameterCell();
+    const identity = libraryId, stamp = generation;
+    const overlay = element('div', 'modal-overlay parameter-modal');
+    const dialog = element('form', 'modal-dialog parameter-matrix-merge-dialog parameter-reference-dialog-editor');
+    dialog.setAttribute('role', 'dialog'); dialog.setAttribute('aria-modal', 'true'); dialog.setAttribute('aria-labelledby', 'parameter-references-title');
+    let held = null;
+    const close = () => { held = null; overlay.remove(); modal = null; if (anchor && anchor.isConnected) anchor.focus({ preventScroll: true }); queueMicrotask(applyPendingCatalog); };
+    const header = element('div', 'modal-header'), title = element('h2', '', ordering ? '修改引用顺序' : '引用参数表'); title.id = 'parameter-references-title';
+    header.append(title, button('关闭', close, 'close')); dialog.append(header);
+    const body = element('div', 'modal-body'), choices = element('div', 'parameter-reference-choices-editor');
+    const error = element('p', 'parameter-count-error'); error.setAttribute('role', 'alert');
+    const confirm = button('应用', () => {}); confirm.type = 'submit'; confirm.classList.add('modal-btn-primary');
+    const columns = effectiveTables(), drafts = clone(table.references || []), states = [];
+    function checkbox(label, checked) {
+      const node = element('label'), input = element('input'); input.type = 'checkbox'; input.checked = checked; input.setAttribute('aria-label', label);
+      node.append(input, element('span', '', label)); return { node, input };
+    }
+    if (ordering) {
+      function renderOrder() {
+        choices.replaceChildren();
+        drafts.forEach((ref, index) => {
+          const row = element('div', 'parameter-reference-order-row'); row.dataset.referenceId = ref.tableId;
+          const source = columns.find((item) => item.id === ref.tableId);
+          const grip = button('拖动引用表：' + (source ? source.name : ref.name || ref.tableId), () => {}, 'grip');
+          const move = (to) => { if (to < 0 || to >= drafts.length) return; drafts.splice(to, 0, drafts.splice(index, 1)[0]); renderOrder(); };
+          grip.addEventListener('pointerdown', (event) => {
+            if (event.button !== 0) return;
+            event.preventDefault(); held = { key: ref.tableId, x: event.clientX, y: event.clientY, pointer: event.pointerId };
+            grip.setPointerCapture(event.pointerId); row.classList.add('dragging');
+          });
+          function mark(event) {
+            if (!held) return;
+            held.x = event.clientX; held.y = event.clientY;
+            choices.querySelectorAll('.drop-before,.drop-after').forEach((item) => item.classList.remove('drop-before', 'drop-after'));
+            const hit = document.elementFromPoint(held.x, held.y)?.closest('.parameter-reference-order-row');
+            if (hit && hit !== row) hit.classList.add(held.y < hit.getBoundingClientRect().top + hit.offsetHeight / 2 ? 'drop-before' : 'drop-after');
+          }
+          grip.addEventListener('pointermove', mark);
+          grip.addEventListener('pointerup', (event) => {
+            if (!held) return; mark(event);
+            const target = choices.querySelector('.drop-before,.drop-after'); held = null;
+            if (!target) { row.classList.remove('dragging'); return; }
+            const from = drafts.findIndex((item) => item.tableId === ref.tableId), to = drafts.findIndex((item) => item.tableId === target.dataset.referenceId) + (target.classList.contains('drop-after') ? 1 : 0);
+            drafts.splice(to > from ? to - 1 : to, 0, drafts.splice(from, 1)[0]); renderOrder();
+          });
+          grip.addEventListener('lostpointercapture', () => { held = null; row.classList.remove('dragging'); });
+          grip.addEventListener('keydown', (event) => { if (['ArrowUp', 'ArrowDown'].includes(event.key)) { event.preventDefault(); move(index + (event.key === 'ArrowUp' ? -1 : 1)); choices.children[index + (event.key === 'ArrowUp' ? -1 : 1)]?.querySelector('button')?.focus(); } });
+          const up = button('提高引用优先级', () => move(index - 1), 'up'), down = button('降低引用优先级', () => move(index + 1), 'down');
+          up.disabled = index === 0; down.disabled = index === drafts.length - 1;
+          row.append(grip, element('span', 'parameter-reference-order-name', (index + 1) + '. ' + (source ? source.name : (ref.name || ref.tableId) + '（已删除）')), up, down); choices.append(row);
+        });
+      }
+      renderOrder();
+    } else {
+      const all = checkbox('全选变量', false); body.append(all.node);
+      function sync() {
+        const checked = states.filter((state) => state.pick.checked);
+        const entries = checked.flatMap((state) => state.variables.map((entry) => entry.input));
+        all.input.disabled = !checked.length; all.input.checked = !!checked.length && entries.every((input) => input.checked);
+        all.input.indeterminate = entries.some((input) => input.checked) && !all.input.checked;
+        states.forEach((state) => { const inputs = state.variables.map((entry) => entry.input); state.all.checked = inputs.every((input) => input.checked); state.all.indeterminate = inputs.some((input) => input.checked) && !state.all.checked; });
+      }
+      all.input.addEventListener('change', () => { states.filter((state) => state.pick.checked).forEach((state) => state.variables.forEach((entry) => { entry.input.checked = all.input.checked; })); sync(); });
+      const candidates = columns.filter((item) => matrix.owner(catalog.tables, item.id).id !== table.id);
+      candidates.forEach((source) => {
+        const previous = drafts.find((ref) => ref.tableId === source.id), section = element('section', 'parameter-reference-selection');
+        const pick = checkbox('引用 ' + source.name, !!previous), selectAll = checkbox('全选变量：' + source.name, true);
+        const missingIds = previous && previous.rowIds ? previous.rowIds.filter((key) => !source.rows.some((row) => row.id === key)) : [];
+        const state = { source, pick: pick.input, all: selectAll.input, variables: [], hasMissing: missingIds.length > 0 }; states.push(state);
+        const details = element('details'); details.open = !!previous; details.append(element('summary', '', source.name + ' · ' + source.rows.length + ' 个变量'));
+        details.append(selectAll.node);
+        source.rows.filter((row) => row.name).forEach((row) => {
+          const entry = checkbox(source.name + ' / ' + row.name, !previous || !matrix.own(previous, 'rowIds') || previous.rowIds.includes(row.id));
+          entry.rowId = row.id; state.variables.push(entry); entry.node.append(element('small', '', matrix.raw(row.val)));
+          entry.input.addEventListener('change', () => { if (entry.input.checked) state.pick.checked = true; sync(); }); details.append(entry.node);
+        });
+        missingIds.forEach((key) => {
+          const entry = checkbox('已删除变量：' + source.name + ' / ' + key, true); entry.rowId = key;
+          entry.node.classList.add('parameter-reference-missing-choice'); entry.node.title = '保留勾选后，源变量恢复时自动接续引用';
+          entry.input.addEventListener('change', sync); state.variables.push(entry); details.append(entry.node);
+        });
+        pick.input.addEventListener('change', () => { if (pick.input.checked) details.open = true; sync(); });
+        selectAll.input.addEventListener('change', () => { state.variables.forEach((entry) => { entry.input.checked = selectAll.input.checked; }); if (selectAll.input.checked) pick.input.checked = true; sync(); });
+        section.append(pick.node, details); choices.append(section);
+      });
+      drafts.filter((ref) => !columns.some((source) => source.id === ref.tableId)).forEach((ref) => {
+        const pick = checkbox('保留缺失引用：' + (ref.name || ref.tableId), true); choices.append(pick.node); states.push({ missing: ref, pick: pick.input, all: { checked: true }, variables: [] });
+      });
+      if (!states.length) choices.append(element('p', 'parameter-empty', '没有可引用的其他参数表'));
+      sync();
+    }
+    body.append(choices, error); dialog.append(body);
+    const footer = element('div', 'modal-footer'); footer.append(button('取消', close), confirm); dialog.append(footer);
+    dialog.addEventListener('submit', (event) => {
+      event.preventDefault();
+      try {
+        if (identity !== libraryId || stamp !== generation || !catalog.tables.includes(table)) throw new Error('参数目录已变化，请重新打开引用窗口');
+        let references = drafts;
+        if (!ordering) {
+          const chosen = states.filter((state) => state.pick.checked).map((state) => {
+            if (state.missing) return state.missing;
+            const selected = state.variables.filter((entry) => entry.input.checked).map((entry) => entry.rowId);
+            return { tableId: state.source.id, name: state.source.name, ...(!state.hasMissing && selected.length === state.variables.length ? {} : { rowIds: selected }) };
+          });
+          references = [...drafts.map((ref) => chosen.find((entry) => entry.tableId === ref.tableId)).filter(Boolean), ...chosen.filter((entry) => !drafts.some((ref) => ref.tableId === entry.tableId))];
+        }
+        const candidate = clone(catalog); candidate.tables.find((item) => item.id === table.id).references = references; validate(candidate);
+        close();
+        if (JSON.stringify(table.references || []) !== JSON.stringify(references)) patchMatrix(table, [{ target: table, field: 'references', value: references }], true);
+        status(ordering ? '已更新引用顺序' : '已更新引用参数表');
+      } catch (cause) { error.textContent = cause.message; }
+    });
+    let outside = false;
+    overlay.addEventListener('pointerdown', (event) => { outside = event.target === overlay; });
+    overlay.addEventListener('click', (event) => { if (outside && event.target === overlay) close(); });
+    overlay.addEventListener('keydown', (event) => {
+      event.stopPropagation();
+      if (event.key === 'Escape') { event.preventDefault(); close(); }
+      if (event.key === 'Tab') {
+        const controls = [...dialog.querySelectorAll('button:not(:disabled),input:not(:disabled),summary')].filter((node) => node.getClientRects().length);
+        if (event.shiftKey && document.activeElement === controls[0]) { event.preventDefault(); controls.at(-1).focus(); }
+        else if (!event.shiftKey && document.activeElement === controls.at(-1)) { event.preventDefault(); controls[0].focus(); }
+      }
+    });
+    modal = overlay; overlay.append(dialog); document.body.append(overlay); header.querySelector('button').focus();
   }
   function pendingParameterChanges() { return !!activeCellEdit || dirty !== savedGeneration; }
   function folderAncestors(parentId) {
@@ -866,11 +1050,8 @@
     const table = catalog.tables.find((item) => item.id === selectedTable);
     const index = table ? table.rows.indexOf(selectedRow) : -1;
     if (index < 0) return false;
-    const scroller = $('parameter-workspace').querySelector('.parameter-grid-scroll');
-    // Retain the removed row and its neighbors, not a snapshot of unrelated edits.
-    recordParameterHistory({ kind: 'row-delete', tableId: table.id, row: selectedRow, index, previous: table.rows[index - 1], next: table.rows[index + 1] });
-    table.rows.splice(index, 1);
-    finishRowHistory(table, null, scroller ? scroller.scrollTop : 0);
+    const row = selectedRow, patches = [{ target: table, field: 'rows', value: table.rows.filter((item) => item !== row) }];
+    selectedRow = null; patchMatrix(table, patches, true);
     return true;
   }
   function rowPosition(table, row) {
@@ -900,6 +1081,20 @@
     commitParameterCell();
     const from = redo ? parameterRedoStack : parameterUndoStack, to = redo ? parameterUndoStack : parameterRedoStack;
     const entry = from[from.length - 1]; if (!entry) return false;
+    if (entry.kind === 'matrix-patch') {
+      const table = catalog.tables.find((item) => item.id === entry.tableId); if (!table) return false;
+      const scroller = $('parameter-workspace').querySelector('.parameter-grid-scroll');
+      const position = scroller ? [scroller.scrollLeft, scroller.scrollTop] : [0, 0];
+      (redo ? entry.changes : entry.changes.slice().reverse()).forEach((patch) => {
+        if (redo ? patch.present : patch.beforePresent) patch.target[patch.field] = redo ? patch.value : patch.before;
+        else delete patch.target[patch.field];
+      });
+      from.pop(); to.push(entry); selectedTable = table.id;
+      changed(true, true);
+      const next = $('parameter-workspace').querySelector('.parameter-grid-scroll');
+      if (next) { next.scrollLeft = position[0]; next.scrollTop = position[1]; }
+      return true;
+    }
     if (entry.kind === 'cell-batch') {
       const additions = entry.additions || [];
       if (entry.changes.some((change) => !catalog.tables.some((table) => table.id === change.tableId && table.rows.includes(change.row)))) return false;
@@ -1055,7 +1250,7 @@
     if (modal) return;
     try {
       commitParameterCell();
-      const table = catalog.tables.find((item) => item.id === tableId);
+      const table = effectiveTable(tableId);
       if (!table) throw new Error('参数表不存在或已被删除');
       let name = String(table.name || '参数表').trim().replace(/\.toml$/i, '')
         .replace(/[<>:"/\\|?*\u0000-\u001f\u007f]/g, '_');
@@ -1125,7 +1320,7 @@
         setBusy(true);
         try {
           commitParameterCell();
-          const current = catalog.tables.find((item) => item.id === tableId);
+          const current = effectiveTable(tableId);
           if (!current || identity !== libraryId) throw new Error('目标参数表已变化，请关闭后重新导出');
           const result = parameterTableToml(current, descriptions.checked);
           let savedPath = target;
@@ -1171,6 +1366,7 @@
     } catch (error) { status('导出 TOML 失败：' + error.message, true); }
   }
   function validate(value) {
+    matrix.normalize(value.tables);
     const ids = new Set();
     ['directories', 'tables', 'presets'].forEach((key) => value[key].forEach((item) => {
       if (ids.has(item.id)) throw new Error('重复的参数目录标识');
@@ -1184,6 +1380,7 @@
         if (error) throw new Error(table.name + ' 第 ' + (index + 1) + ' 行：' + error);
       });
     });
+    matrix.validate(value.tables);
   }
   function invalidate() {
     generation++; cache = new WeakMap(); calculationCache = new WeakMap();
@@ -1197,10 +1394,60 @@
     status('正在保存参数目录...');
     clearTimeout(timer); timer = setTimeout(() => { void flush(false).catch(() => {}); }, 220);
   }
+  function rebasePendingCatalog() {
+    if (!pendingCatalog || pendingCatalog.libraryId !== libraryId || Number(pendingCatalog.catalog.revision) <= catalog.revision) { pendingCatalog = null; return false; }
+    const incoming = normalize(pendingCatalog.catalog), baseline = syncedCatalog;
+    if (!baseline) return false;
+    const next = {};
+    for (const field of ['tables', 'directories', 'presets']) {
+      const before = new Map(baseline[field].map((item) => [item.id, item]));
+      const local = new Map(catalog[field].map((item) => [item.id, item]));
+      const remote = new Map(incoming[field].map((item) => [item.id, item]));
+      next[field] = [];
+      const localOrderUnchanged = JSON.stringify([...local.keys()]) === JSON.stringify([...before.keys()]);
+      const order = localOrderUnchanged ? [...remote.keys(), ...local.keys()] : [...local.keys(), ...remote.keys()];
+      for (const key of new Set(order)) {
+        const b = JSON.stringify(before.get(key)), l = JSON.stringify(local.get(key)), r = JSON.stringify(remote.get(key));
+        if (l !== b && r !== b && l !== r) throw new Error('参数表在其他窗口也被修改，请保留当前输入后重新打开：' + (local.get(key)?.name || remote.get(key)?.name || key));
+        const chosen = r === b || l === r ? local.get(key) : remote.get(key);
+        if (chosen) next[field].push(chosen);
+      }
+    }
+    validate(next);
+    const replaced = new Set(catalog.tables.filter((table) => next.tables.find((item) => item.id === table.id) !== table).map((table) => table.id));
+    const unaffected = (entry) => !replaced.has(entry.tableId || entry.table?.id)
+      && !(entry.changes || []).some((change) => replaced.has(change.tableId || change.sourceTableId));
+    parameterUndoStack = parameterUndoStack.filter(unaffected); parameterRedoStack = parameterRedoStack.filter(unaffected);
+    Object.assign(catalog, next, { revision: incoming.revision });
+    syncedCatalog = clone(incoming); pendingCatalog = null;
+    invalidate(); renderTree(); renderTable(); return true;
+  }
+  function applyPendingCatalog() {
+    if (!pendingCatalog || modal || activeCellEdit || saving) return;
+    if (dirty !== savedGeneration) { void flush(false).catch(() => {}); return; }
+    const active = document.activeElement, scroll = $('parameter-workspace')?.querySelector('.parameter-grid-scroll');
+    const position = scroll && [scroll.scrollLeft, scroll.scrollTop];
+    const field = active && active.dataset.parameterField, line = active && active.closest('tr');
+    const index = line && line.parentElement ? [...line.parentElement.children].indexOf(line) : -1;
+    const sourceId = active && active.dataset.referenceSourceId, rowId = active && active.dataset.referenceRowId;
+    const start = active && active.selectionStart, end = active && active.selectionEnd;
+    try { rebasePendingCatalog(); }
+    catch (error) { status(error.message, true); return; }
+    const next = $('parameter-workspace')?.querySelector('.parameter-grid-scroll');
+    if (next && position) { next.scrollLeft = position[0]; next.scrollTop = position[1]; }
+    if (field && next) {
+      const row = next.querySelector('tbody')?.children[index];
+      const input = sourceId ? [...next.querySelectorAll('[data-reference-source-id]')].find((node) => node.dataset.parameterField === field && node.dataset.referenceSourceId === sourceId && node.dataset.referenceRowId === rowId)
+        : row && [...row.querySelectorAll('[data-parameter-field]')].find((node) => node.dataset.parameterField === field);
+      if (input) { input.focus({ preventScroll: true }); if (typeof start === 'number') input.setSelectionRange(start, end); }
+    }
+  }
   async function flush(includeDraft = true) {
     if (includeDraft) commitParameterCell();
     clearTimeout(timer);
     if (saving) { await saving; if (dirty !== savedGeneration) return flush(false); return; }
+    if (pendingCatalog && !modal && !activeCellEdit) rebasePendingCatalog();
+    else if (pendingCatalog && activeCellEdit) return;
     if (dirty === savedGeneration) return;
     const at = dirty, identity = libraryId;
     const value = clone(catalog);
@@ -1209,6 +1456,7 @@
       const saved = await bridge.save(value, value.revision);
       if (identity !== libraryId) throw new Error('保存期间波形库已切换');
       catalog.revision = saved.revision; savedGeneration = at; failure = '';
+      syncedCatalog = clone(saved);
       if (channel) channel.postMessage({ libraryId, catalog: saved });
       status('已保存到工作库');
     })().catch((error) => {
@@ -1216,6 +1464,7 @@
     }).finally(() => { saving = null; });
     await saving;
     if (dirty !== savedGeneration) return flush(false);
+    applyPendingCatalog();
   }
   function setCatalog(value, identity) {
     if (comparisonCommit && identity === libraryId) return;
@@ -1227,6 +1476,7 @@
     if (sameContent) catalog.revision = next.revision;
     else { catalog = next; parameterUndoStack = []; parameterRedoStack = []; }
     libraryId = identity || '';
+    syncedCatalog = clone(next); pendingCatalog = null;
     dirty = savedGeneration = 0; failure = '';
     if (!catalog.tables.some((table) => table.id === selectedTable)) selectedTable = '';
     if (!catalog.directories.some((dir) => dir.id === selectedFolder)) selectedFolder = '';
@@ -1363,9 +1613,9 @@
         error.textContent = '目标参数表已变化，请关闭后重新选择'; return;
       }
       confirm.disabled = true;
-      const rows = Array.from({ length: count }, () => ({ name: '', val: '', description: '' }));
-      table.rows.push(...rows); selectedRow = rows[0]; rowFilters.name = ''; rowFilters.val = '';
-      close(); changed(true);
+      const rows = Array.from({ length: count }, () => ({ id: id(), name: '', val: '', description: '' }));
+      selectedRow = rows[0]; rowFilters.name = ''; rowFilters.val = '';
+      close(); patchMatrix(table, [{ target: table, field: 'rows', value: table.rows.concat(rows) }], true);
       const firstInput = $('parameter-workspace').querySelector('tr.selected input');
       if (firstInput) { firstInput.focus({ preventScroll: true }); firstInput.scrollIntoView({ block: 'nearest', inline: 'nearest' }); }
     });
@@ -1388,9 +1638,10 @@
     const workspace = $('parameter-workspace'); if (!workspace) return;
     referenceScan++; referenceRefresh = null;
     commitParameterCell();
-    if (standaloneTableId) selectedTable = standaloneTableId;
+    if (matrixDispose) { matrixDispose(); matrixDispose = null; }
+    if (standaloneTableId) selectedTable = (matrix.owner(catalog.tables, standaloneTableId) || {}).id || standaloneTableId;
     const table = catalog.tables.find((item) => item.id === selectedTable);
-    if (standaloneTableId) document.title = (table ? table.name : '参数表') + ' - VisualWaveDrom';
+    if (standaloneTableId) document.title = (effectiveTable(standaloneTableId) || table || { name: '参数表' }).name + ' - VisualWaveDrom';
     if (tableViewId !== (table && table.id || '')) {
       tableViewId = table && table.id || ''; selectedRow = null;
       rowFilters.name = ''; rowFilters.val = '';
@@ -1439,7 +1690,7 @@
       open.insertAdjacentHTML('afterbegin', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="lucide" aria-hidden="true">' + paths.external + '</svg>');
       toolbar.append(open);
     }
-    if (standaloneTableId) {
+    if (table) {
       const undo = button('撤销', () => applyParameterHistory(false), 'undo'); undo.id = 'parameter-single-undo';
       const redo = button('重做', () => applyParameterHistory(true), 'redo'); redo.id = 'parameter-single-redo';
       toolbar.append(undo, redo);
@@ -1469,16 +1720,19 @@
     const scroller = element('div', 'parameter-grid-scroll'); const grid = element('table', 'parameter-grid');
     const head = element('thead'); const tr = element('tr');
     const filterInputs = {}, filterCount = element('span', 'parameter-filter-count');
+    let matrixView = null;
     const clearFilters = button('清除筛选', () => {
       ['name', 'val'].forEach((field) => { rowFilters[field] = ''; filterInputs[field].value = ''; });
+      if (matrixView) matrixView.clearFilters();
       applyFilters(); filterInputs.name.focus();
     }, 'close');
-    ['变量名 name', '变量值 val', '变量说明 description'].forEach((label, index) => {
+    ['name', 'val', 'description'].forEach((field) => {
+      const label = { name: '变量名 name', val: '变量值 val', description: '变量说明 description' }[field];
       const th = element('th'); th.scope = 'col'; th.append(element('span', 'parameter-column-label', label));
-      if (index < 2) {
-        const field = index === 0 ? 'name' : 'val'; const input = element('input', 'parameter-column-filter');
+      if (field !== 'description') {
+        const input = element('input', 'parameter-column-filter');
         input.type = 'search'; input.value = rowFilters[field]; input.spellcheck = false;
-        input.placeholder = index === 0 ? '筛选变量名' : '筛选变量值'; input.setAttribute('aria-label', input.placeholder);
+        input.placeholder = field === 'name' ? '筛选变量名' : '筛选变量值'; input.setAttribute('aria-label', input.placeholder);
         input.addEventListener('input', () => { rowFilters[field] = input.value; applyFilters(); });
         filterInputs[field] = input; th.append(input);
       } else {
@@ -1560,6 +1814,7 @@
       const context = { stack: [], values: new Map() };
       const names = parameterNameCounts(table.rows);
       rowViews.forEach((view) => view.updateValue(context, names));
+      if (matrixView) matrixView.refresh();
     }
     function refreshCommittedCell() {
       refreshValues();
@@ -1662,6 +1917,7 @@
             input.classList.toggle('parameter-negative-value', !result.error && Number.isFinite(numericValue) && numericValue < 0);
             input.setAttribute('aria-invalid', String(!!result.error));
             input.title = result.formula ? '公式：' + result.rawVal : '';
+            input.placeholder = '';
             error.hidden = !result.error; error.textContent = result.error;
             if (input.isConnected && valueChanged) resize();
           };
@@ -1680,6 +1936,15 @@
           const committed = activeCellEdit && activeCellEdit.input === input && commitParameterCell();
           if (!committed) refreshValues();
           void flush(false).catch(() => {});
+        });
+        input.addEventListener('keydown', (event) => {
+          if (event.isComposing || field === 'description') return;
+          if (event.key === 'Enter' && !event.shiftKey && !event.ctrlKey && !event.metaKey) { event.preventDefault(); event.stopPropagation(); input.blur(); }
+          if (event.key === 'Escape') {
+            event.preventDefault(); event.stopPropagation();
+            if (activeCellEdit && activeCellEdit.input === input) { activeCellEdit = null; notifyParameterHistory(); }
+            input.value = String(row[field] ?? ''); input.blur();
+          }
         });
         if (field === 'val') fieldBox.prepend(input);
         else fieldBox.append(input);
@@ -1702,28 +1967,31 @@
       if (filterError) filterInputs.val.setAttribute('aria-describedby', emptyCell.id);
       else filterInputs.val.removeAttribute('aria-describedby');
       let count = 0;
-      rowViews.forEach((view) => {
-        const result = view.valueResult;
-        const displayedValue = String(result ? result.val ?? '' : view.row.val ?? '').trim();
-        let matchesValue;
-        if (comparison) {
-          const value = Number(displayedValue);
-          matchesValue = !filterError && !(result && result.error)
-            && numericPattern.test(displayedValue) && Number.isFinite(value);
-          if (matchesValue) {
-            switch (comparison[1]) {
-              case '>': matchesValue = value > limit; break;
-              case '<': matchesValue = value < limit; break;
-              case '>=': matchesValue = value >= limit; break;
-              case '<=': matchesValue = value <= limit; break;
+      const matches = (result) => {
+          const displayedValue = String(result ? result.val ?? '' : '').trim();
+          let matchesValue;
+          if (comparison) {
+            const value = Number(displayedValue);
+            matchesValue = !filterError && !(result && result.error)
+              && numericPattern.test(displayedValue) && Number.isFinite(value);
+            if (matchesValue) {
+              switch (comparison[1]) {
+                case '>': matchesValue = value > limit; break;
+                case '<': matchesValue = value < limit; break;
+                case '>=': matchesValue = value >= limit; break;
+                case '<=': matchesValue = value <= limit; break;
+              }
             }
+          } else {
+            matchesValue = String(result ? result.rawVal ?? '' : '').toLowerCase().includes(val)
+              || displayedValue.toLowerCase().includes(val);
           }
-        } else {
-          matchesValue = String(view.row.val ?? '').toLowerCase().includes(val)
-            || displayedValue.toLowerCase().includes(val);
-        }
+          return matchesValue;
+      };
+      if (matrixView) matrixView.filterReferences(matches);
+      rowViews.forEach((view) => {
         const visible = String(view.row.name ?? '').toLowerCase().includes(name)
-          && matchesValue;
+          && (matrixView ? matrixView.visible(view, matches) : matches(view.valueResult));
         const wasHidden = view.line.hidden; view.line.hidden = !visible;
         if (visible) count++;
         else if (selectedRow === view.row) selectRow(null, null);
@@ -1735,8 +2003,40 @@
       filterCount.textContent = count + ' / ' + table.rows.length;
       clearFilters.disabled = !rowFilters.name && !rowFilters.val;
     }
+    matrixView = global.VWDParameterMatrixView.attach({ table, toolbar, grid, headRow: tr, rows: rowViews, workspace, emptyCell, scroller,
+      filters: rowFilters, element, button, id, status, commit: commitParameterCell,
+      patch: (patches, render) => patchMatrix(table, patches, render),
+      editSource: (source, row, field, input, original) => {
+        if (activeCellEdit && activeCellEdit.input !== input) commitParameterCell();
+        activeCellEdit = input.value === original ? null : { input, original, commit: () => {
+          if (!catalog.tables.includes(source) || !source.rows.includes(row)) { status('源参数已变化，请重新编辑', true); return; }
+          patchMatrix(table, [{ target: row, field, value: input.value, sourceTableId: source.id }]);
+          renderTree(); refreshCommittedCell(); applyFilters();
+        } };
+        notifyParameterHistory();
+      },
+      history: applyParameterHistory,
+      tables: effectiveTables, resolve: (column, row, context) => resolveParameterRow(column, row, { parameterTables: [column.id] }, context),
+      refresh: () => { refreshCommittedCell(); applyFilters(); }, filter: applyFilters,
+      references: (event) => openTableReferences(table, event.currentTarget),
+      orderReferences: (event) => openTableReferences(table, event.currentTarget, true),
+      rawTables: () => catalog.tables,
+      open: (key) => { void bridge.openTable(key).catch((error) => status(error.message, true)); },
+      showSource: (key) => {
+        commitParameterCell();
+        const source = catalog.tables.find((item) => item.id === key);
+        if (!source) return;
+        if (standaloneTableId) { void bridge.openTable(key).catch((error) => status(error.message, true)); return; }
+        selectedTable = source.id; selectedFolder = source.parentId || '';
+        folderAncestors(selectedFolder).forEach((key) => expanded.add(key));
+        renderTree(); renderTable(); focusTreeItem('tableId', source.id);
+      },
+      sourceTable: (key) => catalog.tables.find((item) => item.id === key),
+      export: exportParameterTableToml, compare: openComparison
+    });
+    matrixDispose = matrixView.dispose;
     refreshValues(); applyFilters();
-    grid.append(body); scroller.append(grid); workspace.append(scroller);
+    grid.append(body); scroller.prepend(grid); workspace.append(scroller);
     referenceRefresh = () => { void updateReferenceButtons(table, rowViews, workspace); };
     referenceRefresh();
   }
@@ -1802,7 +2102,7 @@
     let editor = null, busy = false;
     function draftTable(id) {
       if (!drafts.has(id)) {
-        const table = catalog.tables.find((item) => item.id === id);
+        const table = effectiveTable(id);
         if (table) {
           const draft = clone(table);
           drafts.set(id, { base: clone(table), draft, missingRows: new Map(), compared: { table: clone(table), rows: draft.rows.slice() } });
@@ -1835,11 +2135,11 @@
     function tableSelect(caption) {
       const label = element('label', 'parameter-compare-select'), select = element('select');
       select.setAttribute('aria-label', caption); select.add(new Option('选择参数表', ''));
-      catalog.tables.forEach((table) => select.add(new Option((folderPath(table.parentId) || '根目录') + ' / ' + table.name, table.id)));
+      effectiveTables().forEach((table) => select.add(new Option((folderPath(table.parentId) || '根目录') + ' / ' + table.name, table.id)));
       label.append(element('span', '', caption), select); return { label, select };
     }
     const left = tableSelect('左侧参数表'), right = tableSelect('右侧参数表'); left.select.value = tableId;
-    right.select.value = (catalog.tables.find((table) => table.id !== tableId) || {}).id || '';
+    right.select.value = (effectiveTables().find((table) => table.id !== tableId) || {}).id || '';
     const swap = button('交换左右参数表', () => {
       const previous = left.select.value; left.select.value = right.select.value; right.select.value = previous; rebuild();
     }, 'swap');
@@ -1992,6 +2292,46 @@
         if (saving) { try { await saving; } catch (_) { /* Validate the repaired draft below before retrying. */ } }
         if (identity !== libraryId) throw new Error('波形库已切换，请重新打开比较。');
         const current = catalog, at = dirty, candidate = clone(current), changes = [], additions = [];
+        if ([...editedRows.values()].some((item) => {
+          const owner = matrix.owner(current.tables, item.table.id);
+          return item.table.referenceOwnerId || owner && owner.references && owner.references.length;
+        })) {
+          const grouped = new Map();
+          editedRows.forEach((item) => {
+            const live = effectiveTable(item.table.id), baseline = drafts.get(item.table.id).base;
+            if (!live || JSON.stringify(live.rows) !== JSON.stringify(baseline.rows)) throw new Error('参数表“' + item.table.name + '”已变化，请重新打开比较');
+            if (!grouped.has(item.table.id)) grouped.set(item.table.id, []);
+            const index = item.table.rows.indexOf(item.row);
+            grouped.get(item.table.id).push({ before: baseline.rows[index], after: item.row });
+          });
+          grouped.forEach((edits, key) => matrix.editEffective(candidate.tables, key, edits, id));
+          validate(candidate);
+          let saved;
+          try { saving = bridge.save(candidate, current.revision); saved = await saving; }
+          finally { saving = null; }
+          if (identity !== libraryId || current !== catalog || at !== dirty) throw new Error('保存期间参数发生变化，请重新打开比较');
+          const patches = [];
+          candidate.tables.forEach((next) => {
+            const original = current.tables.find((item) => item.id === next.id);
+            if (JSON.stringify(original) === JSON.stringify(next)) return;
+            const rows = next.rows.map((row) => {
+              const existing = original.rows.find((item) => item.id === row.id);
+              if (!existing) return row;
+              ['name', 'val', 'description'].forEach((field) => {
+                if (existing[field] !== row[field] || matrix.own(existing, field) !== matrix.own(row, field)) patches.push({ target: existing, field, value: row[field], present: matrix.own(row, field) });
+              });
+              return existing;
+            });
+            if (rows.length !== original.rows.length) patches.push({ target: original, field: 'rows', value: rows });
+          });
+          const operations = patches.map((patch) => ({ ...patch, before: patch.target[patch.field], beforePresent: matrix.own(patch.target, patch.field), present: patch.present !== false }));
+          if (operations.length) recordParameterHistory({ kind: 'matrix-patch', tableId: matrix.owner(current.tables, grouped.keys().next().value).id, changes: operations });
+          operations.forEach((patch) => { if (patch.present) patch.target[patch.field] = patch.value; else delete patch.target[patch.field]; });
+          catalog.revision = saved.revision; dirty++; savedGeneration = dirty; failure = '';
+          invalidate(); renderTree(); renderTable(); notifyParameterHistory();
+          if (channel) channel.postMessage({ libraryId, catalog: saved });
+          status('比较修改已保存到工作库'); busy = false; close(true); return;
+        }
         const checked = new Set();
         editedRows.forEach((item) => {
           const table = current.tables.find((entry) => entry.id === item.table.id);
@@ -2102,7 +2442,7 @@
       applyEditor();
       const l = draftTable(left.select.value), r = draftTable(right.select.value);
       leftHeading.textContent = l ? l.name : '左侧参数表'; rightHeading.textContent = r ? r.name : '右侧参数表';
-      problem = !l || !r ? (catalog.tables.length < 2 ? '当前波形库不足两张参数表' : '请选择两张参数表') : l.id === r.id ? '请选择两张不同的参数表' : '';
+      problem = !l || !r ? (effectiveTables().length < 2 ? '当前波形库不足两张参数表' : '请选择两张参数表') : l.id === r.id ? '请选择两张不同的参数表' : '';
       records = [];
       if (!problem) {
         const a = drafts.get(l.id).compared, b = drafts.get(r.id).compared;
@@ -2228,7 +2568,7 @@
       const focusId = focusRow ? focusRow.dataset.tableId : focused && focused.dataset.tableId;
       const focusLabel = focused && focused.getAttribute('aria-label');
       choices.replaceChildren(); priority.replaceChildren();
-      catalog.tables.filter((table) => (folderPath(table.parentId) + table.name).toLowerCase().includes(search.value.toLowerCase())).forEach((table) => {
+      effectiveTables().filter((table) => (folderPath(table.parentId) + table.name).toLowerCase().includes(search.value.toLowerCase())).forEach((table) => {
         const row = element('div', 'parameter-choice-row');
         const label = element('label', 'parameter-choice'); const check = element('input'); check.type = 'checkbox'; check.checked = order.includes(table.id); check.setAttribute('aria-label', table.name);
         check.dataset.tableId = table.id;
@@ -2238,7 +2578,7 @@
       });
       if (!choices.childNodes.length) choices.append(element('p', 'parameter-empty', '没有匹配的参数表'));
       order.forEach((tableId, index) => {
-        const table = catalog.tables.find((entry) => entry.id === tableId); const row = element('div', 'parameter-priority-row'); row.draggable = true; row.dataset.tableId = tableId;
+        const table = effectiveTable(tableId); const row = element('div', 'parameter-priority-row'); row.draggable = true; row.dataset.tableId = tableId;
         row.addEventListener('dragstart', (event) => { dragging = tableId; event.dataTransfer.setData('text/plain', tableId); event.dataTransfer.effectAllowed = 'move'; });
         row.addEventListener('dragover', (event) => { if (dragging) { event.preventDefault(); row.classList.add('drop-target'); } });
         row.addEventListener('dragleave', () => row.classList.remove('drop-target'));
@@ -2299,9 +2639,26 @@
     global.addEventListener('keydown', (event) => {
       if (activePage !== 'parameters' || modal || event.target.closest('.modal-overlay')) return;
       event.stopPropagation();
+      if (!event.isComposing && event.key === 'Enter' && !event.shiftKey && !event.ctrlKey && !event.metaKey
+          && event.target.matches('[data-parameter-field]:not([data-parameter-field="description"])')) {
+        event.preventDefault(); event.target.blur(); return;
+      }
       if (event.key === 'Escape' && !event.isComposing && isTextInput(event.target)) {
+        if (activeCellEdit && activeCellEdit.input === event.target) {
+          const edit = activeCellEdit; activeCellEdit = null;
+          event.target.value = edit.original !== undefined ? edit.original : String(edit.row[edit.field] ?? '');
+          notifyParameterHistory();
+        }
         const line = event.target.closest('tbody tr');
-        if (line) { event.preventDefault(); line.querySelector('.parameter-row-select').focus({ preventScroll: true }); }
+        if (line) {
+          event.preventDefault();
+          const target = line.querySelector('.parameter-row-select') || line.closest('.parameter-reference-section')?.querySelector('.parameter-reference-name');
+          if (target) target.focus({ preventScroll: true }); else event.target.blur();
+        }
+      }
+      if (event.key === 'Escape' && !event.isComposing && !isTextInput(event.target)
+          && $('parameter-workspace').classList.contains('parameter-matrix-fullscreen')) {
+        event.preventDefault(); $('parameter-workspace').querySelector('.parameter-matrix-fullscreen-toggle').click(); return;
       }
       if (event.isComposing) return;
       if (isTextInput(event.target) && !event.target.matches('[data-parameter-field]')) return;
@@ -2389,10 +2746,11 @@
       channel = new BroadcastChannel('vwd-parameters:' + global.location.pathname);
       channel.onmessage = (event) => {
         const data = event.data;
-        if (!data || data.libraryId !== libraryId || pendingParameterChanges() || Number(data.catalog && data.catalog.revision) <= catalog.revision) return;
-        if (activePage === 'parameters' && $('parameter-workspace').contains(document.activeElement)) return;
-        setCatalog(data.catalog, libraryId);
+        if (!data || data.libraryId !== libraryId || !data.catalog || Number(data.catalog.revision) <= catalog.revision) return;
+        if (!pendingCatalog || Number(data.catalog.revision) > Number(pendingCatalog.catalog.revision)) pendingCatalog = data;
+        applyPendingCatalog();
       };
+      document.addEventListener('focusout', () => { queueMicrotask(applyPendingCatalog); });
       global.addEventListener('pagehide', () => channel.close(), { once: true });
     } catch (_) { /* Explicit refresh on opening either parameter surface remains available. */ }
     renderTree(); renderTable();

@@ -3,6 +3,8 @@
 .directory-tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
 .parameter-workspace[hidden], #wave-workspace[hidden], #parameter-directory-page[hidden], #wave-directory-page[hidden] { display: none !important; }
 .parameter-workspace { order: 2; flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--surface); color: var(--text); overflow: hidden; }
+.parameter-page-active #sidebar { display: none !important; }
+.parameter-page-active .parameter-library-save { display: inline-flex; }
 .parameter-workspace-header { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 16px 20px; border-bottom: 1px solid var(--border); }
 .parameter-workspace h2 { font-size: 1.1rem; line-height: 1.4; overflow-wrap: anywhere; flex: 1 1 160px; }
 .parameter-table-name { max-width: 100%; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; overflow-wrap: anywhere; cursor: pointer; }
@@ -71,6 +73,39 @@ svg text.parameter-reference-highlight tspan { paint-order: stroke fill; stroke:
 .parameter-cell input:hover, .parameter-cell textarea:hover { border-color: var(--border); }
 .parameter-status { min-height: 26px; padding: 4px 20px; font-size: .82rem; color: var(--text-muted); overflow-wrap: anywhere; }
 .parameter-status.error, .parameter-modal .error { color: var(--error); }
+.parameter-workspace.parameter-matrix-fullscreen { position: fixed; inset: 0; z-index: 2000; width: 100%; height: 100%; }
+.parameter-matrix-merge-dialog { width: min(740px, calc(100vw - 24px)); max-height: calc(100vh - 32px); display: flex; flex-direction: column; }
+.parameter-matrix-merge-dialog .modal-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.parameter-matrix-merge-dialog h2 { font-size: 1.1rem; }
+.parameter-matrix-merge-dialog .modal-body { min-height: 0; overflow: auto; }
+.parameter-matrix-merge-dialog label { display: flex; align-items: center; gap: 8px; min-height: 32px; font-size: .9rem; overflow-wrap: anywhere; }
+.parameter-matrix-merge-dialog input[type="checkbox"] { width: 16px; height: 16px; padding: 0; flex: 0 0 16px; accent-color: var(--accent); }
+.parameter-reference-sections { min-width: 0; }
+.parameter-reference-section { margin-top: 22px; border-top: 1px solid var(--accent); background: #192922; }
+.parameter-reference-section:nth-child(even) { background: #292438; }
+.parameter-reference-header { display: flex; align-items: center; gap: 8px; padding: 12px; }
+.parameter-reference-header h3 { flex: 1; font-size: .95rem; font-weight: 600; overflow-wrap: anywhere; }
+.parameter-reference-name { padding: 0; border: 0; background: transparent; color: var(--accent); font: inherit; text-align: left; text-decoration: underline; text-underline-offset: 3px; overflow-wrap: anywhere; cursor: pointer; }
+.parameter-reference-name:disabled { color: var(--text-muted); text-decoration: none; cursor: default; }
+.parameter-reference-grid th { position: static; background: transparent; }
+.parameter-reference-grid td { white-space: pre-wrap; overflow-wrap: anywhere; }
+.parameter-reference-unused-group { padding: 0 12px 12px; }
+.parameter-reference-unused-group > summary { padding: 8px 0; cursor: pointer; color: var(--text-muted); font-size: .85rem; }
+.parameter-reference-grid .parameter-reference-unused td { color: #b2b2b2; opacity: .58; }
+.parameter-reference-unused .parameter-cell input:not(:focus), .parameter-reference-unused .parameter-cell textarea:not(:focus) { color: #b2b2b2; }
+.parameter-reference-grid .parameter-reference-unused td:focus-within { opacity: 1; }
+.parameter-reference-missing-choice { color: var(--warning); }
+.parameter-reference-selection { padding: 12px 0; border-bottom: 1px solid var(--border); }
+.parameter-reference-selection > label { font-weight: 600; }
+.parameter-reference-selection details { margin-left: 24px; }
+.parameter-reference-selection summary { padding: 6px 0; color: var(--text-muted); cursor: pointer; }
+.parameter-reference-selection small { margin-left: auto; max-width: 50%; color: var(--text-muted); white-space: pre-wrap; overflow-wrap: anywhere; }
+.parameter-reference-order-row { display: flex; align-items: center; min-height: 44px; gap: 8px; border-bottom: 1px solid var(--border); }
+.parameter-reference-order-row > button:first-child { cursor: grab; touch-action: none; }
+.parameter-reference-order-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.parameter-reference-order-row.dragging { opacity: .5; }
+.parameter-reference-order-row.drop-before { box-shadow: inset 0 2px var(--accent); }
+.parameter-reference-order-row.drop-after { box-shadow: inset 0 -2px var(--accent); }
 .parameter-empty { color: var(--text-muted); padding: 20px; }
 .parameter-count-dialog { width: min(360px, calc(100vw - 24px)); max-height: calc(100vh - 32px); overflow-y: auto; }
 .parameter-count-dialog .modal-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
