@@ -63,6 +63,8 @@ svg text.parameter-reference-highlight tspan { paint-order: stroke fill; stroke:
 .parameter-row-actions { padding-left: 8px; border-left: 1px solid var(--border); }
 .parameter-cell input, .parameter-cell textarea { width: 100%; border-color: transparent; background: transparent; min-height: 34px; font-family: var(--editor-font); line-height: 1.5; }
 .parameter-cell textarea { resize: vertical; white-space: pre-wrap; overflow-wrap: anywhere; }
+.parameter-cell textarea { box-sizing: border-box; }
+.parameter-cell textarea[data-parameter-field="description"] { resize: none; overflow-y: hidden; }
 .parameter-value-cell { flex-direction: column; }
 .parameter-value-cell textarea { color: var(--text); }
 .parameter-value-cell textarea.parameter-formula-value:not(:focus) { color: #83bfff; }

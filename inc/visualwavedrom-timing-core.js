@@ -101,6 +101,7 @@
         issues.push(entry); return entry;
       }
       const signals = flatten(source.signal, []), stretches = new Map(), holdStarts = new Map(), dataEnds = [], terminalMarkers = new Map();
+      const dataOmissions = new Map();
       function buildRows() { signals.forEach((signal, index) => {
         const wave = String(signal.wave || ''), node = String(signal.node || '');
         let lastNode = node.length - 1;
@@ -171,6 +172,15 @@
           }
           if (col === length) break;
           const char = wave[col] || 'x';
+          const omissionEnd = dataOmissions.get(index)?.get(col);
+          if (omissionEnd !== undefined) {
+            block.end = col;
+            const next = { id: makeBlock(), col: omissionEnd, end: omissionEnd };
+            const gap = { index: gaps.length, row: index, col, endCol: omissionEnd, kind: 'data-omission',
+              a: block.id, b: next.id, offset: (col - block.col) * row.period, ignored: col >= row.checkUntil };
+            gaps.push(gap); row.gaps.push(gap.index); addRun(col, omissionEnd, gap.index + 1);
+            block = next; row.blocks.push(block); col = omissionEnd - 1; continue;
+          }
           const stretchEnd = stretchEnds && stretchEnds.get(col);
           if (stretchEnd !== undefined) {
             consume(char, col, false); block.end = col;
@@ -208,6 +218,14 @@
         if (!rows[index].supported) return;
         const wave = String(signal.wave || ''), spans = [];
         const runStarts = new Map(rows[index].runs.map((run) => [run.col, run]));
+        const runIndices = new Map(rows[index].runs.map((run, position) => [run.col, position]));
+        const endpointColumns = Array.from(String(signal.node || '').matchAll(/[a-zA-Z0-9]/g))
+          .filter((match) => referencedNodes.has(match[0])).map((match) => match.index);
+        function hasInteriorEndpoint(left, right) {
+          let lo = 0, hi = endpointColumns.length;
+          while (lo < hi) { const mid = (lo + hi) >> 1; if (endpointColumns[mid] <= left) lo = mid + 1; else hi = mid; }
+          return lo < endpointColumns.length && endpointColumns[lo] < right;
+        }
         const lastEndpoint = Array.from(String(signal.node || '').matchAll(/[a-zA-Z0-9]/g))
           .reduce((last, match) => referencedNodes.has(match[0]) ? match.index : last, -1);
         // A closed hold can have one elastic duration across multiple omissions.
@@ -223,6 +241,30 @@
           // Dots after an omission still hold the same data item. Separate data
           // symbols remain available to arithmetic-series inference.
           const continuedData = /[2-9=]/.test(wave[col]) && /[. ]/.test(wave[omissions[omissions.length - 1] + 1] || '');
+          if (omissions.length && right < wave.length && /[2-9=]/.test(wave[col])) {
+            const current = runStarts.get(col), next = runStarts.get(right);
+            const left = current?.state === 'bus' ? numericLabel(current.value) : null;
+            const after = next?.state === 'bus' ? numericLabel(next.value) : null;
+            const width = omissions[0] - col;
+            const previous = rows[index].runs[runIndices.get(col) - 1];
+            const following = rows[index].runs[runIndices.get(right) + 1];
+            const supports = (other, boundary) => {
+              const label = other?.state === 'bus' && !other.gap ? numericLabel(other.value) : null;
+              return label && label.key === boundary.key && other.end - other.col === width
+                && label.value !== boundary.value;
+            };
+            // Repeated omission/continuation symbols form one missing interval,
+            // not a constant hold, when neighbouring data establishes a series.
+            if (left && after && left.key === after.key && left.value !== after.value && current.end - current.col === width
+                && (supports(previous, left) || next.end - next.col === width && supports(following, after))
+                && !hasInteriorEndpoint(omissions[0], right)) {
+              if (right > omissions[0] + 1) {
+                if (!dataOmissions.has(index)) dataOmissions.set(index, new Map());
+                dataOmissions.get(index).set(omissions[0], right);
+              }
+              col = right - 1; continue;
+            }
+          }
           if (omissions.length && right < wave.length && right <= rows[index].checkUntil + 1
               && (!/[2-9=]/.test(wave[col]) || omissions.length > 1 || continuedData))
             spans.push({ left: col, right, omissions });
@@ -329,7 +371,7 @@
         stretches.set(row, ends);
         holdStarts.set(row, origins);
       });
-      if (stretches.size) {
+      if (stretches.size || dataOmissions.size) {
         rows.length = gaps.length = constraints.length = issues.length = 0;
         graph.length = 1; graph[0] = []; nodes.clear(); duplicates.clear();
         buildRows();
@@ -1019,6 +1061,12 @@
           const before = direction < 0 ? other : current, after = direction < 0 ? current : other;
           const step = (after.label.value - before.label.value) / distance;
           const evidence = { step, columns, before: before.run.value, after: after.run.value, distance, side: direction < 0 ? 'left' : 'right' };
+          const preceding = section[i + direction];
+          if (distance === 1 && preceding?.label && !preceding.run.gap && preceding.run.end - preceding.run.col === columns
+              && nearNumber(direction < 0 ? other.label.value - preceding.label.value : preceding.label.value - other.label.value, step)) {
+            evidence.confirmation = direction < 0 ? { before: preceding.run.value, after: other.run.value, distance: 1 }
+              : { before: other.run.value, after: preceding.run.value, distance: 1 };
+          }
           if (distance > 1) {
             const beyond = section[i + direction];
             const earlier = beyond && beyond.label && !beyond.run.gap
@@ -1088,7 +1136,8 @@
           return { gap, duration, fills, series: { first: left.label.value + step * (beforeCount + 1), step, count, cellDuration,
             before: left.run.value, after: right.run.value, style: left.label.style, filledCount: fills.length,
             evidence: evidence.filter((item, i) => !gap.seriesAlternatives[i].reason && nearNumber(item.step, step)
-              && item.columns === columns).map(({ before, after, distance }) => ({ before, after, distance })) } };
+              && item.columns === columns).flatMap(({ before, after, distance, confirmation }) =>
+                (confirmation ? [confirmation] : []).concat({ before, after, distance })) } };
         };
         const { step, columns } = evidence[0];
         const stepMismatch = evidence.some((item) => !nearNumber(item.step, step));
@@ -1097,9 +1146,15 @@
           gap.seriesReason = stepMismatch ? '两侧相邻数据的公差不一致：' + evidence.map((item) => item.before + ' → ' + item.after
             + ' 的公差为 ' + format(item.step)).join('；') : '相邻数据或已有空白数据格的宽度不一致，无法确定每项时长';
           const viable = gap.seriesAlternatives.map((item, index) => item.reason ? -1 : index).filter((index) => index >= 0);
-          // A reset beyond the gap can contradict the local progression.
-          // Accept its sole viable candidate only after independent timing confirms it.
-          if (viable.length === 1) deferredSeriesCandidates.set(gap.index, makeCandidate(viable[0]));
+          if (viable.length === 1) {
+            const candidate = makeCandidate(viable[0]);
+            // Three consistent adjacent samples establish the progression even
+            // when the far side immediately resets to a different sequence.
+            if (evidence[viable[0]].confirmation && applySeriesCandidate(candidate)) {
+              gap.seriesConfirmation = '连续三项确认了相同公差；另一侧跳变不满足本段补全条件，未作为本段等差依据';
+              for (const dependent of seriesDependents.get(gap.index) || []) enqueueSeries(dependent);
+            } else if (!gap.seriesReported) deferredSeriesCandidates.set(gap.index, candidate);
+          }
           continue;
         }
         const { duration, reason } = gap.seriesAlternatives[0];

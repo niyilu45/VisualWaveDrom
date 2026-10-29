@@ -1,6 +1,15 @@
 (function (global) {
   'use strict';
   const M = global.VWDParameterMatrix;
+  function resizeTextareas(inputs) {
+    const visible = Array.from(inputs).filter((input) => input.tagName === 'TEXTAREA' && input.getClientRects().length);
+    visible.forEach((input) => { input.style.height = 'auto'; });
+    const heights = visible.map((input) => {
+      const height = input.scrollHeight + input.offsetHeight - input.clientHeight;
+      return input.dataset.parameterField === 'description' ? height : Math.min(220, height);
+    });
+    visible.forEach((input, index) => { input.style.height = heights[index] + 'px'; });
+  }
   function attach(api) {
     const { table, toolbar, button, element } = api;
     toolbar.append(button('引用参数表', api.references));
@@ -16,10 +25,20 @@
     const references = element('div', 'parameter-reference-sections'); api.scroller.append(references);
     const expandedUnused = new Set();
     let signature = '', editors = [], resizeFrame = 0;
-    function resize(input) {
-      if (input.tagName !== 'TEXTAREA' || !input.getClientRects().length) return;
-      input.style.height = 'auto'; input.style.height = Math.min(220, input.scrollHeight) + 'px';
+    function resize(input) { resizeTextareas([input]); }
+    function queueResize() {
+      if (!resizeFrame) resizeFrame = requestAnimationFrame(() => {
+        resizeFrame = 0; resizeTextareas(api.scroller.querySelectorAll('.parameter-cell textarea'));
+      });
     }
+    let lastWidth = -1;
+    const observer = typeof ResizeObserver === 'function' ? new ResizeObserver((entries) => {
+      const width = entries[0].contentRect.width;
+      if (Math.abs(width - lastWidth) > .5) { lastWidth = width; queueResize(); }
+    }) : null;
+    if (observer) observer.observe(api.scroller);
+    global.addEventListener('resize', queueResize);
+    global.addEventListener('vwd-ui-font-change', queueResize);
     function refresh() {
       const columns = api.tables(), sections = M.referenceSections(api.rawTables(), table.id, columns);
       const next = JSON.stringify(sections.map((section) => [section.reference, section.source?.name, section.missingRows,
@@ -76,7 +95,7 @@
             if (unused.length) {
               const details = element('details', 'parameter-reference-unused-group'); details.open = expandedUnused.has(source.id);
               details.append(element('summary', '', '未使用变量（' + unused.length + '）'), buildGrid(unused, true));
-              details.addEventListener('toggle', () => { if (details.open) expandedUnused.add(source.id); else expandedUnused.delete(source.id); editors.forEach((editor) => resize(editor.input)); }); band.append(details);
+              details.addEventListener('toggle', () => { if (details.open) expandedUnused.add(source.id); else expandedUnused.delete(source.id); queueResize(); }); band.append(details);
             }
             if (!section.rows.length) band.append(element('p', 'parameter-empty', '暂无可用的引用变量'));
           }
@@ -100,15 +119,22 @@
         error.textContent = result?.error || ''; error.hidden = !result?.error;
         if (field === 'val') { editor.line.dataset.value = result.val; editor.line.dataset.rawValue = result.rawVal; editor.line.dataset.valueError = result.error; }
       });
-      if (!resizeFrame) resizeFrame = requestAnimationFrame(() => { resizeFrame = 0; editors.forEach((editor) => resize(editor.input)); });
+      queueResize();
     }
     function filterReferences(test) {
+      let revealed = false;
       references.querySelectorAll('tbody tr').forEach((line) => {
         const name = line.querySelector('[data-parameter-field="name"]')?.value || '';
+        const wasHidden = line.hidden;
         line.hidden = !name.toLowerCase().includes(api.filters.name.trim().toLowerCase()) || !test({ val: line.dataset.value || '', rawVal: line.dataset.rawValue || '', error: line.dataset.valueError || '' });
+        if (wasHidden && !line.hidden) revealed = true;
       });
+      if (revealed) queueResize();
     }
-    return { refresh, filterReferences, visible: (view, test) => test(view.valueResult), clearFilters() {}, dispose() { cancelAnimationFrame(resizeFrame); } };
+    return { refresh, filterReferences, visible: (view, test) => test(view.valueResult), clearFilters() {}, dispose() {
+      cancelAnimationFrame(resizeFrame); if (observer) observer.disconnect();
+      global.removeEventListener('resize', queueResize); global.removeEventListener('vwd-ui-font-change', queueResize);
+    } };
   }
-  global.VWDParameterMatrixView = Object.freeze({ attach });
+  global.VWDParameterMatrixView = Object.freeze({ attach, resizeTextareas });
 })(window);

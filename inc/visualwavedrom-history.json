@@ -1,5 +1,27 @@
 [
   {
+    "version": "2026.10.29.2",
+    "date": "2026-10-29T08:01:12Z",
+    "head": "46699f4113f5415779f063869321e70a096d87dc",
+    "notes": [
+      "参数说明按每行内容独立自动增高或缩短，取消说明栏 220 像素限制；本表和引用表均适用，短说明不会随其他行一起增高。",
+      "窗口宽度、字体、筛选和折叠状态变化后重新计算说明高度，兼容输入、撤销重做和保存重开；合并尺寸读写并清理观察器，避免重复布局与事件残留。",
+      "修复时延检查把连续多个 | 或混合延续符的数字序列误判为普通保持段：0、2、4、|、58 按步长 2 补出 6 至 56，共 26 项。",
+      "连续三项确认同一公差且只有一个可行补全候选时，不让远端计数重置阻断推断；两侧都有不同可行候选、或与连接时延矛盾时仍报告冲突。",
+      "保留普通保持段、相同值、真实内部端点及 0.5 cycle 精度，不修改原始波形；更新使用说明和缓存标识。",
+      "验证 600 项等差、符号、前缀、列宽、周期、方向、参数公式及 RealWave 用例；回归邻行优先级、真实冲突和半周期精度，并验证 Chrome 后台计算、说明行高、引用编辑及 SQLite 保存重开。"
+    ],
+    "commits": [
+      {
+        "id": "46699f4113f5415779f063869321e70a096d87dc",
+        "date": "2026-10-29T04:02:03+08:00",
+        "title": "feat: add live parameter references and inline source editing",
+        "body": "Replace parameter-table merging with ordered live references displayed below the current table. Support global and per-source variable selection, collapsed shadowed rows, stable missing-variable selections, drag ordering, reference navigation and cycle detection.\n\nKeep only name/value/description columns. Remove scenario controls and convert legacy scenario data into ordinary tables without losing identifiers, effective values or waveform links. Allow inline edits to original source rows, including nested references, with deferred commits, Esc cancellation and current-page undo/redo.\n\nSynchronize source updates across tabs while protecting active drafts and independent edits. Preserve parameter resolution, comparison, TOML export and single-file SQLite persistence. Update ReadMe, QuickStart, cache keys and release metadata to 2026.10.29.1.\n\nVerified core migration/resolution cases, real Chrome editing and navigation, nested references, live synchronization, keyboard focus, priorities, undo/redo, filters, TOML export, SQLite save/reload and browser import roundtrips, desktop/mobile layouts and all 67 staged runtime hashes. Exclude local launcher edits, waveform data, temporary files and unrelated deletions."
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.10.29.1",
     "date": "2026-10-28T20:01:16Z",
     "head": "2858028dbd9980d31b1344da07d9069becfce22d",

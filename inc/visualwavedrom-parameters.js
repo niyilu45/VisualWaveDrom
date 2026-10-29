@@ -1892,7 +1892,7 @@
         input.value = row[field] == null ? '' : String(row[field]); input.setAttribute('aria-label', '第 ' + (index + 1) + ' 行 ' + field);
         input.dataset.parameterField = field;
         input.spellcheck = false; if (field !== 'name') input.rows = 1;
-        const resize = () => { if (field !== 'name' && !line.hidden) { input.style.height = 'auto'; input.style.height = Math.min(220, input.scrollHeight) + 'px'; } };
+        const resize = () => { if (field !== 'name' && !line.hidden) global.VWDParameterMatrixView.resizeTextareas([input]); };
         view.resize.push(resize);
         if (field === 'val') {
           fieldBox.classList.add('parameter-value-cell');
