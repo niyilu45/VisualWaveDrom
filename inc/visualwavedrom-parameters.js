@@ -28,6 +28,7 @@
   let activeCellEdit = null;
   let matrixDispose = null;
   let pendingCatalog = null, syncedCatalog = null;
+  let catalogLoadError = '', rejectedCatalog = null, catalogWarnings = [];
   const expanded = new Set(['']);
   const $ = (id) => document.getElementById(id);
   const element = (tag, className, text) => {
@@ -61,19 +62,20 @@
     node.addEventListener('click', action);
     return node;
   }
-  function normalize(value) {
+  function normalize(value, warnings) {
     const next = Object.assign(empty(), value || {});
     ['directories', 'tables', 'presets'].forEach((key) => {
       next[key] = Array.isArray(next[key]) ? clone(next[key]).filter((item) => item && typeof item.id === 'string') : [];
     });
     next.tables.forEach((table) => { table.rows = Array.isArray(table.rows) ? table.rows : []; });
-    matrix.normalize(next.tables);
+    matrix.normalize(next.tables, warnings);
     next.revision = Number(next.revision) || 0;
     return next;
   }
   function id() { return 'param-' + (global.crypto.randomUUID ? global.crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2)); }
   function linked(source) { return source && Array.isArray(source.parameterTables) ? source.parameterTables : []; }
   function effectiveTables() {
+    if (catalogLoadError) return [];
     if (matrixGeneration !== generation) {
       matrix.normalize(catalog.tables); matrixTables = matrix.all(catalog.tables); matrixGeneration = generation;
     }
@@ -511,7 +513,7 @@
       rows(source.signal);
     }
     return { build: '20261021-parameter-diagnostics-v1', libraryId, generation, revision: catalog.revision,
-      pending: pendingParameterChanges(), tableCount: catalog.tables.length,
+      pending: pendingParameterChanges(), tableCount: catalog.tables.length, loadError: catalogLoadError, compatibilityRepairs: catalogWarnings.slice(0, 16),
       links: linked(source).map((tableId) => { const table = effectiveTable(tableId);
         return { tableId, found: !!table, name: table && table.name, rowCount: table && table.rows.length }; }), expressions };
   }
@@ -809,6 +811,7 @@
     } catch (error) { status(error.message, true); }
   }
   function clipboardContext(target) {
+    if (catalogLoadError) return null;
     if (activePage !== 'parameters' || modal || !target || !target.closest || target.closest('.modal-overlay')) return '';
     if (target.closest('#parameter-directory-page')) return 'table';
     if (target.closest('#parameter-workspace')) return 'row';
@@ -1077,7 +1080,7 @@
     return true;
   }
   function applyParameterHistory(redo) {
-    if (activePage !== 'parameters' || modal) return false;
+    if (activePage !== 'parameters' || modal || catalogLoadError) return false;
     commitParameterCell();
     const from = redo ? parameterRedoStack : parameterUndoStack, to = redo ? parameterUndoStack : parameterRedoStack;
     const entry = from[from.length - 1]; if (!entry) return false;
@@ -1424,6 +1427,7 @@
   }
   function applyPendingCatalog() {
     if (!pendingCatalog || modal || activeCellEdit || saving) return;
+    if (catalogLoadError) { const incoming = pendingCatalog; pendingCatalog = null; setCatalog(incoming.catalog, incoming.libraryId); return; }
     if (dirty !== savedGeneration) { void flush(false).catch(() => {}); return; }
     const active = document.activeElement, scroll = $('parameter-workspace')?.querySelector('.parameter-grid-scroll');
     const position = scroll && [scroll.scrollLeft, scroll.scrollTop];
@@ -1443,6 +1447,7 @@
     }
   }
   async function flush(includeDraft = true) {
+    if (catalogLoadError) return;
     if (includeDraft) commitParameterCell();
     clearTimeout(timer);
     if (saving) { await saving; if (dirty !== savedGeneration) return flush(false); return; }
@@ -1470,7 +1475,12 @@
     if (comparisonCommit && identity === libraryId) return;
     if (identity === libraryId && (pendingParameterChanges() || Number(value && value.revision) < catalog.revision)) return;
     if (identity !== libraryId) { referenceDocuments.clear(); clearReferenceHighlight(); }
-    const next = normalize(value);
+    let next; catalogLoadError = ''; rejectedCatalog = null; catalogWarnings = [];
+    try { next = normalize(value, catalogWarnings); matrix.validate(next.tables); }
+    catch (error) {
+      catalogLoadError = error.message; rejectedCatalog = clone(value || empty()); next = empty();
+      next.revision = Number(value && value.revision) || 0;
+    }
     const sameContent = identity === libraryId && (parameterUndoStack.length || parameterRedoStack.length)
       && ['directories', 'tables', 'presets'].every((key) => JSON.stringify(catalog[key]) === JSON.stringify(next[key]));
     if (sameContent) catalog.revision = next.revision;
@@ -1478,12 +1488,14 @@
     libraryId = identity || '';
     syncedCatalog = clone(next); pendingCatalog = null;
     dirty = savedGeneration = 0; failure = '';
+    if (catalogLoadError) { parameterUndoStack = []; parameterRedoStack = []; }
     if (!catalog.tables.some((table) => table.id === selectedTable)) selectedTable = '';
     if (!catalog.directories.some((dir) => dir.id === selectedFolder)) selectedFolder = '';
     // A restored JSON document can be unchanged while its parameter values differ.
     // Invalidate the host's rendered-wave caches as well as the resolver cache.
     invalidate();
     renderTree(); renderTable(); notifyParameterHistory();
+    return { ok: !catalogLoadError, error: catalogLoadError, repairedRows: catalogWarnings.length };
   }
   async function refresh() {
     if (!bridge || !bridge.identity()) throw new Error('波形库仍在加载，请稍后再试');
@@ -1493,14 +1505,17 @@
     const value = await bridge.load();
     if (identity !== bridge.identity() || dirty !== loadGeneration) return;
     setCatalog(value, identity);
+    if (catalogLoadError) throw new Error('参数表暂不可用：' + catalogLoadError + '；原始数据已保留');
   }
   function namePrompt(label, initial) { const answer = global.prompt(label, initial || ''); return answer == null ? null : answer.trim(); }
   function addDirectory(parentId) {
+    if (catalogLoadError) return;
     const name = namePrompt('新标题名称'); if (!name) return;
     const dir = { id: id(), name, parentId: parentId || '' };
     catalog.directories.push(dir); expanded.add(dir.parentId); selectedFolder = dir.id; expanded.add(dir.id); changed(true);
   }
   function addTable() {
+    if (catalogLoadError) return;
     const name = namePrompt('参数表名称'); if (!name) return;
     const table = { id: id(), name, parentId: selectedFolder, rows: [{ name: '', val: '', description: '' }] };
     insertTable(table);
@@ -1546,6 +1561,9 @@
     if (standaloneTableId) return;
     const tree = $('parameter-tree'); if (!tree) return;
     tree.replaceChildren();
+    if ($('parameter-add-table')) $('parameter-add-table').disabled = !!catalogLoadError;
+    if ($('parameter-toggle-all')) $('parameter-toggle-all').disabled = !!catalogLoadError;
+    if (catalogLoadError) { tree.append(element('p', 'parameter-status error', '参数表载入失败，原始数据已保留')); return; }
     function directory(parentId, depth, number, seen) {
       if (seen.has(parentId)) return;
       const nextSeen = new Set(seen); nextSeen.add(parentId);
@@ -1648,6 +1666,11 @@
     }
     if (!table || !table.rows.includes(selectedRow)) selectedRow = null;
     workspace.replaceChildren();
+    if (catalogLoadError) {
+      workspace.append(element('h2', 'parameter-workspace-header', '参数表暂不可用'),
+        element('p', 'parameter-status error', catalogLoadError + '；已禁止覆盖参数表，原始数据保持不变，波形图仍可查看。'));
+      return;
+    }
     const toolbar = element('header', 'parameter-workspace-header');
     let deleteRowButton;
     const heading = element('h2');
@@ -2044,7 +2067,7 @@
     if (standaloneTableId) return;
     if (page === activePage) return;
     if (page === 'parameters') {
-      try { await refresh(); } catch (error) { if (bridge) bridge.status(error.message); return; }
+      try { await refresh(); } catch (error) { if (bridge) bridge.status(error.message); if (!catalogLoadError) return; }
     }
     activePage = page;
     $('parameter-workspace').hidden = page !== 'parameters';
@@ -2760,7 +2783,7 @@
     renderTable();
     if (error) status(error, true);
   }
-  global.VisualWaveDromParameters = { mount, setCatalog, finishSingleLoad, getCatalog: () => clone(catalog), getRevision: () => generation, evaluate, resolve, text, details, diagnostics, decorate, decorateText, resolveName,
+  global.VisualWaveDromParameters = { mount, setCatalog, finishSingleLoad, getCatalog: () => clone(rejectedCatalog || catalog), getLoadError: () => catalogLoadError, getRevision: () => generation, evaluate, resolve, text, details, diagnostics, decorate, decorateText, resolveName,
     revealReference, clearReferenceHighlight, matchesReference, referenceWindowInfo,
     openLinks, flush, refresh, page: () => activePage, pending: pendingParameterChanges,
     historyState: parameterHistoryState, undo: () => applyParameterHistory(false), redo: () => applyParameterHistory(true) };

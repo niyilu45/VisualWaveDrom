@@ -14337,8 +14337,8 @@ ${lines.join('\n')}`;
     }
 
     function normalizeSavedTag(raw) {
-      if (!raw || typeof raw.name !== 'string') return null;
-      const content = typeof raw.content === 'string' ? raw.content : null;
+      if (!raw || typeof raw.name !== 'string' || !raw.name.trim()) return null;
+      const content = typeof raw.content === 'string' ? raw.content : typeof raw.json === 'string' ? raw.json : null;
       const deferred = raw.deferred === true && content == null;
       if (content == null && !deferred) return null;
       return {
@@ -16213,6 +16213,22 @@ ${lines.join('\n')}`;
         setStatus(false, '波形库文件格式无效');
         return false;
       }
+      const documents = bundle.documents.map(normalizeSavedTag);
+      const invalidDocuments = documents.map((tag, index) => tag ? null : { index, name: bundle.documents[index] && bundle.documents[index].name }).filter(Boolean);
+      const assignedNames = new Set(Array.isArray(bundle.rootDocuments) ? bundle.rootDocuments : []);
+      (function collect(nodes) { (nodes || []).forEach((node) => {
+        if (!node || typeof node !== 'object') return;
+        (Array.isArray(node.documents) ? node.documents : []).forEach((name) => assignedNames.add(name));
+        collect(Array.isArray(node.children) ? node.children : []);
+      }); })(Array.isArray(bundle.directories) ? bundle.directories : []);
+      vwdDebugLog('wave-library', { phase: 'bundle-validation', libraryId: bundle.libraryId, fileName,
+        sourceDocumentCount: bundle.documents.length, validDocumentCount: documents.length - invalidDocuments.length,
+        directoryDocumentCount: assignedNames.size, invalidDocuments: invalidDocuments.slice(0, 10) });
+      if (invalidDocuments.length || !documents.length && assignedNames.size) {
+        setStatus(false, invalidDocuments.length ? '波形库中的波形索引不完整，已停止加载，未覆盖现有数据'
+          : '波形库保留了目录引用，但没有返回波形内容；已停止加载，请检查库文件，勿保存空库');
+        return false;
+      }
       applyingWaveLibraryBundle = true;
       try {
         if (requestedLibraryId && bundle.libraryId && bundle.libraryId !== requestedLibraryId) {
@@ -16230,9 +16246,10 @@ ${lines.join('\n')}`;
         if (!focusedWaveViewActive && !singleParameterViewActive) {
           document.title = currentWaveLibraryFile + ' - VisualWaveDrom';
         }
-        window.VisualWaveDromParameters.setCatalog(bundle.parameters, currentWaveLibraryId);
-        savedTags = bundle.documents.map(normalizeSavedTag).filter(Boolean);
+        const parameterResult = window.VisualWaveDromParameters.setCatalog(bundle.parameters, currentWaveLibraryId);
+        savedTags = documents;
         vwdDebugLog('parameters', { phase: 'catalog-restored', libraryId: currentWaveLibraryId,
+          error: parameterResult && parameterResult.error, repairedRows: parameterResult && parameterResult.repairedRows,
           revision: bundle.parameters && bundle.parameters.revision,
           tableCount: bundle.parameters && Array.isArray(bundle.parameters.tables) ? bundle.parameters.tables.length : 0,
           linkedDocumentCount: savedTags.filter((tag) => tag.parameterTables.length > 0).length });
@@ -16275,6 +16292,8 @@ ${lines.join('\n')}`;
         setStatus(!!preferred || !focusedWaveViewActive, preferred || !focusedWaveViewActive
           ? ('已导入波形库：' + (currentWaveLibraryFile || '未命名'))
           : '链接指定的波形图不存在或已被删除');
+        if (parameterResult && !parameterResult.ok) setStatus(false, '已载入 ' + savedTags.length
+          + ' 张波形；参数表暂不可用：' + parameterResult.error + '（原始参数数据已保留）');
         return true;
       } finally {
         dirtyWaveDocumentNames.clear();
@@ -16484,6 +16503,10 @@ ${lines.join('\n')}`;
         ? 'libraryId=' + encodeURIComponent(libraryId) : 'file=' + encodeURIComponent(fileName)), 'summary');
       if (!bundle.libraryId || !Array.isArray(bundle.documents)) throw new Error('波形库返回的数据不完整');
       if (libraryId && bundle.libraryId !== libraryId) throw new Error('返回的波形库与链接指定的波形库不一致');
+      // Older services may omit the explicit deferred flag in summary records.
+      bundle.documents = bundle.documents.map((document) => document && typeof document.name === 'string'
+        && typeof document.content !== 'string' && typeof document.json !== 'string'
+        ? Object.assign({}, document, { deferred: true }) : document);
       if (singleWaveViewActive) {
         // The catalog is advisory. Verify the requested document in its own library
         // before declaring it missing, and finish loading it before enabling editing.
@@ -16538,7 +16561,7 @@ ${lines.join('\n')}`;
         browserWaveLibraryReady = true;
         currentWaveLibraryFile = store.fileName;
         currentWaveLibraryId = summary.libraryId;
-        applyWaveLibraryBundle(summary, store.fileName);
+        if (!applyWaveLibraryBundle(summary, store.fileName)) throw new Error('SQLite 波形库索引不完整，已停止加载且未覆盖当前数据');
         try {
           localStorage.removeItem(WAVE_DOCUMENTS_KEY);
           localStorage.removeItem(WAVE_DOCUMENTS_LOADED_CACHE_KEY);
@@ -24025,6 +24048,9 @@ ${lines.join('\n')}`;
     }
 
     async function performCurrentWaveLibrarySave(options = {}) {
+      if (waveLibraryInitializationPending || waveLibraryInitializationError) {
+        setStatus(false, '波形库尚未完整载入，已禁止保存，避免覆盖原始数据'); return false;
+      }
       try { await window.VisualWaveDromParameters.flush(); }
       catch (error) { setStatus(false, '参数目录尚未保存：' + error.message); return false; }
       if (singleParameterViewActive) {

@@ -3,13 +3,20 @@
   const own = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key);
   const copy = (value) => JSON.parse(JSON.stringify(value));
   const raw = (value) => value == null ? '' : String(value);
-  function normalize(tables) {
+  function normalize(tables, warnings) {
     const additions = [], ids = new Set(tables.map((table) => table.id));
     tables.forEach((table) => {
       const used = new Set();
+      const reserved = new Set(table.rows.filter((row) => row && typeof row.id === 'string' && row.id).map((row) => row.id));
       table.rows.forEach((row, index) => {
-        if (!row.id) row.id = 'row-' + table.id + '-' + index;
-        if (used.has(row.id)) throw new Error('参数行标识重复：' + table.name);
+        if (!row || typeof row !== 'object' || Array.isArray(row)) throw new Error('参数行格式错误：' + table.name + ' 第 ' + (index + 1) + ' 行');
+        if (typeof row.id !== 'string' || !row.id || used.has(row.id)) {
+          const previous = row.id, base = 'row-' + table.id + '-' + index;
+          let next = base, suffix = 1;
+          while (used.has(next) || reserved.has(next)) next = base + '-' + suffix++;
+          row.id = next;
+          if (previous != null && warnings) warnings.push({ tableId: table.id, row: index + 1, previous, id: next });
+        }
         used.add(row.id);
       });
       // Preserve values and existing links when opening the retired column format.

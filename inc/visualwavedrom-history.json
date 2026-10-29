@@ -1,5 +1,27 @@
 [
   {
+    "version": "2026.10.29.3",
+    "date": "2026-10-29T10:16:22Z",
+    "head": "6fed12f7bed5c2917ac35408863f295cdda247d7",
+    "notes": [
+      "修复读取旧参数行重复标识时整库加载被中断的问题；为缺失、无效或重复标识生成稳定且不冲突的行标识，保留变量名、值和说明。",
+      "参数表解析失败与波形加载隔离：波形仍可显示，原始参数数据保留并暂停参数编辑、覆盖和撤销，避免用空参数目录替换原始数据。",
+      "兼容旧服务摘要省略 deferred 标记及旧波形记录使用 json 内容字段；载入前检查波形索引，拒绝静默丢弃无效记录。",
+      "目录仍引用波形但摘要没有返回图时停止加载；波形库未完整载入时禁止保存，避免空状态覆盖原库。",
+      "Debug Mode 增加原始图数、有效图数、目录引用数、参数兼容修复记录和读取错误；更新使用说明和脚本缓存标识。",
+      "验证 BAT 模式下多库切换、多级目录和 8 张图的旧库导入，覆盖旧摘要、重复行标识、参数结构异常、循环引用、新窗口、源文件不变及保存重开；回归参数编辑、行高和 SQLite 数据往返。"
+    ],
+    "commits": [
+      {
+        "id": "6fed12f7bed5c2917ac35408863f295cdda247d7",
+        "date": "2026-10-29T16:04:05+08:00",
+        "title": "fix: infer grouped timing series and auto-fit parameter descriptions",
+        "body": "Recognize numeric arithmetic intervals containing repeated omission markers or mixed omitted continuations without treating them as constant holds. Preserve real interior endpoints, non-numeric or equal-value holds, source data and explicit connection timing. Use three consistent adjacent samples to confirm a unique viable progression despite an incompatible reset on the opposite side; retain genuine candidate and timing conflicts.\n\nAuto-grow and shrink each parameter description independently in local and referenced tables without the previous 220px cap. Reflow after width, font, filter and disclosure changes, batch measurements and clean up observers and listeners. Preserve the existing value-field size limit.\n\nUpdate timing documentation, cache keys and release metadata to 2026.10.29.2. Verified 600 focused arithmetic/RealWave cases, 56 neighbour-priority cases, 43 half-cycle checks, actual Chrome Worker results, local and referenced description sizing, edits/undo/reload, SQLite persistence and all 67 staged runtime hashes. Exclude waveform libraries, local launcher changes, temporary tests and unrelated deletions."
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.10.29.2",
     "date": "2026-10-29T08:01:12Z",
     "head": "46699f4113f5415779f063869321e70a096d87dc",
