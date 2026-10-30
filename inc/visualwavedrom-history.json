@@ -1,5 +1,27 @@
 [
   {
+    "version": "2026.10.30.1",
+    "date": "2026-10-30T01:46:58Z",
+    "head": "73d663db8eb80f3aafbd10e907966efb8106632f",
+    "notes": [
+      "修复旧版恢复记录把不完整浏览器缓存当作整库回写，导致目录和参数表仍在但原波形缺失的问题；恢复仅增量更新已确认归属、版本一致的当前波形，不删除其他图或覆盖目录。",
+      "旧恢复记录及原始缓存先按库和记录标识独立存档；小容量存储不足时回退到 IndexedDB，无须加载 SQLite 计算引擎，无法确认归属的缓存不会混入其他库。",
+      "移除启动时自动创建 2222/51515 示例图的历史逻辑；初始化未完成或失败时禁止缓存回写，避免示例和空状态覆盖真实恢复数据。",
+      "完整波形库读取失败时显示明确错误和重新加载入口并阻止保存；Debug Mode 快照增加服务图数、网页图数、缺失目录引用和旧记录恢复结果。",
+      "图片复制菜单、兼容复制入口和提示支持 Word / PPT；带链接 Office 图片声明显示宽高并保留高分辨率 PNG，Markdown 格式保持原样；更新使用说明、快速指南及弹窗配图。",
+      "旧库副本验证覆盖空缓存、部分缓存、按需缓存、跨库缓存、过期版本、无效 JSON、现代恢复与冲突、存储额度不足、慢速加载、服务索引缺失及纯 HTML 初始化；8 张波形的目录归属、参数表、源文件保护、刷新和保存检查通过；网页端图片复制与兼容回退通过，PowerPoint 原生粘贴未完成自动验证。"
+    ],
+    "commits": [
+      {
+        "id": "73d663db8eb80f3aafbd10e907966efb8106632f",
+        "date": "2026-10-29T18:17:55+08:00",
+        "title": "fix: preserve waves when importing legacy parameter catalogs",
+        "body": "Repair missing, invalid and duplicate legacy parameter row identifiers deterministically without changing names, values or descriptions. Quarantine malformed parameter catalogs instead of interrupting waveform library loading, preserve the original catalog for export and saving, and block parameter edits while unresolved.\n\nAccept older service summaries without deferred flags and legacy json content records. Validate document indexes before applying a bundle, reject silent record loss or empty indexes with remaining directory references, and block saves when library initialization is incomplete. Add bounded import counts and compatibility diagnostics, documentation and cache keys.\n\nPublish release metadata 2026.10.29.3. Verified real BAT-service multi-library imports with eight waves and nested directories, legacy summaries, duplicate row IDs, malformed rows, circular references, new windows, source-file integrity, protected parameter data and explicit save/reload. Parameter editing, independent row heights and SQLite roundtrips also pass; all 67 staged runtime hashes verified. Exclude personal wave libraries, local launcher edits, temporary tests and unrelated deletions."
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.10.29.3",
     "date": "2026-10-29T10:16:22Z",
     "head": "6fed12f7bed5c2917ac35408863f295cdda247d7",

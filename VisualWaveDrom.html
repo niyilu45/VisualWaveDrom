@@ -720,14 +720,14 @@
 
   <div class="modal-overlay" id="wave-copy-modal" hidden>
     <div class="modal-dialog wave-copy-dialog" role="dialog" aria-modal="true" aria-labelledby="wave-copy-modal-title">
-      <div class="modal-header" id="wave-copy-modal-title">选择复制格式（Word / Markdown）</div>
+      <div class="modal-header" id="wave-copy-modal-title">选择复制格式（Word / PPT / Markdown）</div>
       <div id="wave-copy-standard"><div class="modal-body wave-copy-options">
         <button type="button" class="wave-copy-option" data-copy-mode="image">
-          <strong>Word：仅复制图片</strong>
+          <strong>Word / PPT：仅复制图片</strong>
           <span>粘贴为普通 PNG 图片，不附带波形链接</span>
         </button>
         <button type="button" class="wave-copy-option" data-copy-mode="linked-image">
-          <strong>Word：复制带链接图片</strong>
+          <strong>Word / PPT：复制带链接图片</strong>
           <span>粘贴后可点击打开波形图；悬停会提示新电脑先运行 BAT</span>
         </button>
         <button type="button" class="wave-copy-option" data-copy-mode="linked-markdown">
@@ -735,14 +735,14 @@
           <span>粘贴到支持图片粘贴的 Markdown 编辑器，生成图片文件并附加波形链接</span>
         </button>
         <button type="button" class="wave-copy-option" data-copy-mode="link">
-          <strong>Word / Markdown：仅复制链接</strong>
+          <strong>Word / PPT / Markdown：仅复制链接</strong>
           <span>只复制可自动启动 VisualWaveDrom 的单图链接，不包含图片</span>
         </button>
       </div></div>
       <div id="wave-copy-compatibility" hidden>
         <div class="modal-body wave-copy-options">
           <p id="wave-copy-compatibility-status" role="status" aria-live="polite"></p>
-          <button type="button" class="modal-btn primary" id="wave-copy-compatibility-confirm">兼容复制到 Word</button>
+          <button type="button" class="modal-btn primary" id="wave-copy-compatibility-confirm">兼容复制到 Word / PPT</button>
         </div>
       </div>
       <div class="modal-footer">
@@ -978,7 +978,7 @@
     <script src="inc/codemirror.js?v=5.65.21"></script>
     <script src="inc/codemirror-javascript.js?v=5.65.21"></script>
     <script src="inc/codemirror-vim.js?v=5.65.21"></script>
-    <script src="inc/visualwavedrom-sqlite-browser.js?v=20261015-library-paths-v1"></script>
+    <script src="inc/visualwavedrom-sqlite-browser.js?v=20261030-safe-legacy-recovery-v1"></script>
     <script src="inc/visualwavedrom-vim.js?v=20260908-vim-modified-shortcuts-v1"></script>
     <script src="inc/visualwavedrom-bigdata.js?v=20260815-large-import-v1"></script>
     <script src="inc/visualwavedrom-json-bigdata.js?v=20260731-bigdata-fix-v1"></script>
@@ -1034,6 +1034,6 @@
     <script src="inc/visualwavedrom-parameters.js?v=20261029-library-import-compat-v1"></script>
     <script src="inc/visualwavedrom-timing-core.js?v=20261029-series-omissions-v1"></script>
     <script src="inc/visualwavedrom-timing.js?v=20261029-series-omissions-v1"></script>
-  <script src="inc/visualwavedrom-app.js?v=20261029-library-import-compat-v1"></script>
+  <script src="inc/visualwavedrom-app.js?v=20261030-safe-legacy-recovery-v1"></script>
 </body>
 </html>

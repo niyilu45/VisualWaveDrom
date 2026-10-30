@@ -742,6 +742,14 @@ if (!window.VWDCodeEditorPairs) {
         const host = active ? waveContainer : waveLibraryCardCache.get(name)?.previewDisplay;
         const labels = host ? Array.from(host.querySelectorAll('svg text'), (node) => node.textContent) : [];
         const pending = readPendingWaveLibrarySave();
+        vwdDebugLog('wave-library-state', { reason, build: '20261030-safe-legacy-recovery-v1',
+          libraryId: currentWaveLibraryId, sourcePath: currentWaveLibraryPath,
+          initializing: waveLibraryInitializationPending,
+          initializationError: waveLibraryInitializationError && waveLibraryInitializationError.message,
+          lastLoad: waveLibraryLoadState, legacyRecovery: waveLibraryLegacyRecovery,
+          documentCount: savedTags.length, deferredDocumentCount: savedTags.filter((item) => item.deferred).length,
+          renderedCardCount: waveLibraryCardCache.size, selectedDirectoryId: selectedNavNodeId,
+          activeDocumentName: editingWaveDocumentName });
         vwdDebugLog('parameter-state', { reason, build: '20261021-parameter-startup-v2',
           version: window.VisualWaveDromVersion && window.VisualWaveDromVersion.version,
           page: window.location.href, libraryId: currentWaveLibraryId, documentName: name,
@@ -1060,7 +1068,7 @@ ${lines.join('\n')}`;
     const WAVE_DOCUMENTS_KEY = 'vwd-wave-documents';
     const WAVE_DOCUMENTS_LOADED_CACHE_KEY = 'vwd-wave-documents-loaded-cache-v1';
     const WAVE_LIBRARY_PENDING_SAVE_KEY = 'vwd-wave-library-pending-save-v1';
-    const NAV_COPY_SEED_KEY = 'vwd-nav-copy-seed-2222-51515-v2';
+    const WAVE_LIBRARY_LEGACY_RECOVERY_KEY = 'vwd-wave-library-legacy-recovery-v1';
     const PERSIST_DEBOUNCE_MS = 500;
     const SAVED_TAGS_PERSIST_DEBOUNCE_MS = 1200;
     const SAVED_TAGS_PERSIST_IDLE_TIMEOUT_MS = 2500;
@@ -1102,6 +1110,8 @@ ${lines.join('\n')}`;
     let waveLibraryInitializationPending = true;
     let waveLibraryInitializationError = null;
     let waveLibraryRecoveryError = null;
+    let waveLibraryLoadState = null;
+    let waveLibraryLegacyRecovery = null;
     let waveLibraryInitializationOperation = null;
     const pageQuery = new URLSearchParams(window.location.search);
     const requestedLibraryId = String(pageQuery.get('libraryId') || '').trim();
@@ -2383,17 +2393,6 @@ ${lines.join('\n')}`;
       return true;
     }
 
-    function findNavDirectoryByLabel(node, label) {
-      if (!node) return null;
-      if (node.isCustom && node.label === label) return node;
-      const children = node.children || [];
-      for (let i = 0; i < children.length; i++) {
-        const found = findNavDirectoryByLabel(children[i], label);
-        if (found) return found;
-      }
-      return null;
-    }
-
     function getNavDirectoryChoices(root) {
       const choices = [{ node: root, label: '未归类（根目录）' }];
       function walk(nodes) {
@@ -2486,38 +2485,6 @@ ${lines.join('\n')}`;
         saved: saved
       });
       return true;
-    }
-
-    function seedRequestedWaveCopies() {
-      try {
-        if (localStorage.getItem(NAV_COPY_SEED_KEY) === '1') return;
-      } catch (_e) {
-        return;
-      }
-      if (!ensureNavStateReady()) return;
-      const snapshot = getCurrentStateSnapshot();
-      const targets = ['2222', '51515'];
-      const created = [];
-      targets.forEach((label) => {
-        let directory = findNavDirectoryByLabel(navTreeState, label);
-        if (!directory) {
-          directory = createNavNode(label, [], [], { isCustom: true });
-          navTreeState.children.push(directory);
-        }
-        const documentName = '__vwd-copy-' + label;
-        if (findSavedTagIndex(documentName) < 0) {
-          upsertSavedTag(documentName, snapshot);
-        }
-        directory.documents = Array.isArray(directory.documents) ? directory.documents : [];
-        if (!directory.documents.includes(documentName)) directory.documents.push(documentName);
-        directory.expanded = true;
-        created.push({ directory: label, document: documentName });
-      });
-      navTreeState.expanded = true;
-      saveNavCustomNodesFromTree();
-      setSelectedNavNode('nav-root');
-      try { localStorage.setItem(NAV_COPY_SEED_KEY, '1'); } catch (_e) { /* ignore */ }
-      vwdDebugLog('nav-tree', { phase: 'seed-copies', created: created });
     }
 
     let navControlButtonsBound = false;
@@ -4083,6 +4050,7 @@ ${lines.join('\n')}`;
       const opts = options || {};
       clearTimeout(persistTimer);
       persistTimer = null;
+      if (waveLibraryInitializationPending || waveLibraryInitializationError) return;
       flushCodeMirrorToTextarea('persist-editor-json');
       if (jsonDocumentViewMode === 'window') commitJsonWindowEdits('persist-editor-json');
       const text = editor.value;
@@ -14546,7 +14514,7 @@ ${lines.join('\n')}`;
         }
         savedTagsPersistIdleHandle = null;
       }
-      if (applyingWaveLibraryBundle) return;
+      if (applyingWaveLibraryBundle || waveLibraryInitializationPending || waveLibraryInitializationError) return;
       if (singleWaveViewActive && waveLibraryServerMode) {
         scheduleWaveLibraryServerSave();
         return;
@@ -14707,12 +14675,61 @@ ${lines.join('\n')}`;
       } catch (_e) { /* ignore */ }
     }
 
-    function buildPendingWaveLibraryBundle(pending) {
-      const bundle = getWaveLibraryBundle();
-      bundle.libraryId = pending.libraryId;
-      bundle.activeDocumentName = pending.activeDocumentName || bundle.activeDocumentName;
-      bundle.selectedDirectoryId = pending.selectedDirectoryId || bundle.selectedDirectoryId;
-      return bundle;
+    async function migrateLegacyWaveLibraryRecovery(pending) {
+      const storage = getWindowStateStorage();
+      const caches = {};
+      const candidates = new Map();
+      [WAVE_DOCUMENTS_KEY, WAVE_DOCUMENTS_LOADED_CACHE_KEY].forEach((key) => {
+        const raw = localStorage.getItem(key);
+        if (!raw) return;
+        caches[key] = raw;
+        try {
+          const values = JSON.parse(raw);
+          if (!Array.isArray(values)) return;
+          values.forEach((value) => {
+            const tag = normalizeSavedTag(value);
+            if (!tag || tag.deferred) return;
+            try {
+              const source = JSON.parse(tag.content);
+              if (!source || typeof source !== 'object' || Array.isArray(source)) return;
+            } catch (_e) { return; }
+            candidates.set(tag.name, tag);
+          });
+        } catch (_e) { /* Keep malformed cache text in the archive as well. */ }
+      });
+      const archiveKey = WAVE_LIBRARY_LEGACY_RECOVERY_KEY + ':' + encodeURIComponent(pending.libraryId)
+        + ':' + encodeURIComponent(pending.token);
+      const archive = { pending, caches, archivedAt: new Date().toISOString() };
+      let archiveStorage = 'localStorage';
+      let archiveId = archiveKey;
+      try {
+        if (!storage) throw new Error('无法访问浏览器恢复存储');
+        if (!storage.getItem(archiveKey)) storage.setItem(archiveKey, JSON.stringify(archive));
+      } catch (error) {
+        if (!window.VWDSqliteLibrary || !window.VWDSqliteLibrary.archiveRecovery) throw error;
+        archiveId = await window.VWDSqliteLibrary.archiveRecovery(archiveKey, archive);
+        archiveStorage = 'indexedDB';
+      }
+      const summary = await readWaveLibraryJson('/api/wave-library?summary=1&libraryId='
+        + encodeURIComponent(pending.libraryId), 'legacy-recovery-summary');
+      if (summary.libraryId !== pending.libraryId || !Array.isArray(summary.documents)) {
+        throw new Error('旧版恢复记录与目标波形库不一致，未写入任何数据');
+      }
+      const remote = new Map(summary.documents.map((document) => [document.name, document]));
+      const documents = [];
+      candidates.forEach((tag) => {
+        const previous = remote.get(tag.name);
+        // Old caches were not library-scoped. Only replay the explicitly named
+        // active document at the same revision; preserve everything else for recovery.
+        if (tag.name !== pending.activeDocumentName || !previous || tag.revision !== (previous.revision || 0)) return;
+        documents.push(getWaveDocumentServerSnapshot(tag, false));
+      });
+      waveLibraryLegacyRecovery = { libraryId: pending.libraryId,
+        archiveKey: archiveId, archiveStorage, libraryDocumentCount: summary.documents.length, cachedDocumentCount: candidates.size,
+        recoveredDocumentCount: documents.length, skippedDocumentCount: candidates.size - documents.length };
+      vwdDebugLog('persistence', Object.assign({ phase: 'legacy-pending-library-migrated' }, waveLibraryLegacyRecovery));
+      // Missing entries in a browser cache never mean deletion from the library.
+      return { libraryId: pending.libraryId, documents, deletedDocuments: [] };
     }
 
     async function recoverPendingWaveLibraryServerSave() {
@@ -14720,20 +14737,20 @@ ${lines.join('\n')}`;
       const pending = readPendingWaveLibrarySave();
       if (!pending) return 'none';
       try {
-        const incremental = pending.state && pending.state.libraryId;
-        const response = await fetch(incremental
-          ? '/api/wave-library-state'
-          : ('/api/wave-library?libraryId=' + encodeURIComponent(pending.libraryId)), {
-          method: incremental ? 'PATCH' : 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(incremental ? pending.state : buildPendingWaveLibraryBundle(pending))
-        });
-        if (!response.ok) {
-          const result = await response.json().catch(() => ({}));
-          const error = new Error(result.error || ('HTTP ' + response.status));
-          error.status = response.status;
-          error.waveId = result.waveId;
-          throw error;
+        const state = pending.state || await migrateLegacyWaveLibraryRecovery(pending);
+        if (pending.state || state.documents.length) {
+          const response = await fetch('/api/wave-library-state', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(state)
+          });
+          if (!response.ok) {
+            const result = await response.json().catch(() => ({}));
+            const error = new Error(result.error || ('HTTP ' + response.status));
+            error.status = response.status;
+            error.waveId = result.waveId;
+            throw error;
+          }
         }
         clearPendingWaveLibrarySave(pending);
         vwdDebugLog('persistence', {
@@ -16221,9 +16238,13 @@ ${lines.join('\n')}`;
         (Array.isArray(node.documents) ? node.documents : []).forEach((name) => assignedNames.add(name));
         collect(Array.isArray(node.children) ? node.children : []);
       }); })(Array.isArray(bundle.directories) ? bundle.directories : []);
-      vwdDebugLog('wave-library', { phase: 'bundle-validation', libraryId: bundle.libraryId, fileName,
+      const availableNames = new Set(documents.filter(Boolean).map((tag) => tag.name));
+      const missingAssignments = [...assignedNames].filter((name) => !availableNames.has(name));
+      waveLibraryLoadState = { libraryId: bundle.libraryId, fileName,
         sourceDocumentCount: bundle.documents.length, validDocumentCount: documents.length - invalidDocuments.length,
-        directoryDocumentCount: assignedNames.size, invalidDocuments: invalidDocuments.slice(0, 10) });
+        directoryDocumentCount: assignedNames.size, missingAssignmentCount: missingAssignments.length,
+        missingAssignments: missingAssignments.slice(0, 10), invalidDocuments: invalidDocuments.slice(0, 10) };
+      vwdDebugLog('wave-library', Object.assign({ phase: 'bundle-validation' }, waveLibraryLoadState));
       if (invalidDocuments.length || !documents.length && assignedNames.size) {
         setStatus(false, invalidDocuments.length ? '波形库中的波形索引不完整，已停止加载，未覆盖现有数据'
           : '波形库保留了目录引用，但没有返回波形内容；已停止加载，请检查库文件，勿保存空库');
@@ -21331,7 +21352,7 @@ ${lines.join('\n')}`;
       pendingWaveCopyCompatibility = null;
       document.getElementById('wave-copy-standard').hidden = false;
       document.getElementById('wave-copy-compatibility').hidden = true;
-      document.getElementById('wave-copy-modal-title').textContent = '选择复制格式（Word / Markdown）';
+      document.getElementById('wave-copy-modal-title').textContent = '选择复制格式（Word / PPT / Markdown）';
       waveCopyModal.hidden = false;
       const first = waveCopyModal.querySelector('[data-copy-mode]');
       if (first) requestAnimationFrame(() => first.focus());
@@ -21342,7 +21363,7 @@ ${lines.join('\n')}`;
       pendingWaveCopyCompatibility = { documentName, html, plainText };
       document.getElementById('wave-copy-standard').hidden = true;
       document.getElementById('wave-copy-compatibility').hidden = false;
-      document.getElementById('wave-copy-modal-title').textContent = 'Word 带链接图片';
+      document.getElementById('wave-copy-modal-title').textContent = 'Word / PPT 带链接图片';
       document.getElementById('wave-copy-compatibility-status').textContent =
         '浏览器未完成自动复制。截图和链接已准备好，请点击兼容复制。';
       waveCopyModal.hidden = false;
@@ -21356,7 +21377,7 @@ ${lines.join('\n')}`;
       try {
         window.VisualWaveDromImageClipboard.copyHtml(pending.html, pending.plainText);
         closeWaveCopyModal();
-        setStatus(true, '带链接图片已兼容复制，可粘贴到 Word');
+        setStatus(true, '带链接图片已兼容复制，可粘贴到 Word / PPT');
         vwdDebugLog('wave-screenshot', {
           phase: 'success', documentName: pending.documentName, mode: 'linked-image', method: 'copy-event'
         });
@@ -21643,13 +21664,18 @@ ${lines.join('\n')}`;
         let htmlPromise = null;
         if (mode === 'linked-image' || mode === 'linked-markdown') {
           const titleText = getSavedTagTitle(tag);
-          htmlPromise = blobPromise
-            .then(blobToDataUrl)
-            .then((dataUrl) => {
+          htmlPromise = renderPromise
+            .then(async (result) => {
+              const dataUrl = await blobToDataUrl(result.blob);
+              // Keep Office's pasted display size independent of the high-resolution PNG scale.
+              const imageSize = mode === 'linked-image'
+                ? ' width="' + Math.max(1, Math.round(result.width / result.scale))
+                  + '" height="' + Math.max(1, Math.round(result.height / result.scale)) + '"'
+                : '';
               const escapedHoverHint = escapeHtmlAttribute(WAVE_LINK_HOVER_HINT);
               const linkedImage = '<a href="' + escapeHtmlAttribute(deepLink)
                 + '" title="' + escapedHoverHint + '">'
-                + '<img src="' + escapeHtmlAttribute(dataUrl) + '" alt="'
+                + '<img' + imageSize + ' src="' + escapeHtmlAttribute(dataUrl) + '" alt="'
                 + escapeHtmlAttribute(titleText) + '" title="' + escapedHoverHint + '">'
                 + '</a>';
               const linkedText = '<a href="' + escapeHtmlAttribute(deepLink)
@@ -21697,8 +21723,8 @@ ${lines.join('\n')}`;
         setStatus(true, mode === 'linked-markdown'
           ? ('Markdown 图片和超链接已复制：' + titleText)
           : (mode === 'linked-image'
-            ? ('带链接截图已复制，可粘贴到 Word：' + titleText)
-            : ('波形图截图已复制，可直接粘贴到 Word：' + titleText)));
+            ? ('带链接截图已复制，可粘贴到 Word / PPT：' + titleText)
+            : ('波形图截图已复制，可直接粘贴到 Word / PPT：' + titleText)));
         button.classList.add('copied');
         button.title = '截图已复制';
         vwdDebugLog('wave-screenshot', {
@@ -22515,13 +22541,13 @@ ${lines.join('\n')}`;
       }
 
       const selected = getNavNodeById(navTreeState, selectedNavNodeId) || navTreeState;
-      if (singleWaveViewActive && (waveLibraryInitializationPending || waveLibraryInitializationError
+      if (waveLibraryInitializationError || singleWaveViewActive && (waveLibraryInitializationPending
           || !savedTagByName.has(requestedWaveDocumentName))) {
         mountWaveContainerOutsideLibrary();
         waveContainer.hidden = true;
         const message = document.createElement('div');
         const failure = waveLibraryInitializationError;
-        const missing = !failure || failure.kind === 'missing-document';
+        const missing = singleWaveViewActive && (!failure || failure.kind === 'missing-document');
         message.className = waveLibraryInitializationPending
           ? 'single-wave-loading'
           : missing ? 'single-wave-not-found' : 'single-wave-load-error';
@@ -22530,7 +22556,8 @@ ${lines.join('\n')}`;
         message.textContent = waveLibraryInitializationPending
           ? '波形图加载中…'
           : missing ? '链接指定的波形图不存在或已被删除。'
-            : '波形图暂时无法加载，请确认原波形库和本地服务仍可用。';
+            : singleWaveViewActive ? '波形图暂时无法加载，请确认原波形库和本地服务仍可用。'
+              : '波形库载入失败，未覆盖原始数据。';
         if (!waveLibraryInitializationPending) {
           if (failure && !missing) {
             const detail = document.createElement('p');
@@ -25367,7 +25394,6 @@ ${lines.join('\n')}`;
       if (vimController && vimController.getState().enabled) {
         requestAnimationFrame(() => setVimScope('wave'));
       }
-      seedRequestedWaveCopies();
       renderLegends();
       updateWavePaintModeUI();
       renderConnectionPresets();
@@ -25396,7 +25422,7 @@ ${lines.join('\n')}`;
           setStatus(false, '波形库加载失败：' + error.message);
         } finally {
           waveLibraryInitializationPending = false;
-          if (singleWaveViewActive) renderWaveLibrary();
+          if (singleWaveViewActive || waveLibraryInitializationError) renderWaveLibrary();
           const tableId = pageQuery.get('parameterTable'), name = pageQuery.get('parameterName');
           if (!waveLibraryInitializationError && tableId && name && requestedWaveDocumentName) {
             void window.VisualWaveDromParameters.revealReference({ libraryId: currentWaveLibraryId,

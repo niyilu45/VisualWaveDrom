@@ -88,7 +88,7 @@
 | 保留原库、制作副本 | **波形库另存为**，选择新的 `.sqlite` 路径 |
 | 建立独立工程 | **新增波形库**，创建空库；再新增波形图 |
 | 切换已有工程 | **导入波形库**；可在新窗口打开另一套库 |
-| 放进报告 | 图框的 **复制图片到剪贴板**，按 Word / Markdown 用途选择 |
+| 放进报告或幻灯片 | 图框的 **复制图片到剪贴板**，按 Word / PPT / Markdown 用途选择 |
 
 ![保存示意：右侧标出保存波形库和波形库另存为，中央弹窗显示保存完成以及已保存的 QuickStartDemo 库名](ReadMeFig/quickstart-05-save.png)
 
@@ -98,9 +98,9 @@
 
 `.tmp` 和浏览器缓存用于临时恢复，不是正式交付文件；尚未保存时不要清理它们。截图不包含图下方的 `description` 说明。[完整保存说明](ReadMe.md#library-save) · [备份与共享](ReadMe.md#library-backup)
 
-![复制图片弹窗：分别列出 Word 仅图片、Word 带链接图片、Markdown 图片与链接，以及仅复制链接](ReadMeFig/quickstart-06-copy-image.png)
+![复制图片弹窗：分别列出 Word / PPT 仅图片、带链接图片、Markdown 图片与链接，以及仅复制链接](ReadMeFig/quickstart-06-copy-image.png)
 
-*图 6：只放静态图选“Word：仅复制图片”；需要回溯原图时再选带链接的格式。*
+*图 6：只放静态图选“Word / PPT：仅复制图片”；需要回溯原图时再选带链接的格式。PowerPoint 如未保留链接，可选“仅复制链接”，选中已粘贴的图片后按 `Ctrl+K` 添加。*
 
 <a id="import-data"></a>
 ## 5. 从文件导入，再分析长波形

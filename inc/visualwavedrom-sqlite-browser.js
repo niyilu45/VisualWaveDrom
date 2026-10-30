@@ -638,6 +638,14 @@
 
   global.VWDSqliteLibrary = {
     kind: LIBRARY_KIND,
+    async archiveRecovery(key, record) {
+      const database = await openSnapshotDatabase();
+      const id = SNAPSHOT_KEY + ':recovery:' + key;
+      try {
+        if (!await readSnapshot(database, id)) await writeSnapshot(database, { id, ...record });
+        return id;
+      } finally { database.close(); }
+    },
     async createStore(libraryId) {
       const results = await Promise.all([loadSqlite(), openSnapshotDatabase()]);
       return new BrowserWaveLibraryStore(results[0], results[1], libraryId);
