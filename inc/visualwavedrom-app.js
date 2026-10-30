@@ -14262,11 +14262,11 @@ ${lines.join('\n')}`;
         + String(currentWaveLibraryId || currentWaveLibraryFile || 'browser-default');
     }
 
-    async function withWaveLibraryWriteLock(operation) {
+    async function withWaveLibraryWriteLock(operation, libraryIdentity) {
       if (!navigator.locks || typeof navigator.locks.request !== 'function') {
         return operation();
       }
-      const lockName = getWaveLibraryWriteLockName();
+      const lockName = libraryIdentity ? 'visualwavedrom-wave-library-save:' + libraryIdentity : getWaveLibraryWriteLockName();
       const waitStartedAt = Date.now();
       let acquired = false;
       const waitingTimer = setTimeout(() => {
@@ -14675,8 +14675,25 @@ ${lines.join('\n')}`;
       } catch (_e) { /* ignore */ }
     }
 
-    async function migrateLegacyWaveLibraryRecovery(pending) {
+    async function archiveWaveLibraryRecovery(pending, caches = {}) {
       const storage = getWindowStateStorage();
+      const archiveKey = WAVE_LIBRARY_LEGACY_RECOVERY_KEY + ':' + encodeURIComponent(pending.libraryId)
+        + ':' + encodeURIComponent(pending.token);
+      const archive = { pending, caches, archivedAt: new Date().toISOString() };
+      let archiveStorage = 'localStorage';
+      let archiveId = archiveKey;
+      try {
+        if (!storage) throw new Error('无法访问浏览器恢复存储');
+        if (!storage.getItem(archiveKey)) storage.setItem(archiveKey, JSON.stringify(archive));
+      } catch (error) {
+        if (!window.VWDSqliteLibrary || !window.VWDSqliteLibrary.archiveRecovery) throw error;
+        archiveId = await window.VWDSqliteLibrary.archiveRecovery(archiveKey, archive);
+        archiveStorage = 'indexedDB';
+      }
+      return { archiveKey: archiveId, archiveStorage };
+    }
+
+    async function migrateLegacyWaveLibraryRecovery(pending) {
       const caches = {};
       const candidates = new Map();
       [WAVE_DOCUMENTS_KEY, WAVE_DOCUMENTS_LOADED_CACHE_KEY].forEach((key) => {
@@ -14697,19 +14714,7 @@ ${lines.join('\n')}`;
           });
         } catch (_e) { /* Keep malformed cache text in the archive as well. */ }
       });
-      const archiveKey = WAVE_LIBRARY_LEGACY_RECOVERY_KEY + ':' + encodeURIComponent(pending.libraryId)
-        + ':' + encodeURIComponent(pending.token);
-      const archive = { pending, caches, archivedAt: new Date().toISOString() };
-      let archiveStorage = 'localStorage';
-      let archiveId = archiveKey;
-      try {
-        if (!storage) throw new Error('无法访问浏览器恢复存储');
-        if (!storage.getItem(archiveKey)) storage.setItem(archiveKey, JSON.stringify(archive));
-      } catch (error) {
-        if (!window.VWDSqliteLibrary || !window.VWDSqliteLibrary.archiveRecovery) throw error;
-        archiveId = await window.VWDSqliteLibrary.archiveRecovery(archiveKey, archive);
-        archiveStorage = 'indexedDB';
-      }
+      const archive = await archiveWaveLibraryRecovery(pending, caches);
       const summary = await readWaveLibraryJson('/api/wave-library?summary=1&libraryId='
         + encodeURIComponent(pending.libraryId), 'legacy-recovery-summary');
       if (summary.libraryId !== pending.libraryId || !Array.isArray(summary.documents)) {
@@ -14724,8 +14729,8 @@ ${lines.join('\n')}`;
         if (tag.name !== pending.activeDocumentName || !previous || tag.revision !== (previous.revision || 0)) return;
         documents.push(getWaveDocumentServerSnapshot(tag, false));
       });
-      waveLibraryLegacyRecovery = { libraryId: pending.libraryId,
-        archiveKey: archiveId, archiveStorage, libraryDocumentCount: summary.documents.length, cachedDocumentCount: candidates.size,
+      waveLibraryLegacyRecovery = { ...archive, libraryId: pending.libraryId,
+        libraryDocumentCount: summary.documents.length, cachedDocumentCount: candidates.size,
         recoveredDocumentCount: documents.length, skippedDocumentCount: candidates.size - documents.length };
       vwdDebugLog('persistence', Object.assign({ phase: 'legacy-pending-library-migrated' }, waveLibraryLegacyRecovery));
       // Missing entries in a browser cache never mean deletion from the library.
@@ -14769,7 +14774,16 @@ ${lines.join('\n')}`;
           file: pending.file,
           message: error && error.message ? error.message : String(error)
         });
-        return 'failed';
+        try {
+          const archive = await archiveWaveLibraryRecovery(pending);
+          Object.assign(waveLibraryRecoveryError, archive, { archived: true });
+          clearPendingWaveLibrarySave(pending);
+          vwdDebugLog('persistence', { phase: 'pending-library-recovery-archived', ...waveLibraryRecoveryError });
+          return 'archived';
+        } catch (archiveError) {
+          waveLibraryRecoveryError.archiveError = archiveError.message;
+          return 'failed';
+        }
       }
     }
 
@@ -16225,6 +16239,16 @@ ${lines.join('\n')}`;
       }, immediate ? 0 : 350);
     }
 
+    function collectWaveLibraryAssignments(bundle) {
+      const assignedNames = new Set(Array.isArray(bundle.rootDocuments) ? bundle.rootDocuments : []);
+      (function collect(nodes) { (nodes || []).forEach((node) => {
+        if (!node || typeof node !== 'object') return;
+        (Array.isArray(node.documents) ? node.documents : []).forEach((name) => assignedNames.add(name));
+        collect(Array.isArray(node.children) ? node.children : []);
+      }); })(Array.isArray(bundle.directories) ? bundle.directories : []);
+      return assignedNames;
+    }
+
     function applyWaveLibraryBundle(bundle, fileName) {
       if (!bundle || bundle.kind !== WAVE_LIBRARY_KIND || !Array.isArray(bundle.documents)) {
         setStatus(false, '波形库文件格式无效');
@@ -16232,12 +16256,7 @@ ${lines.join('\n')}`;
       }
       const documents = bundle.documents.map(normalizeSavedTag);
       const invalidDocuments = documents.map((tag, index) => tag ? null : { index, name: bundle.documents[index] && bundle.documents[index].name }).filter(Boolean);
-      const assignedNames = new Set(Array.isArray(bundle.rootDocuments) ? bundle.rootDocuments : []);
-      (function collect(nodes) { (nodes || []).forEach((node) => {
-        if (!node || typeof node !== 'object') return;
-        (Array.isArray(node.documents) ? node.documents : []).forEach((name) => assignedNames.add(name));
-        collect(Array.isArray(node.children) ? node.children : []);
-      }); })(Array.isArray(bundle.directories) ? bundle.directories : []);
+      const assignedNames = collectWaveLibraryAssignments(bundle);
       const availableNames = new Set(documents.filter(Boolean).map((tag) => tag.name));
       const missingAssignments = [...assignedNames].filter((name) => !availableNames.has(name));
       waveLibraryLoadState = { libraryId: bundle.libraryId, fileName,
@@ -16377,13 +16396,15 @@ ${lines.join('\n')}`;
       try {
         if (!inNewWindow) {
           await window.VisualWaveDromParameters.flush();
-          flushPersistEditorJson();
-          if (!saveCurrentWaveDocumentBeforeSwitch()) throw new Error('当前波形图尚未成功保存，请先检查 JSON');
-          flushPersistSavedTags();
-          const saved = waveLibraryServerMode
-            ? await flushScheduledWaveLibraryServerSave(markWaveLibraryServerSavePending())
-            : await flushBrowserWaveLibrarySave({ force: true });
-          if (!saved) throw new Error('当前波形库的临时编辑未保存，已取消切换');
+          if (!waveLibraryInitializationError) {
+            flushPersistEditorJson();
+            if (!saveCurrentWaveDocumentBeforeSwitch()) throw new Error('当前波形图尚未成功保存，请先检查 JSON');
+            flushPersistSavedTags();
+            const saved = waveLibraryServerMode
+              ? await flushScheduledWaveLibraryServerSave(markWaveLibraryServerSavePending())
+              : await flushBrowserWaveLibrarySave({ force: true });
+            if (!saved) throw new Error('当前波形库的临时编辑未保存，已取消切换');
+          }
         }
         const url = new URL(window.location.href);
         url.search = new URLSearchParams({ libraryId }).toString();
@@ -16462,7 +16483,7 @@ ${lines.join('\n')}`;
       const inNewWindow = pendingWaveLibraryImportInNewWindow;
       pendingWaveLibraryImportWindow = null;
       if (!file) { if (opened && !opened.closed) opened.close(); return; }
-      let store;
+      let store, cachedStore;
       try {
         store = await window.VWDSqliteLibrary.createStore();
         const bytes = new Uint8Array(await file.arrayBuffer());
@@ -16473,12 +16494,35 @@ ${lines.join('\n')}`;
         }
         if (header !== sqliteHeader) throw new Error('所选文件不是 SQLite 波形库');
         const summary = await store.importBytes(bytes, file.name);
-        const known = (await window.VWDSqliteLibrary.listLibraries()).some(item => item.libraryId === summary.libraryId);
+        let known = (await window.VWDSqliteLibrary.listLibraries()).some(item => item.libraryId === summary.libraryId);
+        let restoredCount = 0;
+        if (known) {
+          await withWaveLibraryWriteLock(async () => {
+            cachedStore = await window.VWDSqliteLibrary.createStore(summary.libraryId);
+            if (!await cachedStore.loadPersisted()) { known = false; return; }
+            const cached = cachedStore.readSummary();
+            const existing = new Set(cached.documents.map((document) => document.name));
+            const incoming = new Set(summary.documents.map((document) => document.name));
+            const missing = [...collectWaveLibraryAssignments(cached)].filter((name) => !existing.has(name) && incoming.has(name));
+            if (!missing.length) return;
+            await window.VWDSqliteLibrary.archiveRecovery('import:' + summary.libraryId + ':' + Date.now(), {
+              libraryId: summary.libraryId, fileName: cachedStore.fileName,
+              bytes: cachedStore.exportBytes(), archivedAt: new Date().toISOString()
+            });
+            cachedStore.patchState({ libraryId: summary.libraryId,
+              documents: missing.map((name) => store.readDocument(name)), deletedDocuments: [] });
+            await cachedStore.persist({ makeActive: true });
+            restoredCount = missing.length;
+            vwdDebugLog('persistence', { phase: 'browser-library-documents-restored', libraryId: summary.libraryId,
+              restoredCount, preservedDocumentCount: existing.size });
+          }, summary.libraryId);
+        }
         // An already-open library can contain unsaved edits. Reopen its cache,
         // never replace that cache with an older copy imported in another tab.
         if (!known) await store.persist({ makeActive: true });
         await openWaveLibrary(summary.libraryId, inNewWindow, opened);
-        setStatus(true, known ? '已打开此波形库的现有编辑副本，未覆盖临时修改' : '已导入 SQLite 波形库：' + store.fileName);
+        setStatus(true, restoredCount ? '已补回 ' + restoredCount + ' 张波形，现有临时修改保持不变'
+          : known ? '已打开此波形库的现有编辑副本，未覆盖临时修改' : '已导入 SQLite 波形库：' + store.fileName);
       } catch (error) {
         if (opened && !opened.closed) opened.close();
         setStatus(false, '导入波形库失败：' + error.message);
@@ -16487,7 +16531,7 @@ ${lines.join('\n')}`;
           fileName: file.name,
           message: error && error.message ? error.message : String(error)
         });
-      } finally { if (store) store.close(); }
+      } finally { if (cachedStore) cachedStore.close(); if (store) store.close(); }
     }
 
     async function readWaveLibraryJson(url, stage) {
@@ -16520,10 +16564,18 @@ ${lines.join('\n')}`;
 
     async function loadServerWaveLibrary(fileName, libraryId) {
       await window.VisualWaveDromParameters.flush();
-      const bundle = await readWaveLibraryJson('/api/wave-library?summary=1&' + (libraryId
+      let bundle = await readWaveLibraryJson('/api/wave-library?summary=1&' + (libraryId
         ? 'libraryId=' + encodeURIComponent(libraryId) : 'file=' + encodeURIComponent(fileName)), 'summary');
-      if (!bundle.libraryId || !Array.isArray(bundle.documents)) throw new Error('波形库返回的数据不完整');
+      if (!bundle.libraryId) throw new Error('波形库返回的数据不完整');
       if (libraryId && bundle.libraryId !== libraryId) throw new Error('返回的波形库与链接指定的波形库不一致');
+      const names = new Set((Array.isArray(bundle.documents) ? bundle.documents : []).map((document) => document && document.name));
+      if (!Array.isArray(bundle.documents) || [...collectWaveLibraryAssignments(bundle)].some((name) => !names.has(name))) {
+        const full = await readWaveLibraryJson('/api/wave-library?libraryId=' + encodeURIComponent(bundle.libraryId), 'legacy-full-library');
+        if (full.libraryId !== bundle.libraryId || !Array.isArray(full.documents)) throw new Error('波形库完整读取结果无效');
+        vwdDebugLog('wave-library', { phase: 'legacy-full-library-loaded', libraryId: full.libraryId,
+          summaryDocumentCount: names.size, documentCount: full.documents.length });
+        bundle = full;
+      }
       // Older services may omit the explicit deferred flag in summary records.
       bundle.documents = bundle.documents.map((document) => document && typeof document.name === 'string'
         && typeof document.content !== 'string' && typeof document.json !== 'string'
@@ -16700,6 +16752,7 @@ ${lines.join('\n')}`;
         }
         if (requestedLibraryId || fileName) await loadServerWaveLibrary(fileName, requestedLibraryId || catalog.currentLibraryId);
         else updateWaveLibraryFileStatus();
+        if (recovery === 'archived') setStatus(true, '已载入波形库，未恢复的临时修改已单独备份');
       } catch (e) {
         waveLibraryInitializationError = e;
         updateWaveLibraryFileStatus();

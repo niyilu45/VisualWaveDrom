@@ -1370,7 +1370,7 @@ func (s *service) handleWaveLibrary(writer http.ResponseWriter, request *http.Re
 			sendJSON(writer, 404, map[string]any{"error": "Library not found"})
 			return
 		}
-		library, err := s.store.readLibrary(filePath, request.URL.Query().Get("summary") == "1")
+		library, err := s.readDisplayLibrary(sourcePath, filePath, request.URL.Query().Get("summary") == "1")
 		if err != nil {
 			sendJSON(writer, 400, map[string]any{"error": err.Error()})
 			return

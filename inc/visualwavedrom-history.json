@@ -1,5 +1,28 @@
 [
   {
+    "version": "2026.10.30.2",
+    "date": "2026-10-30T02:55:32Z",
+    "head": "f598be5c7397c64e2f5872f4198ea7afa8bed652",
+    "notes": [
+      "兼容没有分块表的早期 SQLite 波形库，按实际结构读取内联内容；复制到临时工作库时不再要求原库存在分块表，只打开、查询和读取旧库不会改写原始文件。",
+      "保存回缺少分块表的旧库时补齐当前结构，不再仅凭 schema 版本号误判库已升级；保持已有大数据分块读取和保存行为。",
+      "临时工作库的目录仍引用已丢失波形时，从对应原库补回缺失图，保留现有编辑、参数表及归属；正常删除同时移除引用，因此不会自动恢复用户主动删除的图。",
+      "恢复记录冲突或与当前接口不兼容时，完整备份记录后继续载入已保存的波形，不再中断整库读取；摘要索引不完整时自动尝试完整读取。",
+      "纯 HTML 重新导入原文件可修复浏览器中空缺或部分丢图的缓存，不覆盖已有编辑；当前库加载失败时不再强制保存失败状态后才允许重新导入。",
+      "重建 Windows x64 和 Linux x64 免安装服务程序及 SHA-256 校验文件，更新兼容读取说明；服务模式须关闭旧服务后重新运行 BAT/SH。",
+      "针对旧 schema 1/2 缺少分块表、旧库保存往返、源文件不变、缺图补回、保留本地编辑和主动删除进行 Go 测试；浏览器验证旧库 8 张图显示、刷新、保存、恢复冲突、缺失摘要、纯 HTML 新导入与损坏缓存重导入，均通过。"
+    ],
+    "commits": [
+      {
+        "id": "f598be5c7397c64e2f5872f4198ea7afa8bed652",
+        "date": "2026-10-30T09:47:53+08:00",
+        "title": "fix: preserve legacy wave libraries during recovery",
+        "body": "Replace legacy full-library cache replay with revision-checked incremental recovery. Archive ambiguous browser caches, fall back to IndexedDB when needed, and prevent incomplete initialization from overwriting recovery data.\n\nRemove obsolete startup sample injection, report library load failures instead of empty results, and add wave-index and recovery diagnostics.\n\nAdd Word/PPT clipboard choices and Office image sizing while preserving Markdown copy behavior. Refresh documentation and the copy-dialog screenshot, and publish version 2026.10.30.1."
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.10.30.1",
     "date": "2026-10-30T01:46:58Z",
     "head": "73d663db8eb80f3aafbd10e907966efb8106632f",

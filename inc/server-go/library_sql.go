@@ -30,7 +30,8 @@ func libraryLocation(reference string) (file, prefix string) {
 // bound separately; the namespace is a SHA-256 identifier, never user SQL.
 type libraryDB struct {
 	*sql.DB
-	prefix string
+	prefix         string
+	documentChunks *bool
 }
 
 func librarySQL(query, prefix string) string {
@@ -100,6 +101,10 @@ func (s *sqliteStore) copyLibraryWithIdentity(source, target, identity string) e
 	if err = db.DB.QueryRow("SELECT COUNT(*) FROM incoming.sqlite_master WHERE type='table' AND name=?", sourcePrefix+"vwd_parameters").Scan(&hasParameters); err != nil {
 		return err
 	}
+	var hasChunks int
+	if err = db.DB.QueryRow("SELECT COUNT(*) FROM incoming.sqlite_master WHERE type='table' AND name=?", sourcePrefix+"vwd_document_chunks").Scan(&hasChunks); err != nil {
+		return err
+	}
 	tx, err := db.DB.Begin()
 	if err != nil {
 		return err
@@ -121,6 +126,9 @@ func (s *sqliteStore) copyLibraryWithIdentity(source, target, identity string) e
 		{"vwd_documents", "name,sort_order,content,hscale,wave_edit_mode,revision,saved_at,title_cache,description_cache,content_length,extra_json"},
 		{"vwd_document_chunks", "document_name,chunk_index,content_chunk"},
 	} {
+		if item.table == "vwd_document_chunks" && hasChunks == 0 {
+			continue
+		}
 		query := "INSERT INTO main." + db.prefix + item.table + " (" + item.columns + ") SELECT " + item.columns + " FROM incoming." + sourcePrefix + item.table
 		if _, err = tx.Exec(query); err != nil {
 			return err
@@ -132,4 +140,66 @@ func (s *sqliteStore) copyLibraryWithIdentity(source, target, identity string) e
 		}
 	}
 	return tx.Commit()
+}
+
+func missingDocumentReferences(library waveLibrary) []string {
+	known := make(map[string]bool)
+	for _, document := range library.Documents {
+		known[stringValue(document["name"])] = true
+	}
+	missing := make([]string, 0)
+	add := func(value any) {
+		items, _ := value.([]any)
+		for _, item := range items {
+			name, ok := item.(string)
+			if ok && name != "" && !known[name] {
+				known[name] = true
+				missing = append(missing, name)
+			}
+		}
+	}
+	add(library.RootDocuments)
+	var visit func(any)
+	visit = func(value any) {
+		items, _ := value.([]any)
+		for _, item := range items {
+			if node, ok := item.(map[string]any); ok {
+				add(node["documents"])
+				visit(node["children"])
+			}
+		}
+	}
+	visit(library.Directories)
+	return missing
+}
+
+// A missing referenced row is an incomplete draft, not an intentional deletion:
+// normal delete operations remove the row and its directory references together.
+func (s *service) readDisplayLibrary(source, working string, summaryOnly bool) (waveLibrary, error) {
+	library, err := s.store.readLibrary(working, summaryOnly)
+	if err != nil || samePath(source, working) || len(missingDocumentReferences(library)) == 0 {
+		return library, err
+	}
+	s.libraryMu.Lock()
+	defer s.libraryMu.Unlock()
+	current, err := s.store.readLibrary(working, true)
+	if err != nil {
+		return waveLibrary{}, err
+	}
+	documents := make([]any, 0)
+	for _, name := range missingDocumentReferences(current) {
+		document, readErr := s.store.readDocument(source, name)
+		if readErr != nil {
+			return waveLibrary{}, readErr
+		}
+		if document != nil {
+			documents = append(documents, document)
+		}
+	}
+	if len(documents) != 0 {
+		if _, err = s.store.patchLibraryState(working, map[string]any{"documents": documents}); err != nil {
+			return waveLibrary{}, err
+		}
+	}
+	return s.store.readLibrary(working, summaryOnly)
 }

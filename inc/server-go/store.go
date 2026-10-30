@@ -207,8 +207,12 @@ func (s *sqliteStore) ensureSchema(filePath string) error {
 		if openErr == nil {
 			var version int
 			queryErr := db.QueryRow("PRAGMA user_version").Scan(&version)
+			var tables int
+			if queryErr == nil && version >= sqliteSchemaVersion {
+				queryErr = db.DB.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('vwd_library','vwd_documents','vwd_document_chunks')").Scan(&tables)
+			}
 			closeErr := db.Close()
-			if queryErr == nil && closeErr == nil && version >= sqliteSchemaVersion {
+			if queryErr == nil && closeErr == nil && version >= sqliteSchemaVersion && tables == 3 {
 				s.prepared.Store(resolved, true)
 				return nil
 			}
@@ -565,9 +569,6 @@ func decodeJSONOr(text string, fallback any) any {
 }
 
 func (s *sqliteStore) readLibraryRow(filePath string) (waveLibrary, error) {
-	if err := s.ensureSchema(filePath); err != nil {
-		return waveLibrary{}, err
-	}
 	db, err := s.open(filePath, false)
 	if err != nil {
 		return waveLibrary{}, err
@@ -634,6 +635,17 @@ func scanDocument(scanner interface{ Scan(...any) error }, withContent bool) (do
 }
 
 func readChunkContent(db *libraryDB, documentName string) (string, bool, error) {
+	if db.documentChunks == nil {
+		var count int
+		if err := db.DB.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", db.prefix+"vwd_document_chunks").Scan(&count); err != nil {
+			return "", false, err
+		}
+		exists := count != 0
+		db.documentChunks = &exists
+	}
+	if !*db.documentChunks {
+		return "", false, nil
+	}
 	rows, err := db.Query(`SELECT content_chunk FROM vwd_document_chunks
 		WHERE document_name=? ORDER BY chunk_index`, documentName)
 	if err != nil {
@@ -709,9 +721,6 @@ func (s *sqliteStore) readLibrary(filePath string, summaryOnly bool) (waveLibrar
 }
 
 func (s *sqliteStore) readDocument(filePath, waveID string) (map[string]any, error) {
-	if err := s.ensureSchema(filePath); err != nil {
-		return nil, err
-	}
 	db, err := s.open(filePath, false)
 	if err != nil {
 		return nil, err
