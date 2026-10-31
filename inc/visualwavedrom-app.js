@@ -892,7 +892,7 @@ if (!window.VWDCodeEditorPairs) {
         context.font = style.font || `${style.fontSize} ${style.fontFamily}`;
       }
       const value = String(input.value || ' ');
-      const measuredText = context ? context.measureText(value).width : value.length * 8;
+      const measuredText = Math.max(...value.split(/\r?\n/).map(line => context ? context.measureText(line).width : line.length * 8));
       const letterSpacing = Number.parseFloat(style.letterSpacing) || 0;
       const horizontalSpacing = [
         style.paddingLeft,
@@ -11611,7 +11611,7 @@ ${lines.join('\n')}`;
               point.y = 0;
               const start = point.matrixTransform(matrix);
               point.x = endCol * columnWidth;
-              point.y = 20;
+              point.y = Number(drawGroup.getAttribute('data-vwd-data-height')) || 20;
               const end = point.matrixTransform(matrix);
               return {
                 left: start.x, top: start.y, right: end.x, bottom: end.y,
@@ -11648,7 +11648,10 @@ ${lines.join('\n')}`;
         // Keep both edges on cycle boundaries whenever a full cell fits on screen.
         const left = first <= last ? rect.left + Math.max(first, Math.min(last, centered)) * step
           : Math.max(viewportLeft, Math.min(rect.left, viewportRight - width));
-        const height = Math.max(22, rect.height);
+        const style = getComputedStyle(input);
+        const lineHeight = parseFloat(style.lineHeight) || 16;
+        const lines = input.value.split(/\r?\n/).length;
+        const height = Math.min(Math.max(80, wavePanel.clientHeight - 16), Math.max(22, lines * lineHeight + 4));
         input.style.left = (left - panel.left - wavePanel.clientLeft + wavePanel.scrollLeft) + 'px';
         input.style.top = (rect.top + (rect.height - height) / 2 - panel.top - wavePanel.clientTop + wavePanel.scrollTop) + 'px';
         input.style.width = width + 'px';
@@ -12958,14 +12961,15 @@ ${lines.join('\n')}`;
       const anchor = anchorEl || textEl;
       const rect = anchor.getBoundingClientRect();
       const panelRect = wavePanel.getBoundingClientRect();
-      const overlay = isDescriptionField
+      const overlay = (isDescriptionField || field === 'data')
         ? document.createElement('textarea')
         : document.createElement('input');
       overlay.className = isDescriptionField
         ? 'wave-text-edit-overlay wave-description-overlay'
         : 'wave-text-edit-overlay';
       if (field === 'data') overlay.classList.add('wave-data-edit-overlay');
-      if (!isDescriptionField) overlay.type = 'text';
+      if (overlay.tagName === 'INPUT') overlay.type = 'text';
+      if (field === 'data') { overlay.rows = 1; overlay.wrap = 'off'; }
       overlay.value = oldValue;
       overlay.autocomplete = 'off';
       overlay.setAttribute('autocomplete', 'off');
@@ -13115,8 +13119,9 @@ ${lines.join('\n')}`;
           targetValueLen: overlay.value.length
         });
         const isSubmitKey = (e.key === 'Enter' || e.key === 'NumpadEnter');
+        if (e.isComposing || e.keyCode === 229) return;
         if (isSubmitKey) {
-          if (isDescriptionField && (e.ctrlKey || e.metaKey)) {
+          if ((field === 'data' && e.altKey) || (isDescriptionField && (e.ctrlKey || e.metaKey))) {
             e.preventDefault();
             insertInlineNewline(overlay, e);
             if (resizeDescriptionOverlay) {

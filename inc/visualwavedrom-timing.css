@@ -65,7 +65,11 @@ label { display: inline-flex; gap: 0.35rem; align-items: center; }
 .timing-reference-toggle { position: absolute; left: 3px; width: 24px; height: 28px; pointer-events: auto; color: #294c81; }
 .timing-reference-toggle summary { width: 24px; height: 28px; padding: 3px; cursor: pointer; list-style-position: inside; font-size: 15px; line-height: 22px; border-radius: 3px; }
 .timing-reference-toggle summary:hover { background: #dceaff; }
-#timing-pan { margin: 0.2rem 0.75rem; width: calc(100% - 1.5rem); accent-color: var(--accent); padding: 0; }
+#timing-pan { position: relative; flex: none; height: 20px; margin: 0.2rem 0.75rem; background: #10171f; box-shadow: inset 0 0 0 1px var(--border); border-radius: 4px; touch-action: none; user-select: none; }
+#timing-pan-thumb { position: absolute; top: 3px; height: 14px; left: 0; width: 100%; border-radius: 3px; background: #829bb2; cursor: grab; }
+#timing-pan-thumb:hover, #timing-pan.dragging #timing-pan-thumb { background: #b1c6d9; }
+#timing-pan.dragging #timing-pan-thumb { cursor: grabbing; }
+#timing-pan-thumb[aria-disabled="true"] { background: #5c6b79; cursor: default; }
 #timing-position { padding: 0.25rem 0.75rem; font-size: 0.75rem; color: var(--muted); }
 @media (max-width: 760px) {
   .timing-workspace { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(9rem, 30%); }

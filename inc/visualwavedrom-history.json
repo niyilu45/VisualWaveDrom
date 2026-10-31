@@ -1,5 +1,28 @@
 [
   {
+    "version": "2026.10.31.1",
+    "date": "2026-10-31T03:03:34Z",
+    "head": "2e99cfbce5b939a183329da953e1efa39f1c0ce6",
+    "notes": [
+      "时延检查底部改为可拖动的比例滑块：长度等于可见时间范围占总范围的比例，缩放和滚动时同步更新；支持轨道点击、鼠标和触控拖动及方向键、Page、Home、End 导航。",
+      "数据标签使用多行编辑框，Alt+Enter 换行、Enter 确认、Esc 取消；每个信号行按自身数据标签的最大行数独立调整高度，删除换行后恢复，保留连续空行和末尾空行。",
+      "多行布局同步调整波形带、分组括号、连接端点及标签、网格和页脚；连接标签按映射后的端点定位，分组名按实际括号中心移动，保留人工标签偏移，兼容截图和演讲者模式。",
+      "大数据窗口保留全行多行标签高度，横向浏览不因标签离开可见范围而跳变；换行按 JSON data 数组保存，保持撤销重做和保存重开。",
+      "扩充 QuickStart 快速上手教程，增加 38 张真实界面截图及图内编号短注、6 段分步骤 GIF，覆盖双击第二下按住选择候选波形、长段覆盖复制粘贴、标签换行、单文件及预设集合导入、示波器缩放游标操作。",
+      "图解覆盖主界面和菜单、JSON、CSV 列选择与过滤、示波器总线/模拟/公式/颜色/比较、参数表链接/引用/比较/TOML、时延检查、演讲者聚焦/样式/分屏/GIF、设置/快捷键/分类器/版本、库打开及另存为。",
+      "验证比例滑块的鼠标、触控、键盘和边界；验证多行标签的独立行高、中心定位、空行、撤销、保存重开、剪贴板 PNG、演讲者和窗口渲染；教程 83 个本地链接、38 张图和 6 段 GIF 的桌面/窄屏加载检查通过。个人波形库、临时文件、本机 BAT 和无关删除不纳入提交。"
+    ],
+    "commits": [
+      {
+        "id": "2e99cfbce5b939a183329da953e1efa39f1c0ce6",
+        "date": "2026-10-30T10:56:51+08:00",
+        "title": "fix: read legacy SQLite libraries and recover missing waveforms",
+        "body": "Read inline legacy libraries without requiring chunk tables or mutating source files. Copy optional chunk storage safely and complete old schemas only when explicitly writing them.\n\nRestore missing referenced documents from the matching source library while preserving local edits, parameter catalogs and intentional deletions. Fall back to complete reads when summaries are incomplete.\n\nArchive incompatible or conflicted recovery records without blocking normal library loading. Repair empty or partial browser caches on reimport, and allow reimport after a failed initialization.\n\nRebuild Windows and Linux services, update checksums and compatibility documentation, add focused storage regressions, and publish version 2026.10.30.2."
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.10.30.2",
     "date": "2026-10-30T02:55:32Z",
     "head": "f598be5c7397c64e2f5872f4198ea7afa8bed652",

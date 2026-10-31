@@ -8,6 +8,7 @@
   'use strict';
 
   const DATA_TOKEN_RE = /[2-9=]/;
+  const dataLineCounts = new WeakMap();
 
   function clampInteger(value, minimum, maximum) {
     const number = Number.isFinite(Number(value)) ? Math.floor(Number(value)) : minimum;
@@ -209,6 +210,17 @@
       copy.node = signal.node.slice(start, end);
     }
     if (Array.isArray(signal.data) || typeof signal.data === 'string') {
+      if (Array.isArray(signal.data)) {
+        let count = dataLineCounts.get(signal.data);
+        if (count === undefined) {
+          count = 1;
+          signal.data.forEach(function (value) {
+            if (typeof value === 'string' && /[\r\n]/.test(value)) count = Math.max(count, value.split(/\r\n|\r|\n/).length);
+          });
+          dataLineCounts.set(signal.data, count);
+        }
+        if (count > 1) copy._vwdDataLineCount = count;
+      }
       const dataValues = normalizeDataValues(signal.data);
       copy.data = waveSlice.dataIndices.map(function (dataIndex) {
         return dataValues[dataIndex] === undefined ? '' : dataValues[dataIndex];

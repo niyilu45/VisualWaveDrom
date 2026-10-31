@@ -29,7 +29,7 @@
     doc.write('<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>时延检查</title></head><body class="timing-view"></body></html>');
     doc.close();
     const stylesheet = doc.createElement('link'); stylesheet.rel = 'stylesheet';
-    stylesheet.href = new URL('inc/visualwavedrom-timing.css?v=20261019-problem-locate', document.baseURI).href;
+    stylesheet.href = new URL('inc/visualwavedrom-timing.css?v=20261030-proportional-pan-v1', document.baseURI).href;
     doc.head.appendChild(stylesheet);
     doc.documentElement.style.fontSize = getComputedStyle(document.documentElement).fontSize;
     doc.body.innerHTML = `
@@ -62,7 +62,7 @@
             <output id="timing-delta">B-A = 0 cycle</output>
           </div>
           <div class="timing-plot"><canvas id="timing-canvas" aria-label="展开后的时序图"></canvas><div id="timing-scroll" tabindex="0" role="region" aria-label="展开波形，点击设置当前游标"><div id="timing-spacer"></div></div><div id="timing-row-toggles"></div><button type="button" id="timing-reference-all">全部展开</button></div>
-          <input type="range" id="timing-pan" min="0" max="100000" value="0" step="1" aria-label="横向浏览已确定时间范围">
+          <div id="timing-pan"><div id="timing-pan-thumb" role="scrollbar" tabindex="-1" aria-orientation="horizontal" aria-controls="timing-scroll" aria-label="横向浏览已确定时间范围" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-disabled="true"></div></div>
           <footer id="timing-position">列号从 0 开始 · 展开预览只读</footer>
         </main>
       </div>`;
@@ -70,7 +70,7 @@
     const core = global.VisualWaveDromTimingCore, fmt = core.format;
     let source = null, model = null, worker = null, version = 0, timer = 0, disposed = false, reading = false;
     let start = 0, end = 10, active = 'a', a = 0, b = 0, selected = -1, highlighted = new Set(), highlightedEdges = new Set();
-    let frame = 0, drag = null, configKey = '', requestTime = 0, selectedColumn = -1, rowOffsets = [0];
+    let frame = 0, drag = null, panDrag = null, configKey = '', requestTime = 0, selectedColumn = -1, rowOffsets = [0];
     let focusedProblem = null;
     let referenceDefault = null, displayMinimum = 0, displayMaximum = 1;
     const referenceOverrides = new Map(), referenceToggles = new Map();
@@ -139,10 +139,16 @@
       const fullyVisible = end - start >= fullSpan() * (1 - 1e-10);
       $('zoom-out').disabled = !model || fullyVisible;
       $('zoom-out').title = model && fullyVisible ? '已显示全部波形，不能继续缩小' : '缩小';
-      if (model) {
-        const room = Math.max(0, fullSpan() - (end - start));
-        $('pan').disabled = !room; $('pan').value = room ? Math.round((start - displayMinimum) / room * 100000) : 0;
-      }
+      const total = model ? fullSpan() : 1, visible = model ? Math.min(total, end - start) : total;
+      const room = fullyVisible || !model ? 0 : Math.max(0, total - visible), thumb = $('pan-thumb');
+      thumb.style.width = (visible / total * 100) + '%';
+      thumb.style.left = (model ? (start - displayMinimum) / total * 100 : 0) + '%';
+      thumb.setAttribute('aria-valuemin', String(model ? displayMinimum : 0));
+      thumb.setAttribute('aria-valuemax', String(model ? displayMinimum + room : 0));
+      thumb.setAttribute('aria-valuenow', String(model ? start : 0));
+      thumb.setAttribute('aria-valuetext', fmt(start) + ' 至 ' + fmt(end) + ' cycle，显示 ' + fmt(visible / total * 100) + '%');
+      thumb.setAttribute('aria-disabled', String(!room)); thumb.tabIndex = room ? 0 : -1;
+      $('pan').title = room ? '横向浏览：' + fmt(start) + ' 至 ' + fmt(end) + ' cycle' : '已显示全部波形';
       $('a').value = fmt(a); $('b').value = fmt(b);
       $('pick-a').setAttribute('aria-pressed', String(active === 'a')); $('pick-b').setAttribute('aria-pressed', String(active === 'b'));
       const delta = b - a, value = (delta > 0 ? '+' : '') + fmt(delta);
@@ -799,7 +805,37 @@
     }
     $('zoom-in').onclick = () => zoom(0.5); $('zoom-out').onclick = () => zoom(2);
     $('start').onchange = $('end').onchange = () => { range(Number($('start').value), Number($('end').value)); refreshControls(); };
-    $('pan').oninput = () => { if (!model) return; const width = end - start, room = Math.max(0, fullSpan() - width); const next = displayMinimum + Number($('pan').value) / 100000 * room; range(next, next + width); };
+    function movePan(event) {
+      if (!panDrag || panDrag.pointerId !== event.pointerId || !model) return;
+      const bounds = $('pan').getBoundingClientRect(), visible = end - start;
+      if (!bounds.width) return;
+      const next = displayMinimum + (event.clientX - bounds.left) / bounds.width * fullSpan() - panDrag.grab * visible;
+      range(next, next + visible);
+    }
+    function endPan(event) {
+      if (!panDrag || event.pointerId !== panDrag.pointerId) return;
+      panDrag = null; $('pan').classList.remove('dragging');
+    }
+    $('pan').addEventListener('pointerdown', (event) => {
+      if (event.button !== 0 || !model || $('pan-thumb').getAttribute('aria-disabled') === 'true') return;
+      event.preventDefault();
+      const bounds = $('pan-thumb').getBoundingClientRect();
+      panDrag = { pointerId: event.pointerId, grab: event.target === $('pan-thumb') && bounds.width
+        ? Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width)) : 0.5 };
+      $('pan-thumb').focus({ preventScroll: true });
+      $('pan').setPointerCapture(event.pointerId); $('pan').classList.add('dragging');
+      movePan(event);
+    });
+    $('pan').addEventListener('pointermove', movePan);
+    ['pointerup', 'pointercancel', 'lostpointercapture'].forEach((type) => $('pan').addEventListener(type, endPan));
+    $('pan-thumb').addEventListener('keydown', (event) => {
+      if (!model || event.currentTarget.getAttribute('aria-disabled') === 'true') return;
+      const visible = end - start;
+      const positions = { ArrowLeft: start - visible / 20, ArrowRight: start + visible / 20,
+        PageUp: start - visible, PageDown: start + visible, Home: displayMinimum, End: displayMinimum + fullSpan() - visible };
+      if (!Object.prototype.hasOwnProperty.call(positions, event.key)) return;
+      event.preventDefault(); event.stopPropagation(); range(positions[event.key], positions[event.key] + visible);
+    });
     ['a', 'b'].forEach((key) => {
       $('pick-' + key).onclick = () => { active = key; refreshControls(); drawSoon(); };
       $(key).onchange = () => { const value = Number($(key).value); if (!Number.isFinite(value)) return; if (key === 'a') a = value; else b = value; refreshControls(); drawSoon(); };
