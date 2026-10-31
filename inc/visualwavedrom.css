@@ -1668,6 +1668,19 @@
       min-height: 44px;
     }
 
+    .vwd-frozen-label-host {
+      position: relative;
+    }
+
+    .vwd-frozen-label-overlay {
+      position: absolute;
+      z-index: 2;
+      overflow: hidden;
+      contain: layout paint;
+      pointer-events: none;
+      will-change: transform;
+    }
+
     .wave-fast-preview {
       display: block;
       max-width: none;

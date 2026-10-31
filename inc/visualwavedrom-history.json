@@ -1,5 +1,34 @@
 [
   {
+    "version": "2026.10.31.2",
+    "date": "2026-10-31T08:04:55Z",
+    "head": "2a597da9228996fd2b3546d5cb8ba57ddb96d9a9",
+    "notes": [
+      "示波器公式的 0 cycle 或 0.5 cycle 留空时不再复用另一侧的公式，也不新增实际采样点。总线与离散显示沿用前值，模拟连续显示在相邻实际采样点间插值；首个采样之前及两侧全空时保持未知。向量、标量、分层 Worker 和预设导入采用相同规则，缓存协议升级以拒绝旧结果，Python 预览也标明未采样时刻。",
+      "修复示波器 Del 删除选中信号行，支持撤销重做；在波形区域继续优先删除选中的连线或简化点，在信号列表则删除行。文本框和可编辑文字区域保留正常删字，避免组合键和长按误删多行。",
+      "优化示波器滚动、框选及缩放：仅绘制可见时间范围，框选复用底图并更新叠加层，全局预览缓存底图与视窗/游标标记分离；数据、样式、公式、显隐及撤销时正确失效缓存。拖动缓冲在空闲后生成，操作时暂停重复生成，但仍保留后台补齐所有行计算。重复游标读数不再请求 Worker 或反复写入相同文字。",
+      "时序图冻结信号名改为独立 HTML 合成层，横向滚动不再改写源 SVG 的 transform；通过周期原点和行高计算交互区域，批量读取行名尺寸，保留多行、空行、分组编辑及截图行为。达到 2000 列或累计 5000 格的非极短图自动使用既有列窗口，预览按实际复杂度选用快速显示，完整源 JSON 保留。",
+      "JSON 面板隐藏时延后 CodeMirror 的显示、滚动及布局刷新，重新显示时同步最新内容并保留编辑提交。解析错误标记按行号和行对象复用，不再在每次绘图时清空 gutter；窗口宽度提前测量并由 ResizeObserver 更新，减少强制布局。刷新脚本和样式缓存标识。",
+      "QuickStart 新增第 15 至 17 节：参数表创建与公式、公共表引用与覆盖优先级、波形链接表与组合预设、直接引用/拼接/四则运算/max/min/常数/noTrans/负数显示，以及演讲者步骤、聚焦、画笔文字、备注、保存和图片/GIF 导出。新增 5 段独立 GIF（6 至 14 帧）和 5 张仅标注 2 至 4 处的简洁图解。",
+      "验证实际 SQLite 服务、Worker 与兼容回退、双 Worker 并行和分块边界、公式空时刻与未知边界、Del 和撤销、全局预览缓存像素、冻结标签编辑/移动/多行对齐、窗口跳到尾部及完整数据保留、隐藏 JSON 恢复与错误行、剪贴板 PNG、演讲者同步和保存重开。40 路各 3 万点的四倍 CPU 限速样例中，主线程滚动/框选/缩放耗时分别约下降 81%/96%/79%。QuickStart 的 55 个本地链接、18 段 GIF 和 16 张图解均通过桌面及窄屏加载检查。个人波形库、临时文件、本机启动配置和无关删除不纳入提交。"
+    ],
+    "commits": [
+      {
+        "id": "2a597da9228996fd2b3546d5cb8ba57ddb96d9a9",
+        "date": "2026-10-31T11:58:46+08:00",
+        "title": "docs: simplify quick start into hands-on GIF tutorials",
+        "body": "Replace the exhaustive interface atlas with a concise step-by-step guide. Keep each diagram focused on only two to four controls used in its accompanying demonstration.\n\nAdd seven real workflow GIFs for creating a waveform, adding and naming rows, drawing levels and data cells, arithmetic-series fill, connection creation, explicit saving and read-only timing-series expansion. Add eleven focused diagrams while retaining existing candidate selection, long-range copy/paste, multiline text, file/batch import and oscilloscope GIFs.\n\nVerified all 38 local links, 13 multi-frame looping GIFs, and 11 focused diagrams. Desktop and mobile previews load all media without horizontal overflow. Exclude personal wave libraries, temporary captures, local launcher edits and unrelated deletions."
+      },
+      {
+        "id": "7f33a0a12e8d7a3750c936f405733794a2aaf957",
+        "date": "2026-10-31T11:04:25+08:00",
+        "title": "feat: add multiline wave labels and illustrated quick start",
+        "body": "Add Alt+Enter data-label line breaks with independent signal row sizing. Preserve blank lines and offscreen row heights, update group/edge geometry without shifting saved label offsets, and support screenshots, presenters, undo and SQLite saves.\n\nReplace timing navigation with an exact proportional scrollbar supporting live pointer/touch dragging, track jumps and keyboard navigation without re-running analysis.\n\nExpand QuickStart with 38 numbered, on-image annotated interface figures and six multi-frame GIF tutorials covering waveform candidates, long-range copy/paste, multiline labels, single/batch imports and oscilloscope operations. Publish release metadata 2026.10.31.1.\n\nVerified focused Chrome interaction checks, independent heights and label centers, clipboard and presenter rendering, save/reload, proportional scrollbar boundaries/input modes, 83 documentation links and 44 images/animations in desktop/mobile previews. All 67 runtime hashes and binary checksums match. Exclude user libraries, temporary files, local launcher edits and unrelated deletions."
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.10.31.1",
     "date": "2026-10-31T03:03:34Z",
     "head": "2e99cfbce5b939a183329da953e1efa39f1c0ce6",

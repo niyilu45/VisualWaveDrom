@@ -2,7 +2,7 @@
 'use strict';
 
 if (!global.VisualWaveDromFormula && typeof global.importScripts === 'function') {
-  global.importScripts('visualwavedrom-formula.js?v=20260815-large-import-v1');
+  global.importScripts('visualwavedrom-formula.js?v=20261031-formula-phases-v1');
 }
 
 function analysisSummary(analysis) {
@@ -57,7 +57,7 @@ global.addEventListener('message', async (event) => {
       {
         parallel: true,
         totalColumns: request.totalColumns,
-        workerUrl: 'visualwavedrom-formula-eval-worker.js?v=20260815-large-import-v1',
+        workerUrl: 'visualwavedrom-formula-eval-worker.js?v=20261031-formula-phases-v1',
         onFormulaStart: sendProgress('evaluating'),
         onFormulaComplete: sendProgress('evaluated'),
         onFormulaPackageStart: sendProgress('packaging'),

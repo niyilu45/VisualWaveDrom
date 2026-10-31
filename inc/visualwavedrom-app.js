@@ -131,6 +131,7 @@ if (!window.VWDCodeEditorPairs) {
     const SIGNAL_DESCRIPTION_X_OFFSET = 0;
     const SIGNAL_DESCRIPTION_OVERLAY_OFFSET = 0;
     const BIG_WAVE_COLUMN_THRESHOLD = 2000;
+    const BIG_WAVE_CELL_THRESHOLD = 5000;
     const BIG_WAVE_MIN_WINDOW_COLUMNS = 24;
     const BIG_WAVE_MAX_WINDOW_COLUMNS = 320;
     const BIG_WAVE_WINDOW_PADDING_PX = 190;
@@ -402,6 +403,7 @@ if (!window.VWDCodeEditorPairs) {
     let directJsonOperations = [];
     let directJsonOperationBaseLength = -1;
     let jsonDocumentViewMode = 'full';
+    let jsonDocumentViewNeedsRefresh = false;
     let jsonDocumentMetrics = null;
     let jsonDocumentSource = null;
     let jsonDocumentSourceText = '';
@@ -525,6 +527,8 @@ if (!window.VWDCodeEditorPairs) {
     let deferredEditorUiTimer = null;
     let deferredKnownValidPersistTimer = null;
     let jsonErrorLine = -1;
+    let codeMirrorErrorMarkerLine = -1;
+    let codeMirrorErrorMarkerHandle = null;
     let waveformRenderingBusy = false;
     const vwdPerfMarks = [];
     const vwdDebugLogEntries = [];
@@ -1077,7 +1081,7 @@ ${lines.join('\n')}`;
     const WAVE_PREVIEW_MAX_RENDERED = 6;
     const WAVE_PREVIEW_FALLBACK_HEIGHT = 120;
     const WAVE_PREVIEW_WORKER_PARSE_THRESHOLD = 50000;
-    const WAVE_PREVIEW_CANVAS_CELL_THRESHOLD = 12000;
+    const WAVE_PREVIEW_CANVAS_CELL_THRESHOLD = BIG_WAVE_CELL_THRESHOLD;
     const WAVE_PREVIEW_CANVAS_COLUMN_THRESHOLD = 1500;
     const WAVE_ANALYSIS_WORKER_URL = 'inc/visualwavedrom-worker.js?v=20260729-json-bigdata-v1';
     const DRAG_THRESHOLD = 5;
@@ -2844,6 +2848,7 @@ ${lines.join('\n')}`;
 
     function scheduleJsonWindowFromNativeScroller(scroller, svg, waveStartX) {
       if (!scroller || !svg || bigWaveViewportState.enabled
+          || app.classList.contains('json-panel-hidden')
           || jsonDocumentViewMode !== 'window'
           || jsonWindowViewDirty
           || !jsonDocumentMetrics
@@ -2919,10 +2924,7 @@ ${lines.join('\n')}`;
       if (context && context.svg === svg && context.nativeBoundsMeasured) return;
       let waveStartX = 0;
       try {
-        const drawBounds = getWaveLaneGroups(svg).map(function (lane) {
-          const drawGroup = lane.querySelector('[id^="wavelane_draw_"]');
-          return drawGroup && typeof drawGroup.getBBox === 'function' ? drawGroup.getBBox() : null;
-        }).filter(Boolean);
+        const drawBounds = getWaveLaneGroups(svg).map((lane) => getWaveLaneDrawFrame(lane)).filter(Boolean);
         if (drawBounds.length) waveStartX = Math.min(...drawBounds.map((bounds) => bounds.x));
       } catch (_e) {
         waveStartX = 0;
@@ -3017,6 +3019,16 @@ ${lines.join('\n')}`;
     function refreshJsonDocumentView(options) {
       if (refreshingJsonDocumentView || !editor) return false;
       const opts = options || {};
+      if (app.classList.contains('json-panel-hidden')) {
+        if (opts.source && typeof opts.source === 'object') {
+          jsonDocumentSource = opts.source;
+          jsonDocumentSourceText = editor.value;
+          jsonDocumentMetrics = opts.metrics || null;
+        }
+        jsonDocumentViewNeedsRefresh = true;
+        return false;
+      }
+      jsonDocumentViewNeedsRefresh = false;
       const api = getJsonBigDataApi();
       if (!codeMirrorEditor || !api) {
         jsonDocumentViewMode = 'full';
@@ -3210,10 +3222,20 @@ ${lines.join('\n')}`;
 
     function setJsonPanelHidden(hidden, persist) {
       const shouldHide = !!hidden;
+      if (shouldHide) flushCodeMirrorToTextarea('hide-json-panel');
       if (shouldHide && app.classList.contains('json-panel-fullscreen')) {
         setJsonPanelFullscreen(false);
       }
       app.classList.toggle('json-panel-hidden', shouldHide);
+      if (!shouldHide && jsonDocumentViewNeedsRefresh && !jsonWindowViewDirty) {
+        refreshJsonDocumentView({
+          source: jsonDocumentSourceText === editor.value ? jsonDocumentSource : null,
+          metrics: jsonDocumentSourceText === editor.value ? jsonDocumentMetrics : null,
+          preserveCursor: true,
+          clearHistory: false
+        });
+      }
+      if (!shouldHide) updateCodeMirrorErrorMarker();
       if (toggleJsonPanelLabel) {
         toggleJsonPanelLabel.textContent = shouldHide ? '显示 JSON' : '隐藏 JSON';
       }
@@ -4163,6 +4185,7 @@ ${lines.join('\n')}`;
       const safeEnd = Math.max(0, Math.min(length, Number.isFinite(end) ? end : safeStart));
       editor.selectionStart = safeStart;
       editor.selectionEnd = safeEnd;
+      if (app.classList.contains('json-panel-hidden')) return;
       if (codeMirrorEditor) {
         if (jsonDocumentViewMode === 'full') {
           codeMirrorEditor.setSelection(
@@ -4189,7 +4212,7 @@ ${lines.join('\n')}`;
     function setEditorScrollTop(top) {
       const safeTop = Math.max(0, Number(top) || 0);
       editor.scrollTop = safeTop;
-      if (codeMirrorEditor) codeMirrorEditor.scrollTo(null, safeTop);
+      if (codeMirrorEditor && !app.classList.contains('json-panel-hidden')) codeMirrorEditor.scrollTo(null, safeTop);
     }
 
     function getEditorLineHeight() {
@@ -4458,7 +4481,9 @@ ${lines.join('\n')}`;
 
     function calculateBigWaveWindowSize(source, totalColumns) {
       const host = getBigWaveHost();
-      const hostWidth = Math.max(320, host && host.clientWidth ? host.clientWidth : 960);
+      const measuredWidth = bigWaveViewportState.measuredHost === host
+        ? bigWaveViewportState.measuredHostWidth : (host && host.clientWidth);
+      const hostWidth = Math.max(320, measuredWidth || 960);
       const columnWidth = Math.max(1, getWaveColumnWidth(getWaveUnitWidth(editor.value, source)));
       const visibleColumns = Math.ceil(Math.max(120, hostWidth - BIG_WAVE_WINDOW_PADDING_PX) / columnWidth);
       return Math.min(
@@ -4475,7 +4500,9 @@ ${lines.join('\n')}`;
       }
       const metrics = suppliedMetrics || api.measureSource(fullSource);
       const totalColumns = Math.max(0, Number(metrics && metrics.maxWaveLength) || 0);
-      if (totalColumns < BIG_WAVE_COLUMN_THRESHOLD) {
+      if ((totalColumns < BIG_WAVE_COLUMN_THRESHOLD
+          && Number(metrics.cellCount || 0) < BIG_WAVE_CELL_THRESHOLD)
+          || totalColumns <= BIG_WAVE_MIN_WINDOW_COLUMNS) {
         resetBigWaveViewport('below-threshold');
         return { window: null, metrics };
       }
@@ -4851,12 +4878,15 @@ ${lines.join('\n')}`;
       });
 
       if (typeof ResizeObserver === 'function' && host && !bigWaveViewportState.resizeObserver) {
-        let previousWidth = host.clientWidth;
+        let previousWidth = bigWaveViewportState.measuredHost === host
+          ? bigWaveViewportState.measuredHostWidth : host.clientWidth;
         bigWaveViewportState.resizeObserver = new ResizeObserver(function () {
           if (!bigWaveViewportState.enabled
               || !bigWaveViewportState.fullSource
               || !bigWaveViewportState.window) return;
           const currentWidth = host.clientWidth;
+          bigWaveViewportState.measuredHost = host;
+          bigWaveViewportState.measuredHostWidth = currentWidth;
           if (Math.abs(currentWidth - previousWidth) < 24) return;
           previousWidth = currentWidth;
           const nextSize = calculateBigWaveWindowSize(
@@ -7613,13 +7643,12 @@ ${lines.join('\n')}`;
         !lane.classList.contains('wave-lane-hidden') && lane.style.display !== 'none'
       ));
       const drawBounds = visibleLanes
-        .map((lane) => getSvgElementBounds(lane.querySelector('[id^="wavelane_draw_"]')))
+        .map((lane) => getWaveLaneDrawFrame(lane))
         .filter(Boolean);
       let left = viewport.x;
       let right = viewport.right;
       if (drawBounds.length) {
         left = Math.max(left, Math.min(...drawBounds.map((bounds) => bounds.x)));
-        right = Math.min(right, Math.max(...drawBounds.map((bounds) => bounds.right)));
       }
       const horizontalPadding = EDGE_LABEL_SAFE_MARGIN_PX * scale.x;
       const verticalPadding = EDGE_LABEL_SAFE_MARGIN_PX * scale.y;
@@ -10978,10 +11007,30 @@ ${lines.join('\n')}`;
       return lanes;
     }
 
+    function getWaveLaneDrawFrame(lane, local) {
+      const draw = lane && lane.querySelector('[id^="wavelane_draw_"]');
+      if (!draw) return null;
+      try {
+        const transform = local ? draw.transform.baseVal.consolidate() : null;
+        const matrix = local
+          ? (transform ? transform.matrix : { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 })
+          : draw.getCTM();
+        if (!matrix) return null;
+        const height = Math.max(20, Number(draw.getAttribute('data-vwd-data-height')) || 20);
+        // The cycle origin and row band do not require measuring thousands of SVG uses.
+        return {
+          x: matrix.e,
+          y: Math.min(matrix.f, matrix.f + matrix.d * height),
+          bottom: Math.max(matrix.f, matrix.f + matrix.d * height)
+        };
+      } catch (_error) { return null; }
+    }
+
     function getSvgElementBounds(element) {
       if (!element || typeof element.getBBox !== 'function' || typeof element.getCTM !== 'function') return null;
       try {
-        const box = element.getBBox();
+        const box = element.localName === 'text' && element.classList.contains('info')
+          ? getSignalNameBounds(element) : element.getBBox();
         const matrix = element.getCTM();
         if (!matrix || !Number.isFinite(box.x) || !Number.isFinite(box.y)) return null;
         const points = [
@@ -11076,7 +11125,7 @@ ${lines.join('\n')}`;
       const visibleLanes = allLanes.filter((lane) => !lane.classList.contains('wave-lane-hidden') && lane.style.display !== 'none');
       const lanes = visibleLanes.length ? visibleLanes : allLanes;
       const drawBounds = lanes
-        .map((lane) => getSvgElementBounds(lane.querySelector('[id^="wavelane_draw_"]')))
+        .map((lane) => getWaveLaneDrawFrame(lane))
         .filter(Boolean);
       if (!drawBounds.length) return false;
 
@@ -11104,7 +11153,8 @@ ${lines.join('\n')}`;
       const waveformClearance = Math.max(2, 4 * userUnitsPerPixel);
       const boundaryX = Math.max(viewX + 1, waveStartX - waveformClearance);
       const groupRoot = svg.querySelector('[id^="groups_"]');
-      const verticalBounds = lanes.map(getSvgElementBounds).filter(Boolean);
+      const verticalBounds = drawBounds.concat(lanes
+        .map((lane) => getSvgElementBounds(lane.querySelector('text.info'))).filter(Boolean));
       const groupBounds = getSvgElementBounds(groupRoot);
       if (groupBounds) verticalBounds.push(groupBounds);
       const backgroundY = verticalBounds.length
@@ -11214,12 +11264,21 @@ ${lines.join('\n')}`;
 
       layer.appendChild(divider);
 
-      svg.appendChild(layer);
+      const overlay = document.createElement('div');
+      overlay.className = 'vwd-frozen-label-overlay';
+      const overlaySvg = document.createElementNS(svgNs, 'svg');
+      overlaySvg.setAttribute('viewBox', svg.getAttribute('viewBox') || '0 0 1 1');
+      overlaySvg.setAttribute('preserveAspectRatio', svg.getAttribute('preserveAspectRatio') || 'xMinYMin meet');
+      overlaySvg.appendChild(layer);
+      overlay.appendChild(overlaySvg);
+      renderHost.classList.add('vwd-frozen-label-host');
+      renderHost.appendChild(overlay);
 
       const controller = {
         svg,
         scroller,
         layer,
+        overlay,
         updateRaf: null,
         resizeObserver: null,
         geometryDirty: true,
@@ -11235,21 +11294,29 @@ ${lines.join('\n')}`;
           // Scrolling changes the offset, not the SVG scale. Remeasure only after layout changes.
           if (forceGeometry || this.geometryDirty || this.measuredUserWidth !== userWidth || !this.resizeObserver) {
             const rect = svg.getBoundingClientRect();
+            const hostRect = renderHost.getBoundingClientRect();
             this.userUnitsPerPixel = rect.width > 0 ? userWidth / rect.width : 1;
             this.measuredUserWidth = userWidth;
             this.geometryDirty = !(rect.width > 0);
+            overlay.style.left = (rect.left - hostRect.left) + 'px';
+            overlay.style.top = (rect.top - hostRect.top) + 'px';
+            overlay.style.width = Math.max(1, (boundaryX - viewX) / this.userUnitsPerPixel) + 'px';
+            overlay.style.height = Math.max(1, rect.height) + 'px';
+            overlaySvg.setAttribute('width', String(Math.max(1, rect.width)));
+            overlaySvg.setAttribute('height', String(Math.max(1, rect.height)));
           }
-          const translateX = Math.max(0, scroller.scrollLeft) * this.userUnitsPerPixel;
+          const translateX = Math.max(0, scroller.scrollLeft);
           if (translateX === this.lastTranslateX) return;
           this.lastTranslateX = translateX;
-          layer.setAttribute('transform', 'translate(' + translateX + ' 0)');
+          overlay.style.transform = 'translateX(' + translateX + 'px)';
         },
         dispose() {
           if (this.updateRaf !== null) cancelAnimationFrame(this.updateRaf);
           this.updateRaf = null;
           if (this.resizeObserver) this.resizeObserver.disconnect();
           this.resizeObserver = null;
-          if (this.layer && this.layer.isConnected) this.layer.remove();
+          if (this.overlay) this.overlay.remove();
+          renderHost.classList.remove('vwd-frozen-label-host');
           if (this.svg && this.svg.__vwdFrozenLabelController === this) {
             delete this.svg.__vwdFrozenLabelController;
           }
@@ -11265,7 +11332,7 @@ ${lines.join('\n')}`;
         scroller.addEventListener('scroll', () => scheduleFrozenWaveLabelUpdate(scroller), { passive: true });
         scroller.__vwdFrozenLabelScrollBound = true;
       }
-      scroller.__vwdJsonWindowContext = { svg, waveStartX };
+      scroller.__vwdJsonWindowContext = { svg, waveStartX, nativeBoundsMeasured: true };
       if (!scroller.__vwdJsonWindowScrollBound) {
         scroller.addEventListener('scroll', () => {
           const context = scroller.__vwdJsonWindowContext;
@@ -11296,22 +11363,28 @@ ${lines.join('\n')}`;
       return true;
     }
 
+    function getSignalNameBounds(name) {
+      const measured = name && name.__vwdNameBounds;
+      return measured && measured.text === name.textContent ? measured.box : name.getBBox();
+    }
+
     function addLaneHoverRect(lane, maxBoundaryIndex, unitWidth) {
       if (lane.querySelector('rect.lane-hover-bg')) return;
       try {
-        const bbox = lane.getBBox();
+        const name = lane.querySelector('text.info');
+        const bbox = name ? getSignalNameBounds(name) : { x: 0, y: 0, width: 0, height: 20 };
+        const band = getWaveLaneDrawFrame(lane, true) || { x: 0, y: 0, bottom: 20 };
+        const left = Math.min(bbox.x, band.x);
+        const top = Math.min(bbox.y, band.y);
+        const bottom = Math.max(bbox.y + bbox.height, band.bottom);
         const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
         rect.setAttribute('class', 'lane-hover-bg');
-        rect.setAttribute('x', bbox.x - 4);
-        rect.setAttribute('y', bbox.y - 2);
-        let width = bbox.width + 8;
-        const drawGroup = lane.querySelector('[id^="wavelane_draw_"]');
-        if (maxBoundaryIndex) {
-          const waveStartX = drawGroup ? drawGroup.getBBox().x : 0;
-          width = Math.max(width, (waveStartX - bbox.x) + maxBoundaryIndex * getWaveColumnWidth(unitWidth) + 8);
-        }
+        rect.setAttribute('x', left - 4);
+        rect.setAttribute('y', top - 2);
+        const width = Math.max(bbox.width + 8,
+          band.x - left + Math.max(1, maxBoundaryIndex || 0) * getWaveColumnWidth(unitWidth) + 8);
         rect.setAttribute('width', width);
-        rect.setAttribute('height', Math.max(20, bbox.height + 4));
+        rect.setAttribute('height', Math.max(20, bottom - top + 4));
         rect.setAttribute('fill', 'transparent');
         rect.setAttribute('pointer-events', 'all');
         lane.insertBefore(rect, lane.firstChild);
@@ -11323,7 +11396,7 @@ ${lines.join('\n')}`;
     function hasVisibleSvgText(textEl) {
       if (!textEl) return false;
       try {
-        const bbox = textEl.getBBox();
+        const bbox = getSignalNameBounds(textEl);
         return bbox.width > 0.5 && bbox.height > 0.5;
       } catch (e) {
         return false;
@@ -11339,8 +11412,9 @@ ${lines.join('\n')}`;
       let height;
 
       try {
-        const laneBbox = lane.getBBox();
-        const drawX = drawGroup ? drawGroup.getBBox().x : 0;
+        const laneBbox = getSignalNameBounds(nameText);
+        const band = getWaveLaneDrawFrame(lane, true) || { x: 0, y: 0, bottom: 20 };
+        const drawX = band.x;
         x = laneBbox.x;
         width = drawX - laneBbox.x;
         if (width < MIN_NAME_CLICK_ZONE_WIDTH) {
@@ -11348,8 +11422,8 @@ ${lines.join('\n')}`;
           x = textX - MIN_NAME_CLICK_ZONE_WIDTH + 8;
           width = MIN_NAME_CLICK_ZONE_WIDTH;
         }
-        y = laneBbox.y;
-        height = Math.max(laneBbox.height, 20);
+        y = Math.min(laneBbox.y, band.y);
+        height = Math.max(laneBbox.y + laneBbox.height, band.bottom) - y;
       } catch (e) {
         const textX = parseFloat(nameText.getAttribute('x') || '-10');
         const textY = parseFloat(nameText.getAttribute('y') || '15');
@@ -13445,6 +13519,14 @@ ${lines.join('\n')}`;
       const hasFilter = isNavFilteringActive();
       const visibleSet = hasFilter ? getNavVisibleRowSet() : null;
 
+      // Read all name geometry before adding hit areas or changing lane styles.
+      lanes.forEach((lane) => {
+        const name = lane.querySelector('text.info');
+        if (!name) return;
+        try { name.__vwdNameBounds = { text: name.textContent, box: name.getBBox() }; }
+        catch (_error) { delete name.__vwdNameBounds; }
+      });
+
       lanes.forEach((lane, idx) => {
         const entry = sourceMap[idx];
         const visible = !hasFilter || visibleSet.has(idx);
@@ -13745,8 +13827,11 @@ ${lines.join('\n')}`;
               return;
             }
             if (laneDrawGroup) {
-              const drawRect = laneDrawGroup.getBoundingClientRect();
-              if (hover.clientX < drawRect.left - 1 || hover.clientX > drawRect.right + 1) {
+              const matrix = laneDrawGroup.getScreenCTM();
+              const startX = matrix ? matrix.e : 0;
+              const endX = matrix ? startX + renderedWaveColumnCount * getWaveColumnWidth(unitWidth) * matrix.a : 0;
+              if (!matrix || hover.clientX < Math.min(startX, endX) - 1
+                  || hover.clientX > Math.max(startX, endX) + 1) {
                 hideWaveCellTooltip();
                 return;
               }
@@ -14023,14 +14108,21 @@ ${lines.join('\n')}`;
     }
 
     function updateCodeMirrorErrorMarker() {
-      if (!codeMirrorEditor) return;
-      codeMirrorEditor.clearGutter('vwd-json-error-gutter');
-      if (jsonErrorLine < 1 || jsonErrorLine > codeMirrorEditor.lineCount()) return;
-      const marker = document.createElement('span');
-      marker.className = 'vwd-json-error-marker';
-      marker.textContent = '×';
-      marker.title = 'JSON 解析错误';
-      codeMirrorEditor.setGutterMarker(jsonErrorLine - 1, 'vwd-json-error-gutter', marker);
+      if (!codeMirrorEditor || app.classList.contains('json-panel-hidden')) return;
+      const line = jsonErrorLine >= 1 && jsonErrorLine <= codeMirrorEditor.lineCount() ? jsonErrorLine : -1;
+      const handle = line >= 1 ? codeMirrorEditor.getLineHandle(line - 1) : null;
+      if (codeMirrorErrorMarkerLine === line && codeMirrorErrorMarkerHandle === handle) return;
+      codeMirrorEditor.operation(() => {
+        codeMirrorEditor.clearGutter('vwd-json-error-gutter');
+        if (line < 1) return;
+        const marker = document.createElement('span');
+        marker.className = 'vwd-json-error-marker';
+        marker.textContent = '×';
+        marker.title = 'JSON 解析错误';
+        codeMirrorEditor.setGutterMarker(line - 1, 'vwd-json-error-gutter', marker);
+      });
+      codeMirrorErrorMarkerLine = line;
+      codeMirrorErrorMarkerHandle = handle;
     }
 
     function setJsonEditorVimMode(enabled) {
@@ -17519,7 +17611,7 @@ ${lines.join('\n')}`;
     }
 
     const FORMULA_IMPORT_WORKER_URL = 'inc/visualwavedrom-formula-import-worker.js'
-      + '?v=20260815-large-import-v1';
+      + '?v=20261031-formula-phases-v1';
     let formulaImportRequestSequence = 0;
 
     function formulaSequenceLength(values, sampleStep) {
@@ -17702,7 +17794,7 @@ ${lines.join('\n')}`;
           {
           parallel: true,
           totalColumns: sourceInput.totalColumns,
-          workerUrl: 'inc/visualwavedrom-formula-eval-worker.js?v=20260815-large-import-v1',
+          workerUrl: 'inc/visualwavedrom-formula-eval-worker.js?v=20261031-formula-phases-v1',
           onFormulaStart: (progress) => {
             if (typeof onProgress === 'function') {
               onProgress(Object.assign({ phase: 'formula', stage: 'evaluating' }, progress));
@@ -19650,6 +19742,9 @@ ${lines.join('\n')}`;
         return true;
       }
       const waveScrollState = captureActiveWaveScrollState();
+      const measuredHost = getBigWaveHost();
+      bigWaveViewportState.measuredHost = measuredHost;
+      bigWaveViewportState.measuredHostWidth = measuredHost ? measuredHost.clientWidth : 0;
       const previousMinHeight = waveContainer.style.getPropertyValue('min-height');
       const previousMinHeightPriority = waveContainer.style.getPropertyPriority('min-height');
       // Keep the scroll extent stable while the old SVG is replaced and measured.
@@ -22307,7 +22402,8 @@ ${lines.join('\n')}`;
         return false;
       }
       try {
-        const metrics = hasPrepared ? preparedAnalysis.metrics : null;
+        const metrics = hasPrepared ? preparedAnalysis.metrics
+          : (getBigWaveApi() ? getBigWaveApi().measureSource(meta.renderSource) : null);
         const useCanvas = !opts.forceSvg && metrics && (
           metrics.cellCount >= WAVE_PREVIEW_CANVAS_CELL_THRESHOLD
           || metrics.maxWaveLength >= WAVE_PREVIEW_CANVAS_COLUMN_THRESHOLD
@@ -24829,7 +24925,7 @@ ${lines.join('\n')}`;
         setStatus,
         debugLog: vwdDebugLog,
         refreshEditors: () => {
-          if (codeMirrorEditor) codeMirrorEditor.refresh();
+          if (codeMirrorEditor && !app.classList.contains('json-panel-hidden')) codeMirrorEditor.refresh();
         },
         applyImport: async (payload, importOptions) => {
           const applyStartedAt = Date.now();
@@ -25103,8 +25199,7 @@ ${lines.join('\n')}`;
         const scroller = event.target;
         if (scroller === wavePanel) {
           const top = wavePanel.scrollTop, now = performance.now();
-          const elapsed = now - wavePanelScrollSample.time;
-          if (elapsed > 0 && elapsed < 200 && Math.abs(top - wavePanelScrollSample.top) / elapsed > 1.2) {
+          if (Math.abs(top - wavePanelScrollSample.top) > 0.5) {
             waveLibraryPreviewResumeAt = now + 100;
           }
           wavePanelScrollSample = { top, time: now };

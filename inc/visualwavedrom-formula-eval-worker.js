@@ -2,7 +2,7 @@
 'use strict';
 
 if (!global.VisualWaveDromFormula && typeof global.importScripts === 'function') {
-  global.importScripts('visualwavedrom-formula.js?v=20260815-large-import-v1');
+  global.importScripts('visualwavedrom-formula.js?v=20261031-formula-phases-v1');
 }
 
 let sources = Object.create(null);

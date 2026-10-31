@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20261023-bus-defaults-v1';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20261031-formula-phases-v1';
   const FormulaEngine = global.VisualWaveDromFormula || null;
   const DEFAULT_ROW_HEIGHT = 42;
   const DEFAULT_MULTI_WAVE_ROW_HEIGHT = 68;
@@ -628,6 +628,7 @@
       this.connectionSequence = 0;
       this.showOriginal = false;
       this.cursorInspectSequence = 0;
+      this.cursorReadoutSignature = '';
       this.cursorNavigationSequence = 0;
       this.cursorReadoutFrame = 0;
       this.cursorReadoutInFlight = false;
@@ -660,6 +661,7 @@
       this.overviewDataCacheKey = '';
       this.overviewDataRequestSequence = 0;
       this.overviewDataRequestPromise = null;
+      this.overviewBaseCache = null;
       this.lastSynchronizedScrollTop = Number.NaN;
       this.verticalScrollFrame = 0;
       this.pendingVerticalScrollOptions = null;
@@ -1125,13 +1127,13 @@
             <label class="scope-formula-field">
               <span>0 cycle</span>
               <textarea id="scope-formula-cycle0" rows="3" spellcheck="false"
-                  placeholder="例如：math.sin({Signal1})"></textarea>
+                  placeholder="例如：math.sin({Signal1})；留空不计算该时刻"></textarea>
               <code class="scope-formula-highlight" id="scope-formula-cycle0-highlight"></code>
             </label>
             <label class="scope-formula-field">
               <span>0.5 cycle</span>
               <textarea id="scope-formula-cycle05" rows="3" spellcheck="false"
-                  placeholder="留空时使用 0 cycle 公式"></textarea>
+                  placeholder="留空不计算该时刻"></textarea>
               <code class="scope-formula-highlight" id="scope-formula-cycle05-highlight"></code>
             </label>
             <div class="scope-formula-feedback" id="scope-formula-feedback" aria-live="polite"></div>
@@ -1695,7 +1697,8 @@
           return;
         }
         const target = event.target;
-        const editingText = target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName);
+        const editingText = target && (/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)
+          || target.isContentEditable);
         if (editingText) return;
         if (!event.ctrlKey && !event.metaKey && !event.altKey
             && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
@@ -1712,12 +1715,13 @@
         } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'y') {
           event.preventDefault();
           void this.redo();
-        } else if (event.key === 'Delete' && this.selectedConnectionId) {
+        } else if (event.key === 'Delete' && !event.ctrlKey && !event.metaKey
+            && !event.altKey && !event.isComposing && !event.repeat) {
           event.preventDefault();
-          this.deleteSelectedConnection();
-        } else if (event.key === 'Delete' && this.selectedPoint) {
-          event.preventDefault();
-          this.deleteSelectedPoint();
+          if (this.signalList.contains(target)) void this.deleteActiveSignal();
+          else if (this.selectedConnectionId) this.deleteSelectedConnection();
+          else if (this.selectedPoint) this.deleteSelectedPoint();
+          else void this.deleteActiveSignal();
         }
       });
 
@@ -1813,6 +1817,7 @@
     }
 
     markDraftDirty(kind) {
+      this.overviewBaseCache = null;
       if (kind === 'data') this.dataDraftDirty = true;
       else this.presentationDraftDirty = true;
       this.updateDraftState();
@@ -2195,6 +2200,7 @@
     }
 
     persistTransientFormulaState() {
+      this.overviewBaseCache = null;
       if (typeof this.adapter.setTransientState !== 'function') return;
       try {
         this.adapter.setTransientState(clone(this.transientFormulaState));
@@ -3657,6 +3663,8 @@
     }
 
     renderSignalRows() {
+      this.cursorReadoutSignature = '';
+      this.cursorInspectSequence += 1;
       this.closeDisplayPopover();
       this.closeStylePopover();
       this.rebuildRowOffsets();
@@ -4373,16 +4381,22 @@
     }
 
     schedulePlotPanBuffer() {
-      if (this.drag && this.drag.kind === 'pan') return;
+      if (this.drag || this.overviewDrag || this.rowResize) return;
       const currentRequestKey = this.windowRequestKey(this.windowRequestConfig());
       if (!this.windowData || this.windowData.viewportKey !== currentRequestKey) return;
       const key = this.plotPanBufferKey();
       if (!key || (this.plotPanBuffer && this.plotPanBuffer.key === key)) return;
-      if (this.plotPanBufferTimer) return;
+      if (this.plotPanBufferTimer) global.clearTimeout(this.plotPanBufferTimer);
       this.plotPanBufferTimer = global.setTimeout(() => {
         this.plotPanBufferTimer = 0;
-        if (!this.drag) this.buildPlotPanBuffer();
-      }, 0);
+        const now = global.performance && typeof global.performance.now === 'function'
+          ? global.performance.now() : Date.now();
+        if (this.backgroundWindowPausedUntil > now) {
+          this.schedulePlotPanBuffer();
+          return;
+        }
+        if (!this.drag && !this.overviewDrag && !this.rowResize) this.buildPlotPanBuffer();
+      }, 250);
     }
 
     capturePlotPanFrame() {
@@ -4477,6 +4491,7 @@
       this.windowBuildPromise = null;
       this.windowBackgroundPromise = null;
       this.overviewData = null;
+      this.overviewBaseCache = null;
       this.overviewDataCacheKey = '';
       this.overviewDataRequestSequence += 1;
       this.overviewDataRequestPromise = null;
@@ -4486,6 +4501,8 @@
     }
 
     pauseBackgroundWindowWork(duration) {
+      if (this.plotPanBufferTimer) global.clearTimeout(this.plotPanBufferTimer);
+      this.plotPanBufferTimer = 0;
       const now = global.performance && typeof global.performance.now === 'function'
         ? global.performance.now()
         : Date.now();
@@ -4542,11 +4559,11 @@
         || Math.abs(scrollTop - this.lastSynchronizedScrollTop) > 0.01;
       if (!changed && !settings.force) return;
       this.lastSynchronizedScrollTop = scrollTop;
+      this.pauseBackgroundWindowWork(100);
       if (settings.redraw !== false) {
         this.plotBaseRevision += 1;
         this.drawNow({ plotOnly: true });
       }
-      this.pauseBackgroundWindowWork(100);
       this.scheduleWindowRequest();
     }
 
@@ -5215,6 +5232,7 @@
       }
       if (data.kind === 'buckets') {
         mergedDisplayBuckets(data.items).forEach((bucket) => {
+          if (bucket.end < this.viewStart || bucket.start > this.viewEnd) return;
           const x1 = this.xForColumn(bucket.start, width);
           const x2 = this.xForColumn(bucket.end, width);
           const bucketWidth = Math.max(0, x2 - x1);
@@ -5304,6 +5322,7 @@
       }
       let previousY = null;
       data.items.forEach((segment) => {
+        if (segment.end < this.viewStart || segment.start > this.viewEnd) return;
         const x1 = this.xForColumn(segment.start, width);
         const x2 = this.xForColumn(segment.end, width);
         const state = String(
@@ -5403,6 +5422,7 @@
       if (data.kind === 'envelope') {
         context.beginPath();
         data.items.forEach((item) => {
+          if (item[0] < this.viewStart || item[0] > this.viewEnd) return;
           const x = this.xForColumn(item[0], width);
           context.moveTo(x, yFor(item[1]));
           context.lineTo(x, yFor(item[2]));
@@ -5413,7 +5433,9 @@
         let started = false;
         let previousY = null;
         const stepped = data.interpolation === 'step';
-        data.items.forEach((item) => {
+        data.items.forEach((item, index) => {
+          if (index + 1 < data.items.length && data.items[index + 1][0] < this.viewStart) return;
+          if (index > 0 && data.items[index - 1][0] > this.viewEnd) return;
           const x = this.xForColumn(item[0], width);
           const value = finiteScopeNumber(item[1]);
           if (value == null) {
@@ -5452,10 +5474,11 @@
       }
       if (settings.drawUnknowns !== false) {
         (data.unknowns || []).forEach((range) => {
+          if (range[1] < this.viewStart || range[0] > this.viewEnd) return;
           this.drawUnknownDigitalSegment(
             context,
-            this.xForColumn(range[0], width),
-            this.xForColumn(range[1], width),
+            Math.max(0, this.xForColumn(range[0], width)),
+            Math.min(width, this.xForColumn(range[1], width)),
             yTop,
             yBottom,
             1,
@@ -6294,12 +6317,7 @@
       if (!plotOnly) this.drawOverview();
     }
 
-    drawOverview() {
-      if (!this.meta || !this.overviewCanvas.clientWidth) return;
-      const resized = this.resizeCanvas(this.overviewCanvas, this.plotViewport.clientWidth, OVERVIEW_HEIGHT);
-      const context = resized.context;
-      const width = resized.width;
-      const height = resized.height;
+    drawOverviewBase(context, width, height) {
       context.clearRect(0, 0, width, height);
       context.fillStyle = '#f8f9fa';
       context.fillRect(0, 0, width, height);
@@ -6522,6 +6540,30 @@
           });
         }
       });
+    }
+
+    drawOverview() {
+      if (!this.meta || !this.overviewCanvas.clientWidth) return;
+      const resized = this.resizeCanvas(this.overviewCanvas, this.plotViewport.clientWidth, OVERVIEW_HEIGHT);
+      const { context, width, height } = resized;
+      const collapsed = Array.from(this.collapsedRows).join(',');
+      let cache = this.overviewBaseCache;
+      if (!cache || cache.data !== this.overviewData || cache.simplified !== this.simplified
+          || cache.collapsed !== collapsed || cache.hover !== this.multiWaveLegendHover
+          || cache.width !== this.overviewCanvas.width || cache.height !== this.overviewCanvas.height) {
+        this.drawOverviewBase(context, width, height);
+        const canvas = cache && cache.canvas || document.createElement('canvas');
+        canvas.width = this.overviewCanvas.width;
+        canvas.height = this.overviewCanvas.height;
+        canvas.getContext('2d').drawImage(this.overviewCanvas, 0, 0);
+        cache = this.overviewBaseCache = {
+          canvas, width: canvas.width, height: canvas.height,
+          data: this.overviewData, simplified: this.simplified, collapsed, hover: this.multiWaveLegendHover
+        };
+      } else {
+        context.clearRect(0, 0, width, height);
+        context.drawImage(cache.canvas, 0, 0, cache.width, cache.height, 0, 0, width, height);
+      }
       const x1 = this.viewStart / this.meta.totalColumns * width;
       const x2 = this.viewEnd / this.meta.totalColumns * width;
       context.fillStyle = 'rgba(31, 104, 213, 0.1)';
@@ -6942,7 +6984,7 @@
           columnIndex,
           this.cursorColumnForRow(this.columnForX(x, rect.width), this.drag.rowIndex)
         );
-        this.draw();
+        this.draw({ overlayOnly: true });
         return;
       }
     }
@@ -7553,11 +7595,16 @@
       if (!this.meta || !this.signalList) return;
       const sequence = ++this.cursorInspectSequence;
       const reference = this.readoutReference();
+      const signature = reference ? JSON.stringify([
+        this.windowSessionRevision, reference, this.modes, this.busFormats, this.analogFormats
+      ]) : 'none';
+      if (signature === this.cursorReadoutSignature) return;
       if (!reference) {
         this.cursorValueTargets.forEach((target) => {
-          target.textContent = '游标：--';
-          target.title = '请选择 A/B 游标或波形列';
+          if (target.textContent !== '游标：--') target.textContent = '游标：--';
+          if (target.title !== '请选择 A/B 游标或波形列') target.title = '请选择 A/B 游标或波形列';
         });
+        this.cursorReadoutSignature = signature;
         return;
       }
       try {
@@ -7571,10 +7618,13 @@
         result.rows.forEach((row) => {
           const target = this.cursorValueTargets.get(Number(row.index));
           if (!target) return;
-          target.textContent = reference.label + '：' + this.formatCursorValue(row.value);
-          target.title = reference.title + ' @ ' + this.formatTime(result.column)
+          const text = reference.label + '：' + this.formatCursorValue(row.value);
+          const title = reference.title + ' @ ' + this.formatTime(result.column)
             + ' = ' + this.formatCursorValue(row.value);
+          if (target.textContent !== text) target.textContent = text;
+          if (target.title !== title) target.title = title;
         });
+        this.cursorReadoutSignature = signature;
       } catch (error) {
         this.log('scope-cursor', {
           phase: 'inspect-error',
@@ -7989,6 +8039,7 @@
 
     async restoreSnapshot(snapshot) {
       if (!snapshot) return;
+      this.overviewBaseCache = null;
       if (snapshot.rowState) {
         this.transientFormulaState = normalizeTransientFormulaState(
           snapshot.rowState.transientFormulaState

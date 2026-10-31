@@ -2,7 +2,7 @@
   'use strict';
 
   const UNKNOWN = Object.freeze({ unknown: true });
-  const DERIVED_CACHE_PROTOCOL = 1;
+  const DERIVED_CACHE_PROTOCOL = 2;
   const DEFAULT_FORMULA_CHUNK_SIZE = 32768;
   const DEFAULT_PARALLEL_THRESHOLD = 16384;
   const COMPACT_DATA_LABEL_THRESHOLD = 2000;
@@ -754,8 +754,8 @@
       try { cycle05 = compileExpression(entry.formula.cycle05, context); } catch (error) {
         errors.push('0.5 cycle：' + (error.message || String(error)));
       }
-      const effective0 = cycle0 || cycle05;
-      const effective05 = cycle05 || cycle0;
+      const effective0 = cycle0;
+      const effective05 = cycle05;
       const libraries = new Set(entry.formula.libraries);
       const references = new Set();
       const dependencies = new Set();
@@ -1356,6 +1356,11 @@
     const serializedVector = createNumericVector(halfCount);
     let knownCount = 0;
     for (let index = 0; index < halfCount; index += 1) {
+      const compiled = index % 2 === 0 ? item.effective0 : item.effective05;
+      if (!compiled && index > 0) {
+        result.values[index] = result.values[index - 1];
+        result.valid[index] = result.valid[index - 1];
+      }
       const value = result.valid[index] ? result.values[index] : Number.NaN;
       if (result.valid[index] && Number.isFinite(value)) {
         values[index] = value;
@@ -1521,7 +1526,7 @@
           for (let halfIndex = chunkStart; halfIndex < chunkEnd; halfIndex += 1) {
             const compiled = halfIndex % 2 === 0 ? item.effective0 : item.effective05;
             if (!compiled) {
-              values[halfIndex] = 'x';
+              values[halfIndex] = halfIndex > 0 ? values[halfIndex - 1] : 'x';
               continue;
             }
             const result = evaluateAst(compiled.ast, (requestedName, offset) => {
@@ -2731,10 +2736,10 @@
     return imports.concat([
       imports.length ? '' : null,
       'def value_at_cycle(cycle):',
-      '    return ' + (left || right || "'x'"),
+      '    return ' + (left || 'None  # No sample at this phase'),
       '',
       'def value_at_half_cycle(cycle):',
-      '    return ' + (right || left || "'x'")
+      '    return ' + (right || 'None  # No sample at this phase')
     ].filter((line) => line !== null)).join('\n');
   }
 

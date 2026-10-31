@@ -4,7 +4,7 @@
 if (typeof document === 'undefined' && typeof global.importScripts === 'function'
     && !global.VisualWaveDromFormula) {
   try {
-    global.importScripts('visualwavedrom-formula.js?v=20260815-large-import-v1');
+    global.importScripts('visualwavedrom-formula.js?v=20261031-formula-phases-v1');
   } catch (_error) { /* surfaced when a formula is configured */ }
 }
 
@@ -1372,7 +1372,7 @@ async function createSession(content, transientState, previousSession) {
       totalColumns,
       sampleStep: 0.5,
       parallel: true,
-      workerUrl: 'visualwavedrom-formula-eval-worker.js?v=20260815-large-import-v1'
+      workerUrl: 'visualwavedrom-formula-eval-worker.js?v=20261031-formula-phases-v1'
     };
     formulaEvaluation = typeof FormulaEngine.evaluateDefinitionsLayeredAsync === 'function'
       ? await FormulaEngine.evaluateDefinitionsLayeredAsync(
@@ -2250,11 +2250,21 @@ function segmentAt(row, column) {
   return row.segments[index];
 }
 
+function singleFormulaSamplePhase(row) {
+  const formula = row.formula;
+  if (!formula || !formula.valid) return -1;
+  const cycle0 = !!String(formula.cycle0 || '').trim();
+  const cycle05 = !!String(formula.cycle05 || '').trim();
+  return cycle0 === cycle05 ? -1 : (cycle0 ? 0 : 1);
+}
+
 function analogRowForFormat(row, requestedFormat, totalColumns) {
   const format = normalizeAnalogFormat(requestedFormat || row.analogFormat, 'unsigned');
   const clockRow = Array.isArray(row.clockRanges) && row.clockRanges.length > 0;
   const stepInterpolation = clockRow || format.interpolation === 'discrete';
-  if (row.samples && row.samples.length) {
+  const formulaPhase = singleFormulaSamplePhase(row);
+  const singleFormulaPhase = formulaPhase >= 0;
+  if (row.samples && row.samples.length && !singleFormulaPhase) {
     return Object.assign({}, row, {
       stepInterpolation,
       analogFormat: format
@@ -2297,6 +2307,17 @@ function analogRowForFormat(row, requestedFormat, totalColumns) {
         segment.kind === 'bus' ? segment.value : segment.state,
         format
       );
+    }
+  }
+  if (singleFormulaPhase && !stepInterpolation) {
+    const emptyPhase = 1 - formulaPhase;
+    // Missing formula phases have no sample: interpolate only between real samples.
+    for (let index = emptyPhase; index < samples.length; index += 2) {
+      const left = index > 0 ? samples[index - 1] : Number.NaN;
+      const right = index + 1 < samples.length ? samples[index + 1] : left;
+      samples[index] = Number.isFinite(left) && Number.isFinite(right)
+        ? left / 2 + right / 2
+        : Number.NaN;
     }
   }
   const derived = Object.assign({}, row, {
@@ -2576,7 +2597,8 @@ function stateAtColumn(row, column, mode, analogFormat) {
     }).join(' · ');
   }
   if (mode === 'analog') {
-    if (Array.isArray(row.scopeValues) && row.scopeValues.length) {
+    const singleFormulaPhase = singleFormulaSamplePhase(row) >= 0;
+    if (!singleFormulaPhase && Array.isArray(row.scopeValues) && row.scopeValues.length) {
       const index = Math.floor((Math.max(0, column) + 1e-9) / rowSampleStep(row));
       if (index < 0 || index >= row.scopeValues.length) return null;
       const format = normalizeAnalogFormat(analogFormat || row.analogFormat, 'unsigned');
