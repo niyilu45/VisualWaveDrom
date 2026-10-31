@@ -1,0 +1,44 @@
+{
+  "InnerType": "VisualWaveDrom.BatchWaveImportPreset",
+  "vars": [],
+  "paths": [
+    {
+      "usrGen": {
+        "folder": "iq",
+        "grepKeys": "^rx\\.txt$",
+        "name": "rx"
+      },
+      "autoGen": {
+        "hasSeq": false
+      }
+    },
+    {
+      "usrGen": {
+        "name": "Magnitude",
+        "formula": {
+          "cycle0": "numpy.abs({rx_I} + 1j * {rx_Q})"
+        }
+      },
+      "autoGen": {}
+    },
+    {
+      "usrGen": {
+        "name": "Phase",
+        "formula": {
+          "cycle0": "numpy.angle({rx_I} + 1j * {rx_Q})"
+        }
+      },
+      "autoGen": {}
+    },
+    {
+      "usrGen": {
+        "name": "IQ overlay",
+        "multiWave": [
+          "rx_I",
+          "rx_Q"
+        ]
+      },
+      "autoGen": {}
+    }
+  ]
+}

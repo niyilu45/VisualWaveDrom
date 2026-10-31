@@ -1,0 +1,16 @@
+{
+  "InnerType": "VisualWaveDrom.BatchWaveImportPreset",
+  "vars": [],
+  "paths": [
+    {
+      "usrGen": {
+        "folder": "indexed",
+        "grepKeys": "^rx\\.txt$",
+        "name": "rx_indexed"
+      },
+      "autoGen": {
+        "hasSeq": true
+      }
+    }
+  ]
+}

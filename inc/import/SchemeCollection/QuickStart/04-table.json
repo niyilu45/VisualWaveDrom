@@ -1,0 +1,13 @@
+{
+  "InnerType": "VisualWaveDrom.BatchWaveImportPreset",
+  "vars": [],
+  "paths": [
+    {
+      "usrGen": {
+        "folder": "columns",
+        "grepKeys": "^capture\\.csv$"
+      },
+      "autoGen": {}
+    }
+  ]
+}

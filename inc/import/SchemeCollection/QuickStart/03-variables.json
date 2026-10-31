@@ -1,0 +1,16 @@
+{
+  "InnerType": "VisualWaveDrom.BatchWaveImportPreset",
+  "vars": [],
+  "paths": [
+    {
+      "usrGen": {
+        "folder": "run",
+        "grepKeys": "^rx_{ch}_run{run}\\.txt$",
+        "name": "rx"
+      },
+      "autoGen": {
+        "hasSeq": false
+      }
+    }
+  ]
+}

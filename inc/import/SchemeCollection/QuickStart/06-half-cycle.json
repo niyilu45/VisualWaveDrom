@@ -1,0 +1,35 @@
+{
+  "InnerType": "VisualWaveDrom.BatchWaveImportPreset",
+  "vars": [],
+  "paths": [
+    {
+      "usrGen": {
+        "folder": ".",
+        "grepKeys": "^capture\\.txt$",
+        "name": "raw"
+      },
+      "autoGen": {
+        "hasSeq": false
+      }
+    },
+    {
+      "usrGen": {
+        "name": "previous",
+        "formula": {
+          "cycle0": "{raw}[-1]"
+        }
+      },
+      "autoGen": {}
+    },
+    {
+      "usrGen": {
+        "name": "interpolated",
+        "formula": {
+          "cycle0": "{raw}",
+          "cycle05": "({raw} + {raw}[1]) / 2"
+        }
+      },
+      "autoGen": {}
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "InnerType": "VisualWaveDrom.BatchWaveImportPreset",
+  "vars": [],
+  "paths": [
+    {
+      "usrGen": {
+        "folder": ".",
+        "grepKeys": "^state\\.txt$",
+        "name": "state",
+        "tbl": {
+          "0": "idle",
+          "1": "active",
+          "2": "done"
+        }
+      },
+      "autoGen": {
+        "hasSeq": false
+      }
+    }
+  ]
+}
