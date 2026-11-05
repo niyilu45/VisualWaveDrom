@@ -63,6 +63,15 @@
     node.addEventListener('click', action);
     return node;
   }
+  const parameterFields = ['name', 'val', 'description'];
+  function isEmptyParameterRow(row) {
+    return parameterFields.every((field) => !String(row[field] ?? '').trim());
+  }
+  function trimTrailingParameterRows(rows, isEmpty = isEmptyParameterRow) {
+    let length = rows.length;
+    while (length && isEmpty(rows[length - 1])) length--;
+    return length === rows.length ? rows : rows.slice(0, length);
+  }
   function normalize(value, warnings) {
     const next = Object.assign(empty(), value || {});
     ['directories', 'tables', 'presets'].forEach((key) => {
@@ -70,10 +79,12 @@
     });
     next.tables.forEach((table) => { table.rows = Array.isArray(table.rows) ? table.rows : []; });
     matrix.normalize(next.tables, warnings);
+    next.tables.forEach((table) => { table.rows = trimTrailingParameterRows(table.rows); });
     next.revision = Number(next.revision) || 0;
     return next;
   }
   function id() { return 'param-' + (global.crypto.randomUUID ? global.crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2)); }
+  function emptyParameterRow() { return { id: id(), name: '', val: '', description: '' }; }
   function linked(source) { return source && Array.isArray(source.parameterTables) ? source.parameterTables : []; }
   function effectiveTables() {
     if (catalogLoadError) return [];
@@ -800,7 +811,7 @@
     let index = -1;
     table.rows.forEach((row, position) => { if (selectedRows.has(row)) index = position; });
     const position = index < 0 ? table.rows.length : index + 1;
-    const nextRows = table.rows.slice(0, position).concat(copied, table.rows.slice(position));
+    const nextRows = trimTrailingParameterRows(table.rows.slice(0, position).concat(copied, table.rows.slice(position)));
     setRowSelection(copied); rowFilters.name = ''; rowFilters.val = '';
     const patches = [{ target: table, field: 'rows', value: nextRows }];
     patchMatrix(table, patches, true);
@@ -852,21 +863,37 @@
     if (parameterUndoStack.length > 50) parameterUndoStack.shift();
     parameterRedoStack = [];
   }
-  function editParameterCell(table, row, field, input, refresh) {
+  function editParameterCell(table, row, field, input, refresh, isAppendRow) {
     if (activeCellEdit && activeCellEdit.input !== input) commitParameterCell();
     const wasEditing = !!activeCellEdit;
     // Keep typing local to this control; no catalog writes, evaluation or wave invalidation.
-    activeCellEdit = String(row[field] ?? '') === input.value ? null : { table, row, field, input, refresh };
+    activeCellEdit = String(row[field] ?? '') === input.value ? null : { table, row, field, input, refresh, isAppendRow };
     if (wasEditing !== !!activeCellEdit) notifyParameterHistory();
+  }
+  function parameterCellPatches(table, row, field, value, isAppendRow) {
+    const next = Object.assign({}, row, { [field]: value });
+    if (isAppendRow && isEmptyParameterRow(next)) return [];
+    const patches = [{ target: row, field, value, sourceTableId: table.id }];
+    const rows = isAppendRow ? table.rows.concat(row) : table.rows;
+    const trimmed = trimTrailingParameterRows(rows, (item) => isEmptyParameterRow(item === row ? next : item));
+    if (trimmed !== table.rows) patches.push({ target: table, field: 'rows', value: trimmed, sourceTableId: table.id });
+    return patches;
   }
   function commitParameterCell() {
     const edit = activeCellEdit;
     if (!edit) return false;
     activeCellEdit = null;
     if (edit.commit) { edit.commit(); notifyParameterHistory(); return true; }
-    const { table, row, field, input, refresh } = edit;
-    if (!catalog.tables.includes(table) || !table.rows.includes(row)
+    const { table, row, field, input, refresh, isAppendRow } = edit;
+    if (!catalog.tables.includes(table) || (!isAppendRow && !table.rows.includes(row))
       || String(row[field] ?? '') === input.value) return false;
+    const patches = parameterCellPatches(table, row, field, input.value, isAppendRow);
+    if (!patches.length) { input.value = ''; notifyParameterHistory(); return false; }
+    if (patches.length > 1) {
+      patchMatrix(table, patches);
+      refresh();
+      return true;
+    }
     recordParameterHistory({ kind: 'row-edit', tableId: table.id, row, field,
       before: row[field], beforePresent: Object.prototype.hasOwnProperty.call(row, field), after: input.value });
     row[field] = input.value; changed(false);
@@ -958,11 +985,12 @@
       candidates.forEach((source) => {
         const previous = drafts.find((ref) => ref.tableId === source.id), section = element('section', 'parameter-reference-selection');
         const pick = checkbox('引用 ' + source.name, !!previous), selectAll = checkbox('全选变量：' + source.name, true);
-        const missingIds = previous && previous.rowIds ? previous.rowIds.filter((key) => !source.rows.some((row) => row.id === key)) : [];
+        const namedRows = source.rows.filter((row) => matrix.raw(row.name).trim());
+        const missingIds = previous && previous.rowIds ? previous.rowIds.filter((key) => !namedRows.some((row) => row.id === key)) : [];
         const state = { source, pick: pick.input, all: selectAll.input, variables: [], hasMissing: missingIds.length > 0 }; states.push(state);
-        const details = element('details'); details.open = !!previous; details.append(element('summary', '', source.name + ' · ' + source.rows.length + ' 个变量'));
+        const details = element('details'); details.open = !!previous; details.append(element('summary', '', source.name + ' · ' + namedRows.length + ' 个变量'));
         details.append(selectAll.node);
-        source.rows.filter((row) => row.name).forEach((row) => {
+        namedRows.forEach((row) => {
           const entry = checkbox(source.name + ' / ' + row.name, !previous || !matrix.own(previous, 'rowIds') || previous.rowIds.includes(row.id));
           entry.rowId = row.id; state.variables.push(entry); entry.node.append(element('small', '', matrix.raw(row.val)));
           entry.input.addEventListener('change', () => { if (entry.input.checked) state.pick.checked = true; sync(); }); details.append(entry.node);
@@ -1040,6 +1068,7 @@
     focusTreeItem(table ? 'tableId' : 'folderId', table ? table.id : selectedFolder);
   }
   function insertTable(table) {
+    table.rows = trimTrailingParameterRows(table.rows);
     catalog.tables.push(table);
     recordParameterHistory(captureTablePosition({ kind: 'table-add', table }));
     finishTableHistory(table);
@@ -1074,7 +1103,7 @@
     const table = catalog.tables.find((item) => item.id === selectedTable);
     const index = table ? table.rows.indexOf(selectedRow) : -1;
     if (index < 0) return false;
-    const row = selectedRow, patches = [{ target: table, field: 'rows', value: table.rows.filter((item) => item !== row) }];
+    const row = selectedRow, patches = [{ target: table, field: 'rows', value: trimTrailingParameterRows(table.rows.filter((item) => item !== row)) }];
     setRowSelection([]); patchMatrix(table, patches, true);
     return true;
   }
@@ -1094,6 +1123,14 @@
     let index = targetIndex + (after ? 1 : 0);
     if (before.index < index) index--;
     if (index === before.index) return false;
+    const nextRows = table.rows.slice();
+    nextRows.splice(before.index, 1); nextRows.splice(index, 0, row);
+    const trimmed = trimTrailingParameterRows(nextRows);
+    if (trimmed !== nextRows) {
+      setRowSelection(trimmed.includes(row) ? [row] : []);
+      patchMatrix(table, [{ target: table, field: 'rows', value: trimmed }], true);
+      return true;
+    }
     const scroller = $('parameter-workspace').querySelector('.parameter-grid-scroll');
     table.rows.splice(before.index, 1); table.rows.splice(index, 0, row);
     recordParameterHistory({ kind: 'row-move', tableId: table.id, row, before, after: rowPosition(table, row) });
@@ -1220,7 +1257,7 @@
   }
   function parameterRowNameError(row, counts) {
     const name = String(row.name || '');
-    if (!name && !row.val && !row.description) return '';
+    if (isEmptyParameterRow(row)) return '';
     if (!name || /[{}\s$]/.test(name)) return '变量名不能为空或包含空白、{}、$';
     return counts.get(name) > 1 ? '变量名 ' + name + ' 重复' : '';
   }
@@ -1538,7 +1575,7 @@
   function addTable() {
     if (catalogLoadError) return;
     const name = namePrompt('参数表名称'); if (!name) return;
-    const table = { id: id(), name, parentId: selectedFolder, rows: [{ name: '', val: '', description: '' }] };
+    const table = { id: id(), name, parentId: selectedFolder, rows: [] };
     insertTable(table);
     const input = $('parameter-workspace').querySelector('tbody input'); if (input) input.focus();
   }
@@ -1617,62 +1654,6 @@
     }
     directory('', 0, '', new Set());
   }
-  function openAddVariables(tableId, anchor) {
-    if (modal) return;
-    const identity = libraryId;
-    const overlay = element('div', 'modal-overlay parameter-modal');
-    const dialog = element('form', 'modal-dialog parameter-count-dialog'); dialog.noValidate = true;
-    dialog.setAttribute('role', 'dialog'); dialog.setAttribute('aria-modal', 'true'); dialog.setAttribute('aria-labelledby', 'parameter-count-title');
-    const header = element('div', 'modal-header'); const title = element('h2', '', '新增变量'); title.id = 'parameter-count-title';
-    let closed = false;
-    function close() {
-      if (closed) return;
-      closed = true; overlay.remove(); modal = null;
-      const target = anchor && anchor.isConnected ? anchor : $('parameter-workspace').querySelector('.parameter-add-variables');
-      if (target) target.focus({ preventScroll: true });
-    }
-    header.append(title, button('关闭', close, 'close')); dialog.append(header);
-    const body = element('div', 'modal-body'); const label = element('label', 'parameter-count-label', '添加数量');
-    const input = element('input'); input.id = 'parameter-add-count'; input.type = 'number'; input.min = '1'; input.max = '1000'; input.step = '1'; input.value = '1'; input.required = true;
-    label.htmlFor = input.id;
-    const error = element('p', 'parameter-count-error'); error.id = 'parameter-count-error'; error.setAttribute('role', 'alert');
-    input.setAttribute('aria-describedby', error.id);
-    input.addEventListener('input', () => { error.textContent = ''; input.removeAttribute('aria-invalid'); });
-    body.append(label, input, error); dialog.append(body);
-    const footer = element('div', 'modal-footer'); const confirm = button('添加', () => {}); confirm.type = 'submit'; confirm.classList.add('modal-btn-primary');
-    footer.append(button('取消', close), confirm); dialog.append(footer);
-    dialog.addEventListener('submit', (event) => {
-      event.preventDefault(); if (closed) return;
-      const count = Number(input.value);
-      if (!input.value.trim() || !Number.isInteger(count) || count < 1 || count > 1000) {
-        error.textContent = '请输入 1 到 1000 之间的整数'; input.setAttribute('aria-invalid', 'true'); input.focus(); return;
-      }
-      const table = catalog.tables.find((item) => item.id === tableId);
-      if (!table || identity !== libraryId || selectedTable !== tableId || activePage !== 'parameters') {
-        error.textContent = '目标参数表已变化，请关闭后重新选择'; return;
-      }
-      confirm.disabled = true;
-      const rows = Array.from({ length: count }, () => ({ id: id(), name: '', val: '', description: '' }));
-      setRowSelection([rows[0]]); rowFilters.name = ''; rowFilters.val = '';
-      close(); patchMatrix(table, [{ target: table, field: 'rows', value: table.rows.concat(rows) }], true);
-      const firstInput = $('parameter-workspace').querySelector('tr.selected input');
-      if (firstInput) { firstInput.focus({ preventScroll: true }); firstInput.scrollIntoView({ block: 'nearest', inline: 'nearest' }); }
-    });
-    let startedOutside = false;
-    overlay.addEventListener('pointerdown', (event) => { startedOutside = event.target === overlay; });
-    overlay.addEventListener('click', (event) => { if (startedOutside && event.target === overlay) close(); });
-    overlay.addEventListener('keydown', (event) => {
-      event.stopPropagation();
-      if (event.key === 'Escape') { event.preventDefault(); close(); }
-      if (event.key === 'Enter' && event.isComposing) event.preventDefault();
-      if (event.key === 'Tab') {
-        const controls = Array.from(dialog.querySelectorAll('button:not(:disabled),input'));
-        if (event.shiftKey && document.activeElement === controls[0]) { event.preventDefault(); controls[controls.length - 1].focus(); }
-        else if (!event.shiftKey && document.activeElement === controls[controls.length - 1]) { event.preventDefault(); controls[0].focus(); }
-      }
-    });
-    clipboardRequest++; modal = overlay; overlay.append(dialog); document.body.append(overlay); input.focus(); input.select();
-  }
   function renderTable() {
     const workspace = $('parameter-workspace'); if (!workspace) return;
     referenceScan++; referenceRefresh = null;
@@ -1707,8 +1688,6 @@
     } else heading.textContent = folderPath(selectedFolder) || '参数目录';
     toolbar.append(heading);
     if (table) {
-      const addVariables = button('新增变量', () => openAddVariables(table.id, addVariables));
-      addVariables.classList.add('parameter-add-variables'); toolbar.append(addVariables);
       deleteRowButton = button('删除选中行', deleteSelectedRow, 'trash');
       deleteRowButton.disabled = selectedRows.size !== 1; toolbar.append(deleteRowButton);
       const rowActions = element('div', 'parameter-row-actions');
@@ -1789,6 +1768,7 @@
     const body = element('tbody');
     const rowViews = [];
     const rowDropViews = new Map();
+    let appendRow = emptyParameterRow();
     const dragLibraryId = libraryId;
     let draggedRow = null, draggedLine = null, dropTarget = null, rowDrag = null, rowDragFrame = 0;
     function clearDropTarget() {
@@ -1825,10 +1805,14 @@
       const underPointer = document.elementFromPoint(event.clientX, event.clientY);
       let view = rowDropViews.get(underPointer && underPointer.closest('tr'));
       let after;
-      if (view && !view.line.hidden) {
+      if (view?.row === appendRow) {
+        view = rowViews.slice(0, -1).filter((item) => !item.line.hidden).at(-1);
+        if (!view) return null;
+        after = true;
+      } else if (view && !view.line.hidden) {
         const bounds = view.line.getBoundingClientRect(); after = event.clientY >= bounds.top + bounds.height / 2;
       } else {
-        const visible = rowViews.filter((item) => !item.line.hidden);
+        const visible = rowViews.filter((item) => item.row !== appendRow && !item.line.hidden);
         if (!visible.length) return null;
         const first = visible[0], last = visible[visible.length - 1];
         if (event.clientY < first.line.getBoundingClientRect().top) { view = first; after = false; }
@@ -1862,7 +1846,9 @@
       if (matrixView) matrixView.refresh();
     }
     function refreshCommittedCell() {
+      const rowsChanged = syncAppendRow();
       refreshValues();
+      if (rowsChanged) applyFilters();
       if (referenceRefresh) referenceRefresh();
       const treeRow = Array.from($('parameter-tree').querySelectorAll('[data-table-id]')).find((item) => item.dataset.tableId === table.id);
       if (treeRow) treeRow.querySelector('.parameter-count').textContent = table.rows.filter((item) => item.name).length;
@@ -1880,9 +1866,10 @@
       updateClipboardButtons();
     }
     function selectRow(row, event) {
+      if (row === appendRow) { setRowSelection([]); updateRowSelection(); return; }
       const toggle = !!(event && (event.ctrlKey || event.metaKey));
       if (event?.shiftKey && rowSelectionAnchor) {
-        const visible = rowViews.filter((view) => !view.line.hidden).map((view) => view.row);
+        const visible = rowViews.filter((view) => view.row !== appendRow && !view.line.hidden).map((view) => view.row);
         const start = visible.indexOf(rowSelectionAnchor), end = visible.indexOf(row);
         if (start >= 0 && end >= 0) {
           const range = visible.slice(Math.min(start, end), Math.max(start, end) + 1);
@@ -1898,18 +1885,33 @@
       } else setRowSelection([row]);
       updateRowSelection();
     }
-    table.rows.forEach((row, index) => {
+    function updateRowPosition(view, index) {
+      const draft = view.row === appendRow;
+      view.index = index;
+      view.line.classList.toggle('parameter-append-row', draft);
+      view.rowHandle.disabled = draft;
+      view.rowHandle.setAttribute('aria-label', draft ? '空白录入行' : '选中第 ' + (index + 1) + ' 行');
+      view.rowNumber.textContent = index + 1;
+      view.nameInput.placeholder = draft ? '名称' : '';
+      view.valueError.id = 'parameter-value-error-' + index;
+      view.inputs.val.setAttribute('aria-describedby', view.valueError.id);
+      parameterFields.forEach((field) => {
+        view.inputs[field].setAttribute('aria-label', (draft ? '新增变量' : '第 ' + (index + 1) + ' 行') + ' ' + field);
+      });
+    }
+    function appendRowView(row, index) {
       const line = element('tr');
-      const view = { row, line, resize: [] }; rowViews.push(view);
+      const view = { row, line, resize: [], inputs: {} }; rowViews.push(view);
       rowDropViews.set(line, view);
       line.addEventListener('click', () => selectRow(row));
       line.addEventListener('focusin', (event) => {
         if (!event.target.closest('.parameter-row-select')) selectRow(row);
       });
       line.setAttribute('aria-selected', 'false');
-      ['name', 'val', 'description'].forEach((field) => {
+      parameterFields.forEach((field) => {
         const td = element('td'); const fieldBox = element('div', 'parameter-cell');
         const input = element(field === 'name' ? 'input' : 'textarea');
+        view.inputs[field] = input;
         if (field === 'name') {
           const jump = button('正在查找引用...', (event) => {
             event.stopPropagation();
@@ -1957,11 +1959,12 @@
           handle.addEventListener('lostpointercapture', clearRowDrag);
           const marker = element('span', 'parameter-row-error'); marker.hidden = true; marker.setAttribute('aria-hidden', 'true');
           marker.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="lucide">' + paths.close + '</svg>';
-          handle.replaceChildren(marker, element('span', 'parameter-row-number', index + 1));
+          view.rowNumber = element('span', 'parameter-row-number');
+          handle.replaceChildren(marker, view.rowNumber);
           view.rowError = marker; view.rowHandle = handle; view.nameInput = input;
           fieldBox.append(handle);
         }
-        input.value = row[field] == null ? '' : String(row[field]); input.setAttribute('aria-label', '第 ' + (index + 1) + ' 行 ' + field);
+        input.value = row[field] == null ? '' : String(row[field]);
         input.dataset.parameterField = field;
         input.spellcheck = false; if (field !== 'name') input.rows = 1;
         const resize = () => { if (field !== 'name' && !line.hidden) global.VWDParameterMatrixView.resizeTextareas([input]); };
@@ -1969,15 +1972,15 @@
         if (field === 'val') {
           fieldBox.classList.add('parameter-value-cell');
           const error = element('span', 'parameter-value-error'); error.hidden = true;
-          error.id = 'parameter-value-error-' + index;
-          input.setAttribute('aria-describedby', error.id);
+          view.valueError = error;
           view.updateValue = (context, names) => {
             const result = resolveParameterRow(table, row, valueSource, context);
             view.valueResult = result;
             const nameError = parameterRowNameError(row, names);
             const rowError = [nameError, result.error].filter(Boolean).join('\n');
             view.rowError.hidden = !rowError;
-            view.rowHandle.title = '选中第 ' + (index + 1) + ' 行；Ctrl/⌘ 多选，Shift 连选，拖动排序' + (rowError ? '\n' + rowError : '');
+            view.rowHandle.title = row === appendRow ? '空白录入行'
+              : '选中第 ' + (view.index + 1) + ' 行；Ctrl/⌘ 多选，Shift 连选，拖动排序' + (rowError ? '\n' + rowError : '');
             if (rowError) view.rowHandle.setAttribute('aria-description', rowError);
             else view.rowHandle.removeAttribute('aria-description');
             view.nameInput.setAttribute('aria-invalid', String(!!nameError)); view.nameInput.title = nameError;
@@ -1997,7 +2000,7 @@
           fieldBox.append(error);
         }
         input.addEventListener('input', () => {
-          editParameterCell(table, row, field, input, refreshCommittedCell);
+          editParameterCell(table, row, field, input, refreshCommittedCell, row === appendRow);
           resize();
         });
         input.addEventListener('beforeinput', (event) => {
@@ -2023,11 +2026,31 @@
         td.append(fieldBox); line.append(td);
         requestAnimationFrame(resize);
       });
+      updateRowPosition(view, index);
       body.append(line);
-    });
+    }
     const emptyRow = element('tr'), emptyCell = element('td', 'parameter-empty'); emptyCell.colSpan = 3;
     emptyCell.id = 'parameter-filter-message';
     emptyRow.append(emptyCell); body.append(emptyRow);
+    function syncAppendRow() {
+      const rows = table.rows;
+      if (rowViews.length === rows.length + 1 && rowViews.at(-1)?.row === appendRow) return false;
+      // Promote the existing editor in place so Tab and clicks keep their target.
+      if (rows.includes(appendRow)) appendRow = emptyParameterRow();
+      const nextRows = rows.concat(appendRow), wanted = new Set(nextRows);
+      const previous = new Map(rowViews.map((view) => [view.row, view]));
+      rowViews.forEach((view) => {
+        if (!wanted.has(view.row)) { rowDropViews.delete(view.line); view.line.remove(); }
+      });
+      rowViews.length = 0;
+      nextRows.forEach((row, index) => {
+        const view = previous.get(row);
+        if (view) { updateRowPosition(view, index); rowViews.push(view); }
+        else appendRowView(row, index);
+      });
+      body.insertBefore(emptyRow, rowViews.at(-1).line);
+      return true;
+    }
     function applyFilters() {
       const name = rowFilters.name.trim().toLowerCase(), val = rowFilters.val.trim().toLowerCase();
       const comparison = val.match(/^(>=|<=|>|<)\s*(.*)$/);
@@ -2063,6 +2086,7 @@
       if (matrixView) matrixView.filterReferences(matches);
       const visibleSelection = [];
       rowViews.forEach((view) => {
+        if (view.row === appendRow) return;
         const visible = String(view.row.name ?? '').toLowerCase().includes(name)
           && (matrixView ? matrixView.visible(view, matches) : matches(view.valueResult));
         const wasHidden = view.line.hidden; view.line.hidden = !visible;
@@ -2087,7 +2111,7 @@
         if (activeCellEdit && activeCellEdit.input !== input) commitParameterCell();
         activeCellEdit = input.value === original ? null : { input, original, commit: () => {
           if (!catalog.tables.includes(source) || !source.rows.includes(row)) { status('源参数已变化，请重新编辑', true); return; }
-          patchMatrix(table, [{ target: row, field, value: input.value, sourceTableId: source.id }]);
+          patchMatrix(table, parameterCellPatches(source, row, field, input.value, false));
           renderTree(); refreshCommittedCell(); applyFilters();
         } };
         notifyParameterHistory();
@@ -2112,9 +2136,9 @@
       export: exportParameterTableToml, compare: openComparison
     });
     matrixDispose = matrixView.dispose;
-    refreshValues(); applyFilters();
+    syncAppendRow(); refreshValues(); applyFilters();
     grid.append(body); scroller.prepend(grid); workspace.append(scroller);
-    referenceRefresh = () => { void updateReferenceButtons(table, rowViews, workspace); };
+    referenceRefresh = () => { void updateReferenceButtons(table, rowViews.filter((view) => view.row !== appendRow), workspace); };
     referenceRefresh();
   }
   async function switchPage(page) {

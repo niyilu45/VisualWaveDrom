@@ -515,7 +515,7 @@ Cycle,CurSt,SigA
 位宽、延迟等数值会反复出现在图中时，先建参数表，避免到处手工修改标签。
 
 1. 左侧切到 **参数目录 → 新增参数表**，输入表名 `公共参数`。新表自带一行空变量；点表名本身可改名。
-2. 第一行填写 `N / 16 / 总线位宽`。点 **新增变量**，数量填 `2`，再按下表填写另外两行。
+2. 第一行填写 `N / 16 / 总线位宽`。每次填完，继续在表底自动出现的空行填写下一项。
 3. 输入完按 `Enter` 或点击别处确认。值中的公式在编辑时显示原文，结束编辑后显示蓝色计算结果；负数优先标红。
 
 | 变量名 name | 变量值 val（输入内容） | 变量说明 description |
@@ -524,7 +524,7 @@ Cycle,CurSt,SigA
 | `delay` | `2` | 传输延迟，单位 cycle |
 | `remain` | `{$N - $delay}` | 剩余周期数，显示结果为 14 |
 
-![GIF：新建公共参数表，填写 N，新增两行，再填写 delay 和计算 remain](ReadMeFig/quickstart-parameter-table.gif)
+![GIF：新建公共参数表，在自动补出的空行依次填写 N、delay 和 remain](ReadMeFig/quickstart-parameter-table.gif)
 
 ![本步骤图解：新建参数表、修改表名，以及变量名、值、说明三列](ReadMeFig/quickstart-step-parameter-table.png)
 

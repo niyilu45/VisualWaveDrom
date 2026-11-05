@@ -89,7 +89,7 @@
         const selected = own(ref, 'rowIds') ? new Set(ref.rowIds) : null;
         source.rows.forEach((row) => {
           const name = raw(row.name);
-          if (!name || selected && !selected.has(row.id) || names.has(name)) return;
+          if (!name.trim() || selected && !selected.has(row.id) || names.has(name)) return;
           names.add(name);
           rows.push(Object.assign({}, row, { referenceSource: row.referenceSource || { tableId: source.id, name: source.name }, referencePath: [source.id, ...(row.referencePath || [])] }));
         });
@@ -106,11 +106,12 @@
     return (table.references || []).map((ref) => {
       const source = resolved.find((item) => item.id === ref.tableId);
       const selected = own(ref, 'rowIds') ? new Set(ref.rowIds) : null;
-      const available = new Set(source ? source.rows.map((row) => row.id) : []);
-      const rows = source ? source.rows.filter((row) => raw(row.name) && (!selected || selected.has(row.id))).map((row) => {
+      const namedRows = source ? source.rows.filter((row) => raw(row.name).trim()) : [];
+      const available = new Set(namedRows.map((row) => row.id));
+      const rows = namedRows.filter((row) => !selected || selected.has(row.id)).map((row) => {
         const winner = winners.get(raw(row.name));
         return { row, winner, used: !!winner && !!winner.referencePath && winner.referencePath[0] === source.id && winner.id === row.id };
-      }) : [];
+      });
       return { reference: ref, source, rows, missing: !source, missingRows: selected ? [...selected].filter((key) => !available.has(key)).length : 0 };
     });
   }
