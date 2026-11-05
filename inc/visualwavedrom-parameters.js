@@ -19,6 +19,7 @@
   let modal = null, channel = null;
   let comparisonCommit = false;
   let tableViewId = '', selectedRow = null;
+  let selectedRows = new Set(), rowSelectionAnchor = null;
   let standaloneTableId = '', standaloneLoading = false, standaloneError = '';
   const rowFilters = { name: '', val: '' };
   let matrixTables = [], matrixGeneration = -1;
@@ -710,34 +711,45 @@
     node.title = label + (action === 'copy' ? ' (Ctrl+C)' : ' (Ctrl+V)');
     return node;
   }
+  function setRowSelection(rows, active = rows[0] || null, anchor = active) {
+    selectedRows = new Set(rows);
+    selectedRow = active;
+    rowSelectionAnchor = anchor;
+    clipboardRequest++;
+  }
   function updateClipboardButtons() {
     const table = catalog.tables.find((item) => item.id === selectedTable);
     document.querySelectorAll('[data-parameter-clipboard]').forEach((node) => {
       const [type, action] = node.dataset.parameterClipboard.split('-');
       node.disabled = action === 'copy'
-        ? !table || (type === 'row' && !table.rows.includes(selectedRow))
+        ? !table || (type === 'row' && !selectedRows.size)
         : (type === 'row' && !table) || !(parameterClipboard && parameterClipboard.type === type || global.navigator.clipboard && global.navigator.clipboard.readText);
     });
   }
   function clipboardSnapshot(type) {
     const table = catalog.tables.find((item) => item.id === selectedTable);
-    if (!table || type === 'row' && !table.rows.includes(selectedRow)) throw new Error(type === 'table' ? '请先选中参数表' : '请先选中一行');
+    const rows = type === 'row' && table ? table.rows.filter((row) => selectedRows.has(row)) : [];
+    if (!table || type === 'row' && !rows.length) throw new Error(type === 'table' ? '请先选中参数表' : '请先选中参数行');
     const payload = { kind: clipboardKind, version: 1, type };
     if (type === 'table') payload.table = table;
-    else payload.row = selectedRow;
+    else if (rows.length === 1) payload.row = rows[0];
+    else payload.rows = rows;
     return clone(payload);
   }
-  function parseClipboard(value, type) {
+  function parseClipboard(value, type, allowRows) {
     if (!value || value.length > 8 * 1024 * 1024) throw new Error('剪贴板为空或参数内容过大');
     let payload;
     try { payload = JSON.parse(value); } catch (_) { throw new Error('剪贴板中不是参数表或参数行'); }
-    if (!payload || payload.kind !== clipboardKind || payload.version !== 1 || payload.type !== type) {
-      throw new Error(type === 'table' ? '请先复制一张参数表' : '请先复制一行参数');
+    if (!payload || payload.kind !== clipboardKind || payload.version !== 1
+        || (payload.type !== type && !(allowRows && payload.type === 'row'))) {
+      throw new Error(type === 'table' ? '请先复制一张参数表或选中的参数行' : '请先复制参数行');
     }
-    const table = type === 'table' ? payload.table : { name: '参数行', rows: [payload.row] };
+    if (payload.type === 'row' && payload.rows === undefined) payload.rows = [payload.row];
+    const table = payload.type === 'table' ? payload.table : { name: '参数行', rows: payload.rows };
     if (!table || typeof table.name !== 'string' || !Array.isArray(table.rows) || table.rows.some((row) =>
       !row || typeof row !== 'object' || Array.isArray(row) || typeof row.name !== 'string'
-      || ![row.val, row.description].every((item) => item == null || ['string', 'number', 'boolean'].includes(typeof item)))) {
+      || ![row.val, row.description].every((item) => item == null || ['string', 'number', 'boolean'].includes(typeof item)))
+      || (payload.type === 'row' && !table.rows.length)) {
       throw new Error('剪贴板中的参数格式无效');
     }
     validate({ directories: [], presets: [], tables: [Object.assign({ id: 'clipboard' }, table)] });
@@ -747,7 +759,7 @@
     try {
       const payload = clipboardSnapshot(type), text = JSON.stringify(payload, null, 2);
       parameterClipboard = payload; const request = ++clipboardRequest; updateClipboardButtons();
-      const label = type === 'table' ? '已复制参数表' : '已复制参数行';
+      const label = type === 'table' ? '已复制参数表' : '已复制 ' + (payload.rows?.length || 1) + ' 行参数';
       if (event && event.clipboardData) {
         event.clipboardData.setData('text/plain', text); event.preventDefault(); status(label); return;
       }
@@ -777,12 +789,20 @@
     }
     const table = catalog.tables.find((item) => item.id === selectedTable);
     if (!table) throw new Error('请先选中目标参数表');
-    const row = clone(payload.row); row.id = id();
-    if (row.name) row.name = uniqueCopyName(row.name, new Set(table.rows.map((item) => item.name)), false);
-    const index = table.rows.indexOf(selectedRow);
-    const rows = table.rows.slice(); rows.splice(index < 0 ? rows.length : index + 1, 0, row);
-    selectedRow = row; rowFilters.name = ''; rowFilters.val = '';
-    const patches = [{ target: table, field: 'rows', value: rows }];
+    const existingNames = new Set(table.rows.map((row) => row.name));
+    const reservedNames = new Set([...existingNames, ...payload.rows.map((row) => row.name)]);
+    const copied = payload.rows.map((source) => {
+      const row = clone(source); row.id = id();
+      if (row.name && existingNames.has(row.name)) row.name = uniqueCopyName(row.name, reservedNames, false);
+      reservedNames.add(row.name);
+      return row;
+    });
+    let index = -1;
+    table.rows.forEach((row, position) => { if (selectedRows.has(row)) index = position; });
+    const position = index < 0 ? table.rows.length : index + 1;
+    const nextRows = table.rows.slice(0, position).concat(copied, table.rows.slice(position));
+    setRowSelection(copied); rowFilters.name = ''; rowFilters.val = '';
+    const patches = [{ target: table, field: 'rows', value: nextRows }];
     patchMatrix(table, patches, true);
     const handle = $('parameter-workspace').querySelector('tr.selected .parameter-row-select');
     if (handle) { handle.focus({ preventScroll: true }); handle.scrollIntoView({ block: 'nearest', inline: 'nearest' }); }
@@ -806,8 +826,8 @@
           || destination.folder !== selectedFolder || destination.table !== selectedTable || destination.row !== selectedRow) {
         status('粘贴位置已改变，请重新粘贴', true); return;
       }
-      const payload = parseClipboard(text, type);
-      applyClipboard(payload, type); parameterClipboard = clone(payload); updateClipboardButtons();
+      const payload = parseClipboard(text, type, !!(event && type === 'table' && destination.table));
+      applyClipboard(payload, payload.type); parameterClipboard = clone(payload); updateClipboardButtons();
     } catch (error) { status(error.message, true); }
   }
   function clipboardContext(target) {
@@ -1033,13 +1053,14 @@
   function finishRowHistory(table, row, scrollTop) {
     clipboardRequest++;
     const switched = selectedTable !== table.id;
-    selectedTable = table.id; selectedFolder = table.parentId || ''; tableViewId = table.id; selectedRow = row;
+    selectedTable = table.id; selectedFolder = table.parentId || ''; tableViewId = table.id;
+    setRowSelection(row ? [row] : []);
     if (switched) { rowFilters.name = ''; rowFilters.val = ''; }
     changed(true, true);
     const workspace = $('parameter-workspace');
     let handle = workspace.querySelector('tr.selected .parameter-row-select');
     if (row && !handle) {
-      rowFilters.name = ''; rowFilters.val = ''; selectedRow = row;
+      rowFilters.name = ''; rowFilters.val = ''; setRowSelection([row]);
       renderTable(); handle = workspace.querySelector('tr.selected .parameter-row-select');
     }
     const scroller = workspace.querySelector('.parameter-grid-scroll');
@@ -1049,12 +1070,12 @@
     if (handle) handle.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }
   function deleteSelectedRow() {
-    if (activePage !== 'parameters' || modal) return false;
+    if (activePage !== 'parameters' || modal || selectedRows.size !== 1) return false;
     const table = catalog.tables.find((item) => item.id === selectedTable);
     const index = table ? table.rows.indexOf(selectedRow) : -1;
     if (index < 0) return false;
     const row = selectedRow, patches = [{ target: table, field: 'rows', value: table.rows.filter((item) => item !== row) }];
-    selectedRow = null; patchMatrix(table, patches, true);
+    setRowSelection([]); patchMatrix(table, patches, true);
     return true;
   }
   function rowPosition(table, row) {
@@ -1632,7 +1653,7 @@
       }
       confirm.disabled = true;
       const rows = Array.from({ length: count }, () => ({ id: id(), name: '', val: '', description: '' }));
-      selectedRow = rows[0]; rowFilters.name = ''; rowFilters.val = '';
+      setRowSelection([rows[0]]); rowFilters.name = ''; rowFilters.val = '';
       close(); patchMatrix(table, [{ target: table, field: 'rows', value: table.rows.concat(rows) }], true);
       const firstInput = $('parameter-workspace').querySelector('tr.selected input');
       if (firstInput) { firstInput.focus({ preventScroll: true }); firstInput.scrollIntoView({ block: 'nearest', inline: 'nearest' }); }
@@ -1661,10 +1682,11 @@
     const table = catalog.tables.find((item) => item.id === selectedTable);
     if (standaloneTableId) document.title = (effectiveTable(standaloneTableId) || table || { name: '参数表' }).name + ' - VisualWaveDrom';
     if (tableViewId !== (table && table.id || '')) {
-      tableViewId = table && table.id || ''; selectedRow = null;
+      tableViewId = table && table.id || ''; setRowSelection([]);
       rowFilters.name = ''; rowFilters.val = '';
     }
-    if (!table || !table.rows.includes(selectedRow)) selectedRow = null;
+    const surviving = table ? table.rows.filter((row) => selectedRows.has(row)) : [];
+    if (surviving.length !== selectedRows.size) setRowSelection(surviving);
     workspace.replaceChildren();
     if (catalogLoadError) {
       workspace.append(element('h2', 'parameter-workspace-header', '参数表暂不可用'),
@@ -1688,7 +1710,7 @@
       const addVariables = button('新增变量', () => openAddVariables(table.id, addVariables));
       addVariables.classList.add('parameter-add-variables'); toolbar.append(addVariables);
       deleteRowButton = button('删除选中行', deleteSelectedRow, 'trash');
-      deleteRowButton.disabled = !selectedRow; toolbar.append(deleteRowButton);
+      deleteRowButton.disabled = selectedRows.size !== 1; toolbar.append(deleteRowButton);
       const rowActions = element('div', 'parameter-row-actions');
       rowActions.append(clipboardButton('row', 'copy', '复制行'), clipboardButton('row', 'paste', '粘贴行')); toolbar.append(rowActions);
       toolbar.append(button('删除参数表', () => {
@@ -1845,23 +1867,46 @@
       const treeRow = Array.from($('parameter-tree').querySelectorAll('[data-table-id]')).find((item) => item.dataset.tableId === table.id);
       if (treeRow) treeRow.querySelector('.parameter-count').textContent = table.rows.filter((item) => item.name).length;
     }
-    let selectedLine = null;
-    function selectRow(row, line) {
-      if (selectedLine) { selectedLine.classList.remove('selected'); selectedLine.setAttribute('aria-selected', 'false'); }
-      selectedRow = row; selectedLine = line;
-      if (line) { line.classList.add('selected'); line.setAttribute('aria-selected', 'true'); }
-      deleteRowButton.disabled = !row;
-      deleteRowButton.title = row ? '删除第 ' + (table.rows.indexOf(row) + 1) + ' 行' : '删除选中行';
+    function updateRowSelection() {
+      rowViews.forEach(({ row, line, rowHandle }) => {
+        const selected = selectedRows.has(row);
+        if (rowHandle.getAttribute('aria-pressed') === String(selected)) return;
+        line.classList.toggle('selected', selected);
+        line.setAttribute('aria-selected', String(selected));
+        rowHandle.setAttribute('aria-pressed', String(selected));
+      });
+      deleteRowButton.disabled = selectedRows.size !== 1;
+      deleteRowButton.title = deleteRowButton.disabled ? '删除选中行' : '删除第 ' + (table.rows.indexOf(selectedRow) + 1) + ' 行';
       updateClipboardButtons();
+    }
+    function selectRow(row, event) {
+      const toggle = !!(event && (event.ctrlKey || event.metaKey));
+      if (event?.shiftKey && rowSelectionAnchor) {
+        const visible = rowViews.filter((view) => !view.line.hidden).map((view) => view.row);
+        const start = visible.indexOf(rowSelectionAnchor), end = visible.indexOf(row);
+        if (start >= 0 && end >= 0) {
+          const range = visible.slice(Math.min(start, end), Math.max(start, end) + 1);
+          setRowSelection(toggle ? [...selectedRows, ...range] : range, row, rowSelectionAnchor);
+          updateRowSelection(); return;
+        }
+      }
+      if (toggle) {
+        const rows = new Set(selectedRows);
+        if (rows.has(row)) rows.delete(row);
+        else rows.add(row);
+        setRowSelection([...rows], rows.has(row) ? row : rows.values().next().value || null, row);
+      } else setRowSelection([row]);
+      updateRowSelection();
     }
     table.rows.forEach((row, index) => {
       const line = element('tr');
       const view = { row, line, resize: [] }; rowViews.push(view);
       rowDropViews.set(line, view);
-      line.addEventListener('click', () => selectRow(row, line));
-      line.addEventListener('focusin', () => selectRow(row, line));
+      line.addEventListener('click', () => selectRow(row));
+      line.addEventListener('focusin', (event) => {
+        if (!event.target.closest('.parameter-row-select')) selectRow(row);
+      });
       line.setAttribute('aria-selected', 'false');
-      if (selectedRow === row) selectRow(row, line);
       ['name', 'val', 'description'].forEach((field) => {
         const td = element('td'); const fieldBox = element('div', 'parameter-cell');
         const input = element(field === 'name' ? 'input' : 'textarea');
@@ -1875,12 +1920,16 @@
           }, 'external');
           jump.disabled = true; jump.classList.add('parameter-reference-jump'); view.jump = jump;
           fieldBox.append(jump);
-          const handle = button('选中第 ' + (index + 1) + ' 行', () => selectRow(row, line));
+          const handle = button('选中第 ' + (index + 1) + ' 行', (event) => {
+            event.stopPropagation(); selectRow(row, event);
+          });
           handle.className = 'parameter-row-select';
           handle.addEventListener('pointerdown', (event) => {
             if (event.button !== 0 || !event.isPrimary || modal || activePage !== 'parameters' || selectedTable !== table.id || !catalog.tables.includes(table)) return;
             event.preventDefault(); event.stopPropagation(); clearRowDrag();
-            handle.focus({ preventScroll: true }); selectRow(row, line);
+            handle.focus({ preventScroll: true });
+            if (event.ctrlKey || event.metaKey || event.shiftKey) return;
+            selectRow(row);
             rowDrag = { handle, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, x: event.clientX, y: event.clientY };
             global.addEventListener('keydown', cancelRowDrag, true);
             global.addEventListener('blur', clearRowDrag);
@@ -1928,7 +1977,7 @@
             const nameError = parameterRowNameError(row, names);
             const rowError = [nameError, result.error].filter(Boolean).join('\n');
             view.rowError.hidden = !rowError;
-            view.rowHandle.title = '选中第 ' + (index + 1) + ' 行，按住拖动调整顺序' + (rowError ? '\n' + rowError : '');
+            view.rowHandle.title = '选中第 ' + (index + 1) + ' 行；Ctrl/⌘ 多选，Shift 连选，拖动排序' + (rowError ? '\n' + rowError : '');
             if (rowError) view.rowHandle.setAttribute('aria-description', rowError);
             else view.rowHandle.removeAttribute('aria-description');
             view.nameInput.setAttribute('aria-invalid', String(!!nameError)); view.nameInput.title = nameError;
@@ -2012,12 +2061,15 @@
           return matchesValue;
       };
       if (matrixView) matrixView.filterReferences(matches);
+      const visibleSelection = [];
       rowViews.forEach((view) => {
         const visible = String(view.row.name ?? '').toLowerCase().includes(name)
           && (matrixView ? matrixView.visible(view, matches) : matches(view.valueResult));
         const wasHidden = view.line.hidden; view.line.hidden = !visible;
-        if (visible) count++;
-        else if (selectedRow === view.row) selectRow(null, null);
+        if (visible) {
+          count++;
+          if (selectedRows.has(view.row)) visibleSelection.push(view.row);
+        }
         if (visible && wasHidden) requestAnimationFrame(() => view.resize.forEach((resize) => resize()));
       });
       emptyRow.hidden = count > 0;
@@ -2025,6 +2077,8 @@
       emptyCell.classList.toggle('parameter-value-error', !!filterError);
       filterCount.textContent = count + ' / ' + table.rows.length;
       clearFilters.disabled = !rowFilters.name && !rowFilters.val;
+      if (visibleSelection.length !== selectedRows.size) setRowSelection(visibleSelection);
+      updateRowSelection();
     }
     matrixView = global.VWDParameterMatrixView.attach({ table, toolbar, grid, headRow: tr, rows: rowViews, workspace, emptyCell, scroller,
       filters: rowFilters, element, button, id, status, commit: commitParameterCell,
