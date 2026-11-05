@@ -20,6 +20,7 @@
   let comparisonCommit = false;
   let tableViewId = '', selectedRow = null;
   let selectedRows = new Set(), rowSelectionAnchor = null;
+  let referenceSelection = null;
   let standaloneTableId = '', standaloneLoading = false, standaloneError = '';
   const rowFilters = { name: '', val: '' };
   let matrixTables = [], matrixGeneration = -1;
@@ -131,7 +132,7 @@
         }
       }
     }
-    return keys;
+    return [...new Set(keys)];
   }
   function matchesReference(raw, source, tableId, name) {
     return referenceKeys(referenceNames(raw), source).includes(referenceKey(tableId, name));
@@ -278,9 +279,25 @@
     clipboardRequest++; dialog.append(header, body); overlay.append(dialog); document.body.append(overlay); modal = overlay;
     body.querySelector('button').focus();
   }
-  async function updateReferenceButtons(table, views, workspace) {
-    if (!bridge || !bridge.referenceDocuments || !libraryId || activePage !== 'parameters') return;
+  function parameterReferenceJump(view, table) {
+    const jump = button('正在查找引用...', (event) => {
+      event.stopPropagation();
+      const documents = view.references || [];
+      if (!documents.length) return;
+      const name = String(view.row.name || '');
+      if (documents.length > 1) chooseReference(documents, table.id, name, jump);
+      else void jumpToReference(documents[0], table.id, name).catch(referenceError);
+    }, 'external');
+    jump.disabled = true;
+    jump.classList.add('parameter-reference-jump');
+    view.jump = jump;
+    view.table = table;
+    return jump;
+  }
+  async function updateReferenceButtons(views, workspace) {
+    if (!views.length || !bridge || !bridge.referenceDocuments || !libraryId || activePage !== 'parameters') return;
     const sequence = ++referenceScan, identity = libraryId;
+    const tableIds = new Set(views.map((view) => view.table.id));
     views.forEach((view) => { view.jump.disabled = true; view.jump.title = '正在查找引用...'; });
     const found = new Map();
     let skipped = 0;
@@ -290,7 +307,8 @@
       for (const document of documents) {
         if (!current()) return;
         if (!document.content && Array.isArray(document.parameterTables)
-          && !document.parameterTables.some((key) => matrix.owner(catalog.tables, key) === table)) continue;
+          && !document.parameterTables.some((key) => tableIds.has(key)
+            || effectiveTable(key)?.rows.some((row) => tableIds.has(row.referenceSource?.tableId)))) continue;
         const key = identity + ':' + document.name;
         const stamp = document.content || JSON.stringify([document.revision, document.savedAt, document.contentLength]);
         let cached = referenceDocuments.get(key);
@@ -310,6 +328,7 @@
       }
       if (!current()) return;
       views.forEach((view) => {
+        const table = view.table;
         const name = String(view.row.name || '');
         view.references = table.rows.find((row) => String(row.name || '') === name) === view.row
           ? found.get(referenceKey(table.id, name)) || [] : [];
@@ -345,6 +364,7 @@
           result.formula = true;
           const evaluated = evaluate(expression, source, context);
           if (evaluated.error) { result.error = result.error || evaluated.error; return raw; }
+          if (evaluated.symbolic) result.symbolic = true;
           return evaluated.value;
         });
         if (!result.error) result.val = value;
@@ -390,10 +410,15 @@
     const context = state || { stack: [], values: new Map() };
     const variables = new Map();
     const hasVariables = expression.includes('$');
+    const directVariable = /^\$[^{}\s$(),]+$/.test(expression);
+    let substitute = false;
     let offset = 0, depth = 0;
     function skipSpace() { while (/\s/.test(expression[offset] || '') && offset < expression.length) offset++; }
+    function isNumber(value) {
+      return numericPattern.test(String(value).trim()) && Number.isFinite(Number(value));
+    }
     function number(value) {
-      if (!numericPattern.test(String(value).trim()) || !Number.isFinite(Number(value))) {
+      if (!isNumber(value)) {
         throw new Error(String(value) + ' 不是有效数字，不能参与运算');
       }
       return Number(value);
@@ -410,12 +435,7 @@
         const variable = /^\$[^{}\s$(),]+/.exec(rest);
         if (variable) {
           offset += variable[0].length;
-          const name = variable[0].slice(1);
-          const found = variables.get(name) || resolveName(name, source, context);
-          if (!found) throw new Error('未找到变量：' + variable[0] + '（运算符两侧需有空格）');
-          if (found.error) throw new Error(found.error);
-          variables.set(name, found);
-          return found.val;
+          return variables.get(variable[0].slice(1)).val;
         }
         const literal = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?/.exec(rest);
         if (literal) { offset += literal[0].length; return literal[0]; }
@@ -426,11 +446,15 @@
           if (expression[offset] === ')') throw new Error(call ? call[1] + ' 至少需要一个参数' : '括号内不能为空');
           let value = sum();
           if (call) {
-            value = number(value); skipSpace();
+            if (!substitute) value = number(value);
+            skipSpace();
             while (expression[offset] === ',') {
               offset++;
-              const right = number(sum());
-              value = call[1] === 'max' ? Math.max(value, right) : Math.min(value, right);
+              const argument = sum();
+              if (!substitute) {
+                const right = number(argument);
+                value = call[1] === 'max' ? Math.max(value, right) : Math.min(value, right);
+              }
               skipSpace();
             }
           }
@@ -455,7 +479,9 @@
     function product() {
       let value = primary(), op;
       while ((op = operator('*/'))) {
-        const left = number(value), right = number(primary());
+        const operand = primary();
+        if (substitute) continue;
+        const left = number(value), right = number(operand);
         if (op === '/' && right === 0) throw new Error('除数不能为 0');
         value = finite(op === '*' ? left * right : left / right);
       }
@@ -464,16 +490,34 @@
     function sum() {
       let value = product(), op;
       while ((op = operator('+-'))) {
-        const left = number(value), right = number(product());
+        const operand = product();
+        if (substitute) continue;
+        const left = number(value), right = number(operand);
         value = finite(op === '+' ? left + right : left - right);
       }
       return value;
     }
     try {
+      // Decide before parsing any arithmetic, including subexpressions preceding a text parameter.
+      for (const match of expression.matchAll(/\$[^{}\s$(),]+/g)) {
+        const name = match[0].slice(1);
+        if (variables.has(name)) continue;
+        const found = resolveName(name, source, context);
+        if (!found) throw new Error('未找到变量：' + match[0] + '（运算符两侧需有空格）');
+        if (found.error) throw new Error(found.error);
+        variables.set(name, found);
+        substitute = substitute || found.symbolic || !isNumber(found.val);
+      }
       let result = sum(); skipSpace();
       if (offset !== expression.length) throw new Error('表达式格式错误：第 ' + (offset + 1) + ' 个字符附近有多余内容');
       if (!hasVariables) result = number(result);
-      return { value: String(result), variables: Array.from(variables.values()) };
+      if (substitute && !directVariable) {
+        result = expression.replace(/\$[^{}\s$(),]+/g, (token) => variables.get(token.slice(1)).val).replace(/\s/g, '');
+        return { value: result, variables: Array.from(variables.values()), symbolic: true };
+      }
+      const resolved = { value: String(result), variables: Array.from(variables.values()) };
+      if (directVariable && variables.get(expression.slice(1))?.symbolic) resolved.symbolic = true;
+      return resolved;
     } catch (error) {
       return { error: error.message, variables: Array.from(variables.values()) };
     }
@@ -485,7 +529,8 @@
       found.add(match[1]);
       const result = evaluate(match[1], source);
       const parsed = parseExpression(match[1]);
-      const summary = result.error ? '\n' + result.error : '\n' + (parsed.noTrans ? '时延计算结果：' : '结果：') + result.value;
+      const summary = result.error ? '\n' + result.error : '\n'
+        + (result.symbolic ? '替换结果：' : parsed.noTrans ? '时延计算结果：' : '结果：') + result.value;
       return match[0] + (parsed.noTrans && !parsed.error ? '\n显示：' + parsed.expression.replace(/[$\s]/g, '') + '（noTrans）' : '')
         + summary + result.variables.map((item) => '\n\n$' + item.name + '\n参数表：' + item.table
         + (item.sourceTable ? '\n定义来源：' + item.sourceTable : '')
@@ -599,7 +644,7 @@
       const parsed = parseExpression(match[1]);
       const symbolic = parsed.noTrans && !parsed.error;
       const replacement = symbolic ? parsed.expression.replace(/[$\s]/g, '') : result.error ? match[0] : result.value;
-      if (!symbolic && !result.error && numericPattern.test(replacement.trim()) && Number.isFinite(Number(replacement)) && Number(replacement) < 0) {
+      if (!symbolic && !result.symbolic && !result.error && numericPattern.test(replacement.trim()) && Number.isFinite(Number(replacement)) && Number(replacement) < 0) {
         ranges.push({ start: rendered.length, end: rendered.length + replacement.length });
       }
       rendered += replacement;
@@ -723,23 +768,67 @@
     return node;
   }
   function setRowSelection(rows, active = rows[0] || null, anchor = active) {
+    referenceSelection = null;
     selectedRows = new Set(rows);
     selectedRow = active;
     rowSelectionAnchor = anchor;
     clipboardRequest++;
   }
+  function selectedReference(owner) {
+    return referenceSelection && referenceSelection.owner === owner && catalog.tables.includes(referenceSelection.source)
+      ? referenceSelection : null;
+  }
+  function parameterRowSelection(row, event, selected, anchor, visibleRows) {
+    const toggle = !!(event && (event.ctrlKey || event.metaKey));
+    if (event?.shiftKey && anchor) {
+      const visible = visibleRows();
+      const start = visible.indexOf(anchor), end = visible.indexOf(row);
+      if (start >= 0 && end >= 0) {
+        const range = visible.slice(Math.min(start, end), Math.max(start, end) + 1);
+        return { rows: toggle ? [...selected, ...range] : range, active: row, anchor };
+      }
+    }
+    if (!toggle) return { rows: [row], active: row, anchor: row };
+    const rows = new Set(selected);
+    if (rows.has(row)) rows.delete(row);
+    else rows.add(row);
+    return { rows: [...rows], active: rows.has(row) ? row : rows.values().next().value || null, anchor: row };
+  }
+  function referenceRowPatches(owner, path, addedRows, removedRows = []) {
+    const ids = addedRows.map((row) => row.id);
+    const removed = new Set(removedRows.map((row) => row.id));
+    const patches = [];
+    let table = owner;
+    path.forEach((key) => {
+      const ref = (table.references || []).find((item) => item.tableId === key);
+      const source = matrix.owner(catalog.tables, key);
+      if (!ref || !source) throw new Error('引用参数表已变化，请重新选择');
+      if (matrix.own(ref, 'rowIds')) {
+        const rowIds = [...new Set(ref.rowIds.filter((id) => !removed.has(id)).concat(ids))];
+        const references = table.references.map((item) => item === ref
+          ? Object.assign({}, ref, { rowIds }) : item);
+        patches.push({ target: table, field: 'references', value: references, sourceTableId: table.id });
+      }
+      table = source;
+    });
+    return patches;
+  }
   function updateClipboardButtons() {
     const table = catalog.tables.find((item) => item.id === selectedTable);
+    const rows = selectedReference(table)?.rows || selectedRows;
     document.querySelectorAll('[data-parameter-clipboard]').forEach((node) => {
       const [type, action] = node.dataset.parameterClipboard.split('-');
       node.disabled = action === 'copy'
-        ? !table || (type === 'row' && !selectedRows.size)
+        ? !table || (type === 'row' && !rows.size)
         : (type === 'row' && !table) || !(parameterClipboard && parameterClipboard.type === type || global.navigator.clipboard && global.navigator.clipboard.readText);
     });
   }
   function clipboardSnapshot(type) {
-    const table = catalog.tables.find((item) => item.id === selectedTable);
-    const rows = type === 'row' && table ? table.rows.filter((row) => selectedRows.has(row)) : [];
+    const owner = catalog.tables.find((item) => item.id === selectedTable);
+    const ref = type === 'row' ? selectedReference(owner) : null;
+    const table = ref?.source || owner;
+    const selected = ref?.rows || selectedRows;
+    const rows = type === 'row' && table ? table.rows.filter((row) => selected.has(row)) : [];
     if (!table || type === 'row' && !rows.length) throw new Error(type === 'table' ? '请先选中参数表' : '请先选中参数行');
     const payload = { kind: clipboardKind, version: 1, type };
     if (type === 'table') payload.table = table;
@@ -791,14 +880,54 @@
     const node = Array.from($('parameter-tree').querySelectorAll('.parameter-tree-label')).find((item) => item.dataset[type] === value);
     if (node) node.focus({ preventScroll: true });
   }
-  function applyClipboard(payload, type) {
+  function captureParameterFocus(input) {
+    if (!input?.matches('[data-parameter-field]')) return null;
+    const line = input.closest('tr');
+    return {
+      field: input.dataset.parameterField,
+      row: input.dataset.parameterRowId || input.dataset.referenceRowId,
+      source: input.dataset.referenceSourceId,
+      section: input.closest('.parameter-reference-section')?.dataset.referenceId,
+      draft: !!line?.classList.contains('parameter-append-row'),
+      start: input.selectionStart, end: input.selectionEnd, direction: input.selectionDirection,
+      left: input.scrollLeft, top: input.scrollTop
+    };
+  }
+  function restoreParameterFocus(container, saved) {
+    if (!container || !saved) return;
+    const fields = [...container.querySelectorAll('[data-parameter-field]')].filter((input) =>
+      input.dataset.parameterField === saved.field && input.dataset.referenceSourceId === saved.source
+      && input.closest('.parameter-reference-section')?.dataset.referenceId === saved.section
+      && !input.closest('[hidden]'));
+    const input = fields.find((node) => (node.dataset.parameterRowId || node.dataset.referenceRowId) === saved.row)
+      || (saved.draft && fields.find((node) => node.closest('.parameter-append-row')));
+    if (!input) return;
+    const folded = input.closest('details:not([open])');
+    if (folded) folded.open = true;
+    input.focus({ preventScroll: true });
+    if (typeof saved.start === 'number') input.setSelectionRange(saved.start, saved.end, saved.direction);
+    input.scrollLeft = saved.left; input.scrollTop = saved.top;
+  }
+  function revealPastedRow(handle, scroller) {
+    if (!handle || !scroller) return;
+    const folded = handle.closest('details:not([open])');
+    if (folded) folded.open = true;
+    handle.focus({ preventScroll: true });
+    const row = handle.closest('tr').getBoundingClientRect(), area = scroller.getBoundingClientRect();
+    const headers = scroller.querySelectorAll('.parameter-grid:not(.parameter-reference-grid) thead th');
+    const top = Math.max(area.top, ...Array.from(headers, (cell) => cell.getBoundingClientRect().bottom));
+    if (row.top < top) scroller.scrollTop += row.top - top;
+    else if (row.bottom > area.bottom) scroller.scrollTop += Math.min(row.top - top, row.bottom - area.bottom);
+  }
+  function applyClipboard(payload, type, ref) {
     if (type === 'table') {
       const source = clone(payload.table); source.id = source.id || 'clipboard'; matrix.normalize([source]);
       const table = matrix.cloneTable(source, id);
       table.name = uniqueCopyName(payload.table.name, new Set(catalog.tables.map((item) => item.name)), true); table.parentId = selectedFolder;
       insertTable(table); return;
     }
-    const table = catalog.tables.find((item) => item.id === selectedTable);
+    const owner = catalog.tables.find((item) => item.id === selectedTable);
+    const table = ref?.source || owner;
     if (!table) throw new Error('请先选中目标参数表');
     const existingNames = new Set(table.rows.map((row) => row.name));
     const reservedNames = new Set([...existingNames, ...payload.rows.map((row) => row.name)]);
@@ -809,14 +938,19 @@
       return row;
     });
     let index = -1;
-    table.rows.forEach((row, position) => { if (selectedRows.has(row)) index = position; });
+    const selected = ref?.rows || selectedRows;
+    table.rows.forEach((row, position) => { if (selected.has(row)) index = position; });
     const position = index < 0 ? table.rows.length : index + 1;
     const nextRows = trimTrailingParameterRows(table.rows.slice(0, position).concat(copied, table.rows.slice(position)));
-    setRowSelection(copied); rowFilters.name = ''; rowFilters.val = '';
-    const patches = [{ target: table, field: 'rows', value: nextRows }];
-    patchMatrix(table, patches, true);
-    const handle = $('parameter-workspace').querySelector('tr.selected .parameter-row-select');
-    if (handle) { handle.focus({ preventScroll: true }); handle.scrollIntoView({ block: 'nearest', inline: 'nearest' }); }
+    const patches = [{ target: table, field: 'rows', value: nextRows, sourceTableId: table.id }];
+    if (ref) {
+      patches.push(...referenceRowPatches(owner, ref.path, copied.filter((row) => row.name)));
+      referenceSelection = Object.assign({}, ref, { rows: new Set(copied), anchor: copied[0] });
+    } else setRowSelection(copied);
+    rowFilters.name = ''; rowFilters.val = '';
+    patchMatrix(owner, patches, true);
+    const workspace = $('parameter-workspace');
+    revealPastedRow(workspace.querySelector('tr.selected .parameter-row-select'), workspace.querySelector('.parameter-grid-scroll'));
   }
   async function pasteParameters(type, event) {
     const destination = { libraryId, folder: selectedFolder, table: selectedTable, row: selectedRow };
@@ -838,7 +972,9 @@
         status('粘贴位置已改变，请重新粘贴', true); return;
       }
       const payload = parseClipboard(text, type, !!(event && type === 'table' && destination.table));
-      applyClipboard(payload, payload.type); parameterClipboard = clone(payload); updateClipboardButtons();
+      const owner = catalog.tables.find((item) => item.id === selectedTable);
+      applyClipboard(payload, payload.type, type === 'row' ? selectedReference(owner) : null);
+      parameterClipboard = clone(payload); updateClipboardButtons();
     } catch (error) { status(error.message, true); }
   }
   function clipboardContext(target) {
@@ -1302,7 +1438,7 @@
         if (includeDescriptions && result.description) lines.push(tomlComment(result.description));
         if (result.formula) lines.push(tomlComment('公式：' + result.rawVal));
         const key = /^[A-Za-z0-9_-]+$/.test(name) ? name : tomlString(name);
-        lines.push(key + ' = ' + tomlValue(result.val), ''); count++;
+        lines.push(key + ' = ' + (result.symbolic ? tomlString(result.val) : tomlValue(result.val)), ''); count++;
       } catch (error) { throw new Error('第 ' + (index + 1) + ' 行：' + error.message); }
     });
     return { text: lines.join('\n'), count };
@@ -1479,30 +1615,24 @@
     const unaffected = (entry) => !replaced.has(entry.tableId || entry.table?.id)
       && !(entry.changes || []).some((change) => replaced.has(change.tableId || change.sourceTableId));
     parameterUndoStack = parameterUndoStack.filter(unaffected); parameterRedoStack = parameterRedoStack.filter(unaffected);
+    const workspace = $('parameter-workspace');
+    const scroll = workspace?.querySelector('.parameter-grid-scroll');
+    const focus = captureParameterFocus(document.activeElement);
+    const position = scroll && [scroll.scrollLeft, scroll.scrollTop];
     Object.assign(catalog, next, { revision: incoming.revision });
     syncedCatalog = clone(incoming); pendingCatalog = null;
-    invalidate(); renderTree(); renderTable(); return true;
+    invalidate(); renderTree(); renderTable();
+    const nextScroll = workspace?.querySelector('.parameter-grid-scroll');
+    if (nextScroll && position) { nextScroll.scrollLeft = position[0]; nextScroll.scrollTop = position[1]; }
+    restoreParameterFocus(nextScroll, focus);
+    return true;
   }
   function applyPendingCatalog() {
     if (!pendingCatalog || modal || activeCellEdit || saving) return;
     if (catalogLoadError) { const incoming = pendingCatalog; pendingCatalog = null; setCatalog(incoming.catalog, incoming.libraryId); return; }
     if (dirty !== savedGeneration) { void flush(false).catch(() => {}); return; }
-    const active = document.activeElement, scroll = $('parameter-workspace')?.querySelector('.parameter-grid-scroll');
-    const position = scroll && [scroll.scrollLeft, scroll.scrollTop];
-    const field = active && active.dataset.parameterField, line = active && active.closest('tr');
-    const index = line && line.parentElement ? [...line.parentElement.children].indexOf(line) : -1;
-    const sourceId = active && active.dataset.referenceSourceId, rowId = active && active.dataset.referenceRowId;
-    const start = active && active.selectionStart, end = active && active.selectionEnd;
     try { rebasePendingCatalog(); }
     catch (error) { status(error.message, true); return; }
-    const next = $('parameter-workspace')?.querySelector('.parameter-grid-scroll');
-    if (next && position) { next.scrollLeft = position[0]; next.scrollTop = position[1]; }
-    if (field && next) {
-      const row = next.querySelector('tbody')?.children[index];
-      const input = sourceId ? [...next.querySelectorAll('[data-reference-source-id]')].find((node) => node.dataset.parameterField === field && node.dataset.referenceSourceId === sourceId && node.dataset.referenceRowId === rowId)
-        : row && [...row.querySelectorAll('[data-parameter-field]')].find((node) => node.dataset.parameterField === field);
-      if (input) { input.focus({ preventScroll: true }); if (typeof start === 'number') input.setSelectionRange(start, end); }
-    }
   }
   async function flush(includeDraft = true) {
     if (catalogLoadError) return;
@@ -1668,6 +1798,10 @@
     }
     const surviving = table ? table.rows.filter((row) => selectedRows.has(row)) : [];
     if (surviving.length !== selectedRows.size) setRowSelection(surviving);
+    const ref = selectedReference(table);
+    if (ref && (table.references || []).some((entry) => entry.tableId === ref.path[0])) {
+      ref.rows = new Set(ref.source.rows.filter((row) => ref.rows.has(row)));
+    } else referenceSelection = null;
     workspace.replaceChildren();
     if (catalogLoadError) {
       workspace.append(element('h2', 'parameter-workspace-header', '参数表暂不可用'),
@@ -1863,26 +1997,14 @@
       });
       deleteRowButton.disabled = selectedRows.size !== 1;
       deleteRowButton.title = deleteRowButton.disabled ? '删除选中行' : '删除第 ' + (table.rows.indexOf(selectedRow) + 1) + ' 行';
+      if (matrixView) matrixView.syncSelection();
       updateClipboardButtons();
     }
     function selectRow(row, event) {
       if (row === appendRow) { setRowSelection([]); updateRowSelection(); return; }
-      const toggle = !!(event && (event.ctrlKey || event.metaKey));
-      if (event?.shiftKey && rowSelectionAnchor) {
-        const visible = rowViews.filter((view) => view.row !== appendRow && !view.line.hidden).map((view) => view.row);
-        const start = visible.indexOf(rowSelectionAnchor), end = visible.indexOf(row);
-        if (start >= 0 && end >= 0) {
-          const range = visible.slice(Math.min(start, end), Math.max(start, end) + 1);
-          setRowSelection(toggle ? [...selectedRows, ...range] : range, row, rowSelectionAnchor);
-          updateRowSelection(); return;
-        }
-      }
-      if (toggle) {
-        const rows = new Set(selectedRows);
-        if (rows.has(row)) rows.delete(row);
-        else rows.add(row);
-        setRowSelection([...rows], rows.has(row) ? row : rows.values().next().value || null, row);
-      } else setRowSelection([row]);
+      const next = parameterRowSelection(row, event, selectedRows, rowSelectionAnchor, () =>
+        rowViews.filter((view) => view.row !== appendRow && !view.line.hidden).map((view) => view.row));
+      setRowSelection(next.rows, next.active, next.anchor);
       updateRowSelection();
     }
     function updateRowPosition(view, index) {
@@ -1913,15 +2035,7 @@
         const input = element(field === 'name' ? 'input' : 'textarea');
         view.inputs[field] = input;
         if (field === 'name') {
-          const jump = button('正在查找引用...', (event) => {
-            event.stopPropagation();
-            const documents = view.references || [];
-            if (!documents.length) return;
-            if (documents.length > 1) chooseReference(documents, table.id, String(row.name || ''), jump);
-            else void jumpToReference(documents[0], table.id, String(row.name || '')).catch(referenceError);
-          }, 'external');
-          jump.disabled = true; jump.classList.add('parameter-reference-jump'); view.jump = jump;
-          fieldBox.append(jump);
+          fieldBox.append(parameterReferenceJump(view, table));
           const handle = button('选中第 ' + (index + 1) + ' 行', (event) => {
             event.stopPropagation(); selectRow(row, event);
           });
@@ -1966,6 +2080,7 @@
         }
         input.value = row[field] == null ? '' : String(row[field]);
         input.dataset.parameterField = field;
+        input.dataset.parameterRowId = row.id;
         input.spellcheck = false; if (field !== 'name') input.rows = 1;
         const resize = () => { if (field !== 'name' && !line.hidden) global.VWDParameterMatrixView.resizeTextareas([input]); };
         view.resize.push(resize);
@@ -1989,14 +2104,18 @@
             const isFormula = result.formula && !result.error;
             const numericValue = Number(result.val);
             input.classList.toggle('parameter-formula-value', isFormula);
-            input.classList.toggle('parameter-negative-value', !result.error && Number.isFinite(numericValue) && numericValue < 0);
+            input.classList.toggle('parameter-negative-value', !result.error && !result.symbolic && Number.isFinite(numericValue) && numericValue < 0);
             input.setAttribute('aria-invalid', String(!!result.error));
             input.title = result.formula ? '公式：' + result.rawVal : '';
             input.placeholder = '';
             error.hidden = !result.error; error.textContent = result.error;
             if (input.isConnected && valueChanged) resize();
           };
-          input.addEventListener('focus', () => { input.value = row.val == null ? '' : String(row.val); resize(); });
+          input.addEventListener('focus', () => {
+            const raw = String(row.val ?? '');
+            if (input.value !== raw) input.value = raw;
+            resize();
+          });
           fieldBox.append(error);
         }
         input.addEventListener('input', () => {
@@ -2067,7 +2186,7 @@
           let matchesValue;
           if (comparison) {
             const value = Number(displayedValue);
-            matchesValue = !filterError && !(result && result.error)
+            matchesValue = !filterError && !(result && (result.error || result.symbolic))
               && numericPattern.test(displayedValue) && Number.isFinite(value);
             if (matchesValue) {
               switch (comparison[1]) {
@@ -2107,11 +2226,43 @@
     matrixView = global.VWDParameterMatrixView.attach({ table, toolbar, grid, headRow: tr, rows: rowViews, workspace, emptyCell, scroller,
       filters: rowFilters, element, button, id, status, commit: commitParameterCell,
       patch: (patches, render) => patchMatrix(table, patches, render),
-      editSource: (source, row, field, input, original) => {
+      jumpButton: parameterReferenceJump,
+      captureFocus: captureParameterFocus,
+      restoreFocus: restoreParameterFocus,
+      referenceSelection: () => selectedReference(table),
+      selectReference: (view, event, visibleRows) => {
+        const current = selectedReference(table);
+        const sameSource = current?.source === view.source && current.path[0] === view.path[0];
+        const next = view.draft ? { rows: [], anchor: null }
+          : parameterRowSelection(view.row, event, sameSource ? current.rows : [], sameSource ? current.anchor : null, visibleRows);
+        setRowSelection([]);
+        referenceSelection = { owner: table, source: view.source, path: view.path, rows: new Set(next.rows), anchor: next.anchor };
+        updateRowSelection();
+      },
+      retainReferenceSelection: (rows) => {
+        const current = selectedReference(table);
+        if (!current || current.rows.size === rows.length) return;
+        setRowSelection([]);
+        if (rows.length) referenceSelection = Object.assign({}, current, { rows: new Set(rows), anchor: rows.includes(current.anchor) ? current.anchor : rows[0] });
+        updateRowSelection();
+      },
+      newRow: emptyParameterRow,
+      editSource: (source, row, field, input, original, path, draft) => {
         if (activeCellEdit && activeCellEdit.input !== input) commitParameterCell();
         activeCellEdit = input.value === original ? null : { input, original, commit: () => {
-          if (!catalog.tables.includes(source) || !source.rows.includes(row)) { status('源参数已变化，请重新编辑', true); return; }
-          patchMatrix(table, parameterCellPatches(source, row, field, input.value, false));
+          if (!catalog.tables.includes(source) || (!draft && !source.rows.includes(row))) { status('源参数已变化，请重新编辑', true); return; }
+          if (draft && field !== 'name') { row[field] = input.value; return; }
+          if (draft && !input.value.trim()) { input.value = ''; return; }
+          if (!draft && field === 'name' && !input.value.trim()
+              && !isEmptyParameterRow(Object.assign({}, row, { name: '' }))) {
+            input.value = original;
+            status('请先清空变量值和说明，再清空变量名', true);
+            return;
+          }
+          const patches = parameterCellPatches(source, row, field, input.value, draft);
+          if (draft) patches.push(...referenceRowPatches(table, path, [row]));
+          else if (field === 'name' && !input.value.trim()) patches.push(...referenceRowPatches(table, path, [], [row]));
+          patchMatrix(table, patches);
           renderTree(); refreshCommittedCell(); applyFilters();
         } };
         notifyParameterHistory();
@@ -2138,7 +2289,10 @@
     matrixDispose = matrixView.dispose;
     syncAppendRow(); refreshValues(); applyFilters();
     grid.append(body); scroller.prepend(grid); workspace.append(scroller);
-    referenceRefresh = () => { void updateReferenceButtons(table, rowViews.filter((view) => view.row !== appendRow), workspace); };
+    referenceRefresh = () => {
+      const views = rowViews.filter((view) => view.row !== appendRow).concat(matrixView.referenceJumpViews());
+      void updateReferenceButtons(views, workspace);
+    };
     referenceRefresh();
   }
   async function switchPage(page) {
@@ -2753,7 +2907,7 @@
         const line = event.target.closest('tbody tr');
         if (line) {
           event.preventDefault();
-          const target = line.querySelector('.parameter-row-select') || line.closest('.parameter-reference-section')?.querySelector('.parameter-reference-name');
+          const target = line.querySelector('.parameter-row-select:not(:disabled)') || line.closest('.parameter-reference-section')?.querySelector('.parameter-reference-name');
           if (target) target.focus({ preventScroll: true }); else event.target.blur();
         }
       }

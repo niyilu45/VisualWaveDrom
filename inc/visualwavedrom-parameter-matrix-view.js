@@ -24,7 +24,24 @@
     toolbar.append(fullscreen);
     const references = element('div', 'parameter-reference-sections'); api.scroller.append(references);
     const expandedUnused = new Set();
-    let signature = '', editors = [], resizeFrame = 0;
+    const drafts = new Map();
+    let signature = '', editors = [], rowViews = [], resizeFrame = 0;
+    const matchesSelection = (view, selection) => selection?.source === view.source && selection.path[0] === view.path[0];
+    const isVisible = (view) => !view.line.hidden && !view.line.closest('details:not([open])');
+    function select(view, event) {
+      api.selectReference(view, event, () => rowViews.filter((item) =>
+        !item.draft && item.source === view.source && item.path[0] === view.path[0] && isVisible(item)
+      ).map((item) => item.row));
+    }
+    function syncSelection() {
+      const selection = api.referenceSelection();
+      rowViews.forEach((view) => {
+        const selected = !view.draft && matchesSelection(view, selection) && selection.rows.has(view.row);
+        view.line.classList.toggle('selected', selected);
+        view.line.setAttribute('aria-selected', String(selected));
+        view.handle.setAttribute('aria-pressed', String(selected));
+      });
+    }
     function resize(input) { resizeTextareas([input]); }
     function queueResize() {
       if (!resizeFrame) resizeFrame = requestAnimationFrame(() => {
@@ -44,7 +61,10 @@
       const next = JSON.stringify(sections.map((section) => [section.reference, section.source?.name, section.missingRows,
         section.rows.map((entry) => [entry.row.id, entry.row.referenceSource?.tableId, entry.used, entry.winner?.referencePath]) ]));
       if (next !== signature) {
-        signature = next; references.replaceChildren(); editors = [];
+        const focused = document.activeElement;
+        const focus = references.contains(focused) ? api.captureFocus(focused) : null;
+        const top = api.scroller.scrollTop;
+        signature = next; references.replaceChildren(); editors = []; rowViews = [];
         sections.forEach((section, index) => {
           const { source, reference } = section;
           const band = element('section', 'parameter-reference-section'); band.dataset.referenceId = reference.tableId;
@@ -57,36 +77,72 @@
           if (!source) band.append(element('p', 'parameter-value-error', '引用表不存在或已删除；恢复源表后将自动更新。'));
           else {
             if (section.missingRows) band.append(element('p', 'parameter-value-error', section.missingRows + ' 个选定变量已不存在'));
-            function buildGrid(entries, muted) {
+            function buildGrid(entries, muted, appendOnly = false) {
               const list = element('table', 'parameter-grid parameter-reference-grid'), head = element('thead'), labels = element('tr');
-              ['变量名 name', '变量值 val', '变量说明 description'].forEach((label) => { const th = element('th', '', label); th.scope = 'col'; labels.append(th); }); head.append(labels); list.append(head);
+              if (appendOnly) {
+                const columns = element('colgroup');
+                ['28%', '27%', '45%'].forEach((width) => { const column = element('col'); column.style.width = width; columns.append(column); });
+                list.append(columns);
+              } else {
+                ['变量名 name', '变量值 val', '变量说明 description'].forEach((label) => { const th = element('th', '', label); th.scope = 'col'; labels.append(th); }); head.append(labels); list.append(head);
+              }
               const body = element('tbody');
               entries.forEach((entry) => {
                 const origin = entry.row.referenceSource?.tableId || source.id;
-                const original = api.sourceTable(origin), row = original?.rows.find((row) => row.id === entry.row.id);
-                const line = element('tr', muted ? 'parameter-reference-unused' : ''); line.dataset.referenceRowId = entry.row.id;
+                const original = api.sourceTable(origin), draft = appendOnly;
+                const row = draft ? entry.row : original?.rows.find((row) => row.id === entry.row.id);
+                if (!original || !row) return;
+                const line = element('tr', draft ? 'parameter-append-row parameter-reference-append-row' : muted ? 'parameter-reference-unused' : '');
+                if (!draft) line.dataset.referenceRowId = entry.row.id;
+                const path = [reference.tableId, ...(entry.row.referencePath || [])];
+                const view = { row, line, source: original, path, draft };
+                rowViews.push(view);
+                line.addEventListener('click', () => select(view));
+                line.addEventListener('focusin', (event) => {
+                  if (event.target.matches('[data-parameter-field]')) select(view);
+                });
                 if (muted) line.title = '未使用：' + (entry.winner?.referencePath ? '上方引用表' : '本表') + ' 已定义同名变量';
                 ['name', 'val', 'description'].forEach((field) => {
                   const td = element('td'), box = element('div', 'parameter-cell' + (field === 'val' ? ' parameter-value-cell' : ''));
                   const input = element(field === 'name' ? 'input' : 'textarea'); input.spellcheck = false; if (field !== 'name') input.rows = 1;
                   input.dataset.parameterField = field; input.dataset.referenceSourceId = origin; input.dataset.referenceRowId = entry.row.id;
-                  input.setAttribute('aria-label', source.name + ' / ' + entry.row.name + ' / ' + field); input.disabled = !row;
+                  input.setAttribute('aria-label', source.name + ' / ' + (draft ? '空白录入行' : entry.row.name) + ' / ' + field);
+                  if (field === 'name') {
+                    const jump = draft ? button('空白录入行', () => {}, 'external') : api.jumpButton(view, original);
+                    if (draft) { jump.disabled = true; jump.classList.add('parameter-reference-jump'); }
+                    const index = draft ? original.rows.length + 1 : original.rows.indexOf(row) + 1;
+                    const handle = button(draft ? '空白录入行' : '选中 ' + original.name + ' 第 ' + index + ' 行', (event) => {
+                      event.stopPropagation(); select(view, event);
+                    });
+                    handle.className = 'parameter-row-select parameter-reference-row-select';
+                    handle.textContent = index; handle.disabled = draft;
+                    view.handle = handle;
+                    box.append(jump, handle);
+                    if (draft) input.placeholder = '名称';
+                  }
                   const error = element('span', 'parameter-value-error'); error.hidden = true;
-                  const raw = () => M.raw(row && row[field]);
-                  input.addEventListener('focus', () => { input.value = raw(); resize(input); });
-                  input.addEventListener('input', () => { api.editSource(original, row, field, input, raw()); resize(input); });
+                  const raw = () => M.raw(row[field]);
+                  input.value = raw();
+                  input.addEventListener('focus', () => {
+                    if (input.value !== raw()) input.value = raw();
+                    resize(input);
+                  });
+                  input.addEventListener('input', () => { api.editSource(original, row, field, input, raw(), path, draft); resize(input); });
+                  input.addEventListener('keydown', (event) => {
+                    if (field !== 'description' && event.key === 'Enter' && !event.isComposing
+                        && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
+                      event.preventDefault(); event.stopPropagation(); input.blur();
+                    }
+                  });
                   input.addEventListener('blur', (event) => {
                     const next = event.relatedTarget;
-                    const focus = next?.dataset.referenceSourceId ? { source: next.dataset.referenceSourceId, row: next.dataset.referenceRowId, field: next.dataset.parameterField } : null;
+                    const focus = next?.dataset.referenceSourceId ? api.captureFocus(next) : null;
                     api.commit(); api.refresh();
-                    if (focus && !next.isConnected) {
-                      const replacement = [...references.querySelectorAll('[data-reference-source-id]')].find((node) => node.dataset.referenceSourceId === focus.source && node.dataset.referenceRowId === focus.row && node.dataset.parameterField === focus.field);
-                      if (replacement) replacement.focus({ preventScroll: true });
-                    }
+                    if (focus && !next.isConnected) api.restoreFocus(references, focus);
                   });
                   input.addEventListener('beforeinput', (event) => { if (['historyUndo', 'historyRedo'].includes(event.inputType)) { event.preventDefault(); api.history(event.inputType === 'historyRedo'); } });
                   box.append(input); if (field === 'val') box.append(error); td.append(box); line.append(td);
-                  editors.push({ input, error, field, rowId: entry.row.id, origin, sourceId: source.id, muted, line });
+                  if (!draft) editors.push({ input, error, field, rowId: entry.row.id, origin, sourceId: source.id, muted, line });
                 }); body.append(line);
               }); list.append(body); return list;
             }
@@ -98,9 +154,17 @@
               details.addEventListener('toggle', () => { if (details.open) expandedUnused.add(source.id); else expandedUnused.delete(source.id); queueResize(); }); band.append(details);
             }
             if (!section.rows.length) band.append(element('p', 'parameter-empty', '暂无可用的引用变量'));
+            const original = api.sourceTable(source.id);
+            if (original) {
+              let draft = drafts.get(source.id);
+              if (!draft || original.rows.includes(draft)) { draft = api.newRow(); drafts.set(source.id, draft); }
+              band.append(buildGrid([{ row: draft }], false, true));
+            }
           }
           references.append(band);
         });
+        api.scroller.scrollTop = top;
+        if (focus && !focused.isConnected) api.restoreFocus(references, focus);
       }
       const byId = new Map(columns.map((column) => [column.id, column])), contexts = new Map();
       editors.forEach((editor) => {
@@ -113,25 +177,34 @@
         const result = field === 'val' ? api.resolve(target, row, contexts.get(target.id)) : null;
         if (document.activeElement !== input) input.value = result ? result.val : M.raw(original[field]);
         input.classList.toggle('parameter-formula-value', !!result?.formula && !result.error);
-        input.classList.toggle('parameter-negative-value', !!result && !result.error && Number.isFinite(Number(result.val)) && Number(result.val) < 0);
+        input.classList.toggle('parameter-negative-value', !!result && !result.error && !result.symbolic && Number.isFinite(Number(result.val)) && Number(result.val) < 0);
         input.setAttribute('aria-invalid', String(!!result?.error));
         input.title = (result?.error || (result?.formula ? '公式：' + result.rawVal + '\n' : '')) + '编辑源表：' + (api.sourceTable(origin)?.name || origin);
         error.textContent = result?.error || ''; error.hidden = !result?.error;
-        if (field === 'val') { editor.line.dataset.value = result.val; editor.line.dataset.rawValue = result.rawVal; editor.line.dataset.valueError = result.error; }
+        if (field === 'val') { editor.line.dataset.value = result.val; editor.line.dataset.rawValue = result.rawVal; editor.line.dataset.valueError = result.error; editor.line.dataset.valueSymbolic = result.symbolic ? 'true' : ''; }
       });
+      syncSelection();
       queueResize();
     }
     function filterReferences(test) {
       let revealed = false;
       references.querySelectorAll('tbody tr').forEach((line) => {
+        if (line.classList.contains('parameter-reference-append-row')) return;
         const name = line.querySelector('[data-parameter-field="name"]')?.value || '';
         const wasHidden = line.hidden;
-        line.hidden = !name.toLowerCase().includes(api.filters.name.trim().toLowerCase()) || !test({ val: line.dataset.value || '', rawVal: line.dataset.rawValue || '', error: line.dataset.valueError || '' });
+        line.hidden = !name.toLowerCase().includes(api.filters.name.trim().toLowerCase()) || !test({ val: line.dataset.value || '', rawVal: line.dataset.rawValue || '', error: line.dataset.valueError || '', symbolic: !!line.dataset.valueSymbolic });
         if (wasHidden && !line.hidden) revealed = true;
       });
+      const selection = api.referenceSelection();
+      if (selection?.rows.size) {
+        const retained = rowViews.filter((view) => !view.line.hidden && matchesSelection(view, selection)
+          && selection.rows.has(view.row)).map((view) => view.row);
+        api.retainReferenceSelection(retained);
+      }
       if (revealed) queueResize();
     }
-    return { refresh, filterReferences, visible: (view, test) => test(view.valueResult), clearFilters() {}, dispose() {
+    return { refresh, filterReferences, syncSelection, referenceJumpViews: () => rowViews.filter((view) => view.jump),
+      visible: (view, test) => test(view.valueResult), clearFilters() {}, dispose() {
       cancelAnimationFrame(resizeFrame); if (observer) observer.disconnect();
       global.removeEventListener('resize', queueResize); global.removeEventListener('vwd-ui-font-change', queueResize);
     } };

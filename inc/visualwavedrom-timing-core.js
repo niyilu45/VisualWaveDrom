@@ -26,6 +26,7 @@
         if (typeof evaluateExpression !== 'function') throw new Error('时延公式或参数未解析，请检查链接参数表');
         const result = evaluateExpression(expression);
         if (!result || result.error) throw new Error(result && result.error || '时延公式计算失败');
+        if (result.symbolic) throw new Error('时延公式含非数字参数，不能用于时延计算');
         return result.value;
       }
       try {

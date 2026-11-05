@@ -91,6 +91,8 @@ svg text.parameter-reference-highlight tspan { paint-order: stroke fill; stroke:
 .parameter-reference-name:disabled { color: var(--text-muted); text-decoration: none; cursor: default; }
 .parameter-reference-grid th { position: static; background: transparent; }
 .parameter-reference-grid td { white-space: pre-wrap; overflow-wrap: anywhere; }
+.parameter-reference-row-select { justify-content: center; cursor: pointer; }
+@media (max-width: 600px) { .parameter-reference-row-select { flex-basis: 24px; } }
 .parameter-reference-unused-group { padding: 0 12px 12px; }
 .parameter-reference-unused-group > summary { padding: 8px 0; cursor: pointer; color: var(--text-muted); font-size: .85rem; }
 .parameter-reference-grid .parameter-reference-unused td { color: #b2b2b2; opacity: .58; }
