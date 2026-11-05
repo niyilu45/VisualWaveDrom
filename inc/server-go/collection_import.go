@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/csv"
@@ -1240,25 +1241,37 @@ func saveCollectionPreset(
 	return resolved, nil
 }
 
-func readCollectionPresetInnerType(path string) (string, error) {
+func isDiscoverableCollectionPreset(path string) bool {
 	info, err := os.Stat(path)
 	if err != nil {
-		return "", err
+		return false
 	}
 	if !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > collectionPresetMaxBytes {
-		return "", errors.New("preset file has an unsupported size or type")
+		return false
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return "", err
+		return false
 	}
+	data = bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
 	var marker struct {
 		InnerType string `json:"InnerType"`
 	}
 	if err = json.Unmarshal(data, &marker); err != nil {
-		return "", err
+		return false
 	}
-	return strings.TrimSpace(marker.InnerType), nil
+	if innerType := strings.TrimSpace(marker.InnerType); innerType != "" {
+		return innerType == collectionPresetInnerType
+	}
+
+	// Handwritten and older presets can lack the marker. Validate their rules
+	// before listing them, rather than treating any JSON with paths as a preset.
+	var raw map[string]any
+	if err = json.Unmarshal(data, &raw); err != nil {
+		return false
+	}
+	preset, err := normalizeCollectionPreset(raw)
+	return err == nil && len(preset.Paths) > 0
 }
 
 func discoverCollectionPresets(
@@ -1299,8 +1312,7 @@ func discoverCollectionPresets(
 		if !strings.EqualFold(filepath.Ext(entry.Name()), ".json") {
 			return nil
 		}
-		innerType, markerErr := readCollectionPresetInnerType(path)
-		if markerErr != nil || innerType != collectionPresetInnerType {
+		if !isDiscoverableCollectionPreset(path) {
 			return nil
 		}
 		if len(result.Entries) >= collectionPresetResultLimit {
@@ -1348,8 +1360,7 @@ func resolveDiscoveredCollectionPreset(
 	if err != nil {
 		return "", "", err
 	}
-	innerType, err := readCollectionPresetInnerType(presetPath)
-	if err != nil || innerType != collectionPresetInnerType {
+	if !isDiscoverableCollectionPreset(presetPath) {
 		return "", "", errors.New("selected file is not a batch waveform import preset")
 	}
 	return presetPath, normalizedRelative, nil

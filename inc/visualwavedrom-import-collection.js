@@ -2262,6 +2262,30 @@
         }));
     }
 
+    function collectionImportSignalOrder(payload, formulas, multiWaves) {
+      const groups = new Map();
+      const entries = payload.search && Array.isArray(payload.search.entries)
+        ? payload.search.entries
+        : [];
+      const updates = Array.isArray(payload.updates) ? payload.updates : [];
+      const files = Array.isArray(payload.files) ? payload.files : [];
+      let offset = 0;
+      let fileIndex = 0;
+      // The service returns files and their updates in match order, even with parallel parsing.
+      entries.forEach((entry) => {
+        if (!Array.isArray(entry.matches) || !entry.matches.length) return;
+        const file = files[fileIndex++];
+        const count = Number(file && file.updateCount) || 0;
+        groups.set(entry.index, updates.slice(offset, offset + count).map((update) => update.signal));
+        offset += count;
+      });
+      formulas.concat(multiWaves).forEach((definition) => {
+        groups.set(Number(definition.id), [definition.name]);
+      });
+      return Array.from(groups.keys()).sort((left, right) => left - right)
+        .flatMap((index) => groups.get(index));
+    }
+
     function scheduleEditorParse() {
       clearTimeout(editorParseTimer);
       scheduleRememberState('preset-editor-change');
@@ -3730,6 +3754,7 @@
         }
         payload.formulas = formulas;
         payload.multiWaves = multiWaves;
+        payload.signalOrder = collectionImportSignalOrder(payload, formulas, multiWaves);
         payload.updates = (Array.isArray(payload.updates) ? payload.updates : []).concat(
           multiWaves.map((definition) => ({
             signal: definition.name,

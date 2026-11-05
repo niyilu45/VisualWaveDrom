@@ -17381,9 +17381,29 @@ ${lines.join('\n')}`;
         });
     }
 
+    function reorderImportedSignalRows(entries, ranks) {
+      const isMovable = (row) => ranks.has(row) && !Array.isArray(row.children);
+      const ordered = entries.filter(isMovable)
+        .sort((left, right) => ranks.get(left) - ranks.get(right));
+      let next = 0;
+      entries.forEach((entry, index) => {
+        if (isMovable(entry)) entries[index] = ordered[next++];
+        else if (Array.isArray(entry)) reorderImportedSignalRows(entry, ranks);
+        else if (entry && Array.isArray(entry.children)) {
+          reorderImportedSignalRows(entry.children, ranks);
+        }
+      });
+    }
+
     function applyImportedWaveRows(payload, importOptions) {
-      const updates = payload && Array.isArray(payload.updates) ? payload.updates : [];
+      let updates = payload && Array.isArray(payload.updates) ? payload.updates : [];
       if (!updates.length) throw new Error('导入方案没有返回任何信号行');
+      const hasImportOrder = Array.isArray(payload.signalOrder);
+      if (hasImportOrder) {
+        const ranks = new Map(payload.signalOrder.map((name, index) => [name, index]));
+        const rank = (update) => ranks.get(String(update && update.signal || '').trim()) ?? ranks.size;
+        updates = updates.slice().sort((left, right) => rank(left) - rank(right));
+      }
       const allowCreateMissing = !!(importOptions && importOptions.createMissing);
       const replaceScopeFormulas = !!(importOptions && importOptions.replaceScopeFormulas);
       const replaceScopeMultiWaves = !!(importOptions && importOptions.replaceScopeMultiWaves);
@@ -17567,6 +17587,19 @@ ${lines.join('\n')}`;
         else delete item.target.signal.scope;
       });
 
+      const sourceRowReplacements = new Map();
+      if (hasImportOrder) {
+        reorderImportedSignalRows(parsed.signal, new Map(
+          prepared.map((item, index) => [item.target.signal, index])
+        ));
+        const oldIndices = new Map(signals.map((row, index) => [row, index]));
+        flattenSignals(parsed.signal).forEach((row, index) => {
+          const oldIndex = oldIndices.get(row);
+          if (oldIndex != null && oldIndex !== index) {
+            sourceRowReplacements.set('source:' + oldIndex, 'source:' + index);
+          }
+        });
+      }
       const serialized = serializeWaveDocumentSource(parsed);
       const newText = serialized.text;
       if (previewOnly) {
@@ -17587,7 +17620,8 @@ ${lines.join('\n')}`;
           createdCount,
           extendedColumns,
           formatPromise: Promise.resolve(true),
-          documentValue: parsed
+          documentValue: parsed,
+          sourceRowReplacements
         };
       }
       const selectionStart = editor.selectionStart;
@@ -17606,7 +17640,8 @@ ${lines.join('\n')}`;
         createdCount,
         extendedColumns,
         formatPromise: Promise.resolve(true),
-        documentValue: parsed
+        documentValue: parsed,
+        sourceRowReplacements
       };
     }
 
@@ -17987,7 +18022,7 @@ ${lines.join('\n')}`;
       return Object.assign({}, payload, { updates: merged });
     }
 
-    function reconcileScopeTransientStateAfterCollectionImport(payload, preparedSource) {
+    function reconcileScopeTransientStateAfterCollectionImport(payload, preparedSource, sourceRowReplacements) {
       const documentName = editingWaveDocumentName;
       if (!documentName) return null;
       const updates = payload && Array.isArray(payload.updates) ? payload.updates : [];
@@ -18015,6 +18050,14 @@ ${lines.join('\n')}`;
       const state = current && typeof current === 'object'
         ? JSON.parse(JSON.stringify(current))
         : {};
+      const remapSourceRow = (id) => {
+        const key = String(id);
+        return sourceRowReplacements && sourceRowReplacements.get(key) || key;
+      };
+      ['formulas', 'multiWaves', 'multiWaveHidden', 'signalNames'].forEach((field) => {
+        state[field] = Object.fromEntries(Object.entries(state[field] || {})
+          .map(([id, value]) => [remapSourceRow(id), value]));
+      });
       state.version = 1;
       state.extraSignals = Array.isArray(state.extraSignals) ? state.extraSignals : [];
       state.formulas = state.formulas && typeof state.formulas === 'object'
@@ -18023,8 +18066,8 @@ ${lines.join('\n')}`;
         && !Array.isArray(state.multiWaves) ? state.multiWaves : {};
       state.signalNames = state.signalNames && typeof state.signalNames === 'object'
         && !Array.isArray(state.signalNames) ? state.signalNames : {};
-      state.rowOrder = Array.isArray(state.rowOrder) ? state.rowOrder.map(String) : [];
-      state.hiddenRows = Array.isArray(state.hiddenRows) ? state.hiddenRows.map(String) : [];
+      state.rowOrder = Array.isArray(state.rowOrder) ? state.rowOrder.map(remapSourceRow) : [];
+      state.hiddenRows = Array.isArray(state.hiddenRows) ? state.hiddenRows.map(remapSourceRow) : [];
 
       const importedNames = new Set(updates.map((update) => String(
         update && update.signal || ''
@@ -18044,6 +18087,7 @@ ${lines.join('\n')}`;
         removedExtraRowIds.add(rowId);
         delete state.formulas[rowId];
         delete state.multiWaves[rowId];
+        delete state.multiWaveHidden[rowId];
         delete state.signalNames[rowId];
         return false;
       });
@@ -18056,6 +18100,15 @@ ${lines.join('\n')}`;
           return true;
         });
       state.hiddenRows = state.hiddenRows.filter((rowId) => !removedExtraRowIds.has(rowId));
+      if (Array.isArray(payload.signalOrder) && state.rowOrder.length) {
+        const orderedIds = Array.from(sourceRowIds)
+          .filter(([name]) => importedNames.has(name)).map(([, id]) => id);
+        const importedIds = new Set(orderedIds);
+        const seen = new Set(state.rowOrder);
+        let next = 0;
+        state.rowOrder = state.rowOrder.concat(orderedIds.filter((id) => !seen.has(id)))
+          .map((id) => importedIds.has(id) ? orderedIds[next++] : id);
+      }
 
       const formulaEngine = window.VisualWaveDromFormula;
       updates.forEach((update) => {
@@ -24979,9 +25032,11 @@ ${lines.join('\n')}`;
           await reportApplyStage('reconciling', true);
           const scopeTransientState = reconcileScopeTransientStateAfterCollectionImport(
             resolvedPayload,
-            result.documentValue
+            result.documentValue,
+            result.sourceRowReplacements
           );
           delete result.documentValue;
+          delete result.sourceRowReplacements;
           await reportApplyStage('saving', true);
           await persistImportedWaveRows(result);
           await reportApplyStage('notifying', true);

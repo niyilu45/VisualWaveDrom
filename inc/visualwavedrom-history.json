@@ -1,5 +1,28 @@
 [
   {
+    "version": "2026.11.4.1",
+    "date": "2026-11-04T15:51:29Z",
+    "head": "4cf5c51206e43616e418bd56b60a2332a636de54",
+    "notes": [
+      "批量预设搜索兼容仅填写 usrGen 的手写预设及带 UTF-8 BOM 的 JSON，仍过滤无关 JSON。"
+    ],
+    "commits": [
+      {
+        "id": "4cf5c51206e43616e418bd56b60a2332a636de54",
+        "date": "2026-10-31T17:05:24+08:00",
+        "title": "docs: expand scope tutorial and add runnable import examples",
+        "body": "Expand QuickStart with file formats, sequence handling, variable combinations, CSV selection and filters, complex I/Q, formulas, half-cycle rules, and scope editing workflows.\n\nBundle six complete presets with sample data and add step-by-step condition-jump and formula GIFs with annotated figures. Validate documentation links, JSON examples, import results, and desktop/mobile previews."
+      },
+      {
+        "id": "df06ffd0bdba13033197ba02049398c74fc83bda",
+        "date": "2026-10-31T16:06:13+08:00",
+        "title": "fix: improve waveform interactions and expand quick start",
+        "body": "修复公式空采样时刻及示波器 Del 删除：空着的 0/0.5 cycle 不执行公式，总线沿用前值、模拟连续显示插值，统一 Worker、导入及缓存协议，保留撤销和文字删改行为。\n\n优化时序图和示波器交互：冻结标签独立绘制、密集波形自适应列窗口、可见范围绘制、全局预览与底图缓存、框选叠加层、空闲拖动缓冲及重复游标读数去重；隐藏 JSON 时延后刷新，复用错误行标记并减少强制布局。\n\nQuickStart 补充参数表、表引用与图链接、参数运算和 noTrans、演讲者模式，新增 5 段独立 GIF 和 5 张简洁图解。发布版本 2026.10.31.2，校验 67 项运行文件及双平台服务二进制，实际服务、浏览器和文档检查通过。"
+      }
+    ],
+    "uncommitted": true
+  },
+  {
     "version": "2026.10.31.2",
     "date": "2026-10-31T08:04:55Z",
     "head": "2a597da9228996fd2b3546d5cb8ba57ddb96d9a9",

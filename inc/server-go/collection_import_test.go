@@ -411,7 +411,7 @@ func TestCollectionPresetMigratesLegacyAndPersistsAutoGen(t *testing.T) {
 	}
 }
 
-func TestCollectionPresetDiscoveryFiltersByInnerType(t *testing.T) {
+func TestCollectionPresetDiscoveryRecognizesHandwrittenPresets(t *testing.T) {
 	root := t.TempDir()
 	nested := filepath.Join(root, "nested", "group")
 	if err := os.MkdirAll(nested, 0o755); err != nil {
@@ -439,22 +439,36 @@ func TestCollectionPresetDiscoveryFiltersByInnerType(t *testing.T) {
 	if err = os.WriteFile(manualPath, manualData, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	wrongType := []byte(`{"InnerType":"AnotherTool","vars":[],"paths":[]}`)
-	if err = os.WriteFile(filepath.Join(root, "wrong.json"), wrongType, 0o600); err != nil {
-		t.Fatal(err)
+	handwritten := `{"paths":[{"usrGen":{"folder":".","grepKeys":"^signal.*","name":"signal"}}]}`
+	for name, contents := range map[string]string{
+		"handwritten.json": handwritten,
+		"bom.JSON":         "\ufeff" + `{"InnerType":"VisualWaveDrom.BatchWaveImportPreset","paths":[{"usrGen":{"grepKeys":"^signal.*"}}]}`,
+		"wrong.json":       strings.Replace(handwritten, `{"paths"`, `{"InnerType":"AnotherTool","paths"`, 1),
+		"unrelated.json":   `{"paths":[{"folder":".","name":"export"}]}`,
+		"empty.json":       `{"paths":[]}`,
+	} {
+		if err = os.WriteFile(filepath.Join(root, name), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	discovered, err := discoverCollectionPresets(root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if discovered.ResultCount != 1 || len(discovered.Entries) != 1 {
+	if discovered.ResultCount != 4 || len(discovered.Entries) != 4 {
 		t.Fatalf("unexpected discovered presets: %#v", discovered)
 	}
 	wantRelative := filepath.ToSlash(filepath.Join("nested", "group", "valid.json"))
-	if discovered.Entries[0].RelativePath != wantRelative ||
-		filepath.IsAbs(discovered.Entries[0].RelativePath) {
-		t.Fatalf("discovery did not return a relative path: %#v", discovered.Entries[0])
+	for index, want := range []string{"bom.JSON", "handwritten.json", "manual.json", wantRelative} {
+		relative := discovered.Entries[index].RelativePath
+		if relative != want || filepath.IsAbs(relative) {
+			t.Fatalf("discovery returned %q, want %q", relative, want)
+		}
+		document, _, _, loadErr := loadDiscoveredCollectionPresetDocument(root, relative, root)
+		if loadErr != nil || !document.Valid || len(document.Preset.Paths) != 1 {
+			t.Fatalf("cannot load discovered preset %q: %#v %v", relative, document, loadErr)
+		}
 	}
 	loaded, loadedPath, relativePath, err := loadDiscoveredCollectionPreset(
 		root, wantRelative, root)
