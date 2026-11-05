@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=20261031-formula-phases-v1';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=scope-dispose-v1';
   const FormulaEngine = global.VisualWaveDromFormula || null;
   const DEFAULT_ROW_HEIGHT = 42;
   const DEFAULT_MULTI_WAVE_ROW_HEIGHT = 68;
@@ -272,11 +272,13 @@
 
   function debounce(callback, delay) {
     let timer = null;
-    return function debounced() {
+    function debounced() {
       const args = arguments;
       clearTimeout(timer);
-      timer = setTimeout(() => callback.apply(null, args), delay);
-    };
+      timer = setTimeout(() => { timer = null; callback.apply(null, args); }, delay);
+    }
+    debounced.cancel = () => { clearTimeout(timer); timer = null; };
+    return debounced;
   }
 
   function niceStep(value) {
@@ -498,6 +500,7 @@
       this.worker = null;
       this.windowGeneration = 0;
       this.windowCancelTimer = 0;
+      this.closed = false;
       this.fallback = global.VisualWaveDromScopeWorkerCore || null;
       try {
         this.worker = new Worker(WORKER_URL);
@@ -526,12 +529,14 @@
     }
 
     call(type, payload) {
+      if (this.closed) return Promise.reject(new Error('Scope window closed'));
       const requestId = ++this.sequence;
       const request = Object.assign({}, payload || {}, { type, requestId });
       if (this.worker) {
         return new Promise((resolve, reject) => {
           this.pending.set(requestId, { resolve, reject });
-          this.worker.postMessage(request);
+          try { this.worker.postMessage(request); }
+          catch (error) { this.pending.delete(requestId); reject(error); }
         });
       }
       const core = this.fallback || global.VisualWaveDromScopeWorkerCore;
@@ -539,11 +544,13 @@
         return Promise.reject(new Error('示波器计算模块不可用'));
       }
       return new Promise((resolve, reject) => {
-        setTimeout(() => {
-          Promise.resolve(core.handleRequest(request)).then((response) => {
-            if (response.ok) resolve(response.result);
-            else reject(new Error(response.error || 'Scope worker failed'));
-          }, reject);
+        const pending = { resolve, reject, timer: 0 };
+        this.pending.set(requestId, pending);
+        pending.timer = setTimeout(() => {
+          pending.timer = 0;
+          if (this.closed) return;
+          Promise.resolve(core.handleRequest(request)).then((response) => this.handleResponse(response),
+            (error) => { this.pending.delete(requestId); reject(error); });
         }, 0);
       });
     }
@@ -562,6 +569,7 @@
     }
 
     cancelWindowWork() {
+      if (this.closed) return this.windowGeneration;
       this.windowGeneration += 1;
       if (this.windowCancelTimer) return this.windowGeneration;
       this.windowCancelTimer = global.setTimeout(() => {
@@ -583,16 +591,27 @@
     }
 
     close() {
+      if (this.closed) return;
+      this.closed = true;
       if (this.windowCancelTimer) global.clearTimeout(this.windowCancelTimer);
       this.windowCancelTimer = 0;
       if (this.worker) this.worker.terminate();
-      this.pending.forEach((item) => item.reject(new Error('Scope window closed')));
+      else {
+        const core = this.fallback || global.VisualWaveDromScopeWorkerCore;
+        if (core) void core.handleRequest({ type: 'dispose' });
+      }
+      this.worker = null; this.fallback = null;
+      this.pending.forEach((item) => {
+        if (item.timer) global.clearTimeout(item.timer);
+        item.reject(new Error('Scope window closed'));
+      });
       this.pending.clear();
     }
   }
 
   class ScopeView {
     constructor(adapter) {
+      this.destroyed = false;
       this.adapter = adapter;
       this.log = adapter && typeof adapter.log === 'function'
         ? adapter.log
@@ -729,6 +748,53 @@
         event.preventDefault();
         event.returnValue = '';
       };
+      this.handlePageHide = (event) => { if (!event.persisted) this.dispose(); };
+      this.handleResize = () => this.updateLayout();
+    }
+
+    dispose() {
+      if (this.destroyed) return;
+      this.destroyed = true;
+      ['windowRequestSequence', 'visibleWindowRequestSequence', 'overviewDataRequestSequence',
+        'formulaRefreshSequence', 'cursorInspectSequence', 'cursorNavigationSequence', 'buildSequence'].forEach((key) => { this[key]++; });
+      ['scheduleWindowRequest', 'scheduleBuild', 'scheduleOverviewDataRequest',
+        'scheduleFormulaRefresh', 'scheduleFormulaSimplify'].forEach((key) => this[key].cancel());
+      ['transientStatusTimer', 'plotPanBufferTimer', 'initialSimplifyTimer'].forEach((key) => {
+        global.clearTimeout(this[key]); this[key] = 0;
+      });
+      if (this.initialSimplifyIdle && global.cancelIdleCallback) global.cancelIdleCallback(this.initialSimplifyIdle);
+      this.initialSimplifyIdle = 0;
+      ['cursorReadoutFrame', 'measurementFrame', 'rowResizeFrame', 'drawFrame',
+        'overviewWindowRequestFrame', 'signalRowDragAutoScrollFrame', 'verticalScrollFrame'].forEach((key) => {
+        if (this[key]) global.cancelAnimationFrame(this[key]);
+        this[key] = 0;
+      });
+      if (this.resizeObserver) this.resizeObserver.disconnect();
+      this.resizeObserver = null;
+      global.removeEventListener('resize', this.handleResize);
+      global.removeEventListener('beforeunload', this.handleBeforeUnload);
+      global.removeEventListener('pagehide', this.handlePageHide);
+      if (this.comparison) this.comparison.close({ destroying: true });
+      this.comparison = null;
+      this.worker.close();
+      const canvases = new Set(this.root ? this.root.querySelectorAll('canvas') : []);
+      if (this.plotBaseCanvas) canvases.add(this.plotBaseCanvas);
+      if (this.plotPanBuffer?.canvas) canvases.add(this.plotPanBuffer.canvas);
+      if (this.overviewBaseCache?.canvas) canvases.add(this.overviewBaseCache.canvas);
+      canvases.forEach((canvas) => { canvas.width = 0; canvas.height = 0; });
+      ['document', 'meta', 'windowData', 'simplified', 'overviewData', 'overviewBaseCache', 'plotBaseCanvas',
+        'plotPanBuffer', 'windowBuildPromise', 'windowBackgroundPromise', 'overviewDataRequestPromise',
+        'drag', 'overviewDrag', 'rowResize', 'signalRowDrag', 'multiWaveLegendDrag', 'signalNameEditor'].forEach((key) => { this[key] = null; });
+      this.formulaDrafts.clear(); this.signalRowTargets.clear(); this.cursorValueTargets.clear();
+      this.undoStack = []; this.redoStack = [];
+      this.signalNames = []; this.rowOffsets = []; this.rowHeights = [];
+      this.transientFormulaState = null;
+      this.outputContent = '';
+      this.adapter = {};
+      this.windowBuildKey = '';
+      if (this.root) this.root.replaceChildren();
+      if (global.__visualWaveDromScopeView === this) delete global.__visualWaveDromScopeView;
+      this.log('scope-view', { phase: 'disposed', pendingRequests: this.worker.pending.size });
     }
 
     async mount() {
@@ -740,7 +806,9 @@
         phase: 'source-wait-start',
         elapsedMs: scopeStartupElapsedMs()
       });
-      this.document = await this.adapter.getDocument();
+      const documentSnapshot = await this.adapter.getDocument();
+      if (this.destroyed) return;
+      this.document = documentSnapshot;
       if (!this.document || typeof this.document.content !== 'string') {
         throw new Error('指定的波形图不存在或尚未载入');
       }
@@ -751,9 +819,9 @@
       });
       if (typeof this.adapter.getTransientState === 'function') {
         try {
-          this.transientFormulaState = normalizeTransientFormulaState(
-            await this.adapter.getTransientState()
-          );
+          const transient = await this.adapter.getTransientState();
+          if (this.destroyed) return;
+          this.transientFormulaState = normalizeTransientFormulaState(transient);
         } catch (error) {
           this.log('scope-formula', {
             phase: 'transient-load-error',
@@ -766,10 +834,12 @@
         this.transientFormulaState
       );
       this.setStatus('正在解析波形数据');
-      this.meta = await this.worker.call('prepare', {
+      const prepared = await this.worker.call('prepare', {
         content: this.document.content,
         transient: clone(this.transientFormulaState)
       });
+      if (this.destroyed) return;
+      this.meta = prepared;
       this.log('scope-startup', {
         phase: 'prepare-complete',
         rows: this.meta && this.meta.rows ? this.meta.rows.length : 0,
@@ -815,7 +885,9 @@
       this.updateLayout();
       this.setStatus('正在绘制首屏波形');
       await this.requestWindow();
+      if (this.destroyed) return;
       await this.updateCursorReadout();
+      if (this.destroyed) return;
       this.updateDraftState();
       this.setStatus('示波器数据已就绪');
       this.log('scope-view', {
@@ -1747,27 +1819,14 @@
         this.resizeObserver = new ResizeObserver(() => this.updateLayout());
         this.resizeObserver.observe(this.plotViewport);
       } else {
-        global.addEventListener('resize', () => this.updateLayout());
+        global.addEventListener('resize', this.handleResize);
       }
       global.addEventListener('beforeunload', this.handleBeforeUnload);
-      global.addEventListener('pagehide', () => {
-        if (this.transientStatusTimer) global.clearTimeout(this.transientStatusTimer);
-        if (this.cursorReadoutFrame) global.cancelAnimationFrame(this.cursorReadoutFrame);
-        if (this.measurementFrame) global.cancelAnimationFrame(this.measurementFrame);
-        if (this.rowResizeFrame) global.cancelAnimationFrame(this.rowResizeFrame);
-        if (this.drawFrame) global.cancelAnimationFrame(this.drawFrame);
-        if (this.overviewWindowRequestFrame) {
-          global.cancelAnimationFrame(this.overviewWindowRequestFrame);
-        }
-        if (this.signalRowDragAutoScrollFrame) {
-          global.cancelAnimationFrame(this.signalRowDragAutoScrollFrame);
-        }
-        this.worker.close();
-      }, { once: true });
+      global.addEventListener('pagehide', this.handlePageHide);
     }
 
     setStatus(message, error) {
-      if (!this.statusEl) return;
+      if (this.destroyed || !this.statusEl) return;
       if (this.transientStatusTimer) {
         global.clearTimeout(this.transientStatusTimer);
         this.transientStatusTimer = 0;
@@ -1801,6 +1860,7 @@
     }
 
     updateDraftState() {
+      if (this.destroyed) return;
       const dirty = this.hasUnsavedChanges();
       if (this.saveSourceButton) {
         this.saveSourceButton.disabled = !dirty || this.saveInFlight;
@@ -2200,6 +2260,7 @@
     }
 
     persistTransientFormulaState() {
+      if (this.destroyed) return;
       this.overviewBaseCache = null;
       if (typeof this.adapter.setTransientState !== 'function') return;
       try {
@@ -4458,6 +4519,7 @@
     }
 
     updateLayout() {
+      if (this.destroyed) return;
       if (!this.meta || !this.plotViewport.clientWidth) return;
       this.resizeCanvas(this.axisCanvas, this.plotViewport.clientWidth, AXIS_HEIGHT);
       this.resizeCanvas(
@@ -6081,6 +6143,7 @@
     }
 
     draw(options) {
+      if (this.destroyed) return;
       if (!this.meta || !this.plotViewport.clientWidth) return;
       const requested = {
         plotOnly: !!(options && options.plotOnly),
@@ -7860,6 +7923,7 @@
       try {
         const options = this.getSimplifyOptions();
         const result = await this.worker.call('simplify', options);
+        if (this.destroyed) return;
         this.simplified = result;
         if (recordHistory) this.simplifiedDisplayActive = true;
         this.outputContent = result.content;
@@ -7886,6 +7950,7 @@
     }
 
     scheduleInitialSimplify() {
+      if (this.destroyed) return;
       if (!this.meta || this.meta.totalColumns > AUTO_SIMPLIFY_COLUMN_LIMIT) {
         this.log('scope-simplify', {
           phase: 'initial-skipped',
@@ -7895,13 +7960,14 @@
         return;
       }
       const run = () => {
-        if (!this.meta || this.simplified || this.formulaRefreshInFlight) return;
+        this.initialSimplifyTimer = this.initialSimplifyIdle = 0;
+        if (this.destroyed || !this.meta || this.simplified || this.formulaRefreshInFlight) return;
         void this.runSimplify(false, { background: true });
       };
       if (typeof global.requestIdleCallback === 'function') {
-        global.requestIdleCallback(run, { timeout: 1200 });
+        this.initialSimplifyIdle = global.requestIdleCallback(run, { timeout: 1200 });
       } else {
-        global.setTimeout(run, 80);
+        this.initialSimplifyTimer = global.setTimeout(run, 80);
       }
     }
 
@@ -8471,6 +8537,7 @@
         this.setStatus('正在保存示波器修改');
         const content = await this.buildDraftSourceContent();
         const saved = await this.adapter.saveSource({ content });
+        if (this.destroyed) return;
         await this.reloadSavedDocument(saved);
         this.clearDraftDirty();
         this.setStatus(replacesSourceData ? '简化结果已保存到原波形' : '示波器修改已保存');
@@ -8496,9 +8563,12 @@
     const view = new ScopeView(adapter || {});
     try {
       await view.mount();
-      global.__visualWaveDromScopeView = view;
+      if (!view.destroyed) global.__visualWaveDromScopeView = view;
       return view;
     } catch (error) {
+      const closing = view.destroyed;
+      view.dispose();
+      if (closing) return view;
       document.body.classList.add('scope-wave-view');
       const root = document.getElementById('scope-app') || document.body;
       const failure = document.createElement('div');

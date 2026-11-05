@@ -153,7 +153,7 @@
       this.panesRoot.replaceChildren();
       const started = performance.now();
       let polling = false;
-      const timer = setInterval(async () => {
+      const timer = this.progressTimer = setInterval(async () => {
         if (polling || !this.active) return;
         polling = true;
         try {
@@ -192,7 +192,7 @@
           this.setBusy(false, '比较失败：' + error.message);
           this.scope.log('scope-compare', { phase: 'error', target: this.loadedName, message: error.message });
         }
-      } finally { clearInterval(timer); }
+      } finally { clearInterval(timer); if (this.progressTimer === timer) this.progressTimer = 0; }
     }
 
     buildPanes() {
@@ -532,19 +532,28 @@
       });
     }
 
-    close() {
+    close(options) {
       if (!this.active) return;
       this.active = false;
       this.sequence += 1;
+      this.revision = (this.revision || 0) + 1;
+      clearInterval(this.progressTimer); this.progressTimer = 0;
       this.result = null;
       this.cache = null;
       if (this.frame) cancelAnimationFrame(this.frame);
       this.frame = 0;
       if (this.resizeObserver) this.resizeObserver.disconnect();
+      this.resizeObserver = null;
+      (this.panes || []).forEach(({ canvas }) => { canvas.width = canvas.height = 0; });
+      this.panes = []; this.rightDisplay = null; this.renderQueued = false;
       this.root.remove();
+      this.root.replaceChildren();
+      this.root = this.panesRoot = null;
       this.scope.root.inert = false;
-      void this.scope.worker.call('compare-close');
-      this.scope.root.querySelector('#scope-compare').focus();
+      if (!options?.destroying) {
+        void this.scope.worker.call('compare-close').catch(() => {});
+        this.scope.root.querySelector('#scope-compare')?.focus();
+      }
     }
   }
   global.VisualWaveDromScopeComparison = ScopeComparison;

@@ -852,6 +852,7 @@
         worker.onerror = (event) => { if (current === version && !disposed) { message('后台检查失败：' + event.message, true); worker.terminate(); worker = null; } };
         worker.postMessage({ source, edgeTimings: snapshot.edgeTimings, parameterConversions: snapshot.parameterConversions });
       } catch (error) {
+        if (disposed || view.closed) return;
         version++; if (worker) worker.terminate(); worker = null; source = null;
         message('无法检查：' + error.message + (model ? '（画面保留上次结果）' : ''), true);
       } finally { reading = false; }
@@ -859,7 +860,14 @@
     function dispose() {
       if (disposed) return;
       disposed = true; clearInterval(timer); if (worker) worker.terminate(); if (frame) view.cancelAnimationFrame(frame);
-      observer.disconnect(); sessions.delete(host.id);
+      timer = frame = 0; worker = null; version++;
+      observer.disconnect();
+      if (sessions.get(host.id) === view) sessions.delete(host.id);
+      source = model = null; panDrag = drag = focusedProblem = null;
+      referenceOverrides.clear(); referenceToggles.clear(); highlighted.clear(); highlightedEdges.clear();
+      canvas.width = canvas.height = 0;
+      if (typeof host.dispose === 'function') host.dispose();
+      host.log && host.log({ phase: 'disposed', activeSessions: sessions.size });
     }
     $('close').onclick = () => view.close();
     $('config').onsubmit = async (event) => {
@@ -987,5 +995,5 @@
     void refresh();
     return view;
   }
-  global.VisualWaveDromTiming = { open };
+  global.VisualWaveDromTiming = { open, diagnostics: () => ({ activeSessions: sessions.size }) };
 })(window);

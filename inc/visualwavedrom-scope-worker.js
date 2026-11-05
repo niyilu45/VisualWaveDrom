@@ -18,6 +18,7 @@ let comparisonGeneration = 0;
 let comparisonProgress = null;
 
 let activeSession = null;
+let sessionGeneration = 0;
 let latestWindowGeneration = 0;
 const DEFAULT_ROW_HEIGHT = 42;
 const DEFAULT_MULTI_WAVE_ROW_HEIGHT = 68;
@@ -2150,6 +2151,7 @@ function analogWindow(row, start, end, width, totalColumns) {
 
 async function createWindow(payload, session = activeSession) {
   if (!session) throw new Error('Scope session has not been prepared');
+  const lifecycle = sessionGeneration;
   const generation = Math.max(0, Math.floor(finiteNumber(payload.windowGeneration) || 0));
   latestWindowGeneration = Math.max(latestWindowGeneration, generation);
   const total = session.totalColumns;
@@ -2175,7 +2177,7 @@ async function createWindow(payload, session = activeSession) {
   );
   const rows = [];
   for (let rowOffset = 0; rowOffset < rowIndices.length; rowOffset += 1) {
-    if (!payload.comparison && generation < latestWindowGeneration) {
+    if (lifecycle !== sessionGeneration || !payload.comparison && generation < latestWindowGeneration) {
       return {
         cancelled: true,
         generation,
@@ -3684,11 +3686,16 @@ async function handleRequest(message) {
   const requestId = request.requestId;
   try {
     let result;
-    if (request.type === 'compare-start') {
+    if (request.type === 'dispose') {
+      sessionGeneration += 1; comparisonGeneration += 1; latestWindowGeneration += 1;
+      activeSession = comparison = comparisonProgress = null;
+      result = { cancelled: true };
+    } else if (request.type === 'compare-start') {
       result = await startComparison(request);
     } else if (request.type === 'compare-close') {
       comparisonGeneration += 1;
       comparison = null;
+      comparisonProgress = null;
       result = { cancelled: true };
     } else if (request.type === 'compare-progress') {
       result = comparisonProgress;
@@ -3706,15 +3713,22 @@ async function handleRequest(message) {
       );
       result = { cancelled: true, latestGeneration: latestWindowGeneration };
     } else if (request.type === 'prepare') {
-      activeSession = await createSession(request.content, request.transient);
+      const generation = ++sessionGeneration;
+      latestWindowGeneration = 0;
+      const session = await createSession(request.content, request.transient);
+      if (generation !== sessionGeneration) return { requestId, ok: true, result: { cancelled: true } };
+      activeSession = session;
       result = prepareResponse();
     } else if (request.type === 'formulas') {
       if (!activeSession) throw new Error('Scope session has not been prepared');
-      activeSession = await createSession(
+      const generation = ++sessionGeneration;
+      const session = await createSession(
         activeSession.originalContent,
         request.transient,
         activeSession
       );
+      if (generation !== sessionGeneration) return { requestId, ok: true, result: { cancelled: true } };
+      activeSession = session;
       result = prepareResponse();
     } else if (request.type === 'window') {
       latestWindowGeneration = Math.max(

@@ -754,6 +754,8 @@ if (!window.VWDCodeEditorPairs) {
           documentCount: savedTags.length, deferredDocumentCount: savedTags.filter((item) => item.deferred).length,
           loadedContentChars: savedTags.reduce((count, item) => count + (item.content?.length || 0), 0),
           parsedDocumentCacheEntries: waveDocumentMetaCache.size,
+          scopeWindowCount: [...scopeWindowRefs.values()].reduce((count, refs) => count + refs.size, 0),
+          scopeStartupCount: scopeWindowOpenStates.size,
           detachedRenderedPreviews: [...waveLibraryCardCache.values()].filter((entry) =>
             !entry.card.isConnected && entry.previewDisplay?.querySelector('svg, .wave-fast-preview')).length,
           renderedCardCount: waveLibraryCardCache.size, selectedDirectoryId: selectedNavNodeId,
@@ -1222,6 +1224,7 @@ ${lines.join('\n')}`;
     let waveLibrarySyncChannel = null;
     const scopeWindowOpenStates = new Map();
     const scopeWindowRefs = new Map();
+    let scopeWindowCleanupTimer = 0;
     const scopeTransientStates = new Map();
     const presenterWindowOpenStates = new Map();
     const presenterWindowRefs = new Map();
@@ -14954,6 +14957,39 @@ ${lines.join('\n')}`;
       return String(libraryId || '') + '\u0000' + String(documentName || '');
     }
 
+    function releaseScopeStartup(token) {
+      const state = scopeWindowOpenStates.get(token);
+      if (!state) return;
+      clearTimeout(state.expiryTimer);
+      state.releaseSource?.();
+      state.getSourcePromise = state.releaseSource = null;
+      scopeWindowOpenStates.delete(token);
+    }
+
+    function releaseScopeWindow(opened) {
+      scopeWindowRefs.forEach((refs, name) => {
+        refs.delete(opened);
+        if (!refs.size) scopeWindowRefs.delete(name);
+      });
+      scopeWindowOpenStates.forEach((state, token) => {
+        if (state.opened === opened) releaseScopeStartup(token);
+      });
+      if (!scopeWindowRefs.size) { clearInterval(scopeWindowCleanupTimer); scopeWindowCleanupTimer = 0; }
+      vwdDebugLog('scope-view', { phase: 'window-released', pendingStartups: scopeWindowOpenStates.size,
+        openWindows: [...scopeWindowRefs.values()].reduce((count, refs) => count + refs.size, 0) });
+    }
+
+    function watchScopeWindows() {
+      if (scopeWindowCleanupTimer) return;
+      scopeWindowCleanupTimer = setInterval(() => {
+        const closed = new Set();
+        scopeWindowRefs.forEach((refs) => refs.forEach((ref) => { if (ref.closed) closed.add(ref); }));
+        scopeWindowOpenStates.forEach((state) => { if (state.opened.closed) closed.add(state.opened); });
+        closed.forEach(releaseScopeWindow);
+        if (!scopeWindowRefs.size) { clearInterval(scopeWindowCleanupTimer); scopeWindowCleanupTimer = 0; }
+      }, 1000);
+    }
+
     function getWaveDocumentScopeViewUrl(documentName, scopeToken) {
       const params = getWaveDocumentScopeViewParams(documentName, scopeToken);
       if (!params) return '';
@@ -15151,6 +15187,7 @@ ${lines.join('\n')}`;
     }
 
     async function openWaveDocumentInScopeWindow(documentName) {
+      const scopeLibraryId = currentWaveLibraryId;
       const scopeToken = 'scope-' + Date.now().toString(36)
         + '-' + Math.random().toString(36).slice(2, 9);
       const url = getWaveDocumentScopeViewUrl(documentName, scopeToken);
@@ -15173,6 +15210,7 @@ ${lines.join('\n')}`;
       const openedAt = Date.now();
       let sourcePromise = null;
       const getSourcePromise = () => {
+        if (opened.closed || currentWaveLibraryId !== scopeLibraryId) return Promise.reject(new Error('示波器窗口已关闭或波形库已切换'));
         if (sourcePromise) return sourcePromise;
         sourcePromise = (async () => {
           vwdDebugLog('scope-view', {
@@ -15186,6 +15224,7 @@ ${lines.join('\n')}`;
           }
           let stored = getSavedTagByName(documentName);
           if (stored && stored.deferred) stored = await ensureWaveDocumentLoaded(documentName);
+          if (opened.closed || currentWaveLibraryId !== scopeLibraryId) throw new Error('示波器窗口已关闭或波形库已切换');
           if (!stored) throw new Error('波形图尚未载入');
           const snapshot = getWaveDocumentServerSnapshot(
             stored,
@@ -15201,6 +15240,7 @@ ${lines.join('\n')}`;
           return snapshot;
         })();
         sourcePromise.catch((error) => {
+          if (opened.closed) return;
           setStatus(false, '打开示波器失败：' + (error && error.message ? error.message : String(error)));
           vwdDebugLog('scope-view', {
             phase: 'source-save-error',
@@ -15210,10 +15250,12 @@ ${lines.join('\n')}`;
         });
         return sourcePromise;
       };
-      scopeWindowOpenStates.set(scopeToken, { documentName, getSourcePromise });
+      const state = { documentName, opened, libraryId: scopeLibraryId, getSourcePromise, releaseSource: () => { sourcePromise = null; } };
+      state.expiryTimer = setTimeout(() => releaseScopeStartup(scopeToken), 60000);
+      scopeWindowOpenStates.set(scopeToken, state);
       if (!scopeWindowRefs.has(documentName)) scopeWindowRefs.set(documentName, new Set());
       scopeWindowRefs.get(documentName).add(opened);
-      setTimeout(() => scopeWindowOpenStates.delete(scopeToken), 60000);
+      watchScopeWindows();
       const tag = getSavedTagByName(documentName);
       const title = tag && tag.titleCache ? tag.titleCache : documentName;
       setStatus(true, '已打开示波器：' + title);
@@ -17016,8 +17058,26 @@ ${lines.join('\n')}`;
     }
 
     function initScopeWindowSync() {
+      if (scopeWaveViewActive) window.addEventListener('pagehide', () => {
+        try {
+          if (window.opener && !window.opener.closed) window.opener.postMessage({
+            type: 'visualwavedrom-scope-closed', scopeToken: requestedScopeToken,
+            waveId: requestedWaveDocumentName, libraryId: currentWaveLibraryId || requestedLibraryId
+          }, '*');
+        } catch (_error) { /* Parent cleanup also checks closed windows. */ }
+      });
       window.addEventListener('message', (event) => {
         const message = event.data || {};
+        if (message.type === 'visualwavedrom-scope-closed') {
+          const ref = event.source;
+          if (ref && [...scopeWindowRefs.values()].some((refs) => refs.has(ref))) {
+            const state = scopeWindowOpenStates.get(String(message.scopeToken || ''));
+            if (state?.opened === ref) state.releaseSource?.();
+            // pagehide also runs on refresh; keep the lightweight handshake until the window really closes.
+            if (ref.closed) releaseScopeWindow(ref);
+          }
+          return;
+        }
         if (message.type === 'visualwavedrom-presenter-save-request') {
           if (!event.source || typeof message.requestId !== 'string') return;
           const payload = message.payload || {};
@@ -17118,13 +17178,18 @@ ${lines.join('\n')}`;
         }
         if (message.type === 'visualwavedrom-scope-source-request') {
           const state = scopeWindowOpenStates.get(String(message.scopeToken || ''));
-          if (!state || state.documentName !== String(message.waveId || '') || !event.source) return;
+          if (!state || state.documentName !== String(message.waveId || '') || state.opened !== event.source
+              || state.libraryId !== currentWaveLibraryId || state.opened.closed) return;
           const sourcePromise = typeof state.getSourcePromise === 'function'
             ? state.getSourcePromise()
             : state.promise;
           if (!sourcePromise) return;
+          const respond = (payload) => {
+            if (state.opened.closed) return;
+            try { state.opened.postMessage(payload, '*'); } catch (_error) { /* Window closed during handoff. */ }
+          };
           sourcePromise.then((documentSnapshot) => {
-            event.source.postMessage({
+            respond({
               type: 'visualwavedrom-scope-source-response',
               scopeToken: message.scopeToken,
               libraryId: currentWaveLibraryId,
@@ -17134,14 +17199,14 @@ ${lines.join('\n')}`;
                 currentWaveLibraryId,
                 state.documentName
               )) || null
-            }, '*');
-          }).catch((error) => {
-            event.source.postMessage({
+            });
+          }, (error) => {
+            respond({
               type: 'visualwavedrom-scope-source-response',
               scopeToken: message.scopeToken,
               error: error && error.message ? error.message : String(error)
-            }, '*');
-          });
+            });
+          }).finally(() => state.releaseSource?.());
           return;
         }
         if (message.type === 'visualwavedrom-scope-transient-state') {
@@ -21990,7 +22055,7 @@ ${lines.join('\n')}`;
 
     function openWaveTimingPreview(documentName) {
       const libraryId = currentWaveLibraryId;
-      let lastMeta = null, lastParameterRevision = -1, prepared = null;
+      let lastMeta = null, lastParameterRevision = -1, prepared = null, timingDisposed = false;
       const getMeta = async () => {
         if (currentWaveLibraryId !== libraryId) throw new Error('波形库已切换，请关闭并重新打开时延检查');
         const tag = await ensureWaveDocumentLoaded(documentName);
@@ -22006,6 +22071,7 @@ ${lines.join('\n')}`;
           id: libraryId + ':' + documentName,
           read: async () => {
             const { tag, meta } = await getMeta();
+            if (timingDisposed) return { source: null };
             const parameters = window.VisualWaveDromParameters, core = window.VisualWaveDromTimingCore;
             const parameterRevision = parameters.getRevision();
             if (meta !== lastMeta || parameterRevision !== lastParameterRevision) {
@@ -22061,6 +22127,7 @@ ${lines.join('\n')}`;
               if (lanes[rowIndex]) lanes[rowIndex].scrollIntoView({ block: 'center', inline: 'nearest' });
             }
           },
+          dispose: () => { timingDisposed = true; lastMeta = prepared = null; lastParameterRevision = -1; },
           log: (event) => vwdDebugLog('timing-check', Object.assign({ documentName }, event))
         });
       } catch (error) { setStatus(false, '无法打开时延检查：' + error.message); }
@@ -24784,7 +24851,12 @@ ${lines.join('\n')}`;
       persistPageStateBeforeExit('before-unload');
       stopWaveLibraryClientSession(true);
     });
-    window.addEventListener('pagehide', () => {
+    window.addEventListener('pagehide', (event) => {
+      if (!event.persisted) {
+        clearInterval(scopeWindowCleanupTimer); scopeWindowCleanupTimer = 0;
+        [...scopeWindowOpenStates.keys()].forEach(releaseScopeStartup);
+        scopeWindowRefs.clear();
+      }
       persistPageStateBeforeExit('page-hide');
       stopWaveLibraryClientSession(true);
     });
