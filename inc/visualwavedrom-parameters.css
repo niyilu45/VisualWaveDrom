@@ -70,6 +70,14 @@ svg text.parameter-reference-highlight tspan { paint-order: stroke fill; stroke:
 .parameter-value-cell textarea.parameter-formula-value:not(:focus) { color: #83bfff; }
 .parameter-value-cell textarea.parameter-negative-value:not(:focus) { color: var(--error); }
 .parameter-value-cell textarea[aria-invalid="true"] { border-color: var(--error); }
+.parameter-formula-editor { position: relative; width: 100%; min-width: 0; }
+.parameter-formula-editor textarea { position: relative; display: block; }
+.parameter-value-cell textarea.parameter-formula-mirrored:focus { color: transparent; caret-color: var(--text); }
+.parameter-value-cell textarea.parameter-formula-mirrored::selection { color: transparent; background: rgba(94, 163, 255, .34); }
+.parameter-formula-layer { position: absolute; overflow: hidden; pointer-events: none; color: var(--text); }
+.parameter-formula-layer > div { box-sizing: border-box; width: 100%; }
+.parameter-formula-token { color: #153e78; background: #c2ddff; border-radius: 2px; }
+.parameter-formula-tooltip { position: fixed; z-index: 1200; pointer-events: none; max-width: min(24rem, calc(100vw - 16px)); max-height: 45vh; overflow: hidden; padding: 6px 9px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-2); color: var(--text); font: .85rem/1.45 var(--editor-font); white-space: pre-wrap; overflow-wrap: anywhere; }
 .parameter-value-error { padding: 3px 9px; color: var(--error); font-size: .8rem; line-height: 1.5; overflow-wrap: anywhere; }
 .parameter-value-error[hidden] { display: none; }
 .parameter-cell input:hover, .parameter-cell textarea:hover { border-color: var(--border); }

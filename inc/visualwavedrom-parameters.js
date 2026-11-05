@@ -391,6 +391,28 @@
     }
     return null;
   }
+  function formulaReferenceTokens(raw, tableId, row) {
+    const tokens = [];
+    if (!raw.includes('$')) return tokens;
+    const source = { parameterTables: [tableId] };
+    const self = effectiveTable(tableId)?.rows.find((item) => item.id === row.id) || row;
+    const context = { stack: [{ row: self, name: String(row.name || '') }], values: new Map() };
+    const resolved = new Map();
+    for (const match of raw.matchAll(parameterValuePattern)) {
+      const parsed = parseExpression(match[1]);
+      if (parsed.error) continue;
+      const start = match.index + 1 + match[1].indexOf(parsed.expression);
+      for (const variable of parsed.expression.matchAll(/\$[^{}\s$(),]+/g)) {
+        const name = variable[0].slice(1);
+        if (!resolved.has(name)) resolved.set(name, resolveName(name, source, context));
+        const found = resolved.get(name);
+        if (found && !found.error) {
+          tokens.push({ start: start + variable.index, text: variable[0], value: found.val });
+        }
+      }
+    }
+    return tokens;
+  }
   function text(value, source, options) {
     if (typeof value !== 'string' || !value.includes('$')) return value;
     return value.replace(tokenPattern, (raw, expression) => {
@@ -2140,7 +2162,8 @@
             input.value = String(row[field] ?? ''); input.blur();
           }
         });
-        if (field === 'val') fieldBox.prepend(input);
+        if (field === 'val') fieldBox.prepend(global.VWDParameterMatrixView.formulaEditor(input,
+          (raw) => formulaReferenceTokens(raw, table.id, row)));
         else fieldBox.append(input);
         td.append(fieldBox); line.append(td);
         requestAnimationFrame(resize);
@@ -2247,6 +2270,7 @@
         updateRowSelection();
       },
       newRow: emptyParameterRow,
+      formulaReferenceTokens,
       editSource: (source, row, field, input, original, path, draft) => {
         if (activeCellEdit && activeCellEdit.input !== input) commitParameterCell();
         activeCellEdit = input.value === original ? null : { input, original, commit: () => {
@@ -2365,11 +2389,25 @@
       }
       return drafts.has(id) ? drafts.get(id).draft : null;
     }
-    function formChanged() {
-      return editor && editor.forms.some((form) => form.create
-        || fields.some((field) => form.inputs[field].value !== String(form.item.row[field] ?? '')));
+    function formValue(inputs, field) {
+      return field === 'name' ? inputs[field].value.trim() : inputs[field].value;
     }
-    function hasChanges() { return editedRows.size > 0 || formChanged(); }
+    function differs(inputs, row) {
+      return fields.some((field) => formValue(inputs, field) !== String(row[field] ?? ''));
+    }
+    function formChanged() {
+      return !!editor && editor.forms.some(({ item, inputs }) => differs(inputs, item.row));
+    }
+    function hasChanges() {
+      if (!editor) return editedRows.size > 0;
+      let pending = editedRows.size;
+      return editor.forms.some(({ item, inputs }) => {
+        if (editedRows.has(item.row)) pending--;
+        const index = item.table.rows.indexOf(item.row);
+        const base = drafts.get(item.table.id).base.rows[index];
+        return base ? differs(inputs, base) : index >= 0 || differs(inputs, item.row);
+      }) || pending > 0;
+    }
     const overlay = element('div', 'modal-overlay parameter-modal');
     const dialog = element('div', 'modal-dialog parameter-compare-dialog');
     dialog.setAttribute('role', 'dialog'); dialog.setAttribute('aria-modal', 'true'); dialog.setAttribute('aria-labelledby', 'parameter-compare-title');
@@ -2417,7 +2455,7 @@
     const next = button('下一页', () => { page++; render(); }, 'right');
     const undoDraft = button('撤销比较修改', () => draftHistory(false), 'undo');
     const redoDraft = button('重做比较修改', () => draftHistory(true), 'redo');
-    const save = button('保存修改', () => { void saveChanges(); }); save.classList.add('primary');
+    const save = button('保存修改', () => { void saveChanges(); });
     const refreshCompare = button('更新比较', () => {
       applyEditor();
       [left.select.value, right.select.value].forEach((id) => {
@@ -2435,16 +2473,17 @@
     dialog.append(message);
     footer.append(pageInfo, previous, next, undoDraft, redoDraft, discard, refreshCompare, save); dialog.append(footer);
     const labels = { same: '相同', different: '不同', left: '仅左侧', right: '仅右侧', error: '异常' };
-    let records = [], page = 0, problem = ''; const pageSize = 100;
+    let records = [], page = 0, pageCount = 0, problem = ''; const pageSize = 100;
     function updateActions() {
       save.disabled = busy || !hasChanges(); discard.disabled = closeButton.disabled = busy;
+      save.classList.toggle('modal-btn-primary', !save.disabled);
       save.textContent = busy ? '正在保存...' : '保存修改';
       undoDraft.disabled = busy || (!draftUndo.length && !formChanged());
       redoDraft.disabled = busy || !!formChanged() || !draftRedo.length;
       refreshCompare.disabled = busy || !!problem;
       [left.select, right.select, swap, search, onlyDifferent].forEach((input) => { input.disabled = busy; });
       dialog.querySelectorAll('.parameter-compare-edit').forEach((input) => { input.disabled = busy; });
-      if (busy) previous.disabled = next.disabled = true;
+      previous.disabled = busy || page === 0; next.disabled = busy || page + 1 >= pageCount;
     }
     function trackRow(item) {
       const index = item.table.rows.indexOf(item.row), base = drafts.get(item.table.id).base.rows[index];
@@ -2474,12 +2513,12 @@
       if (!editor) return;
       const active = editor, changes = [];
       editor = null;
-      active.forms.forEach(({ item, inputs, create }) => {
+      active.forms.forEach(({ item, inputs }) => {
+        if (!differs(inputs, item.row)) return;
         const before = clone(item.row), index = item.table.rows.indexOf(item.row), added = index < 0;
-        if (added && !create && fields.every((field) => inputs[field].value === String(item.row[field] ?? ''))) return;
         const base = drafts.get(item.table.id).base.rows[index] || {};
         fields.forEach((field) => {
-          const value = field === 'name' ? inputs[field].value.trim() : inputs[field].value;
+          const value = formValue(inputs, field);
           if (value === String(base[field] ?? '')) {
             if (Object.prototype.hasOwnProperty.call(base, field)) item.row[field] = base[field];
             else delete item.row[field];
@@ -2507,7 +2546,7 @@
       const table = draftTable(entry.tableIds[side]), state = drafts.get(table.id);
       const other = entry[side === 'left' ? 'right' : 'left'][0];
       const name = other ? other.name : '';
-      if (!state.missingRows.has(name)) state.missingRows.set(name, { name, val: '', description: '' });
+      if (!state.missingRows.has(name)) state.missingRows.set(name, { ...emptyParameterRow(), name });
       return [{ table, row: state.missingRows.get(name), name }];
     }
     function openEditor(entry, tr, side, selectedItem) {
@@ -2529,7 +2568,7 @@
             input.addEventListener('input', updateActions);
             label.append(element('span', '', captions[field]), input); form.append(label); inputs[field] = input;
           });
-          forms.push({ item, inputs, create: item.row === selectedItem.row && !item.table.rows.includes(item.row), side: currentSide });
+          forms.push({ item, inputs, side: currentSide });
           td.append(form);
         });
       });
@@ -2537,10 +2576,32 @@
       const focused = forms.find((form) => form.side === side && form.item.row === selectedItem.row) || forms[0];
       focused.inputs.val.focus({ preventScroll: true });
     }
+    function acceptSavedDrafts() {
+      const liveTables = new Map(effectiveTables().map((table) => [table.id, table]));
+      drafts.forEach((state, key) => {
+        const live = liveTables.get(key);
+        if (!live) { drafts.delete(key); return; }
+        const draft = clone(live), byId = new Map(draft.rows.map((row) => [row.id, row]));
+        const byName = new Map(draft.rows.map((row) => [row.name, row]));
+        // Keep the last comparison results until the user explicitly refreshes them.
+        const remap = (row) => {
+          const match = editedRows.has(row) && row.referenceSource ? byName.get(row.name) : byId.get(row.id);
+          return match || byName.get(row.name) || { ...emptyParameterRow(), name: row.name };
+        };
+        state.compared.rows = state.compared.rows.map(remap);
+        state.missingRows.forEach((row, name) => state.missingRows.set(name, remap(row)));
+        state.base = clone(live); state.draft = draft;
+      });
+      editedRows.clear(); draftUndo.length = 0; draftRedo.length = 0;
+      busy = false;
+      message.textContent = '修改已保存到参数表。';
+      rebuild(true);
+      scroll.focus({ preventScroll: true });
+    }
     async function saveChanges() {
       if (busy) return;
       applyEditor();
-      if (!editedRows.size) { close(true); return; }
+      if (!editedRows.size) return;
       busy = true; comparisonCommit = true; updateActions(); message.textContent = '正在保存修改...';
       clearTimeout(timer);
       try {
@@ -2585,7 +2646,7 @@
           catalog.revision = saved.revision; dirty++; savedGeneration = dirty; failure = '';
           invalidate(); renderTree(); renderTable(); notifyParameterHistory();
           if (channel) channel.postMessage({ libraryId, catalog: saved });
-          status('比较修改已保存到工作库'); busy = false; close(true); return;
+          status('比较修改已保存到工作库'); acceptSavedDrafts(); return;
         }
         const checked = new Set();
         editedRows.forEach((item) => {
@@ -2629,7 +2690,7 @@
           status('比较修改已保存到工作库');
         })().finally(() => { saving = null; });
         await saving;
-        busy = false; close(true);
+        acceptSavedDrafts();
       } catch (error) {
         message.textContent = '保存失败：' + error.message;
       } finally {
@@ -2678,7 +2739,8 @@
       const scrollTop = scroll.scrollTop;
       const query = search.value.trim().toLowerCase();
       const filtered = records.filter((entry) => (!onlyDifferent.checked || entry.kind !== 'same') && entry.name.toLowerCase().includes(query));
-      page = Math.max(0, Math.min(page, Math.ceil(filtered.length / pageSize) - 1));
+      pageCount = Math.ceil(filtered.length / pageSize);
+      page = Math.max(0, Math.min(page, pageCount - 1));
       const start = page * pageSize, shown = filtered.slice(start, start + pageSize);
       body.replaceChildren();
       shown.forEach((entry) => {
@@ -2690,7 +2752,7 @@
         tr.append(td); body.append(tr);
       }
       pageInfo.textContent = filtered.length ? (start + 1) + '-' + (start + shown.length) + ' / ' + filtered.length : '0 / 0';
-      previous.disabled = !page; next.disabled = start + pageSize >= filtered.length; scroll.scrollTop = preserveScroll ? scrollTop : 0;
+      scroll.scrollTop = preserveScroll ? scrollTop : 0;
       updateActions();
     }
     function rebuild(preserveScroll) {

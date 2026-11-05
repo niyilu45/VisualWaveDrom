@@ -10,6 +10,136 @@
     });
     visible.forEach((input, index) => { input.style.height = heights[index] + 'px'; });
   }
+  let formulaTooltip, tooltipOwner, tooltipNativeTitle, tooltipAnchor, stopActiveFormulaEditor;
+  function formulaTokenAt(span, x, y) {
+    return Array.from(span.getClientRects()).some((rect) =>
+      x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom);
+  }
+  function hideFormulaTooltip(owner) {
+    if (!formulaTooltip || (owner && tooltipOwner !== owner)) return;
+    formulaTooltip.hidden = true;
+    if (tooltipOwner && tooltipNativeTitle && !tooltipOwner.title) tooltipOwner.title = tooltipNativeTitle;
+    tooltipOwner = null;
+    tooltipNativeTitle = null;
+    tooltipAnchor = null;
+  }
+  function showFormulaTooltip(input, hit, event) {
+    if (!formulaTooltip) {
+      formulaTooltip = document.createElement('div');
+      formulaTooltip.className = 'parameter-formula-tooltip';
+      formulaTooltip.setAttribute('role', 'tooltip');
+      document.body.append(formulaTooltip);
+      global.addEventListener('scroll', () => {
+        if (!tooltipAnchor) return;
+        const { span, x, y } = tooltipAnchor;
+        if (document.elementFromPoint(x, y) !== tooltipOwner || !formulaTokenAt(span, x, y)) hideFormulaTooltip();
+      }, true);
+      document.addEventListener('pointermove', (pointer) => {
+        if (tooltipOwner && pointer.target !== tooltipOwner) hideFormulaTooltip();
+      });
+    }
+    if (tooltipOwner !== input) {
+      hideFormulaTooltip();
+      tooltipOwner = input;
+      tooltipNativeTitle = input.title;
+      input.title = '';
+    }
+    tooltipAnchor = { span: hit.span, x: event.clientX, y: event.clientY };
+    const text = hit.token.text + ' = ' + (hit.token.value || '（空值）');
+    if (formulaTooltip.textContent !== text) formulaTooltip.textContent = text;
+    formulaTooltip.hidden = false;
+    const left = Math.min(event.clientX + 12, global.innerWidth - formulaTooltip.offsetWidth - 8);
+    const below = event.clientY + 16;
+    const top = below + formulaTooltip.offsetHeight <= global.innerHeight - 8
+      ? below : event.clientY - formulaTooltip.offsetHeight - 12;
+    formulaTooltip.style.left = Math.max(8, left) + 'px';
+    formulaTooltip.style.top = Math.max(8, top) + 'px';
+  }
+  function formulaEditor(input, resolveTokens) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'parameter-formula-editor';
+    wrapper.append(input);
+    let layer, content, observer, composing = false, spans = [];
+    function hide() {
+      if (layer) layer.hidden = true;
+      input.classList.remove('parameter-formula-mirrored');
+      hideFormulaTooltip(input);
+    }
+    function syncScroll() {
+      if (content) content.style.transform = 'translate(' + (-input.scrollLeft) + 'px,' + (-input.scrollTop) + 'px)';
+    }
+    function align() {
+      if (!layer || layer.hidden) return;
+      const style = global.getComputedStyle(input);
+      Object.assign(layer.style, { top: input.clientTop + 'px', left: input.clientLeft + 'px',
+        width: input.clientWidth + 'px', height: input.clientHeight + 'px' });
+      for (const name of ['font-family', 'font-size', 'font-weight', 'font-style', 'font-variant-ligatures',
+        'line-height', 'letter-spacing', 'word-spacing', 'white-space', 'overflow-wrap', 'word-break',
+        'text-align', 'text-indent', 'tab-size', 'direction', 'padding']) {
+        content.style.setProperty(name, style.getPropertyValue(name));
+      }
+      syncScroll();
+    }
+    function render() {
+      hideFormulaTooltip(input);
+      if (composing || document.activeElement !== input) { hide(); return; }
+      const raw = input.value;
+      let tokens = [];
+      try { if (raw.length <= 16384) tokens = resolveTokens(raw); }
+      catch (_) { hide(); return; }
+      if (!tokens.length) { hide(); return; }
+      if (!layer) {
+        layer = document.createElement('div');
+        layer.className = 'parameter-formula-layer';
+        layer.setAttribute('aria-hidden', 'true');
+        content = document.createElement('div');
+        layer.append(content); wrapper.prepend(layer);
+      }
+      const fragment = document.createDocumentFragment();
+      let end = 0;
+      spans = tokens.map((token) => {
+        const span = document.createElement('span');
+        span.className = 'parameter-formula-token';
+        span.textContent = token.text;
+        fragment.append(raw.slice(end, token.start), span);
+        end = token.start + token.text.length;
+        return { span, token };
+      });
+      fragment.append(raw.slice(end) + (raw.endsWith('\n') ? '\u200b' : ''));
+      content.replaceChildren(fragment);
+      layer.hidden = false;
+      input.classList.add('parameter-formula-mirrored');
+      align();
+    }
+    function stop() {
+      observer?.disconnect(); observer = null;
+      hide();
+      if (stopActiveFormulaEditor === stop) stopActiveFormulaEditor = null;
+    }
+    input.addEventListener('focus', () => {
+      stopActiveFormulaEditor?.();
+      stopActiveFormulaEditor = stop;
+      if (typeof global.ResizeObserver === 'function') {
+        observer = new global.ResizeObserver(align);
+        observer.observe(input);
+      }
+      render();
+    });
+    input.addEventListener('blur', stop);
+    input.addEventListener('input', render);
+    input.addEventListener('compositionstart', () => { composing = true; hide(); });
+    input.addEventListener('compositionend', () => { composing = false; render(); });
+    input.addEventListener('scroll', syncScroll);
+    input.addEventListener('pointerleave', () => hideFormulaTooltip(input));
+    input.addEventListener('pointerdown', () => hideFormulaTooltip(input));
+    input.addEventListener('pointermove', (event) => {
+      if (!layer || layer.hidden || event.buttons) return;
+      const hit = spans.find(({ span }) => formulaTokenAt(span, event.clientX, event.clientY));
+      if (!hit) { hideFormulaTooltip(input); return; }
+      showFormulaTooltip(input, hit, event);
+    });
+    return wrapper;
+  }
   function attach(api) {
     const { table, toolbar, button, element } = api;
     toolbar.append(button('引用参数表', api.references));
@@ -141,7 +271,10 @@
                     if (focus && !next.isConnected) api.restoreFocus(references, focus);
                   });
                   input.addEventListener('beforeinput', (event) => { if (['historyUndo', 'historyRedo'].includes(event.inputType)) { event.preventDefault(); api.history(event.inputType === 'historyRedo'); } });
-                  box.append(input); if (field === 'val') box.append(error); td.append(box); line.append(td);
+                  if (field === 'val') box.append(formulaEditor(input, (value) =>
+                    api.formulaReferenceTokens(value, draft ? origin : muted ? source.id : table.id, row)), error);
+                  else box.append(input);
+                  td.append(box); line.append(td);
                   if (!draft) editors.push({ input, error, field, rowId: entry.row.id, origin, sourceId: source.id, muted, line });
                 }); body.append(line);
               }); list.append(body); return list;
@@ -209,5 +342,5 @@
       global.removeEventListener('resize', queueResize); global.removeEventListener('vwd-ui-font-change', queueResize);
     } };
   }
-  global.VWDParameterMatrixView = Object.freeze({ attach, resizeTextareas });
+  global.VWDParameterMatrixView = Object.freeze({ attach, resizeTextareas, formulaEditor });
 })(window);
