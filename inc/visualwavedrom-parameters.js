@@ -1,8 +1,8 @@
 (function (global) {
   'use strict';
-  const tokenPattern = /\{((?=[^{}]*\$)\s*(?:[$+\-.\d(]|(?:max|min)\s*\()[^{}]*)\}/g;
+  const tokenPattern = /\{((?=[^{}]*(?:\$|:\s*(?:noTrans|noCalc)\b))\s*(?:[$+\-.\d(]|(?:max|min)\s*\()[^{}]*)\}/g;
   const parameterValuePattern = /\{(\s*(?:[$+\-.\d(]|(?:max|min)\s*\()[^{}]*)\}/g;
-  const dataTokenPattern = /(?:\{(?=[^{}]*\$)\s*(?:[$+\-.\d(]|(?:max|min)\s*\()[^{}]*\}|\S)+/g;
+  const dataTokenPattern = /(?:\{(?=[^{}]*(?:\$|:\s*(?:noTrans|noCalc)\b))\s*(?:[$+\-.\d(]|(?:max|min)\s*\()[^{}]*\}|\S)+/g;
   const numericPattern = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
   const clone = (value) => JSON.parse(JSON.stringify(value));
   const matrix = global.VWDParameterMatrix;
@@ -99,10 +99,10 @@
     const separator = raw.indexOf(':');
     const expression = (separator < 0 ? raw : raw.slice(0, separator)).trim();
     const options = separator < 0 ? [] : raw.slice(separator + 1).split(',').map((option) => option.trim());
-    const unsupported = options.filter((option) => option !== 'noTrans');
+    const unsupported = options.filter((option) => option !== 'noTrans' && option !== 'noCalc');
     const error = !expression ? '参数表达式不能为空'
       : unsupported.length ? '不支持的表达式配置：' + unsupported.map((option) => option || '(空配置)').join(', ') : '';
-    return { expression, options, noTrans: options.includes('noTrans'), error };
+    return { expression, options, noTrans: options.includes('noTrans'), noCalc: options.includes('noCalc'), error };
   }
   function referenceNames(raw) {
     const names = new Set();
@@ -414,18 +414,22 @@
     return tokens;
   }
   function text(value, source, options) {
-    if (typeof value !== 'string' || !value.includes('$')) return value;
+    if (!mayHaveExpression(value)) return value;
     return value.replace(tokenPattern, (raw, expression) => {
       const parsed = parseExpression(expression);
       if (parsed.noTrans && !parsed.error && (!options || options.mode !== 'calculate'))
         return parsed.expression.replace(/[$\s]/g, '');
-      const result = evaluate(expression, source);
+      const result = evaluate(expression, source, undefined,
+        { substituteOnly: parsed.noCalc && (!options || options.mode !== 'calculate') });
       if (options && options.onExpression) options.onExpression({ raw, expression: parsed.expression,
         options: parsed.options, value: result.value, error: result.error || '' });
       return result.error ? raw : result.value;
     });
   }
-  function evaluate(expression, source, state) {
+  function mayHaveExpression(value) {
+    return typeof value === 'string' && (value.includes('$') || value.includes(':'));
+  }
+  function evaluate(expression, source, state, options) {
     const parsed = parseExpression(expression);
     if (parsed.error) return { error: parsed.error, variables: [] };
     expression = parsed.expression;
@@ -433,7 +437,7 @@
     const variables = new Map();
     const hasVariables = expression.includes('$');
     const directVariable = /^\$[^{}\s$(),]+$/.test(expression);
-    let substitute = false;
+    let substitute = !!(options && options.substituteOnly);
     let offset = 0, depth = 0;
     function skipSpace() { while (/\s/.test(expression[offset] || '') && offset < expression.length) offset++; }
     function isNumber(value) {
@@ -532,7 +536,7 @@
       }
       let result = sum(); skipSpace();
       if (offset !== expression.length) throw new Error('表达式格式错误：第 ' + (offset + 1) + ' 个字符附近有多余内容');
-      if (!hasVariables) result = number(result);
+      if (!hasVariables && !substitute) result = number(result);
       if (substitute && !directVariable) {
         result = expression.replace(/\$[^{}\s$(),]+/g, (token) => variables.get(token.slice(1)).val).replace(/\s/g, '');
         return { value: result, variables: Array.from(variables.values()), symbolic: true };
@@ -552,8 +556,9 @@
       const result = evaluate(match[1], source);
       const parsed = parseExpression(match[1]);
       const summary = result.error ? '\n' + result.error : '\n'
-        + (result.symbolic ? '替换结果：' : parsed.noTrans ? '时延计算结果：' : '结果：') + result.value;
-      return match[0] + (parsed.noTrans && !parsed.error ? '\n显示：' + parsed.expression.replace(/[$\s]/g, '') + '（noTrans）' : '')
+        + (result.symbolic ? '替换结果：' : parsed.noTrans || parsed.noCalc ? '时延计算结果：' : '结果：') + result.value;
+      return match[0] + ((parsed.noTrans || parsed.noCalc) && !parsed.error ? '\n显示：'
+        + text(match[0], source) + (parsed.noTrans ? '（noTrans）' : '（noCalc）') : '')
         + summary + result.variables.map((item) => '\n\n$' + item.name + '\n参数表：' + item.table
         + (item.sourceTable ? '\n定义来源：' + item.sourceTable : '')
         + '\n值：' + item.val + (item.formula ? '\n公式：' + item.rawVal : '') + '\n说明：' + (item.description || '无')).join('');
@@ -563,7 +568,7 @@
     const expressions = [];
     let scanned = 0, rowIndex = 0;
     function add(raw, path) {
-      if (++scanned > 20000 || expressions.length >= 32 || typeof raw !== 'string' || !raw.includes('$')) return;
+      if (++scanned > 20000 || expressions.length >= 32 || !mayHaveExpression(raw)) return;
       for (const match of raw.matchAll(tokenPattern)) {
         const result = evaluate(match[1], source);
         expressions.push({ path, raw: match[0].slice(0, 240), display: String(text(match[0], source)).slice(0, 240),
@@ -626,7 +631,7 @@
       Object.keys(value).forEach((key) => {
         if (key === 'parameterTables') return;
         const raw = value[key];
-        const result = key === 'data' && typeof raw === 'string' && raw.includes('$') && raw.match(tokenPattern)
+        const result = key === 'data' && mayHaveExpression(raw) && raw.match(tokenPattern)
           ? (raw.match(dataTokenPattern) || []).map((label, index) => resolveText(label, path.concat(key, index), row))
           : visit(raw, calculate ? path.concat(key) : path, row);
         if (result !== value[key]) {
@@ -662,8 +667,8 @@
     const value = typeof raw === 'string' ? raw : '';
     for (const match of value.matchAll(tokenPattern)) {
       rendered += value.slice(end, match.index);
-      const result = evaluate(match[1], source);
       const parsed = parseExpression(match[1]);
+      const result = evaluate(match[1], source, undefined, { substituteOnly: parsed.noCalc });
       const symbolic = parsed.noTrans && !parsed.error;
       const replacement = symbolic ? parsed.expression.replace(/[$\s]/g, '') : result.error ? match[0] : result.value;
       if (!symbolic && !result.symbolic && !result.error && numericPattern.test(replacement.trim()) && Number.isFinite(Number(replacement)) && Number(replacement) < 0) {
@@ -709,7 +714,7 @@
       if (node && !node.hasAttribute('data-parameter-hint')) decorateText(node, raw, source, options);
     }
     function add(raw) {
-      if (typeof raw !== 'string' || !raw.includes('$')) return;
+      if (!mayHaveExpression(raw)) return;
       const rendered = text(raw, source);
       const hint = details(raw, source);
       if (hint) {
@@ -3087,7 +3092,7 @@
       if (target) {
         hint = target.dataset.parameterHint || '';
         const value = target.value || target.textContent || '';
-        if (!hint && value.includes('$') && !target.closest('#parameter-workspace, .parameter-modal')) {
+        if (!hint && mayHaveExpression(value) && !target.closest('#parameter-workspace, .parameter-modal')) {
           try { hint = details(value, bridge.currentSource()); } catch (_) { /* Invalid JSON stays editable. */ }
         }
       }

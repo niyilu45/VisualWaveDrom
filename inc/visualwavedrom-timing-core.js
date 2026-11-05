@@ -168,7 +168,7 @@
           const id = node[col];
           if (id && /[a-zA-Z0-9]/.test(id) && referencedNodes.has(id)) {
             const entry = { row: index, col, block: block.id, offset: (col - block.col) * row.period };
-            if (nodes.has(id)) { duplicates.add(id); issue('unknown', '端点 ' + id + ' 重复，无法确定连接位置', [index, nodes.get(id).row]); }
+            if (nodes.has(id)) { duplicates.add(id); issue('unknown', '端点 ' + id + ' 重复，无法确定连接位置', [index, nodes.get(id).row], [], [], [nodes.get(id), entry]); }
             nodes.set(id, entry);
           }
           if (col === length) break;
@@ -1584,6 +1584,22 @@
           return { col, end, start: columnTime(col, false), finish: columnTime(end, false),
             referenceStart: columnTime(col, true), referenceFinish: columnTime(end, true) };
         });
+        const diagnosticRange = (range) => Object.assign(range, {
+          start: columnTime(range.col, false), finish: columnTime(range.end, false),
+          referenceStart: columnTime(range.col, true), referenceFinish: columnTime(range.end, true)
+        });
+        row.unknownRanges = rowIssues[row.index].filter((entry) => entry.kind === 'unknown')
+          .flatMap((entry) => conflictRegions(entry, row).map(({ col, end, gap }) =>
+            diagnosticRange({ col, end, gap, issueId: issueIndices.get(entry) })));
+        const unpositioned = [];
+        if (row.supported) row.blocks.forEach((block) => {
+          if (block.time !== null || block.col > row.checkUntil) return;
+          const col = block.col, end = Math.min(block.end, row.checkUntil + 1);
+          const last = unpositioned[unpositioned.length - 1];
+          if (last && last.end === col) last.end = Math.max(last.end, end);
+          else unpositioned.push({ col, end: Math.max(col, end) });
+        });
+        row.unpositionedRanges = unpositioned.map(diagnosticRange);
         const problems = row.conflictRanges.concat(row.dataUnknownRanges).sort((a, b) => a.col - b.col || a.end - b.end);
         let problemNumber = 0, problemStart = -Infinity, problemEnd = -Infinity;
         problems.forEach((range) => {

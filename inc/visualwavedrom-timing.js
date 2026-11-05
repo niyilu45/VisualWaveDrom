@@ -29,7 +29,7 @@
     doc.write('<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>时延检查</title></head><body class="timing-view"></body></html>');
     doc.close();
     const stylesheet = doc.createElement('link'); stylesheet.rel = 'stylesheet';
-    stylesheet.href = new URL('inc/visualwavedrom-timing.css?v=20261030-proportional-pan-v1', document.baseURI).href;
+    stylesheet.href = new URL('inc/visualwavedrom-timing.css?v=timing-unknown-locations-v1', document.baseURI).href;
     doc.head.appendChild(stylesheet);
     doc.documentElement.style.fontSize = getComputedStyle(document.documentElement).fontSize;
     doc.body.innerHTML = `
@@ -170,7 +170,8 @@
     function fit() { if (model) range(displayMinimum, displayMinimum + fullSpan()); }
     function problemRange(row, target) {
       if (!target) return null;
-      const marked = row.conflictRanges.concat(row.dataUnknownRanges).find((item) => item.col === target.col && item.end === target.end);
+      const marked = row.conflictRanges.concat(row.dataUnknownRanges, row.unknownRanges || [], row.unpositionedRanges || [])
+        .find((item) => item.col === target.col && item.end === target.end);
       if (marked) return marked;
       const gap = row.gaps.map((id) => model.gaps[id]).find((item) => item.col === target.gapCol);
       if (!gap) return null;
@@ -198,10 +199,74 @@
       selectedColumn = interval ? interval.col : -1;
       $('position').textContent = '第' + (index + 1) + '行 ' + row.name + (interval ? ' · '
         + (interval.number ? '[' + interval.number + '] ' : '') + '原列' + interval.col + (interval.end > interval.col ? '至' + interval.end : '')
-        + (reference ? ' · 原序列参考，时刻未定' : '') : ' · 冲突位置未定');
+        + (reference ? ' · 原序列参考，时刻未定' : '') : ' · 该项涉及整行');
       for (const button of $('detail').querySelectorAll('.timing-problem-link'))
         button.setAttribute('aria-current', String(button.dataset.col === String(target?.col) && button.dataset.end === String(target?.end)));
       drawSoon();
+    }
+    function unknownProblems(row, issues) {
+      const results = [], seen = new Set(), rangesByIssue = new Map();
+      (row.unknownRanges || []).forEach((range) => {
+        if (!rangesByIssue.has(range.issueId)) rangesByIssue.set(range.issueId, []);
+        rangesByIssue.get(range.issueId).push(range);
+      });
+      const location = (range) => !range ? '整行' : '原列 ' + range.col
+        + (range.end > range.col + 1 ? '～' + (range.end - 1) : range.end === range.col ? ' 的边沿' : '');
+      function add(target, type, label, reason, scope) {
+        const at = scope || location(target), key = JSON.stringify([target?.col, target?.end, type, label, reason]);
+        if (seen.has(key)) return;
+        seen.add(key);
+        results.push({ col: target?.col ?? -1, target, type, unknown: true,
+          preview: at + '：' + label, text: at + '：' + label + (reason ? '；' + reason : '') + '。' });
+      }
+      issues.forEach(({ entry, issueId }) => {
+        if (entry.reason === '相对时延已确定，但缺少与共同起点的时间关系'
+            && (!row.supported || row.unpositionedRanges?.length)) return;
+        const ranges = rangesByIssue.get(issueId) || [];
+        const gaps = entry.gaps.map((id) => model.gaps[id]).filter((gap) => gap.row === row.index && !gap.ignored);
+        if (gaps.length) {
+          gaps.forEach((gap) => {
+            const range = ranges.find((range) => range.gap === gap.index);
+            const target = gap.duration === undefined ? range : row.dataUnknownRanges.find((range) =>
+              range.col <= gap.col && range.end > gap.col) || range;
+            const reason = gap.seriesReason ? gap.seriesReason.split('；')[0] : '';
+            const omissions = gap.omissions || [];
+            const scope = omissions.length ? location(target) + '（| 在原列 ' + omissions.slice(0, 3).join('、')
+              + (omissions.length > 3 ? ' 等 ' + omissions.length + ' 处' : '') + '）' : undefined;
+            if (gap.duration === undefined) add(target, 'duration', gap.kind === 'stretch' ? '保持区间时长未定' : '省略时长未定',
+              reason || '缺少可确定该段长度的连接时延或相邻行锚点', scope);
+            else add(target, 'data', '数据内容未定', (gap.kind === 'stretch' ? '展开区间' : '| 省略部分')
+              + '时长已确定为 ' + fmt(gap.duration) + ' cycle'
+              + (reason ? '；' + reason : '，但无法唯一推断中间的数据'));
+          });
+        } else if (entry.edges.length) {
+          entry.edges.forEach((id) => {
+            const edge = model.edges[id], scope = '连接 ' + (id + 1) + ' ' + edge.from + '→' + edge.to;
+            const reason = edge.invalid ? entry.reason : edge.timing.reason || entry.reason;
+            const target = ranges.find((range) => [edge.fromNode, edge.toNode].some((node) =>
+              node?.row === row.index && node.col >= range.col && node.col <= range.end));
+            add(target, 'edge', edge.invalid ? '端点位置未定' : '时延标签无法识别',
+              (edge.label ? '标签“' + edge.label + '”；' : '') + reason,
+              scope + (target ? '（' + location(target) + '）' : ''));
+          });
+        } else if (ranges.length) {
+          ranges.filter((range) => range.gap === undefined).forEach((range) =>
+            add(range, 'location', '连接位置未定', entry.reason));
+        } else {
+          add(null, 'row', entry.reason, '');
+        }
+      });
+      (row.unpositionedRanges || []).forEach((range) => {
+        const previousGap = row.gaps.some((id) => {
+          const gap = model.gaps[id];
+          return !gap.ignored && gap.duration === undefined && gap.col < range.col;
+        });
+        add(range, 'position', '时刻未定', previousGap ? '前面的省略时长尚未确定，该区间不能定位到具体 cycle'
+          : '缺少与共同起点的时间关系，不能定位到具体 cycle');
+      });
+      results.sort((a, b) => a.col - b.col || (a.target?.end || 0) - (b.target?.end || 0));
+      results.forEach((item, index) => { item.text = '[未定 ' + (index + 1) + '] ' + item.text; });
+      return results;
     }
     function selectRow(index, locate = false) {
       if (!model || !model.rows[index]) return;
@@ -217,8 +282,10 @@
       paragraph(rowStatusName(row), row.status);
       if (row.status !== 'ok') {
         const shortNames = { 'previous-row': '上行', 'next-row': '下行', current: '已定时延', series: '等差' };
-        const summaries = [], describedConflicts = new Set();
+        const summaries = (row.unknownProblems || []).slice(), describedConflicts = new Set();
+        if (summaries.length) paragraph('共 ' + summaries.length + ' 处未定，具体位置和原因如下：', 'unknown');
         row.comparisons.forEach((comparison) => {
+          if (row.status === 'unknown') return;
           const upper = comparison.estimates.find((item) => item.kind === 'previous-row');
           const difference = comparison.differences.find((item) => item.a === upper?.label) || comparison.differences[0];
           const prefix = comparison.problemNumbers.map((number) => '[' + number + ']').join('');
@@ -285,6 +352,10 @@
         summaries.sort((a, b) => a.col - b.col).forEach((item) => {
           const button = doc.createElement('button'); button.type = 'button'; button.className = 'timing-problem-link'; button.textContent = item.text;
           button.title = '定位此处波形'; button.setAttribute('aria-label', '定位：' + item.text);
+          if (item.unknown && !item.target) {
+            const note = doc.createElement('p'); note.className = 'timing-problem-note'; note.textContent = item.text;
+            detail.appendChild(note); return;
+          }
           button.dataset.col = item.target?.col; button.dataset.end = item.target?.end;
           button.setAttribute('aria-current', String(focusedProblem?.row === index && focusedProblem.target.col === item.target?.col && focusedProblem.target.end === item.target?.end));
           button.onclick = () => locateProblem(index, item.target); detail.appendChild(button);
@@ -416,6 +487,13 @@
         const button = doc.createElement('button'); button.type = 'button'; button.dataset.row = row.index;
         button.className = 'timing-row-result'; button.setAttribute('aria-pressed', String(row.index === selected));
         const name = doc.createElement('span'); name.textContent = (row.index + 1) + '. ' + row.name;
+        if (row.unknownProblems?.length) {
+          const summary = doc.createElement('small'); summary.className = 'timing-row-summary';
+          const problems = row.unknownProblems;
+          summary.textContent = problems.slice(0, 2).map((item) => item.preview).join('；')
+            + (problems.length > 2 ? '；另 ' + (problems.length - 2) + ' 处' : '');
+          name.appendChild(summary);
+        }
         const state = doc.createElement('span'); state.textContent = rowStatusName(row); state.className = row.status;
         button.append(name, state); button.title = row.reasons.join('\n'); button.onclick = () => selectRow(row.index, true);
         fragment.appendChild(button);
@@ -719,6 +797,11 @@
     function receive(result) {
       const firstResult = !model;
       model = result;
+      const unknownByRow = model.rows.map(() => []);
+      model.issues.forEach((entry, issueId) => {
+        if (entry.kind === 'unknown') entry.rows.forEach((index) => unknownByRow[index].push({ entry, issueId }));
+      });
+      model.rows.forEach((row) => { row.unknownProblems = unknownProblems(row, unknownByRow[row.index]); });
       for (const index of referenceOverrides.keys()) if (index >= model.rows.length) referenceOverrides.delete(index);
       layoutRows();
       if (!model.rows[selected]?.referenceRuns.length || selectedColumn >= model.rows[selected].sourceLength) selectedColumn = -1;
@@ -726,7 +809,9 @@
       const alignedCount = model.rows.filter((row) => row.alignments.some((entry) => entry.direction !== 'data-series')).length;
       const seriesCount = model.rows.filter((row) => row.gaps.some((id) => model.gaps[id].series)).length;
       const orphan = model.issues.filter((item) => !item.rows.length).map((item) => item.reason);
+      const unknownCount = model.rows.reduce((count, row) => count + row.unknownProblems.length, 0);
       message('已确定 ' + counts.ok + ' 行 · 时延冲突 ' + counts.conflict + ' 行 · 无法判断 ' + counts.unknown + ' 行'
+        + (unknownCount ? '（共 ' + unknownCount + ' 处未定，点击左侧行查看位置）' : '')
         + (alignedCount ? ' · 相邻行对齐 ' + alignedCount + ' 行' : '')
         + (seriesCount ? ' · 等差补全 ' + seriesCount + ' 行' : '')
         + (orphan.length ? ' · ' + orphan.join('；') : '') + (counts.conflict ? ' · 冲突部分仅供定位，不能作为对齐结论' : ''), false);
