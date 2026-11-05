@@ -99,7 +99,8 @@ svg text.parameter-reference-highlight tspan { paint-order: stroke fill; stroke:
 .parameter-reference-name:disabled { color: var(--text-muted); text-decoration: none; cursor: default; }
 .parameter-reference-grid th { position: static; background: transparent; }
 .parameter-reference-grid td { white-space: pre-wrap; overflow-wrap: anywhere; }
-.parameter-reference-row-select { justify-content: center; cursor: pointer; }
+.parameter-reference-row-select { justify-content: center; }
+.parameter-reference-row-select:disabled { cursor: default; }
 @media (max-width: 600px) { .parameter-reference-row-select { flex-basis: 24px; } }
 .parameter-reference-unused-group { padding: 0 12px 12px; }
 .parameter-reference-unused-group > summary { padding: 8px 0; cursor: pointer; color: var(--text-muted); font-size: .85rem; }
@@ -141,7 +142,10 @@ svg text.parameter-reference-highlight tspan { paint-order: stroke fill; stroke:
 .parameter-priority-row { display: flex; align-items: center; min-height: 42px; gap: 3px; border-bottom: 1px solid var(--border); cursor: grab; }
 .parameter-priority-name { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: .85rem; }
 .parameter-priority-row.drop-target { box-shadow: 0 -2px var(--accent); }
-.parameter-tree-row.drop-target { border-color: var(--accent); background: var(--surface-2); }
+.parameter-tree-row.parameter-tree-drop-inside { border-color: var(--accent); background: var(--surface-2); }
+.parameter-tree-drop-before { box-shadow: inset 0 2px var(--accent); }
+.parameter-tree-drop-after { box-shadow: inset 0 -2px var(--accent); }
+.parameter-tree-dragging { opacity: .55; }
 .parameter-link-dialog > .modal-footer { flex: 0 0 auto; }
 .parameter-tooltip { position: fixed; z-index: 100100; max-width: min(330px, calc(100vw - 16px)); max-height: min(420px, calc(100vh - 16px)); overflow-y: auto; overscroll-behavior: contain; padding: 10px 12px; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 4px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8rem; line-height: 1.5; box-shadow: var(--shadow-float); }
 .cm-parameter { color: #8cc9ff !important; text-decoration: underline dotted; text-underline-offset: 3px; }

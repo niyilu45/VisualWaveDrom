@@ -1265,25 +1265,33 @@
     setRowSelection([]); patchMatrix(table, patches, true);
     return true;
   }
-  function rowPosition(table, row) {
-    const index = table.rows.indexOf(row);
-    return { index, previous: table.rows[index - 1], next: table.rows[index + 1] };
+  function itemPosition(items, item) {
+    const index = items.indexOf(item);
+    return { index, previous: items[index - 1], next: items[index + 1] };
   }
-  function insertRowAtPosition(table, row, position) {
-    const next = table.rows.indexOf(position.next), previous = table.rows.indexOf(position.previous);
-    const index = next >= 0 ? next : previous >= 0 ? previous + 1 : Math.min(position.index, table.rows.length);
-    table.rows.splice(index, 0, row);
+  function insertAtPosition(items, item, position) {
+    const next = items.indexOf(position.next), previous = items.indexOf(position.previous);
+    const index = next >= 0 ? next : previous >= 0 ? previous + 1 : Math.min(position.index, items.length);
+    items.splice(index, 0, item);
   }
-  function moveParameterRow(table, row, target, after) {
-    if (activePage !== 'parameters' || modal || selectedTable !== table.id || !catalog.tables.includes(table)) return false;
-    const before = rowPosition(table, row), targetIndex = table.rows.indexOf(target);
-    if (before.index < 0 || targetIndex < 0) return false;
-    let index = targetIndex + (after ? 1 : 0);
-    if (before.index < index) index--;
-    if (index === before.index) return false;
+  function rowDropIndex(from, target, after) {
+    if (from < 0 || target < 0) return -1;
+    const boundary = target + (after ? 1 : 0);
+    return from < boundary ? boundary - 1 : boundary;
+  }
+  function moveParameterRow(owner, table, row, target, after) {
+    if (activePage !== 'parameters' || modal || selectedTable !== owner.id
+        || !catalog.tables.includes(owner) || !catalog.tables.includes(table)) return false;
+    const before = itemPosition(table.rows, row), targetIndex = table.rows.indexOf(target);
+    const index = rowDropIndex(before.index, targetIndex, after);
+    if (index < 0 || index === before.index) return false;
     const nextRows = table.rows.slice();
     nextRows.splice(before.index, 1); nextRows.splice(index, 0, row);
     const trimmed = trimTrailingParameterRows(nextRows);
+    if (owner !== table) {
+      patchMatrix(owner, [{ target: table, field: 'rows', value: trimmed }]);
+      return true;
+    }
     if (trimmed !== nextRows) {
       setRowSelection(trimmed.includes(row) ? [row] : []);
       patchMatrix(table, [{ target: table, field: 'rows', value: trimmed }], true);
@@ -1291,7 +1299,7 @@
     }
     const scroller = $('parameter-workspace').querySelector('.parameter-grid-scroll');
     table.rows.splice(before.index, 1); table.rows.splice(index, 0, row);
-    recordParameterHistory({ kind: 'row-move', tableId: table.id, row, before, after: rowPosition(table, row) });
+    recordParameterHistory({ kind: 'row-move', tableId: table.id, row, before, after: itemPosition(table.rows, row) });
     finishRowHistory(table, row, scroller ? scroller.scrollTop : 0);
     return true;
   }
@@ -1300,6 +1308,17 @@
     commitParameterCell();
     const from = redo ? parameterRedoStack : parameterUndoStack, to = redo ? parameterUndoStack : parameterRedoStack;
     const entry = from[from.length - 1]; if (!entry) return false;
+    if (entry.kind === 'tree-move') {
+      const { item, listKey } = entry, list = catalog[listKey], index = list.indexOf(item);
+      if (index < 0) return false;
+      const position = redo ? entry.after : entry.before;
+      item.parentId = position.parents.find((key) => !key || (catalog.directories.some((dir) => dir.id === key)
+        && !folderAncestors(key).includes(item.id))) || '';
+      list.splice(index, 1); insertAtPosition(list, item, position);
+      from.pop(); to.push(entry);
+      finishParameterTreeMove(item, listKey);
+      return true;
+    }
     if (entry.kind === 'matrix-patch') {
       const table = catalog.tables.find((item) => item.id === entry.tableId); if (!table) return false;
       const scroller = $('parameter-workspace').querySelector('.parameter-grid-scroll');
@@ -1381,7 +1400,7 @@
     if (entry.kind === 'row-move') {
       const index = table.rows.indexOf(entry.row); if (index < 0) return false;
       table.rows.splice(index, 1);
-      insertRowAtPosition(table, entry.row, redo ? entry.after : entry.before);
+      insertAtPosition(table.rows, entry.row, redo ? entry.after : entry.before);
       from.pop(); to.push(entry);
       finishRowHistory(table, entry.row, scroller ? scroller.scrollTop : 0);
       return true;
@@ -1392,7 +1411,7 @@
       entry.index = index; entry.previous = table.rows[index - 1]; entry.next = table.rows[index + 1];
       table.rows.splice(index, 1);
     } else {
-      insertRowAtPosition(table, entry.row, entry);
+      insertAtPosition(table.rows, entry.row, entry);
     }
     from.pop(); to.push(entry);
     finishRowHistory(table, redo ? null : entry.row, scroller ? scroller.scrollTop : 0);
@@ -1634,7 +1653,8 @@
     }
     validate(next);
     const replaced = new Set(catalog.tables.filter((table) => next.tables.find((item) => item.id === table.id) !== table).map((table) => table.id));
-    const unaffected = (entry) => !replaced.has(entry.tableId || entry.table?.id)
+    const unaffected = (entry) => (entry.kind !== 'tree-move' || next[entry.listKey].includes(entry.item))
+      && !replaced.has(entry.tableId || entry.table?.id)
       && !(entry.changes || []).some((change) => replaced.has(change.tableId || change.sourceTableId));
     parameterUndoStack = parameterUndoStack.filter(unaffected); parameterRedoStack = parameterRedoStack.filter(unaffected);
     const workspace = $('parameter-workspace');
@@ -1750,22 +1770,24 @@
     }
     return names.join(' / ');
   }
-  function enableFolderDrop(node, parentId) {
-    node.addEventListener('dragover', (event) => { if (event.dataTransfer.types.includes('application/x-vwd-parameter')) { event.preventDefault(); node.classList.add('drop-target'); } });
-    node.addEventListener('dragleave', () => node.classList.remove('drop-target'));
-    node.addEventListener('drop', (event) => {
-      node.classList.remove('drop-target');
-      const sourceId = event.dataTransfer.getData('application/x-vwd-parameter'); if (!sourceId) return;
-      event.preventDefault(); event.stopPropagation();
-      const item = catalog.tables.concat(catalog.directories).find((entry) => entry.id === sourceId);
-      if (!item || item.id === parentId) return;
-      let cursor = parentId; const seen = new Set();
-      while (cursor && !seen.has(cursor)) {
-        if (cursor === item.id) { status('不能移入自己的子标题', true); return; }
-        seen.add(cursor); cursor = (catalog.directories.find((entry) => entry.id === cursor) || {}).parentId;
-      }
-      item.parentId = parentId; expanded.add(parentId); changed(true);
-    });
+  function finishParameterTreeMove(item, listKey) {
+    folderAncestors(item.parentId).forEach((key) => expanded.add(key));
+    const current = catalog.tables.find((table) => table.id === selectedTable);
+    if (current) selectedFolder = current.parentId || '';
+    changed(false, true); renderTree();
+    if (!current) renderTable();
+    focusTreeItem(listKey === 'tables' ? 'tableId' : 'folderId', item.id);
+  }
+  function moveParameterTreeItem(item, listKey, target, position, parentId) {
+    commitParameterCell();
+    const list = catalog[listKey], before = { ...itemPosition(list, item), parents: folderAncestors(item.parentId) };
+    const index = position === 'inside' ? list.length - 1 : rowDropIndex(before.index, list.indexOf(target), position === 'after');
+    if (before.index < 0 || index < 0) return;
+    if ((item.parentId || '') === parentId && (index === before.index || position === 'inside')) return;
+    list.splice(before.index, 1); list.splice(index, 0, item); item.parentId = parentId;
+    const after = { ...itemPosition(list, item), parents: folderAncestors(parentId) };
+    recordParameterHistory({ kind: 'tree-move', item, listKey, before, after });
+    finishParameterTreeMove(item, listKey);
   }
   function renderTree() {
     if (standaloneTableId) return;
@@ -1774,6 +1796,58 @@
     if ($('parameter-add-table')) $('parameter-add-table').disabled = !!catalogLoadError;
     if ($('parameter-toggle-all')) $('parameter-toggle-all').disabled = !!catalogLoadError;
     if (catalogLoadError) { tree.append(element('p', 'parameter-status error', '参数表载入失败，原始数据已保留')); return; }
+    let drag = null, hint = null;
+    const identity = libraryId;
+    function showDrop(node, position) {
+      if (hint?.node === node && hint.position === position) return;
+      if (hint) hint.node.classList.remove('parameter-tree-drop-' + hint.position);
+      hint = node ? { node, position } : null;
+      if (hint) node.classList.add('parameter-tree-drop-' + position);
+    }
+    function finishDrag() {
+      if (drag) drag.node.classList.remove('parameter-tree-dragging');
+      drag = null; showDrop(null);
+    }
+    function bindTreeDrag(node, label, item, listKey) {
+      if (item) {
+        label.draggable = true;
+        label.title = listKey === 'directories' ? '拖到标题上缘或下缘排序，拖到中间移入' : '拖动排序，或移入标题';
+        label.addEventListener('dragstart', (event) => {
+          if (!event.dataTransfer || activePage !== 'parameters' || modal || identity !== libraryId) { event.preventDefault(); return; }
+          finishDrag(); drag = { node, item, listKey };
+          node.classList.add('parameter-tree-dragging');
+          event.dataTransfer.effectAllowed = 'move';
+          event.dataTransfer.setData('application/x-vwd-parameter', item.id);
+        });
+        label.addEventListener('dragend', finishDrag);
+      }
+      function targetAt(event) {
+        if (!drag || identity !== libraryId || modal || activePage !== 'parameters'
+            || !drag.node.isConnected || drag.item === item) return null;
+        const folder = listKey === 'directories';
+        if (!folder && drag.listKey !== listKey) return null;
+        const { top, height } = node.getBoundingClientRect(), offset = (event.clientY - top) / height;
+        const position = !item || (folder && (drag.listKey !== listKey || (offset >= .25 && offset <= .75)))
+          ? 'inside' : offset < .5 ? 'before' : 'after';
+        const parentId = position === 'inside' ? item?.id || '' : item.parentId || '';
+        if (drag.listKey === 'directories' && folderAncestors(parentId).includes(drag.item.id)) return null;
+        return { position, parentId };
+      }
+      node.addEventListener('dragover', (event) => {
+        const target = targetAt(event);
+        if (!target) { showDrop(null); return; }
+        event.preventDefault(); event.dataTransfer.dropEffect = 'move'; showDrop(node, target.position);
+      });
+      node.addEventListener('dragleave', (event) => {
+        if (hint?.node === node && !node.contains(event.relatedTarget)) showDrop(null);
+      });
+      node.addEventListener('drop', (event) => {
+        const target = targetAt(event); if (!target) return;
+        event.preventDefault(); event.stopPropagation();
+        const source = drag; finishDrag();
+        moveParameterTreeItem(source.item, source.listKey, item, target.position, target.parentId);
+      });
+    }
     function directory(parentId, depth, number, seen) {
       if (seen.has(parentId)) return;
       const nextSeen = new Set(seen); nextSeen.add(parentId);
@@ -1790,8 +1864,7 @@
       choose.prepend(chevron); choose.setAttribute('aria-expanded', String(expanded.has(parentId))); line.append(choose);
       line.append(button('新增子标题', () => addDirectory(parentId), 'plus'));
       if (dir) { line.append(button('修改标题名称', () => rename(dir), 'edit'), button('删除标题', () => removeDirectory(dir), 'trash')); }
-      if (dir) { choose.draggable = true; choose.addEventListener('dragstart', (e) => e.dataTransfer.setData('application/x-vwd-parameter', dir.id)); }
-      enableFolderDrop(line, parentId); tree.append(line);
+      bindTreeDrag(line, choose, dir, 'directories'); tree.append(line);
       if (!expanded.has(parentId)) return;
       catalog.directories.filter((item) => (item.parentId || '') === parentId).forEach((item, index) => directory(item.id, depth + 1, number + (index + 1) + '.', nextSeen));
       catalog.tables.filter((item) => (item.parentId || '') === parentId).forEach((table) => {
@@ -1800,7 +1873,7 @@
         const pick = button(table.name, () => { selectedTable = table.id; selectedFolder = parentId; renderTree(); renderTable(); focusTreeItem('tableId', table.id); });
         pick.dataset.tableId = table.id;
         pick.className = 'parameter-tree-label'; pick.classList.toggle('active', selectedTable === table.id);
-        pick.draggable = true; pick.addEventListener('dragstart', (e) => e.dataTransfer.setData('application/x-vwd-parameter', table.id));
+        bindTreeDrag(row, pick, table, 'tables');
         row.append(pick, element('span', 'parameter-count', table.rows.filter((item) => item.name).length)); tree.append(row);
       });
     }
@@ -1923,10 +1996,10 @@
     head.append(tr); grid.append(head);
     const body = element('tbody');
     const rowViews = [];
-    const rowDropViews = new Map();
+    const rowDropViews = new WeakMap();
     let appendRow = emptyParameterRow();
     const dragLibraryId = libraryId;
-    let draggedRow = null, draggedLine = null, dropTarget = null, rowDrag = null, rowDragFrame = 0;
+    let dropTarget = null, rowDrag = null, rowDragFrame = 0;
     function clearDropTarget() {
       if (dropTarget) dropTarget.view.line.classList.remove('parameter-drop-before', 'parameter-drop-after');
       dropTarget = null;
@@ -1938,8 +2011,7 @@
       global.removeEventListener('lostpointercapture', rowPointerReleased, true);
       if (rowDragFrame) { global.cancelAnimationFrame(rowDragFrame); rowDragFrame = 0; }
       clearDropTarget();
-      if (draggedLine) draggedLine.classList.remove('parameter-row-dragging');
-      draggedRow = draggedLine = null;
+      if (previous) previous.view.line.classList.remove('parameter-row-dragging');
       scroller.classList.remove('parameter-row-reordering');
       if (previous && previous.handle.hasPointerCapture(previous.pointerId)) previous.handle.releasePointerCapture(previous.pointerId);
     }
@@ -1949,17 +2021,22 @@
     function rowPointerReleased(event) {
       if (rowDrag && rowDrag.pointerId === event.pointerId) clearRowDrag();
     }
-    function acceptsRowDrag() {
-      return draggedRow && dragLibraryId === libraryId && activePage === 'parameters' && selectedTable === table.id
-        && catalog.tables.includes(table) && scroller.isConnected;
+    function acceptsRowDrag(view) {
+      return dragLibraryId === libraryId && !modal && activePage === 'parameters' && selectedTable === table.id
+        && catalog.tables.includes(table) && catalog.tables.includes(view.source || table) && view.line.isConnected;
     }
     function findRowDrop(event) {
-      if (!acceptsRowDrag()) return null;
+      if (!rowDrag?.started || !acceptsRowDrag(rowDrag.view)) return null;
+      const moving = rowDrag.view, source = moving.source || table;
       const bounds = scroller.getBoundingClientRect();
-      const headerBottom = Math.max(bounds.top, ...Array.from(tr.children, (cell) => cell.getBoundingClientRect().bottom));
+      const headerBottom = moving.source ? bounds.top : Math.max(bounds.top, ...Array.from(tr.children, (cell) => cell.getBoundingClientRect().bottom));
       if (event.clientX < bounds.left || event.clientX >= bounds.right || event.clientY < headerBottom || event.clientY >= bounds.bottom) return null;
       const underPointer = document.elementFromPoint(event.clientX, event.clientY);
       let view = rowDropViews.get(underPointer && underPointer.closest('tr'));
+      if (moving.source) {
+        // The visible and shadowed rows are distinct groups, even within one source.
+        if (!view || view.source !== source || view.line.parentElement !== moving.line.parentElement) return null;
+      } else if (underPointer?.closest('.parameter-reference-sections')) return null;
       let after;
       if (view?.row === appendRow) {
         view = rowViews.slice(0, -1).filter((item) => !item.line.hidden).at(-1);
@@ -1975,9 +2052,8 @@
         else if (event.clientY >= last.line.getBoundingClientRect().bottom) { view = last; after = true; }
         else return null;
       }
-      const from = table.rows.indexOf(draggedRow), target = table.rows.indexOf(view.row);
-      let index = target + (after ? 1 : 0); if (from < index) index--;
-      return from < 0 || target < 0 || from === index ? null : { view, after };
+      const from = source.rows.indexOf(moving.row), index = rowDropIndex(from, source.rows.indexOf(view.row), after);
+      return index < 0 || from === index ? null : { view, after };
     }
     function updateRowDrop(event) {
       const next = findRowDrop(event);
@@ -1987,13 +2063,49 @@
     }
     // Pointer capture keeps wheel scrolling available while a row is held.
     scroller.addEventListener('scroll', () => {
-      if (!rowDrag || !draggedRow || rowDragFrame) return;
+      if (!rowDrag?.started || rowDragFrame) return;
       rowDragFrame = global.requestAnimationFrame(() => {
         rowDragFrame = 0;
-        if (rowDrag && acceptsRowDrag()) updateRowDrop({ clientX: rowDrag.x, clientY: rowDrag.y });
+        if (rowDrag && acceptsRowDrag(rowDrag.view)) updateRowDrop({ clientX: rowDrag.x, clientY: rowDrag.y });
         else clearRowDrag();
       });
     }, { passive: true });
+    function bindRowDrag(view, handle, select) {
+      rowDropViews.set(view.line, view);
+      handle.addEventListener('pointerdown', (event) => {
+        if (event.button !== 0 || !event.isPrimary || !acceptsRowDrag(view)) return;
+        event.preventDefault(); event.stopPropagation(); clearRowDrag();
+        handle.focus({ preventScroll: true });
+        if (!acceptsRowDrag(view) || event.ctrlKey || event.metaKey || event.shiftKey) return;
+        select();
+        if (!(view.source || table).rows.includes(view.row)) return;
+        rowDrag = { view, handle, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, x: event.clientX, y: event.clientY, started: false };
+        global.addEventListener('keydown', cancelRowDrag, true);
+        global.addEventListener('blur', clearRowDrag);
+        global.addEventListener('lostpointercapture', rowPointerReleased, true);
+        try { handle.setPointerCapture(event.pointerId); }
+        catch (_) { clearRowDrag(); }
+      });
+      handle.addEventListener('pointermove', (event) => {
+        if (rowDrag?.handle !== handle || rowDrag.pointerId !== event.pointerId) return;
+        rowDrag.x = event.clientX; rowDrag.y = event.clientY;
+        if (!rowDrag.started) {
+          if (Math.hypot(event.clientX - rowDrag.startX, event.clientY - rowDrag.startY) < 4) return;
+          rowDrag.started = true;
+          view.line.classList.add('parameter-row-dragging'); scroller.classList.add('parameter-row-reordering');
+        }
+        event.preventDefault(); updateRowDrop(event);
+      });
+      handle.addEventListener('pointerup', (event) => {
+        if (rowDrag?.handle !== handle || rowDrag.pointerId !== event.pointerId) return;
+        const target = findRowDrop(event);
+        clearRowDrag();
+        if (target && moveParameterRow(table, view.source || table, view.row, target.view.row, target.after) && view.source) {
+          refreshCommittedCell(); applyFilters(); matrixView.focusReferenceRow(view);
+        }
+      });
+      handle.addEventListener('pointercancel', rowPointerReleased);
+    }
     const valueSource = { parameterTables: [table.id] };
     function refreshValues() {
       const context = { stack: [], values: new Map() };
@@ -2046,7 +2158,6 @@
     function appendRowView(row, index) {
       const line = element('tr');
       const view = { row, line, resize: [], inputs: {} }; rowViews.push(view);
-      rowDropViews.set(line, view);
       line.addEventListener('click', () => selectRow(row));
       line.addEventListener('focusin', (event) => {
         if (!event.target.closest('.parameter-row-select')) selectRow(row);
@@ -2062,37 +2173,7 @@
             event.stopPropagation(); selectRow(row, event);
           });
           handle.className = 'parameter-row-select';
-          handle.addEventListener('pointerdown', (event) => {
-            if (event.button !== 0 || !event.isPrimary || modal || activePage !== 'parameters' || selectedTable !== table.id || !catalog.tables.includes(table)) return;
-            event.preventDefault(); event.stopPropagation(); clearRowDrag();
-            handle.focus({ preventScroll: true });
-            if (event.ctrlKey || event.metaKey || event.shiftKey) return;
-            selectRow(row);
-            rowDrag = { handle, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, x: event.clientX, y: event.clientY };
-            global.addEventListener('keydown', cancelRowDrag, true);
-            global.addEventListener('blur', clearRowDrag);
-            global.addEventListener('lostpointercapture', rowPointerReleased, true);
-            try { handle.setPointerCapture(event.pointerId); }
-            catch (_) { clearRowDrag(); }
-          });
-          handle.addEventListener('pointermove', (event) => {
-            if (!rowDrag || rowDrag.pointerId !== event.pointerId) return;
-            rowDrag.x = event.clientX; rowDrag.y = event.clientY;
-            if (!draggedRow) {
-              if (Math.hypot(event.clientX - rowDrag.startX, event.clientY - rowDrag.startY) < 4) return;
-              draggedRow = row; draggedLine = line;
-              line.classList.add('parameter-row-dragging'); scroller.classList.add('parameter-row-reordering');
-            }
-            event.preventDefault(); updateRowDrop(event);
-          });
-          handle.addEventListener('pointerup', (event) => {
-            if (!rowDrag || rowDrag.pointerId !== event.pointerId) return;
-            const target = findRowDrop(event), moving = draggedRow;
-            clearRowDrag();
-            if (target) moveParameterRow(table, moving, target.view.row, target.after);
-          });
-          handle.addEventListener('pointercancel', clearRowDrag);
-          handle.addEventListener('lostpointercapture', clearRowDrag);
+          bindRowDrag(view, handle, () => selectRow(row));
           const marker = element('span', 'parameter-row-error'); marker.hidden = true; marker.setAttribute('aria-hidden', 'true');
           marker.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="lucide">' + paths.close + '</svg>';
           view.rowNumber = element('span', 'parameter-row-number');
@@ -2249,6 +2330,7 @@
     matrixView = global.VWDParameterMatrixView.attach({ table, toolbar, grid, headRow: tr, rows: rowViews, workspace, emptyCell, scroller,
       filters: rowFilters, element, button, id, status, commit: commitParameterCell,
       patch: (patches, render) => patchMatrix(table, patches, render),
+      bindRowDrag,
       jumpButton: parameterReferenceJump,
       captureFocus: captureParameterFocus,
       restoreFocus: restoreParameterFocus,
@@ -2310,7 +2392,7 @@
       sourceTable: (key) => catalog.tables.find((item) => item.id === key),
       export: exportParameterTableToml, compare: openComparison
     });
-    matrixDispose = matrixView.dispose;
+    matrixDispose = () => { clearRowDrag(); matrixView.dispose(); };
     syncAppendRow(); refreshValues(); applyFilters();
     grid.append(body); scroller.prepend(grid); workspace.append(scroller);
     referenceRefresh = () => {

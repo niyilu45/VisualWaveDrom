@@ -246,6 +246,10 @@
                     });
                     handle.className = 'parameter-row-select parameter-reference-row-select';
                     handle.textContent = index; handle.disabled = draft;
+                    if (!draft) {
+                      handle.title += '；Ctrl/⌘ 多选，Shift 连选，拖动可调整源表行顺序';
+                      api.bindRowDrag(view, handle, () => select(view));
+                    }
                     view.handle = handle;
                     box.append(jump, handle);
                     if (draft) input.placeholder = '名称';
@@ -337,6 +341,10 @@
       if (revealed) queueResize();
     }
     return { refresh, filterReferences, syncSelection, referenceJumpViews: () => rowViews.filter((view) => view.jump),
+      focusReferenceRow(view) {
+        const current = rowViews.find((item) => item.row === view.row && matchesSelection(item, view) && isVisible(item));
+        current?.handle.focus({ preventScroll: true });
+      },
       visible: (view, test) => test(view.valueResult), clearFilters() {}, dispose() {
       cancelAnimationFrame(resizeFrame); if (observer) observer.disconnect();
       global.removeEventListener('resize', queueResize); global.removeEventListener('vwd-ui-font-change', queueResize);
