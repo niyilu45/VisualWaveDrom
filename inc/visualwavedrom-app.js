@@ -752,6 +752,10 @@ if (!window.VWDCodeEditorPairs) {
           initializationError: waveLibraryInitializationError && waveLibraryInitializationError.message,
           lastLoad: waveLibraryLoadState, legacyRecovery: waveLibraryLegacyRecovery,
           documentCount: savedTags.length, deferredDocumentCount: savedTags.filter((item) => item.deferred).length,
+          loadedContentChars: savedTags.reduce((count, item) => count + (item.content?.length || 0), 0),
+          parsedDocumentCacheEntries: waveDocumentMetaCache.size,
+          detachedRenderedPreviews: [...waveLibraryCardCache.values()].filter((entry) =>
+            !entry.card.isConnected && entry.previewDisplay?.querySelector('svg, .wave-fast-preview')).length,
           renderedCardCount: waveLibraryCardCache.size, selectedDirectoryId: selectedNavNodeId,
           activeDocumentName: editingWaveDocumentName });
         vwdDebugLog('parameter-state', { reason, build: '20261021-parameter-startup-v2',
@@ -1079,6 +1083,8 @@ ${lines.join('\n')}`;
     const DIRECT_JSON_HISTORY_INTERVAL_MS = 5000;
     const WAVE_PREVIEW_ROOT_MARGIN = '600px 0px';
     const WAVE_PREVIEW_MAX_RENDERED = 6;
+    const WAVE_META_CACHE_MAX_ENTRIES = 24;
+    const WAVE_META_CACHE_MAX_SOURCE_CHARS = 4 * 1024 * 1024;
     const WAVE_PREVIEW_FALLBACK_HEIGHT = 120;
     const WAVE_PREVIEW_WORKER_PARSE_THRESHOLD = 50000;
     const WAVE_PREVIEW_CANVAS_CELL_THRESHOLD = BIG_WAVE_CELL_THRESHOLD;
@@ -14455,7 +14461,10 @@ ${lines.join('\n')}`;
       const cacheKey = (useEditor ? 'editor:' : 'saved:') + tag.name;
       const parameterRevision = window.VisualWaveDromParameters.getRevision();
       const cached = waveDocumentMetaCache.get(cacheKey);
-      if (cached && cached.content === content && cached.parameterRevision === parameterRevision) return cached;
+      if (cached && cached.content === content && cached.parameterRevision === parameterRevision) {
+        waveDocumentMetaCache.delete(cacheKey); waveDocumentMetaCache.set(cacheKey, cached);
+        return cached;
+      }
 
       let source = null;
       let error = null;
@@ -14478,6 +14487,13 @@ ${lines.join('\n')}`;
         error
       };
       waveDocumentMetaCache.set(cacheKey, meta);
+      let sourceChars = 0;
+      waveDocumentMetaCache.forEach((entry) => { sourceChars += entry.content?.length || 0; });
+      for (const [key, entry] of waveDocumentMetaCache) {
+        if (waveDocumentMetaCache.size <= WAVE_META_CACHE_MAX_ENTRIES && sourceChars <= WAVE_META_CACHE_MAX_SOURCE_CHARS) break;
+        if (key === cacheKey || key === 'editor:' + editingWaveDocumentName || key === 'saved:' + editingWaveDocumentName) continue;
+        sourceChars -= entry.content?.length || 0; waveDocumentMetaCache.delete(key);
+      }
       return meta;
     }
 
@@ -14533,6 +14549,7 @@ ${lines.join('\n')}`;
       if (!tag) return '';
       const raw = tag.name !== editingWaveDocumentName && tag.titleCache
         ? tag.titleCache : getWaveDocumentMeta(tag, true).title || tag.name || '未命名波形图';
+      if (!raw.includes('{')) return raw;
       const source = tag.deferred ? tag : getWaveDocumentMeta(tag, true).source;
       return window.VisualWaveDromParameters.text(raw, source);
     }
@@ -22310,6 +22327,8 @@ ${lines.join('\n')}`;
 
     function releaseWaveDocumentPreview(entry, reason) {
       if (!entry || entry.documentName === editingWaveDocumentName) return false;
+      waveDocumentMetaCache.delete('saved:' + entry.documentName);
+      waveDocumentMetaCache.delete('editor:' + entry.documentName);
       const display = ensureWavePreviewDisplay(entry);
       const hasRenderedPreview = !!display.querySelector('svg, .wave-fast-preview, .wave-error');
       if (!hasRenderedPreview && entry.renderedContent === null) return false;
@@ -22834,7 +22853,12 @@ ${lines.join('\n')}`;
             entry.previewNearViewport = false;
           }
         }
+        if (!expectedCardSet.has(card)) {
+          const entry = waveLibraryCardCache.get(card.dataset.documentName || '');
+          if (entry) { entry.previewQueued = false; releaseWaveDocumentPreview(entry, 'directory-change'); }
+        }
       });
+      waveLibraryPreviewQueue = waveLibraryPreviewQueue.filter((entry) => expectedCardSet.has(entry.card));
       const sequenceMatches = currentCards.length === expectedCards.length
         && currentCards.every((card, index) => card === expectedCards[index]);
       if (!sequenceMatches) {

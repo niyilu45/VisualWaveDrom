@@ -9,6 +9,8 @@
   const empty = () => ({ revision: 0, directories: [], tables: [], presets: [] });
   let catalog = empty(), libraryId = '', bridge = null, generation = 0;
   let cache = new WeakMap(), calculationCache = new WeakMap(), selectedFolder = '', selectedTable = '', activePage = 'wave';
+  const parameterContexts = new Map();
+  let dataLabelCache = new WeakMap(), parameterNameIndexes = new WeakMap();
   const textDecorations = new WeakMap();
   const referenceDocuments = new Map();
   let referenceRefresh = null, referenceScan = 0, referenceHighlight = null;
@@ -87,6 +89,20 @@
   function id() { return 'param-' + (global.crypto.randomUUID ? global.crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2)); }
   function emptyParameterRow() { return { id: id(), name: '', val: '', description: '' }; }
   function linked(source) { return source && Array.isArray(source.parameterTables) ? source.parameterTables : []; }
+  function remember(map, key, value, limit) {
+    if (!map.has(key) && map.size >= limit) map.delete(map.keys().next().value);
+    map.set(key, value); return value;
+  }
+  function parameterContext(source) {
+    const key = JSON.stringify(linked(source));
+    let context = parameterContexts.get(key);
+    if (!context) {
+      context = { cached: true, stack: [], values: new Map(), nameIndexes: parameterNameIndexes,
+        expressions: new Map(), hints: new Map(), references: new Map() };
+      remember(parameterContexts, key, context, 32);
+    }
+    return context;
+  }
   function effectiveTables() {
     if (catalogLoadError) return [];
     if (matrixGeneration !== generation) {
@@ -114,25 +130,23 @@
   }
   function referenceKey(tableId, name) { return JSON.stringify([tableId, name]); }
   function referenceKeys(names, source) {
+    const context = parameterContext(source), key = JSON.stringify([...names]);
+    if (context.references.has(key)) return context.references.get(key);
     const keys = [];
     for (const name of names) {
-      const tableId = linked(source).find((tableId) => {
-        const table = effectiveTable(tableId);
-        return table && table.rows.some((row) => String(row.name || '') === name);
-      });
-      if (tableId) {
-        keys.push(referenceKey(tableId, name));
-        const owner = matrix.owner(catalog.tables, tableId);
-        if (owner && owner.id !== tableId) keys.push(referenceKey(owner.id, name));
-        const row = effectiveTable(tableId).rows.find((item) => String(item.name || '') === name);
-        if (row && row.referenceSource) {
-          keys.push(referenceKey(row.referenceSource.tableId, name));
-          const original = matrix.owner(catalog.tables, row.referenceSource.tableId);
+      const found = resolveName(name, source, context);
+      if (found) {
+        keys.push(referenceKey(found.tableId, name));
+        const owner = matrix.owner(catalog.tables, found.tableId);
+        if (owner && owner.id !== found.tableId) keys.push(referenceKey(owner.id, name));
+        if (found.sourceTableId) {
+          keys.push(referenceKey(found.sourceTableId, name));
+          const original = matrix.owner(catalog.tables, found.sourceTableId);
           if (original) keys.push(referenceKey(original.id, name));
         }
       }
     }
-    return [...new Set(keys)];
+    return remember(context.references, key, [...new Set(keys)], 2048);
   }
   function matchesReference(raw, source, tableId, name) {
     return referenceKeys(referenceNames(raw), source).includes(referenceKey(tableId, name));
@@ -163,6 +177,10 @@
     return names;
   }
   function applyReferenceHighlight(node) {
+    if (!referenceHighlight) {
+      if (node.classList.contains('parameter-reference-highlight')) node.classList.remove('parameter-reference-highlight');
+      return;
+    }
     const card = node.closest('.wave-document-card');
     const hit = !!(referenceHighlight && card && card.dataset.documentName === referenceHighlight.waveId
       && (node.namespaceURI !== 'http://www.w3.org/2000/svg' || node.localName === 'text')
@@ -344,7 +362,7 @@
     }
   }
   function resolveParameterRow(table, row, source, state) {
-    const context = state || { stack: [], values: new Map() };
+    const context = state || parameterContext(source);
     if (context.values.has(row)) return context.values.get(row);
     const name = String(row.name || '');
     const rawVal = row.val == null ? '' : String(row.val);
@@ -372,10 +390,12 @@
     } finally {
       context.stack.pop();
     }
-    context.values.set(row, result);
+    if (context.cached) remember(context.values, row, result, 4096);
+    else context.values.set(row, result);
     return result;
   }
   function resolveName(name, source, state) {
+    state = state || parameterContext(source);
     for (const tableId of linked(source)) {
       const table = state && state.tables ? state.tables.get(tableId) : effectiveTable(tableId);
       let row;
@@ -433,7 +453,10 @@
     const parsed = parseExpression(expression);
     if (parsed.error) return { error: parsed.error, variables: [] };
     expression = parsed.expression;
-    const context = state || { stack: [], values: new Map() };
+    const context = state || parameterContext(source);
+    const cacheKey = JSON.stringify([expression, !!(options && options.substituteOnly)]);
+    if (!state && context.expressions.has(cacheKey)) return context.expressions.get(cacheKey);
+    const finish = (result) => state ? result : remember(context.expressions, cacheKey, result, 2048);
     const variables = new Map();
     const hasVariables = expression.includes('$');
     const directVariable = /^\$[^{}\s$(),]+$/.test(expression);
@@ -539,18 +562,21 @@
       if (!hasVariables && !substitute) result = number(result);
       if (substitute && !directVariable) {
         result = expression.replace(/\$[^{}\s$(),]+/g, (token) => variables.get(token.slice(1)).val).replace(/\s/g, '');
-        return { value: result, variables: Array.from(variables.values()), symbolic: true };
+        return finish({ value: result, variables: Array.from(variables.values()), symbolic: true });
       }
       const resolved = { value: String(result), variables: Array.from(variables.values()) };
       if (directVariable && variables.get(expression.slice(1))?.symbolic) resolved.symbolic = true;
-      return resolved;
+      return finish(resolved);
     } catch (error) {
-      return { error: error.message, variables: Array.from(variables.values()) };
+      return finish({ error: error.message, variables: Array.from(variables.values()) });
     }
   }
   function details(value, source) {
+    if (!mayHaveExpression(value)) return '';
+    const context = parameterContext(source);
+    if (context.hints.has(value)) return context.hints.get(value);
     const found = new Set();
-    return Array.from(String(value || '').matchAll(tokenPattern), (match) => {
+    const hint = Array.from(value.matchAll(tokenPattern), (match) => {
       if (found.has(match[1])) return '';
       found.add(match[1]);
       const result = evaluate(match[1], source);
@@ -563,6 +589,7 @@
         + (item.sourceTable ? '\n定义来源：' + item.sourceTable : '')
         + '\n值：' + item.val + (item.formula ? '\n公式：' + item.rawVal : '') + '\n说明：' + (item.description || '无')).join('');
     }).filter(Boolean).join('\n\n');
+    return remember(context.hints, value, hint, 1024);
   }
   function diagnostics(source) {
     const expressions = [];
@@ -651,15 +678,19 @@
     return value;
   }
   function decorateText(node, raw, source, options) {
-    if (!node || node.matches('input, textarea, .editing') || node.querySelector('textarea, input')) return;
+    if (!node) return;
+    const previous = textDecorations.get(node);
+    if (!mayHaveExpression(raw) && !previous && !node.hasAttribute('data-parameter-hint') && !node.hasAttribute('data-parameter-references')) return;
+    if (node.matches('input, textarea, .editing') || node.querySelector('textarea, input')) return;
     applyReferenceHighlight(node);
     const wholeLabel = !!(options && options.wholeLabel);
-    const content = node.textContent, previous = textDecorations.get(node);
+    const content = node.textContent;
     if (previous && previous.raw === raw && previous.source === source && previous.content === content && previous.generation === generation
       && previous.wholeLabel === wholeLabel
       && previous.spans.every((span) => node.contains(span))) return;
-    node.dataset.parameterHint = details(raw, source);
-    node.dataset.parameterReferences = JSON.stringify(referenceKeys(referenceNames(raw), source));
+    const hint = details(raw, source), references = JSON.stringify(referenceKeys(referenceNames(raw), source));
+    if (node.dataset.parameterHint !== hint) node.dataset.parameterHint = hint;
+    if (node.dataset.parameterReferences !== references) node.dataset.parameterReferences = references;
     applyReferenceHighlight(node);
     node.querySelectorAll('[data-parameter-negative]').forEach((span) => span.replaceWith(...span.childNodes));
     const ranges = [], spans = [];
@@ -709,38 +740,45 @@
   }
   function decorate(host, source, renderWindow) {
     if (!host || !source || !linked(source).length) return;
-    const bindings = new Map(), signals = [], groups = [];
+    const bindings = new Map(), signals = [], groups = [], boundNodes = new WeakSet();
     function bind(node, raw, options) {
-      if (node && !node.hasAttribute('data-parameter-hint')) decorateText(node, raw, source, options);
+      if (!node) return;
+      boundNodes.add(node); decorateText(node, raw, source, options); add(raw);
+    }
+    function dataLabels(row) {
+      if (Array.isArray(row.data)) return row.data;
+      if (typeof row.data !== 'string') return [];
+      const old = dataLabelCache.get(row);
+      if (old && old.raw === row.data) return old.labels;
+      const labels = row.data.match(dataTokenPattern) || [];
+      dataLabelCache.set(row, { raw: row.data, labels }); return labels;
     }
     function add(raw) {
       if (!mayHaveExpression(raw)) return;
       const rendered = text(raw, source);
       const hint = details(raw, source);
       if (hint) {
-        const previous = bindings.get(rendered);
-        bindings.set(rendered, previous && previous !== hint ? previous + '\n\n' + hint : hint);
+        if (!bindings.has(rendered)) bindings.set(rendered, new Set());
+        bindings.get(rendered).add(hint);
       }
     }
     function rows(items) {
       (items || []).forEach((row) => {
-        if (Array.isArray(row)) { add(row[0]); rows(row.slice(1)); groups.push(row[0]); }
+        if (Array.isArray(row)) { rows(row.slice(1)); groups.push(row[0]); }
         else if (row && typeof row === 'object') {
           signals.push(row);
-          add(row.name);
-          (Array.isArray(row.data) ? row.data : typeof row.data === 'string' ? row.data.match(dataTokenPattern) || [] : []).forEach(add);
         }
       });
     }
-    rows(source.signal); add(source.title); add(source.head && source.head.text); add(source.foot && source.foot.text); add(source.description);
-    (source.edge || []).forEach((edge) => add(String(edge).replace(/^\S+\s*/, '').replace(/^:\s*/, '')));
+    if (host.querySelector('svg')) rows(source.signal);
+    add(source.title); add(source.head && source.head.text); add(source.foot && source.foot.text); add(source.description);
     // Use row identity in previews so a literal value is not mistaken for an equal parameter result.
     host.querySelectorAll('g[id^="wavelane_"]').forEach((lane) => {
       const match = /^wavelane_(\d+)_/.exec(lane.id), row = match && signals[Number(match[1])];
       if (!row) return;
       const name = lane.querySelector('text.info');
       bind(name, row.name);
-      const data = Array.isArray(row.data) ? row.data : typeof row.data === 'string' ? row.data.match(dataTokenPattern) || [] : [];
+      const data = dataLabels(row);
       lane.querySelectorAll('[id^="wavelane_draw_"] > text').forEach((node, index) => {
         const context = renderWindow && renderWindow.rows && renderWindow.rows[Number(match[1])];
         const fullIndex = context && context.dataIndices ? context.dataIndices[index] : index;
@@ -774,10 +812,10 @@
       });
     });
     host.querySelectorAll('svg text, .wave-document-description:not(.editing), h2').forEach((node) => {
-      if (node.hasAttribute('data-parameter-hint')) return;
+      if (boundNodes.has(node) || node.hasAttribute('data-parameter-hint')) return;
       const content = node.textContent;
       const hint = bindings.get(content) || (node.tagName === 'H2' && Array.from(bindings).find(([value]) => value && content.endsWith(value)) || [])[1];
-      if (hint) node.dataset.parameterHint = hint;
+      if (hint) node.dataset.parameterHint = [...hint].join('\n\n');
       else delete node.dataset.parameterHint;
     });
   }
@@ -1627,6 +1665,7 @@
   }
   function invalidate() {
     generation++; cache = new WeakMap(); calculationCache = new WeakMap();
+    parameterContexts.clear(); dataLabelCache = new WeakMap(); parameterNameIndexes = new WeakMap();
     if (bridge) bridge.changed();
   }
   function changed(render, applyingHistory) {
