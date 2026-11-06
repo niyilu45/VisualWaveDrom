@@ -395,6 +395,33 @@
         if (timing.kind === 'delay') constraint(from.block, to.block, timing.value + from.offset - to.offset,
           { rows: rowIds, edge: index, label: parsed.from + '→' + parsed.to + '=' + timing.value + ' cycle' });
       });
+      // Join matching first data boundaries before assigning default origins.
+      // Existing connections/phase paths win; never close them with a fallback.
+      const originParents = graph.map((_, index) => index);
+      function originRoot(block) {
+        while (originParents[block] !== block) {
+          originParents[block] = originParents[originParents[block]]; block = originParents[block];
+        }
+        return block;
+      }
+      function joinOrigins(a, b) { originParents[originRoot(b)] = originRoot(a); }
+      constraints.forEach(({ a, b }) => joinOrigins(a, b));
+      const connectionOrigins = originParents.map((_, block) => originRoot(block));
+      let previousDataRow = null;
+      for (const row of rows) {
+        if (row.empty) continue;
+        const prefix = String(signals[row.index].wave || '').match(/^[xX. ]+[2-9=]/);
+        const col = prefix ? prefix[0].length - 1 : -1;
+        if (row.supported && previousDataRow && col === previousDataRow.col && col >= 0) {
+          const previous = previousDataRow.row, a = previous.blocks[0].id, b = row.blocks[0].id;
+          if (originRoot(a) !== originRoot(b)) {
+            constraint(a, b, col * (previous.period - row.period), { rows: [previous.index, row.index],
+              label: '第' + (row.index + 1) + '行首个数据按第' + (previous.index + 1) + '行原列' + col + '对齐' });
+            joinOrigins(a, b);
+          }
+        }
+        previousDataRow = row.supported && col >= 0 ? { row, col } : null;
+      }
       // Default row origins are fallback anchors, not extra delay constraints.
       // Anchor each explicitly connected component once, in top-down row order;
       // other default origins follow its delays even without an intervening |.
@@ -736,16 +763,16 @@
       let connectionReachability = null;
       function connectionBacked(block) {
         if (!connectionReachability) {
-          // Use the graph before default row origins were joined through vertex 0.
-          // Otherwise an unrelated row would inherit every connection's authority.
-          const links = Array.from({ length: originGroup }, () => []);
+          // Matching row starts and default origins are fallback positioning,
+          // not new explicit connections or stronger series constraints.
+          const links = Array.from({ length: connectionOrigins.length }, () => []);
           gaps.filter((gap) => gap.series).forEach((gap) => {
-            const a = originGroups[gap.a], b = originGroups[gap.b];
+            const a = connectionOrigins[gap.a], b = connectionOrigins[gap.b];
             links[a].push(b); links[b].push(a);
           });
-          const seeds = [originGroups[0]];
+          const seeds = [connectionOrigins[0]];
           edges.filter((edge) => edge.timing.kind === 'delay' && !edge.invalid).forEach((edge) => {
-            if (edge.fromNode && edge.toNode) seeds.push(originGroups[edge.fromNode.block], originGroups[edge.toNode.block]);
+            if (edge.fromNode && edge.toNode) seeds.push(connectionOrigins[edge.fromNode.block], connectionOrigins[edge.toNode.block]);
           });
           connectionReachability = new Set(seeds);
           const queue = Array.from(connectionReachability);
@@ -756,7 +783,7 @@
         const pending = [block], seen = new Set();
         while (pending.length) {
           const current = pending.pop(), group = groups[current];
-          if (connectionReachability.has(originGroups[current])) return true;
+          if (connectionReachability.has(connectionOrigins[current])) return true;
           if (seen.has(group)) continue;
           seen.add(group);
           pending.push(...(alignmentSources.get(group)?.referenceBlocks || []));

@@ -427,6 +427,7 @@ if (!window.VWDCodeEditorPairs) {
     let copiedWaveSelection = '';
     let copiedWaveDataSlots = [];
     let copiedWaveRows = [];
+    let copiedWaveConnections = [];
     let waveClipboardReadRequest = 0;
     const waveSelectionClipboard = window.VisualWaveDromWaveClipboard.create(receiveWaveClipboardSelection);
     let waveSelectionDrag = null;
@@ -6185,8 +6186,9 @@ ${lines.join('\n')}`;
       copiedWaveRows = cloneWaveClipboardRows(payload.rows);
       copiedWaveSelection = copiedWaveRows[0].text;
       copiedWaveDataSlots = cloneWaveClipboardDataSlots(copiedWaveRows[0].dataSlots);
+      copiedWaveConnections = window.VisualWaveDromWaveClipboard.cloneConnections(payload.connections);
       updateLegendAvailability();
-      vwdDebugLog('wave-selection', { phase: 'clipboard-received', rows: copiedWaveRows.length, columns: payload.columns });
+      vwdDebugLog('wave-selection', { phase: 'clipboard-received', rows: copiedWaveRows.length, columns: payload.columns, connections: copiedWaveConnections.length });
     }
 
     function writeWaveSelectionClipboard(payload, event) {
@@ -6379,6 +6381,10 @@ ${lines.join('\n')}`;
         return false;
       }
 
+      if (options && options.connections && options.connections.length) {
+        return applyWaveRowsReplacement(rowIndex, startCol, [{ text: replacement, dataSlots: options.dataSlots || [] }], actionLabel, options);
+      }
+
       let sourceMap;
       try {
         JSON.parse(editor.value);
@@ -6524,6 +6530,14 @@ ${lines.join('\n')}`;
         changedCount++;
       });
 
+      let copiedConnectionCount = 0;
+      try {
+        copiedConnectionCount = window.VisualWaveDromWaveClipboard.pasteConnections(parsed, options && options.connections, safeStartRow, safeStartCol);
+      } catch (error) {
+        setStatus(false, error.message);
+        vwdDebugLog('wave-selection', { phase: 'paste-connections-rejected', message: error.message });
+        return false;
+      }
       const maxLength = targetRows.reduce((max, row) => Math.max(max, row.text.length), 1);
       const lastRow = safeStartRow + targetRows.length - 1;
       setSelectedWaveBlock(
@@ -6532,7 +6546,7 @@ ${lines.join('\n')}`;
         safeStartCol,
         safeStartCol + maxLength - 1
       );
-      if (!changedCount && !addedRows) {
+      if (!changedCount && !addedRows && !copiedConnectionCount) {
         setStatus(true, (actionLabel || '多行修改') + '完成，波形内容未变化');
         return false;
       }
@@ -6555,13 +6569,15 @@ ${lines.join('\n')}`;
         endCol: safeStartCol + maxLength - 1,
         requestedRowCount: replacements.length,
         appliedRowCount: targetRows.length,
-        changedRowCount: changedCount
+        changedRowCount: changedCount,
+        connectionCount: copiedConnectionCount
       });
       setStatus(
         true,
         (actionLabel || '多行修改') + '：已覆盖 ' + targetRows.length + ' 行 × ' + maxLength + ' 格'
           + (addedRows ? '（新增 ' + addedRows + ' 个无名行）' : '')
           + (targetRows.length < replacements.length ? '（目标剩余行不足）' : '')
+          + (copiedConnectionCount ? '，含 ' + copiedConnectionCount + ' 条连接线' : '')
       );
       return true;
     }
@@ -6600,7 +6616,10 @@ ${lines.join('\n')}`;
           dataSlots: collectWaveClipboardDataSlots(entry.signal, wave, copied, block.start)
         };
       });
-      const payload = waveSelectionClipboard.publish(rows);
+      let connections;
+      try { connections = window.VisualWaveDromWaveClipboard.collectConnections(JSON.parse(editor.value), block); }
+      catch (_error) { setStatus(false, 'JSON 错误，无法复制波形和连接线'); return false; }
+      const payload = waveSelectionClipboard.publish(rows, connections);
       if (!payload) {
         setStatus(false, '复制选区过大或数据格式不受支持，请缩小选区后重试');
         return false;
@@ -6616,7 +6635,8 @@ ${lines.join('\n')}`;
         startCol: block.start,
         endCol: block.end,
         rowCount: copiedWaveRows.length,
-        columnCount
+        columnCount,
+        connectionCount: copiedWaveConnections.length
       });
       const copiedTextCount = copiedWaveRows
         .flatMap((row) => row.dataSlots)
@@ -6625,6 +6645,7 @@ ${lines.join('\n')}`;
       setStatus(
         true,
         '已复制 ' + copiedWaveRows.length + ' 行 × ' + columnCount + ' 格和 ' + copiedTextCount + ' 个文字'
+          + (copiedWaveConnections.length ? '，含 ' + copiedWaveConnections.length + ' 条连接线' : '')
       );
       return true;
     }
@@ -6654,13 +6675,14 @@ ${lines.join('\n')}`;
           text: rows[0].text.repeat(targetColumnCount),
           dataSlots: repeatWaveClipboardDataSlots(rows[0].dataSlots, 1, targetColumnCount)
         };
+        const connections = window.VisualWaveDromWaveClipboard.repeatConnections(copiedWaveConnections, 1, targetColumnCount, targetRowCount);
         if (targetRowCount > 1) {
           return applyWaveRowsReplacement(
             block.startRow,
             block.start,
             Array.from({ length: targetRowCount }, () => repeatedRow),
             '单格填充粘贴',
-            { includeDataLabels: true, mergeBinaryLevels: true }
+            { includeDataLabels: true, mergeBinaryLevels: true, connections }
           );
         }
         return applyWaveRangeReplacement(
@@ -6671,7 +6693,8 @@ ${lines.join('\n')}`;
           {
             mergeBinaryLevels: true,
             includeDataLabels: true,
-            dataSlots: repeatedRow.dataSlots
+            dataSlots: repeatedRow.dataSlots,
+            connections
           }
         );
       }
@@ -6681,7 +6704,7 @@ ${lines.join('\n')}`;
           block.start,
           rows,
           '多行覆盖粘贴',
-          { includeDataLabels: true, mergeBinaryLevels: true, appendMissingRows: true }
+          { includeDataLabels: true, mergeBinaryLevels: true, appendMissingRows: true, connections: copiedWaveConnections }
         );
       }
       return applyWaveRangeReplacement(
@@ -6692,7 +6715,8 @@ ${lines.join('\n')}`;
         {
           mergeBinaryLevels: true,
           includeDataLabels: true,
-          dataSlots: cloneWaveClipboardDataSlots(rows[0].dataSlots)
+          dataSlots: cloneWaveClipboardDataSlots(rows[0].dataSlots),
+          connections: copiedWaveConnections
         }
       );
     }
@@ -23711,7 +23735,8 @@ ${lines.join('\n')}`;
         type: 'wave',
         text: copiedWaveSelection,
         dataSlots: cloneWaveClipboardDataSlots(copiedWaveDataSlots),
-        rows: cloneWaveClipboardRows(copiedWaveRows)
+        rows: cloneWaveClipboardRows(copiedWaveRows),
+        connections: window.VisualWaveDromWaveClipboard.cloneConnections(copiedWaveConnections)
       };
       clearVimVisualSelection();
       return true;
@@ -23773,6 +23798,7 @@ ${lines.join('\n')}`;
     function pasteVimRegister(before, count) {
       if (vimRegister && vimRegister.type === 'row') return pasteVimRows(before, count);
       if (vimRegister && vimRegister.type === 'wave') {
+        copiedWaveConnections = window.VisualWaveDromWaveClipboard.cloneConnections(vimRegister.connections);
         copiedWaveSelection = vimRegister.text;
         copiedWaveDataSlots = cloneWaveClipboardDataSlots(vimRegister.dataSlots);
         copiedWaveRows = vimRegister.rows && vimRegister.rows.length
@@ -23795,13 +23821,14 @@ ${lines.join('\n')}`;
           text: row.text.repeat(repeat),
           dataSlots: repeatWaveClipboardDataSlots(row.dataSlots, row.text.length, repeat)
         }));
+      const connections = window.VisualWaveDromWaveClipboard.repeatConnections(copiedWaveConnections, copiedWaveSelection.length, repeat);
       if (rows.length > 1) {
         return applyWaveRowsReplacement(
           selectedSignalIndex,
           selectedWaveColumnIndex,
           rows,
           'Vim 多行覆盖粘贴',
-          { includeDataLabels: true, mergeBinaryLevels: true, appendMissingRows: true }
+          { includeDataLabels: true, mergeBinaryLevels: true, appendMissingRows: true, connections }
         );
       }
       return applyWaveRangeReplacement(
@@ -23812,7 +23839,8 @@ ${lines.join('\n')}`;
         {
           mergeBinaryLevels: true,
           includeDataLabels: true,
-          dataSlots: cloneWaveClipboardDataSlots(rows[0].dataSlots)
+          dataSlots: cloneWaveClipboardDataSlots(rows[0].dataSlots),
+          connections
         }
       );
     }
@@ -25241,6 +25269,7 @@ ${lines.join('\n')}`;
         copiedWaveSelection,
         copiedWaveDataSlots: cloneWaveClipboardDataSlots(copiedWaveDataSlots),
         copiedWaveRows: cloneWaveClipboardRows(copiedWaveRows),
+        copiedWaveConnections: window.VisualWaveDromWaveClipboard.cloneConnections(copiedWaveConnections),
         waveClipboardShortcutActive,
         groupDeleteShortcutActive,
         drag: waveSelectionDrag
