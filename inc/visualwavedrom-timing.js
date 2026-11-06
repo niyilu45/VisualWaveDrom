@@ -268,6 +268,33 @@
       results.forEach((item, index) => { item.text = '[未定 ' + (index + 1) + '] ' + item.text; });
       return results;
     }
+    function conflictValueAt(row, cycle) {
+      if (!row || !Number.isFinite(cycle)) return { text: '位置未定', data: false };
+      let found = null;
+      for (let index = firstRun(row, cycle); index < row.drawRuns.length; index++) {
+        const run = row.drawRuns[index];
+        if (run.start > cycle) break;
+        if (cycle >= run.finish) continue;
+        const state = run.state.toLowerCase();
+        let text = run.value, data = state === 'bus';
+        if (run.unresolvedData) text = '数据未定';
+        else if (run.series) {
+          const sample = Math.floor((cycle - run.start) / run.series.cellDuration);
+          if (sample < 0 || sample >= run.series.count) continue;
+          text = core.seriesLabel(run.series.first + sample * run.series.step, run.series.style);
+          data = true;
+        } else if (state === 'p' || state === 'n') {
+          const even = Math.floor((cycle - run.clockOrigin) / (row.period / 2)) % 2 === 0;
+          text = (even === (state === 'p')) ? '1' : '0';
+        } else if (state === 'x') text = '未知 x';
+        else if (state === 'h') text = '1';
+        else if (state === 'l') text = '0';
+        text = text == null || text === '' ? '空文本' : String(text).replace(/\r?\n/g, '\\n');
+        if (found && found.text !== text) return { text: '重叠未定', data: found.data || data };
+        found = { text, data };
+      }
+      return found || { text: '无波形', data: false };
+    }
     function selectRow(index, locate = false) {
       if (!model || !model.rows[index]) return;
       const keepDetailsOpen = selected === index && !!$('diagnostic-details')?.open;
@@ -330,15 +357,19 @@
             if (comparison) {
               const context = comparison.col === range.col ? '' : '（关联第' + (comparison.row + 1) + '行列' + comparison.col + '）';
               const precise = comparison.difference > 0 && new Set(comparison.sources.map((source) => fmt(source.time))).size === 1;
-              const times = comparison.sources.map((source) => (source.direction === 'data-series'
+              const compareTime = Math.max(...comparison.sources.map((source) => source.time));
+              const values = comparison.sources.map((source) => conflictValueAt(model.rows[source.row], compareTime));
+              const showValues = values.some((value) => value.data);
+              const valueText = (value) => '（' + fmt(compareTime) + ' cycle 处应为 ' + value.text + '）';
+              const times = comparison.sources.map((source, index) => (source.direction === 'data-series'
                 ? '第' + (source.row + 1) + '行等差推算为 ' : '按第' + (source.row + 1) + '行对齐为 ')
-                + (precise ? String(source.time) : fmt(source.time)) + ' cycle');
+                + (precise ? String(source.time) : fmt(source.time)) + ' cycle' + (showValues ? valueText(values[index]) : ''));
               const [first, second] = comparison.sources;
               const sameRow = first.row === second.row && first.direction !== 'data-series' && second.direction !== 'data-series';
               const cause = sameRow ? '第' + (first.row + 1) + '行'
                 + (Number.isInteger(first.col) ? '原列' + first.col + '锚点' : '已采用锚点') + '推算本列为 '
                 + (precise ? String(first.time) : fmt(first.time)) + ' cycle，但该行原列' + second.col + '要求为 '
-                + (precise ? String(second.time) : fmt(second.time)) + ' cycle' : times.join('，');
+                + (precise ? String(second.time) : fmt(second.time)) + ' cycle' + (showValues ? valueText(values[0]) : '') : times.join('，');
               text = location + context + '时间不一致：' + cause + '，差 ' + fmt(comparison.difference) + ' cycle。';
             }
             summaries.push({ col: range.col, target: range, text });
