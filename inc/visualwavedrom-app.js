@@ -18284,7 +18284,7 @@ ${lines.join('\n')}`;
       });
     }
 
-    async function persistImportedWaveRows(result) {
+    async function persistImportedWaveRows(result, importPayload) {
       const formatSucceeded = await result.formatPromise;
       if (!formatSucceeded) throw new Error('导入后的 JSON 格式化失败');
 
@@ -18302,6 +18302,10 @@ ${lines.join('\n')}`;
         browserWaveLibrarySaveTimer = null;
         const saved = await flushBrowserWaveLibrarySave({ force: true });
         if (!saved) throw new Error('浏览器 SQLite 波形库保存失败');
+      }
+      if (importPayload) {
+        const state = reconcileScopeTransientStateAfterCollectionImport(importPayload, result.documentValue, result.sourceRowReplacements);
+        notifyOpenScopeWindowsAfterCollectionImport(editingWaveDocumentName, state);
       }
     }
 
@@ -18336,7 +18340,7 @@ ${lines.join('\n')}`;
           throw new Error('解析期间波形图或波形库已切换，请重新导入');
         }
         const result = applyImportedWaveRows(payload);
-        await persistImportedWaveRows(result);
+        await persistImportedWaveRows(result, payload);
         rowImportSchemeBusy = false;
         if (rowImportSchemeModal) rowImportSchemeModal.hidden = true;
         setRowImportSchemeHint('', false);
@@ -18774,7 +18778,7 @@ ${lines.join('\n')}`;
       });
       try {
         const result = applyImportedWaveRows(rowImportPreviewPayload, { createMissing: true });
-        await persistImportedWaveRows(result);
+        await persistImportedWaveRows(result, rowImportPreviewPayload);
         const createdMessage = result.createdCount
           ? '，其中新增 ' + result.createdCount + ' 行'
           : '';

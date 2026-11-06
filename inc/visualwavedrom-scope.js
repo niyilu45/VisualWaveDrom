@@ -855,7 +855,7 @@
       ));
       this.syncSignalNameMetadata();
       this.meta.rows.forEach((row) => {
-        this.modes[row.index] = row.mode;
+        this.modes[row.index] = this.isMultiWaveRow(row.index) ? 'analog' : 'bus';
         this.busFormats[row.index] = normalizeBusFormat(row.busFormat);
         this.analogFormats[row.index] = normalizeAnalogFormat(
           row.analogFormat,
@@ -948,8 +948,8 @@
           </div>
           <div class="scope-toolbar-group scope-cursor-controls" aria-label="游标工具">
             <span class="scope-toolbar-label">游标</span>
-            <button type="button" class="scope-cursor-choice" id="scope-cursor-a" aria-pressed="false">A</button>
-            <button type="button" class="scope-cursor-choice" id="scope-cursor-b" aria-pressed="false">B</button>
+            <button type="button" class="scope-cursor-choice" id="scope-cursor-a" aria-pressed="false" aria-keyshortcuts="a" title="选择 / 取消游标 A（a）">A</button>
+            <button type="button" class="scope-cursor-choice" id="scope-cursor-b" aria-pressed="false" aria-keyshortcuts="b" title="选择 / 取消游标 B（b）">B</button>
             <span class="scope-cursor-signal" id="scope-cursor-signal"></span>
             <label>跳转
               <input type="text" id="scope-cursor-jump" placeholder="1,2 或 &gt;=1 and &lt;=2"
@@ -1772,7 +1772,11 @@
         const editingText = target && (/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)
           || target.isContentEditable);
         if (editingText) return;
-        if (!event.ctrlKey && !event.metaKey && !event.altKey
+        if (!event.defaultPrevented && !event.ctrlKey && !event.metaKey && !event.altKey
+            && !event.isComposing && /^(a|b)$/i.test(event.key)) {
+          event.preventDefault();
+          if (!event.repeat) this.toggleActiveCursor(event.key.toUpperCase());
+        } else if (!event.ctrlKey && !event.metaKey && !event.altKey
             && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
           event.preventDefault();
           void this.navigateActiveCursor(event.key === 'ArrowLeft' ? -1 : 1);
@@ -8426,7 +8430,7 @@
       return result.content;
     }
 
-    async reloadSavedDocument(saved) {
+    async reloadSavedDocument(saved, options) {
       this.document = saved;
       Object.keys(this.transientFormulaState.signalNames).forEach((rowId) => {
         if (rowId.indexOf('source:') === 0) delete this.transientFormulaState.signalNames[rowId];
@@ -8435,10 +8439,29 @@
         saved.content,
         this.transientFormulaState
       );
-      this.meta = await this.worker.call('prepare', {
+      const prepared = await this.worker.call('prepare', {
         content: saved.content,
         transient: clone(this.transientFormulaState)
       });
+      if (this.destroyed || prepared.cancelled) return null;
+      const previousView = options && options.preserveView && this.meta ? {
+        start: this.viewStart, end: this.viewEnd,
+        anchor: this.captureVerticalScrollAnchor(), activeRow: this.activeCursorRow,
+        selection: this.columnSelection && Object.assign({}, this.columnSelection),
+        rangeStart: this.rangeStartInput.value, rangeEnd: this.rangeEndInput.value,
+        target: this.targetInput.value, presentationDirty: this.presentationDraftDirty,
+        rows: this.meta.rows.map(row => ({
+          index: row.index, name: String(row.sourceName == null ? row.name || '' : row.sourceName),
+          mode: this.modes[row.index], busFormat: this.busFormats[row.index], analogFormat: this.analogFormats[row.index],
+          style: this.rowStyles[row.index], height: this.rowHeights[row.index], collapsed: this.collapsedRows.has(row.index)
+        }))
+      } : null;
+      const previousByName = new Map(), remappedRows = new Map();
+      if (previousView) previousView.rows.forEach(row => {
+        if (!previousByName.has(row.name)) previousByName.set(row.name, { rows: [], next: 0 });
+        previousByName.get(row.name).rows.push(row);
+      });
+      this.meta = prepared;
       this.resetWindowCache();
       this.adoptPreparedFormulaDefinitions();
       this.adoptPreparedMultiWaveDefinitions();
@@ -8453,47 +8476,79 @@
       this.busFormats = {};
       this.analogFormats = {};
       this.rowStyles = {};
+      this.rowHeights = [];
+      const collapsedRows = new Set();
       this.meta.rows.forEach((row) => {
-        this.modes[row.index] = row.mode;
-        this.busFormats[row.index] = normalizeBusFormat(row.busFormat);
+        // Source indexes can change when a preset is reordered; match names and duplicate occurrence instead.
+        const queue = previousByName.get(String(row.sourceName == null ? row.name || '' : row.sourceName));
+        const previous = queue && queue.rows[queue.next++];
+        if (previous) remappedRows.set(previous.index, row.index);
+        this.modes[row.index] = this.isMultiWaveRow(row.index) ? 'analog'
+          : previous ? previous.mode : previousView ? 'bus' : row.mode;
+        this.busFormats[row.index] = normalizeBusFormat(previous ? previous.busFormat : row.busFormat);
         this.analogFormats[row.index] = normalizeAnalogFormat(
-          row.analogFormat,
+          previous ? previous.analogFormat : row.analogFormat,
           row.detectedMode === 'analog' ? 'float' : 'unsigned'
         );
-        this.rowStyles[row.index] = normalizeRowStyle(row.style);
+        this.rowStyles[row.index] = normalizeRowStyle(previous ? previous.style : row.style);
+        this.rowHeights[row.index] = previous ? previous.height : (row.rowHeight || DEFAULT_ROW_HEIGHT);
+        if (previous ? previous.collapsed : !previousView && this.collapsedRows.has(row.index)) collapsedRows.add(row.index);
       });
-      this.rowHeights = this.meta.rows.map((row) => row.rowHeight || DEFAULT_ROW_HEIGHT);
-      this.collapsedRows = new Set(Array.from(this.collapsedRows).filter(
-        (rowIndex) => rowIndex >= 0 && rowIndex < this.meta.rows.length
-      ));
+      this.collapsedRows = collapsedRows;
       this.rebuildRowOffsets();
-      this.viewStart = 0;
-      this.viewEnd = this.meta.totalColumns;
+      const span = previousView ? Math.min(previousView.end - previousView.start, this.meta.totalColumns) : this.meta.totalColumns;
+      this.viewStart = previousView ? clamp(previousView.start, 0, Math.max(0, this.meta.totalColumns - span)) : 0;
+      this.viewEnd = this.viewStart + span;
+      const lastColumn = Math.max(0, this.meta.totalColumns - (previousView ? 1e-7 : 1));
       this.cursorA = clamp(
         this.cursorA == null ? 0 : this.cursorA,
         0,
-        Math.max(0, this.meta.totalColumns - 1)
+        lastColumn
       );
       this.cursorB = clamp(
         this.cursorB == null ? this.meta.totalColumns - 1 : this.cursorB,
         0,
-        Math.max(0, this.meta.totalColumns - 1)
+        lastColumn
       );
       this.activeCursorRow = clamp(
-        this.activeCursorRow,
+        previousView ? remappedRows.get(previousView.activeRow) ?? previousView.activeRow : this.activeCursorRow,
         0,
         Math.max(0, this.meta.rows.length - 1)
       );
       this.targetInput.max = String(Math.max(2, this.meta.totalColumns));
-      this.targetInput.value = String(initialTargetPointCount(this.meta.totalColumns));
-      this.rangeStartInput.value = '1';
-      this.rangeEndInput.value = String(this.meta.totalColumns);
+      this.targetInput.value = String(previousView
+        ? clamp(Number(previousView.target) || 2, 2, Math.max(2, this.meta.totalColumns))
+        : initialTargetPointCount(this.meta.totalColumns));
+      this.rangeStartInput.value = String(previousView ? clamp(Number(previousView.rangeStart) || 1, 1, this.meta.totalColumns) : 1);
+      this.rangeEndInput.value = String(previousView ? clamp(Number(previousView.rangeEnd) || this.meta.totalColumns,
+        Number(this.rangeStartInput.value), this.meta.totalColumns) : this.meta.totalColumns);
       this.selectedPoint = null;
       this.columnSelection = null;
+      if (previousView) {
+        const selection = previousView.selection;
+        if (selection && remappedRows.has(selection.rowIndex) && selection.start < this.meta.totalColumns) {
+          this.columnSelection = Object.assign({}, selection, { rowIndex: remappedRows.get(selection.rowIndex),
+            end: Math.min(selection.end, this.meta.totalColumns) });
+          if (selection.cursorColumn != null) this.columnSelection.cursorColumn = clamp(selection.cursorColumn, 0, lastColumn);
+        }
+        this.connections = this.connections.filter(connection => remappedRows.has(connection.start.rowIndex)
+          && remappedRows.has(connection.end.rowIndex)).map(connection => Object.assign({}, connection, {
+            start: Object.assign({}, connection.start, { rowIndex: remappedRows.get(connection.start.rowIndex) }),
+            end: Object.assign({}, connection.end, { rowIndex: remappedRows.get(connection.end.rowIndex) })
+          }));
+        if (!this.connections.some(connection => connection.id === this.selectedConnectionId)) this.selectedConnectionId = '';
+        this.connectionDraftStart = this.connectionHover = null;
+        this.simplified = null; this.simplifiedDisplayActive = false; this.outputContent = '';
+        this.updateMetrics(null);
+      }
       this.lockedColumns = new Set();
       this.undoStack = [];
       this.redoStack = [];
       this.renderSignalRows();
+      if (previousView) this.restoreVerticalScrollAnchor({
+        rowIndex: remappedRows.get(previousView.anchor.rowIndex) ?? previousView.anchor.rowIndex,
+        offset: previousView.anchor.offset
+      });
       this.updateHistoryButtons();
       this.updateCursorControls();
       this.updateMeasurements();
@@ -8501,6 +8556,7 @@
       await this.requestWindow();
       await this.updateCursorReadout();
       this.scheduleInitialSimplify();
+      return { preservedRows: remappedRows.size, presentationDirty: !!(previousView && previousView.presentationDirty) };
     }
 
     async applyImportedSource(saved, transientState) {
@@ -8514,14 +8570,18 @@
         saved.content,
         transientState
       );
-      await this.reloadSavedDocument(saved);
+      const retained = await this.reloadSavedDocument(saved, { preserveView: true });
+      if (this.destroyed || !retained) return;
       this.persistTransientFormulaState();
       this.clearDraftDirty();
+      if (retained && retained.presentationDirty) this.markDraftDirty('presentation');
       this.setStatus('预设波形已同步；同名临时波形已由导入内容覆盖');
       this.log('scope-sync', {
         phase: 'import-applied',
         waveId: saved.name || '',
         rowCount: this.meta && this.meta.rows ? this.meta.rows.length : 0,
+        preservedRows: retained ? retained.preservedRows : 0,
+        viewRange: [this.viewStart, this.viewEnd], scrollTop: this.plotViewport.scrollTop,
         formulaCount: Object.keys(this.transientFormulaState.formulas).length
       });
     }
