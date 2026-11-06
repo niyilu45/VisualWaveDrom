@@ -75,7 +75,7 @@
       if (Number.isInteger(number)) text = text.replace(/^-/, '').padStart(style.width, '0');
       return style.prefix + (number < 0 ? '-' : style.plus ? '+' : '') + style.marker + text.replace(/^-/, '') + style.suffix;
     }
-    function analyze(source, edgeTimings, parameterConversions) {
+    function analyze(source, edgeTimings, parameterConversions, options) {
       if (!source || !Array.isArray(source.signal)) throw new Error('signal 必须是波形数组');
       const config = source.timingCheck || {};
       const tolerance = Number.isFinite(Number(config.tolerance)) && Number(config.tolerance) >= 0 ? Number(config.tolerance) : 1e-7;
@@ -211,6 +211,24 @@
         }
       }); }
       buildRows();
+      // Capture the original column clock before omissions or default origins move.
+      const originalRows = options && options.original ? rows.map((row) => {
+        const signal = signals[row.index];
+        const period = Number(signal.period ?? 1), phase = Number(signal.phase ?? 0);
+        const original = { index: row.index, name: row.name, sourceLength: row.sourceLength, length: row.length,
+          period: period > 0 && Number.isFinite(period) ? period : 1, phase: Number.isFinite(phase) ? phase : 0 };
+        const blockColumns = new Map(row.blocks.map((block) => [block.id, block.col]));
+        original.referenceRuns = row.runs.filter((run) => run.col < row.sourceLength).map((run) => ({
+          col: run.col, end: Math.min(run.end, row.sourceLength),
+          start: run.col * original.period - original.phase,
+          finish: Math.min(run.end, row.sourceLength) * original.period - original.phase,
+          state: run.state, symbol: run.symbol, value: run.value, gap: !!run.gap,
+          clockOrigin: run.clockBlock === null ? null
+            : (blockColumns.get(run.clockBlock) + run.clockOffset / row.period) * original.period - original.phase
+        }));
+        original.referenceEnds = original.referenceRuns.map((run) => run.finish);
+        return original;
+      }) : null;
       // Equal-valued intervals and omitted continuations can share one elastic
       // span. Keep every endpoint as a solver boundary.
       const uniformRows = new Map(), ranges = new Map();
@@ -1648,7 +1666,9 @@
         edge.status = issues.some((item) => item.kind === 'conflict' && item.edges.includes(edge.index)) ? 'conflict'
           : edge.invalid || edge.timing.kind === 'unknown' || edge.start === null || edge.end === null ? 'unknown' : 'ok';
       });
-      return { rows, gaps, edges, issues, minimum, maximum, viewMinimum, viewMaximum, tolerance, config, parameterConversions: globalConversions };
+      const result = { rows, gaps, edges, issues, minimum, maximum, viewMinimum, viewMaximum, tolerance, config, parameterConversions: globalConversions };
+      if (originalRows) result.originalRows = originalRows;
+      return result;
     }
     return { analyze, parseDelay, edgeParts, format, seriesLabel };
   }

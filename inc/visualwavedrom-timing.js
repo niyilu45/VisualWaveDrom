@@ -29,7 +29,7 @@
     doc.write('<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>时延检查</title></head><body class="timing-view"></body></html>');
     doc.close();
     const stylesheet = doc.createElement('link'); stylesheet.rel = 'stylesheet';
-    stylesheet.href = new URL('inc/visualwavedrom-timing.css?v=timing-unknown-locations-v1', document.baseURI).href;
+    stylesheet.href = new URL('inc/visualwavedrom-timing.css?v=timing-split-original-v1', document.baseURI).href;
     doc.head.appendChild(stylesheet);
     doc.documentElement.style.fontSize = getComputedStyle(document.documentElement).fontSize;
     doc.body.innerHTML = `
@@ -49,20 +49,40 @@
           <section class="timing-detail"><h2 id="timing-detail-title">检查详情</h2><div id="timing-detail"></div><button id="timing-locate" type="button">定位原图</button></section>
         </aside>
         <main class="timing-preview">
+          <div id="timing-plots" class="timing-plots">
+          <section id="timing-original-pane" class="timing-pane" aria-label="原始波形区域">
+            <div class="timing-toolbar timing-range">
+              <h2>原始波形</h2>
+              <button type="button" id="timing-original-zoom-out" title="缩小原始波形" aria-label="缩小原始波形">${icon('minus')}</button>
+              <button type="button" id="timing-original-zoom-in" title="放大原始波形" aria-label="放大原始波形">${icon('plus')}</button>
+              <button type="button" id="timing-original-fit" title="适应原始波形" aria-label="适应原始波形">${icon('fit')}</button>
+              <label>起点 <input id="timing-original-start" type="number" step="any" value="0" aria-label="原始波形起点"></label>
+              <label>终点 <input id="timing-original-end" type="number" step="any" value="10" aria-label="原始波形终点"></label><span>cycle</span>
+              <button type="button" id="timing-hide-original" aria-controls="timing-original-pane">隐藏</button>
+            </div>
+            <div class="timing-plot"><canvas id="timing-original-canvas" aria-label="原始 cycle 标定的时序图"></canvas><div id="timing-original-scroll" class="timing-scroll" tabindex="0" role="region" aria-label="原始波形"><div id="timing-original-spacer"></div></div></div>
+            <div id="timing-original-pan" class="timing-pan"><div id="timing-original-pan-thumb" class="timing-pan-thumb" role="scrollbar" tabindex="-1" aria-orientation="horizontal" aria-controls="timing-original-scroll" aria-label="横向浏览原始波形" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-disabled="true"></div></div>
+          </section>
+          <div id="timing-splitter" role="separator" tabindex="0" aria-label="调整上下波形区域高度" aria-orientation="horizontal" aria-controls="timing-original-pane timing-expanded-pane" aria-valuemin="15" aria-valuemax="85" aria-valuenow="50" title="拖动调整上下波形区域高度"></div>
+          <section id="timing-expanded-pane" class="timing-pane" aria-label="展开波形区域">
           <div class="timing-toolbar timing-range">
+            <h2>展开波形</h2>
             <button type="button" id="timing-zoom-out" title="缩小" aria-label="缩小">${icon('minus')}</button>
             <button type="button" id="timing-zoom-in" title="放大" aria-label="放大">${icon('plus')}</button>
-            <button type="button" id="timing-fit" title="适应波形和已展开的参考序列" aria-label="适应波形和已展开的参考序列">${icon('fit')}</button>
+            <button type="button" id="timing-fit" title="适应展开波形" aria-label="适应展开波形">${icon('fit')}</button>
             <label>起点 <input id="timing-start" type="number" step="any" value="0"></label>
             <label>终点 <input id="timing-end" type="number" step="any" value="10"></label><span>cycle</span>
+            <button type="button" id="timing-show-original" aria-controls="timing-original-pane" hidden>显示原始波形</button>
           </div>
           <div class="timing-toolbar timing-cursors">
             <button type="button" id="timing-pick-a" aria-pressed="true">游标 A</button><input id="timing-a" type="number" step="any" value="0" aria-label="游标 A 时间">
             <button type="button" id="timing-pick-b" aria-pressed="false">游标 B</button><input id="timing-b" type="number" step="any" value="0" aria-label="游标 B 时间">
             <output id="timing-delta">B-A = 0 cycle</output>
           </div>
-          <div class="timing-plot"><canvas id="timing-canvas" aria-label="展开后的时序图"></canvas><div id="timing-scroll" tabindex="0" role="region" aria-label="展开波形，点击设置当前游标"><div id="timing-spacer"></div></div><div id="timing-row-toggles"></div><button type="button" id="timing-reference-all">全部展开</button></div>
-          <div id="timing-pan"><div id="timing-pan-thumb" role="scrollbar" tabindex="-1" aria-orientation="horizontal" aria-controls="timing-scroll" aria-label="横向浏览已确定时间范围" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-disabled="true"></div></div>
+          <div class="timing-plot"><canvas id="timing-canvas" aria-label="展开后的时序图"></canvas><div id="timing-scroll" class="timing-scroll" tabindex="0" role="region" aria-label="展开波形，点击设置当前游标"><div id="timing-spacer"></div></div></div>
+          <div id="timing-pan" class="timing-pan"><div id="timing-pan-thumb" class="timing-pan-thumb" role="scrollbar" tabindex="-1" aria-orientation="horizontal" aria-controls="timing-scroll" aria-label="横向浏览已确定时间范围" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-disabled="true"></div></div>
+          </section>
+          </div>
           <footer id="timing-position">列号从 0 开始 · 展开预览只读</footer>
         </main>
       </div>`;
@@ -72,65 +92,34 @@
     let start = 0, end = 10, active = 'a', a = 0, b = 0, selected = -1, highlighted = new Set(), highlightedEdges = new Set();
     let frame = 0, drag = null, panDrag = null, configKey = '', requestTime = 0, selectedColumn = -1, rowOffsets = [0];
     let focusedProblem = null;
-    let referenceDefault = null, displayMinimum = 0, displayMaximum = 1;
-    const referenceOverrides = new Map(), referenceToggles = new Map();
-    const rowHeight = 64, referenceHeight = 72, ruler = 34;
+    let displayMinimum = 0, displayMaximum = 1, originalMinimum = 0, originalMaximum = 1;
+    let originalStart = 0, originalEnd = 10, originalVisible = true, splitRatio = 0.5, splitDrag = null;
+    const expectedScroll = new Map();
+    const rowHeight = 64, ruler = 34;
     const canvas = $('canvas'), scroll = $('scroll'), context = canvas.getContext('2d');
-    const dimensions = () => ({ width: scroll.clientWidth, height: scroll.clientHeight, left: Math.min(190, Math.max(105, scroll.clientWidth * 0.25)) });
+    const originalCanvas = $('original-canvas'), originalScroll = $('original-scroll'), originalContext = originalCanvas.getContext('2d');
+    const dimensions = (surface = scroll) => ({ width: surface.clientWidth, height: surface.clientHeight, left: Math.min(190, Math.max(105, surface.clientWidth * 0.25)) });
     function rowAt(offset) {
       if (offset < 0) return -1;
       let lo = 0, hi = rowOffsets.length - 1;
       while (lo < hi) { const mid = (lo + hi) >> 1; if (rowOffsets[mid + 1] <= offset) lo = mid + 1; else hi = mid; }
       return lo;
     }
-    function referenceOpen(row) {
-      return !!row.referenceRuns.length && (referenceOverrides.get(row.index) ?? referenceDefault ?? row.status !== 'ok');
-    }
     function layoutRows() {
       const anchor = rowAt(scroll.scrollTop), offset = scroll.scrollTop - (rowOffsets[anchor] || 0);
       rowOffsets = [0]; displayMinimum = model.minimum; displayMaximum = model.maximum;
-      let available = 0, opened = 0;
-      model.rows.forEach((row) => {
-        const expanded = referenceOpen(row);
-        if (row.referenceRuns.length) available++;
-        if (expanded) {
-          opened++;
-          displayMinimum = Math.min(displayMinimum, row.referenceRuns[0].start);
-          displayMaximum = Math.max(displayMaximum, row.referenceRuns[row.referenceRuns.length - 1].finish);
-        }
-        rowOffsets.push(rowOffsets[rowOffsets.length - 1] + rowHeight + (expanded ? referenceHeight : 0));
-      });
-      $('spacer').style.height = (ruler + rowOffsets[rowOffsets.length - 1]) + 'px';
+      model.rows.forEach(() => rowOffsets.push(rowOffsets[rowOffsets.length - 1] + rowHeight));
+      updateScrollExtents();
       if (anchor >= 0 && anchor < model.rows.length) scroll.scrollTop = rowOffsets[anchor]
         + Math.min(offset, rowOffsets[anchor + 1] - rowOffsets[anchor] - 1);
-      const allOpen = available > 0 && opened === available;
-      $('reference-all').textContent = allOpen ? '全部收起' : '全部展开';
-      $('reference-all').disabled = !available;
-      $('reference-all').dataset.expanded = String(allOpen);
-      $('reference-all').title = (allOpen ? '收起' : '展开') + '全部原序列参考';
-      if (!model.rows[selected] || !referenceOpen(model.rows[selected])) selectedColumn = -1;
+      originalMinimum = 0; originalMaximum = 1;
+      (model.originalRows || []).forEach((row) => {
+        originalMinimum = Math.min(originalMinimum, -row.phase);
+        originalMaximum = Math.max(originalMaximum, row.length * row.period - row.phase);
+      });
       range(start, end);
-    }
-    function updateReferenceToggles(first, last) {
-      for (const [index, toggle] of referenceToggles) {
-        if (index < first || index >= last || !model.rows[index]?.referenceRuns.length) { toggle.remove(); referenceToggles.delete(index); }
-      }
-      for (let index = first; index < last; index++) {
-        const row = model.rows[index]; if (!row.referenceRuns.length) continue;
-        let toggle = referenceToggles.get(index);
-        if (!toggle) {
-          toggle = doc.createElement('details'); toggle.className = 'timing-reference-toggle'; toggle.dataset.row = index;
-          const summary = doc.createElement('summary'); toggle.appendChild(summary);
-          summary.onclick = (event) => {
-            event.preventDefault(); event.stopPropagation();
-            referenceOverrides.set(index, !referenceOpen(model.rows[index])); layoutRows();
-          };
-          $('row-toggles').appendChild(toggle); referenceToggles.set(index, toggle);
-        }
-        toggle.open = referenceOpen(row); toggle.style.top = (rowOffsets[index] - scroll.scrollTop + 6) + 'px';
-        const label = (toggle.open ? '收起' : '展开') + '第' + (index + 1) + '行 ' + row.name + ' 的原序列参考';
-        toggle.firstChild.title = label; toggle.firstChild.setAttribute('aria-label', label);
-      }
+      originalRange(originalStart, originalEnd);
+      syncVerticalScroll(scroll, originalScroll);
     }
     function message(value, error) { $('status').textContent = value; $('status').classList.toggle('error', !!error); }
     function fullSpan() { return Math.max(1, displayMaximum - displayMinimum); }
@@ -168,6 +157,74 @@
       start = nextStart; end = nextEnd; refreshControls(); drawSoon();
     }
     function fit() { if (model) range(displayMinimum, displayMinimum + fullSpan()); }
+    function originalSpan() { return Math.max(1e-8, originalMaximum - originalMinimum); }
+    function refreshOriginalControls() {
+      $('original-start').value = fmt(originalStart); $('original-end').value = fmt(originalEnd);
+      const total = originalSpan(), visible = Math.min(total, originalEnd - originalStart), room = Math.max(0, total - visible);
+      $('original-zoom-out').disabled = !model || !room;
+      const thumb = $('original-pan-thumb');
+      thumb.style.width = visible / total * 100 + '%';
+      thumb.style.left = (originalStart - originalMinimum) / total * 100 + '%';
+      thumb.setAttribute('aria-valuemin', String(originalMinimum));
+      thumb.setAttribute('aria-valuemax', String(originalMinimum + room));
+      thumb.setAttribute('aria-valuenow', String(originalStart));
+      thumb.setAttribute('aria-valuetext', fmt(originalStart) + ' 至 ' + fmt(originalEnd) + ' cycle');
+      thumb.setAttribute('aria-disabled', String(!model || !room)); thumb.tabIndex = model && room ? 0 : -1;
+    }
+    function originalRange(nextStart, nextEnd) {
+      const span = nextEnd - nextStart;
+      if (!Number.isFinite(nextStart) || !Number.isFinite(nextEnd) || !Number.isFinite(span) || span < 1e-8) return;
+      const width = Math.min(span, originalSpan());
+      originalStart = Math.max(originalMinimum, Math.min(originalMaximum - width, nextStart)); originalEnd = originalStart + width;
+      refreshOriginalControls(); drawSoon();
+    }
+    function fitOriginal() { if (model) originalRange(originalMinimum, originalMaximum); }
+    function setScrollTop(surface, top) {
+      const next = Math.max(0, Math.min(surface.scrollHeight - surface.clientHeight, top));
+      if (Math.abs(surface.scrollTop - next) < 0.5) return;
+      expectedScroll.set(surface, next); surface.scrollTop = next;
+    }
+    function syncVerticalScroll(from, to) {
+      if (originalVisible) setScrollTop(to, from.scrollTop);
+    }
+    function updateScrollExtents() {
+      if (!model) return;
+      const minimum = originalVisible ? Math.min(scroll.clientHeight, originalScroll.clientHeight) : scroll.clientHeight;
+      const height = ruler + rowOffsets[rowOffsets.length - 1];
+      // Equalize scroll limits even when the toolbars or splitter change pane heights.
+      for (const [surface, spacer] of [[scroll, $('spacer')], [originalScroll, $('original-spacer')]])
+        spacer.style.height = (height + Math.max(0, surface.clientHeight - minimum)) + 'px';
+    }
+    function locateRow(index) {
+      updateScrollExtents();
+      const available = Math.max(0, Math.min(scroll.clientHeight, originalVisible ? originalScroll.clientHeight : Infinity) - ruler);
+      const top = Math.max(0, rowOffsets[index] - Math.max(0, available - rowHeight) / 2);
+      setScrollTop(scroll, top); setScrollTop(originalScroll, top);
+    }
+    function updateSplit(next) {
+      const height = Math.max(1, $('plots').clientHeight - 8);
+      const minimum = pane => Array.from(pane.querySelectorAll('.timing-toolbar,.timing-pan')).reduce((sum, node) => sum + node.offsetHeight, rowHeight + 8);
+      let low = Math.max(0.15, minimum($('original-pane')) / height), high = Math.min(0.85, 1 - minimum($('expanded-pane')) / height);
+      if (low > high) { low = 0.15; high = 0.85; }
+      splitRatio = Math.max(low, Math.min(high, next));
+      $('plots').style.gridTemplateRows = originalVisible ? 'minmax(0, ' + splitRatio + 'fr) 8px minmax(0, ' + (1 - splitRatio) + 'fr)' : 'minmax(0, 1fr)';
+      $('splitter').setAttribute('aria-valuemin', String(Math.round(low * 100)));
+      $('splitter').setAttribute('aria-valuemax', String(Math.round(high * 100)));
+      $('splitter').setAttribute('aria-valuenow', String(Math.round(splitRatio * 100)));
+      updateScrollExtents();
+      drawSoon();
+    }
+    function showOriginal(visible) {
+      originalVisible = visible; $('original-pane').hidden = !visible; $('splitter').hidden = !visible;
+      $('show-original').hidden = visible; updateSplit(splitRatio);
+      if (visible) syncVerticalScroll(scroll, originalScroll);
+      else { originalCanvas.width = originalCanvas.height = 0; $('show-original').focus({ preventScroll: true }); }
+      host.log && host.log({ phase: 'split-layout', originalVisible, splitRatio });
+    }
+    function originalInterval(index, target) {
+      const row = model.originalRows?.[index]; if (!row || !target) return null;
+      return Object.assign({}, target, { start: target.col * row.period - row.phase, finish: target.end * row.period - row.phase });
+    }
     function problemRange(row, target) {
       if (!target) return null;
       const marked = row.conflictRanges.concat(row.dataUnknownRanges, row.unknownRanges || [], row.unpositionedRanges || [])
@@ -175,34 +232,43 @@
       if (marked) return marked;
       const gap = row.gaps.map((id) => model.gaps[id]).find((item) => item.col === target.gapCol);
       if (!gap) return null;
-      const first = referenceCell(row, gap.col), last = referenceCell(row, (gap.endCol ?? gap.col + 1) - 1);
-      return { col: gap.col, end: gap.endCol ?? gap.col + 1, start: gap.start, finish: gap.end,
-        referenceStart: first?.start ?? null, referenceFinish: last?.finish ?? null };
+      return { col: gap.col, end: gap.endCol ?? gap.col + 1, start: gap.start, finish: gap.end };
     }
     function locateProblem(index, target) {
       const row = model?.rows[index]; if (!row) return;
       const interval = problemRange(row, target);
       focusedProblem = target ? { row: index, target: { col: target.col, end: target.end, gapCol: target.gapCol } } : null;
       const reference = !!interval && (!Number.isFinite(interval.start) || !Number.isFinite(interval.finish));
-      if (reference && !referenceOpen(row)) { referenceOverrides.set(index, true); layoutRows(); }
-      const from = interval && (reference ? interval.referenceStart : interval.start);
-      const to = interval && (reference ? interval.referenceFinish : interval.finish);
+      const from = interval?.start, to = interval?.finish;
       if (Number.isFinite(from) && Number.isFinite(to)) {
         const low = Math.min(from, to), high = Math.max(from, to);
         const minimum = Math.min(displayMinimum, low), maximum = Math.max(displayMaximum, high);
         const span = Math.min(maximum - minimum, Math.max((high - low) * 1.5, Math.min(end - start, row.period * 8)));
         const next = Math.max(minimum, Math.min(maximum - span, (low + high - span) / 2));
         range(next, next + span);
+      } else {
+        const knownBoundary = [from, to].find(Number.isFinite)
+          ?? row.gaps.map(id => model.gaps[id]).filter(gap => gap.col <= (target?.col ?? Infinity) && Number.isFinite(gap.start)).at(-1)?.start;
+        if (Number.isFinite(knownBoundary)) {
+          const width = Math.min(end - start, row.period * 8);
+          range(knownBoundary - width / 4, knownBoundary + width * 3 / 4);
+        }
       }
-      const height = reference ? referenceHeight : rowHeight, available = Math.max(0, scroll.clientHeight - ruler);
-      scroll.scrollTop = Math.max(0, rowOffsets[index] + (reference ? rowHeight : 0) - Math.max(0, available - height) / 2);
-      selectedColumn = interval ? interval.col : -1;
+      const original = originalInterval(index, interval || target);
+      if (original) {
+        const width = Math.max((original.finish - original.start) * 1.5, Math.min(originalEnd - originalStart, (model.originalRows[index].period || 1) * 8));
+        originalRange((original.start + original.finish - width) / 2, (original.start + original.finish + width) / 2);
+      }
+      locateRow(index);
+      selectedColumn = interval ? interval.col : target?.col ?? -1;
       $('position').textContent = '第' + (index + 1) + '行 ' + row.name + (interval ? ' · '
         + (interval.number ? '[' + interval.number + '] ' : '') + '原列' + interval.col + (interval.end > interval.col ? '至' + interval.end : '')
-        + (reference ? ' · 原序列参考，时刻未定' : '') : ' · 该项涉及整行');
+        + (reference ? ' · 展开时刻未定，已定位原始列' : '') : ' · 该项涉及整行');
       for (const button of $('detail').querySelectorAll('.timing-problem-link'))
         button.setAttribute('aria-current', String(button.dataset.col === String(target?.col) && button.dataset.end === String(target?.end)));
       drawSoon();
+      host.log && host.log({ phase: 'locate-problem', row: index, col: selectedColumn,
+        original: original ? [original.start, original.finish] : null, expanded: interval ? [from, to] : null });
     }
     function unknownProblems(row, issues) {
       const results = [], seen = new Set(), rangesByIssue = new Map();
@@ -472,7 +538,6 @@
         + (alignment.referenceExpanded ? '（同值展开区域）' : '')
         + (alignment.row === row.index ? '；连接时延优先。' : '，并经连接约束传递至本行。'));
       });
-      if (row.referenceRuns.length) paragraph('原序列参考与主图共用 cycle 轴；实线表示已确定区间，区间内的原始 . 与 | 按比例示意，不表示各自时长已单独确定；虚线及 | ? 才表示未定位置，不参与时延测量。');
       row.gaps.forEach((id) => {
         const gap = model.gaps[id];
         if (gap.ignored) { paragraph('第' + gap.col + '列 |：行尾省略，不影响后续波形或连接端点，无需推算时长。'); return; }
@@ -502,9 +567,7 @@
       $('locate').disabled = false;
       for (const button of $('row-list').children) button.setAttribute('aria-pressed', String(Number(button.dataset.row) === index));
       if (locate) {
-        const top = rowOffsets[index], available = Math.max(0, scroll.clientHeight - ruler);
-        const visibleHeight = Math.min(rowOffsets[index + 1] - top, available);
-        scroll.scrollTop = Math.max(0, top - (available - visibleHeight) / 2);
+        locateRow(index);
         $('position').textContent = '第' + (index + 1) + '行 ' + row.name + ' · ' + rowStatusName(row);
       }
       drawSoon();
@@ -526,7 +589,10 @@
           name.appendChild(summary);
         }
         const state = doc.createElement('span'); state.textContent = rowStatusName(row); state.className = row.status;
-        button.append(name, state); button.title = row.reasons.join('\n'); button.onclick = () => selectRow(row.index, true);
+        button.append(name, state); button.title = row.reasons.join('\n'); button.onclick = () => {
+          selectRow(row.index, true);
+          if (row.status !== 'ok') locateProblem(row.index, row.conflictRanges[0] || row.unknownProblems?.find((problem) => problem.target)?.target || null);
+        };
         fragment.appendChild(button);
       });
       $('row-list').appendChild(fragment);
@@ -539,17 +605,7 @@
       while (lo < hi) { const mid = (lo + hi) >> 1; if (ends[mid] < time) lo = mid + 1; else hi = mid; }
       return lo;
     }
-    function referenceCell(row, col) {
-      let lo = 0, hi = row.referenceRuns.length;
-      while (lo < hi) { const mid = (lo + hi) >> 1; if (row.referenceRuns[mid].end <= col) lo = mid + 1; else hi = mid; }
-      const run = row.referenceRuns[lo];
-      if (!run || col < run.col) return null;
-      const cellWidth = run.stretch ? (run.finish - run.start) / (run.end - run.col) : row.period;
-      const omission = run.gap && !run.stretch;
-      const start = omission ? run.start : run.start + (col - run.col) * cellWidth;
-      return { start, finish: omission ? run.finish : Math.min(run.finish, start + cellWidth) };
-    }
-    function paintRuns(row, x, from, to, left, right, mid, reference) {
+    function paintRuns(row, x, from, to, left, right, mid, reference, context) {
       const runs = reference ? row.referenceRuns : row.drawRuns, scale = (right - left) / (to - from);
       let previousPixel = -Infinity;
       context.save();
@@ -616,7 +672,7 @@
       }
       context.restore();
     }
-    function paintProblemRanges(ranges, x, left, right, top, height, reference, unknown) {
+    function paintProblemRanges(ranges, x, left, right, top, height, reference, unknown, context) {
       context.save();
       const color = unknown ? '#8a5a08' : '#b62e3b';
       for (const range of ranges) {
@@ -642,7 +698,98 @@
       }
       context.restore();
     }
+    function paintEdges(context, width, height, left, x, y, from, to, original) {
+      context.save(); context.beginPath(); context.rect(left, ruler, width - left, height - ruler); context.clip();
+      for (const edge of model.edges) {
+        if (!edge.fromNode || !edge.toNode || edge.invalid) continue;
+        const fromRow = model.originalRows?.[edge.fromNode.row], toRow = model.originalRows?.[edge.toNode.row];
+        const a = original ? edge.fromNode.col * fromRow.period - fromRow.phase : edge.start;
+        const b = original ? edge.toNode.col * toRow.period - toRow.phase : edge.end;
+        if (a === null || b === null || Math.max(a, b) < from || Math.min(a, b) > to) continue;
+        const x1 = x(a), x2 = x(b), y1 = y(edge.fromNode.row) + 25, y2 = y(edge.toNode.row) + 25;
+        if (Math.max(y1, y2) < ruler || Math.min(y1, y2) > height) continue;
+        context.strokeStyle = edge.status === 'conflict' ? '#bd303e' : edge.status === 'unknown' ? '#946316' : highlightedEdges.has(edge.index) ? '#135bc5' : '#667085';
+        context.lineWidth = highlightedEdges.has(edge.index) ? 2.5 : 1;
+        context.beginPath(); context.moveTo(x1, y1);
+        if (edge.arrow.includes('~')) context.bezierCurveTo((x1 + x2) / 2, y1, (x1 + x2) / 2, y2, x2, y2);
+        else if (edge.arrow.includes('|-')) { context.lineTo(x1, y2); context.lineTo(x2, y2); }
+        else if (edge.arrow.includes('-|')) { context.lineTo(x2, y1); context.lineTo(x2, y2); }
+        else context.lineTo(x2, y2);
+        context.stroke();
+        const arrow = (px, py, angle) => { context.beginPath(); context.moveTo(px - 7 * Math.cos(angle - 0.45), py - 7 * Math.sin(angle - 0.45)); context.lineTo(px, py); context.lineTo(px - 7 * Math.cos(angle + 0.45), py - 7 * Math.sin(angle + 0.45)); context.stroke(); };
+        if (edge.arrow.includes('>')) arrow(x2, y2, Math.atan2(y2 - y1, x2 - x1));
+        if (edge.arrow.includes('<')) arrow(x1, y1, Math.atan2(y1 - y2, x1 - x2));
+        if (edge.label) {
+          const offset = edge.option.labelOffset || {}, text = edge.label, textWidth = Math.min(width - left - 12, context.measureText(text).width);
+          const lx = Math.max(left + 6, Math.min(width - textWidth - 6, (x1 + x2 - textWidth) / 2 + (Number(offset.x) || 0)));
+          const ly = Math.max(ruler + 14, Math.min(height - 4, (y1 + y2) / 2 - 6 + (Number(offset.y) || 0)));
+          context.fillStyle = '#ffffff'; context.fillRect(lx - 1, ly - 11, textWidth + 2, 14); context.fillStyle = context.strokeStyle;
+          context.fillText(text, lx, ly, Math.max(1, textWidth));
+        }
+      }
+      context.restore();
+    }
+    function drawOriginal() {
+      if (!originalVisible) return;
+      const { width, height, left } = dimensions(originalScroll), context = originalContext;
+      if (!width || !height) return;
+      const ratio = Math.min(view.devicePixelRatio || 1, 2);
+      if (originalCanvas.width !== Math.round(width * ratio) || originalCanvas.height !== Math.round(height * ratio)) {
+        originalCanvas.width = Math.round(width * ratio); originalCanvas.height = Math.round(height * ratio);
+        originalCanvas.style.width = width + 'px'; originalCanvas.style.height = height + 'px';
+      }
+      context.setTransform(ratio, 0, 0, ratio, 0, 0); context.clearRect(0, 0, width, height);
+      context.fillStyle = '#ffffff'; context.fillRect(0, 0, width, height);
+      if (!model?.originalRows) return;
+      const x = time => left + (time - originalStart) * Math.max(1, width - left - 16) / (originalEnd - originalStart);
+      const y = row => ruler + rowOffsets[row] - originalScroll.scrollTop;
+      const first = Math.max(0, rowAt(originalScroll.scrollTop)), last = Math.min(model.rows.length, rowAt(originalScroll.scrollTop + height - ruler) + 1);
+      context.font = '12px "Segoe UI", "Microsoft YaHei", sans-serif'; context.lineWidth = 1;
+      const rawStep = (originalEnd - originalStart) / Math.max(2, (width - left) / 85);
+      const power = Math.pow(10, Math.floor(Math.log10(rawStep))), step = [1, 2, 5, 10].find(n => n * power >= rawStep) * power;
+      for (let tick = Math.ceil(originalStart / step) * step, count = 0; tick <= originalEnd && count++ < 100; tick += step) {
+        const px = x(tick); context.strokeStyle = '#e5e9ee'; context.beginPath(); context.moveTo(px, ruler); context.lineTo(px, height); context.stroke();
+      }
+      for (let index = first; index < last; index++) {
+        const row = model.originalRows[index], checked = model.rows[index], top = y(index);
+        if (highlighted.has(index)) { context.fillStyle = '#eaf3ff'; context.fillRect(0, Math.max(ruler, top), width, rowHeight); }
+        context.strokeStyle = '#e2e8ed'; context.beginPath(); context.moveTo(0, top + rowHeight); context.lineTo(width, top + rowHeight); context.stroke();
+        context.save(); context.beginPath(); context.rect(left, Math.max(ruler, top), width - left, Math.min(rowHeight, height - top)); context.clip();
+        paintRuns(row, x, originalStart, originalEnd, left, width - 16, top + 25, true, context);
+        const map = ranges => ranges.map(range => originalInterval(index, range));
+        paintProblemRanges(map(checked.dataUnknownRanges), x, left, width - 8, top, rowHeight, false, true, context);
+        paintProblemRanges(map(checked.conflictRanges), x, left, width - 8, top, rowHeight, false, false, context);
+        if (selected === index && selectedColumn >= 0) {
+          const interval = originalInterval(index, { col: selectedColumn, end: selectedColumn + 1 });
+          context.strokeStyle = '#135bc5'; context.lineWidth = 2;
+          context.strokeRect(x(interval.start), top + 6, Math.max(2, x(interval.finish) - x(interval.start)), rowHeight - 12);
+        }
+        context.restore();
+        context.save(); context.beginPath(); context.rect(0, Math.max(ruler, top), left - 1, rowHeight); context.clip();
+        context.fillStyle = highlighted.has(index) ? '#eaf3ff' : '#f4f6f8'; context.fillRect(0, top, left - 1, rowHeight);
+        context.fillStyle = '#1b2732'; context.fillText((index + 1) + '. ' + row.name, 10, top + 23);
+        context.fillStyle = '#475569'; context.fillText(row.sourceLength ? '原列 0～' + (row.sourceLength - 1) : '空行', 10, top + 43); context.restore();
+      }
+      paintEdges(context, width, height, left, x, y, originalStart, originalEnd, true);
+      context.save(); context.beginPath(); context.rect(0, ruler, width, height - ruler); context.clip();
+      for (let index = first; index < last; index++) if (highlighted.has(index)) {
+        context.strokeStyle = '#135bc5'; context.lineWidth = index === selected ? 2.5 : 1; context.setLineDash(index === selected ? [] : [5, 4]);
+        context.strokeRect(2, y(index) + 2, width - 4, rowHeight - 4);
+      }
+      context.setLineDash([]);
+      if (focusedProblem) {
+        const interval = originalInterval(focusedProblem.row, focusedProblem.target);
+        if (interval) {
+          const x1 = Math.max(left + 1, x(interval.start) - 3), x2 = Math.min(width - 2, x(interval.finish) + 4);
+          if (x2 >= x1) { context.strokeStyle = '#135bc5'; context.lineWidth = 2.5; context.strokeRect(x1, y(focusedProblem.row) + 2, Math.max(2, x2 - x1), rowHeight - 4); }
+        }
+      }
+      context.restore(); context.setLineDash([]);
+      context.fillStyle = '#f0f3f7'; context.fillRect(0, 0, width, ruler); context.fillStyle = '#3f5063';
+      for (let tick = Math.ceil(originalStart / step) * step, count = 0; tick <= originalEnd && count++ < 100; tick += step) context.fillText(fmt(tick), x(tick) + 3, 21);
+    }
     function draw() {
+      drawOriginal();
       const { width, height, left } = dimensions();
       if (!width || !height) return;
       const ratio = Math.min(view.devicePixelRatio || 1, 2);
@@ -657,7 +804,6 @@
       const y = (row) => ruler + rowOffsets[row] - scroll.scrollTop;
       const first = Math.max(0, rowAt(scroll.scrollTop));
       const last = Math.min(model.rows.length, rowAt(scroll.scrollTop + height - ruler) + 1);
-      updateReferenceToggles(first, last);
       context.font = '12px "Segoe UI", "Microsoft YaHei", sans-serif'; context.lineWidth = 1;
       const rawStep = (end - start) / Math.max(2, (width - left) / 85);
       const power = Math.pow(10, Math.floor(Math.log10(rawStep))), step = [1, 2, 5, 10].find((n) => n * power >= rawStep) * power;
@@ -672,7 +818,7 @@
         }
         context.strokeStyle = '#e2e8ed'; context.beginPath(); context.moveTo(0, top + rowHeight); context.lineTo(width, top + rowHeight); context.stroke();
         context.save(); context.beginPath(); context.rect(left, Math.max(ruler, top), width - left, Math.min(rowHeight, height - top)); context.clip();
-        paintRuns(row, x, start, end, left, x(end), mid, false);
+        paintRuns(row, x, start, end, left, x(end), mid, false, context);
         row.gaps.forEach((id, gapIndex) => {
           const gap = model.gaps[id];
           if (gap.ignored) {
@@ -719,8 +865,8 @@
               + (nextAnchor && nextAnchor !== gap ? '至' + nextAnchor.col : '') + (finish === null ? ' · 后续位置未定' : ''), boxLeft + 4, top + 55);
           }
         });
-        paintProblemRanges(row.dataUnknownRanges, x, left, width - 8, top, rowHeight, false, true);
-        paintProblemRanges(row.conflictRanges, x, left, width - 8, top, rowHeight, false, false);
+        paintProblemRanges(row.dataUnknownRanges, x, left, width - 8, top, rowHeight, false, true, context);
+        paintProblemRanges(row.conflictRanges, x, left, width - 8, top, rowHeight, false, false, context);
         if (row.status === 'unknown' && row.hasUnpositionedContent && !row.drawRuns.length) {
           context.strokeStyle = '#a97923'; context.lineWidth = 1;
           context.setLineDash([5, 4]);
@@ -732,67 +878,11 @@
         context.restore();
         context.save(); context.beginPath(); context.rect(0, Math.max(ruler, top), left - 1, rowHeight); context.clip();
         context.fillStyle = row.status === 'unknown' ? '#fff0c8' : highlighted.has(i) ? '#eaf3ff' : '#f4f6f8'; context.fillRect(0, top, left - 1, rowHeight);
-        context.fillStyle = '#1b2732'; context.fillText((i + 1) + '. ' + row.name, 30, top + 23);
+        context.fillStyle = '#1b2732'; context.fillText((i + 1) + '. ' + row.name, 10, top + 23);
         context.fillStyle = row.status === 'conflict' ? '#b62e3b' : row.status === 'unknown' ? '#8a5a08' : '#21633d';
         context.fillText(rowStatusName(row), 10, top + 43); context.restore();
       }
-      context.save(); context.beginPath(); context.rect(left, ruler, width - left, height - ruler); context.clip();
-      context.beginPath();
-      for (let i = first; i < last; i++) context.rect(left, y(i), width - left, rowHeight);
-      context.clip();
-      for (const edge of model.edges) {
-        if (edge.start === null || edge.end === null || Math.max(edge.start, edge.end) < start || Math.min(edge.start, edge.end) > end) continue;
-        const x1 = x(edge.start), x2 = x(edge.end), y1 = y(edge.fromNode.row) + 25, y2 = y(edge.toNode.row) + 25;
-        if (Math.max(y1, y2) < ruler || Math.min(y1, y2) > height) continue;
-        context.strokeStyle = edge.status === 'conflict' ? '#bd303e' : edge.status === 'unknown' ? '#946316' : highlightedEdges.has(edge.index) ? '#135bc5' : '#667085';
-        context.lineWidth = highlightedEdges.has(edge.index) ? 2.5 : 1;
-        context.beginPath(); context.moveTo(x1, y1);
-        if (edge.arrow.includes('~')) context.bezierCurveTo((x1 + x2) / 2, y1, (x1 + x2) / 2, y2, x2, y2);
-        else if (edge.arrow.includes('|-')) { context.lineTo(x1, y2); context.lineTo(x2, y2); }
-        else if (edge.arrow.includes('-|')) { context.lineTo(x2, y1); context.lineTo(x2, y2); }
-        else context.lineTo(x2, y2);
-        context.stroke();
-        const arrow = (px, py, angle) => { context.beginPath(); context.moveTo(px - 7 * Math.cos(angle - 0.45), py - 7 * Math.sin(angle - 0.45)); context.lineTo(px, py); context.lineTo(px - 7 * Math.cos(angle + 0.45), py - 7 * Math.sin(angle + 0.45)); context.stroke(); };
-        if (edge.arrow.includes('>')) arrow(x2, y2, Math.atan2(y2 - y1, x2 - x1));
-        if (edge.arrow.includes('<')) arrow(x1, y1, Math.atan2(y1 - y2, x1 - x2));
-        if (edge.label) {
-          const offset = edge.option.labelOffset || {}, text = edge.label, textWidth = Math.min(width - left - 12, context.measureText(text).width);
-          const lx = Math.max(left + 6, Math.min(width - textWidth - 6, (x1 + x2 - textWidth) / 2 + (Number(offset.x) || 0)));
-          const ly = Math.max(ruler + 14, Math.min(height - 4, (y1 + y2) / 2 - 6 + (Number(offset.y) || 0)));
-          context.fillStyle = '#ffffff'; context.fillRect(lx - 1, ly - 11, textWidth + 2, 14); context.fillStyle = context.strokeStyle;
-          context.fillText(text, lx, ly, Math.max(1, textWidth));
-        }
-      }
-      context.restore();
-      // Reference strips share the time transform, but provisional slots never become timing evidence.
-      for (let i = first; i < last; i++) {
-        const row = model.rows[i]; if (!referenceOpen(row)) continue;
-        const top = y(i) + rowHeight, right = width - 16;
-        context.save(); context.beginPath(); context.rect(0, ruler, width, height - ruler); context.clip();
-        context.fillStyle = '#f7f8fb'; context.fillRect(0, top, width, referenceHeight);
-        context.strokeStyle = '#c5cdd7'; context.lineWidth = 1; context.setLineDash([]);
-        context.beginPath(); context.moveTo(0, top); context.lineTo(width, top); context.stroke(); context.setLineDash([]);
-        context.fillStyle = '#475569';
-        context.save(); context.beginPath(); context.rect(8, top, left - 16, referenceHeight); context.clip();
-        context.fillText('原序列参考', 10, top + 24);
-        context.fillText(row.referenceRuns.some((run) => run.provisional) ? '虚线：位置未定' : '实线：区间已确定', 10, top + 44); context.restore();
-        context.save(); context.beginPath(); context.rect(left, top + 1, right - left, referenceHeight - 2); context.clip();
-        context.fillStyle = '#475569'; context.strokeStyle = '#e5e9ee';
-        for (let tick = Math.ceil(start / step) * step, count = 0; tick <= end && count++ < 100; tick += step) {
-          const px = x(tick); context.beginPath(); context.moveTo(px, top + 1); context.lineTo(px, top + referenceHeight); context.stroke();
-          context.fillText(fmt(tick), px + 3, top + 63);
-        }
-        paintRuns(row, x, start, end, left, right, top + 27, true);
-        paintProblemRanges(row.dataUnknownRanges, x, left, right, top, referenceHeight, true, true);
-        paintProblemRanges(row.conflictRanges, x, left, right, top, referenceHeight, true, false);
-        if (selected === i && selectedColumn >= 0 && selectedColumn < row.sourceLength) {
-          const cell = referenceCell(row, selectedColumn);
-          if (cell) { context.strokeStyle = '#135bc5'; context.lineWidth = 2; context.strokeRect(x(cell.start), top + 10, Math.max(2, x(cell.finish) - x(cell.start)), 34); }
-        }
-        context.restore();
-        context.strokeStyle = '#c5cdd7'; context.lineWidth = 1; context.beginPath(); context.moveTo(0, top + referenceHeight); context.lineTo(width, top + referenceHeight); context.stroke();
-        context.restore();
-      }
+      paintEdges(context, width, height, left, x, y, start, end, false);
       context.fillStyle = '#f0f3f7'; context.fillRect(0, 0, width, ruler); context.fillStyle = '#3f5063'; context.textAlign = 'left';
       for (let tick = Math.ceil(start / step) * step, count = 0; tick <= end && count++ < 100; tick += step) context.fillText(fmt(tick), x(tick) + 3, 21);
       [['a', a, '#b75514'], ['b', b, '#6744ad']].forEach(([key, value, color]) => {
@@ -804,7 +894,7 @@
         context.stroke(); context.restore(); context.setLineDash([]);
         context.fillStyle = color; context.fillRect(px - 9, 0, 18, 15); context.fillStyle = '#ffffff'; context.fillText(key.toUpperCase(), px - 4, 12);
       });
-      // Draw selection last so warning fills, reference strips and connections cannot hide it.
+      // Draw selection last so warning fills and connections cannot hide it.
       context.save(); context.beginPath(); context.rect(0, ruler, width, height - ruler); context.clip();
       for (let i = first; i < last; i++) {
         if (!highlighted.has(i)) continue;
@@ -814,13 +904,13 @@
       }
       if (focusedProblem && focusedProblem.row >= first && focusedProblem.row < last) {
         const row = model.rows[focusedProblem.row], interval = problemRange(row, focusedProblem.target);
-        if (interval) for (const reference of [false, true]) {
-          if (reference && !referenceOpen(row)) continue;
-          const a = reference ? interval.referenceStart : interval.start, b = reference ? interval.referenceFinish : interval.finish;
-          if (!Number.isFinite(a) || !Number.isFinite(b) || Math.max(a, b) < start || Math.min(a, b) > end) continue;
-          const x1 = Math.max(left + 1, x(Math.min(a, b)) - 3), x2 = Math.min(width - 2, x(Math.max(a, b)) + 4);
-          context.strokeStyle = '#135bc5'; context.lineWidth = 2.5; context.setLineDash([]);
-          context.strokeRect(x1, y(row.index) + (reference ? rowHeight : 0) + 2, Math.max(2, x2 - x1), (reference ? referenceHeight : rowHeight) - 4);
+        if (interval) {
+          const a = interval.start, b = interval.finish;
+          if (Number.isFinite(a) && Number.isFinite(b) && Math.max(a, b) >= start && Math.min(a, b) <= end) {
+            const x1 = Math.max(left + 1, x(Math.min(a, b)) - 3), x2 = Math.min(width - 2, x(Math.max(a, b)) + 4);
+            context.strokeStyle = '#135bc5'; context.lineWidth = 2.5; context.setLineDash([]);
+            context.strokeRect(x1, y(row.index) + 2, Math.max(2, x2 - x1), rowHeight - 4);
+          }
         }
       }
       context.restore();
@@ -832,10 +922,13 @@
       model.issues.forEach((entry, issueId) => {
         if (entry.kind === 'unknown') entry.rows.forEach((index) => unknownByRow[index].push({ entry, issueId }));
       });
-      model.rows.forEach((row) => { row.unknownProblems = unknownProblems(row, unknownByRow[row.index]); });
-      for (const index of referenceOverrides.keys()) if (index >= model.rows.length) referenceOverrides.delete(index);
+      model.rows.forEach((row) => {
+        row.unknownProblems = unknownProblems(row, unknownByRow[row.index]);
+        // The independent original pane replaces the old per-row mapped strips.
+        delete row.referenceRuns; delete row.referenceEnds;
+      });
       layoutRows();
-      if (!model.rows[selected]?.referenceRuns.length || selectedColumn >= model.rows[selected].sourceLength) selectedColumn = -1;
+      if (!model.rows[selected] || selectedColumn >= model.rows[selected].sourceLength) selectedColumn = -1;
       const counts = { ok: 0, unknown: 0, conflict: 0 }; model.rows.forEach((row) => counts[row.status]++);
       const alignedCount = model.rows.filter((row) => row.alignments.some((entry) => entry.direction !== 'data-series')).length;
       const seriesCount = model.rows.filter((row) => row.gaps.some((id) => model.gaps[id].series)).length;
@@ -851,9 +944,11 @@
       if (selected >= 0) selectRow(selected);
       else if (model.rows.length) selectRow(model.rows.findIndex((row) => row.status !== 'ok') >= 0 ? model.rows.findIndex((row) => row.status !== 'ok') : 0, firstResult);
       else { $('detail').textContent = '没有可检查的信号'; $('locate').disabled = true; }
-      if (firstResult) { a = model.minimum; b = model.minimum; fit(); }
+      if (firstResult) { a = model.minimum; b = model.minimum; fit(); fitOriginal(); }
       refreshControls(); drawSoon();
-      host.log && host.log({ phase: 'checked', rows: model.rows.length, gaps: model.gaps.length, counts, alignedRows: alignedCount, elapsedMs: Math.round(performance.now() - requestTime) });
+      host.log && host.log({ phase: 'checked', rows: model.rows.length, gaps: model.gaps.length, counts, alignedRows: alignedCount,
+        originalExtent: [originalMinimum, originalMaximum], expandedExtent: [displayMinimum, displayMaximum], originalVisible, splitRatio,
+        elapsedMs: Math.round(performance.now() - requestTime) });
     }
     async function refresh() {
       if (disposed || reading || view.closed) return;
@@ -871,7 +966,7 @@
         if (worker) worker.terminate();
         const current = ++version; requestTime = performance.now();
         message(model ? '正在重新检查，当前为上次结果...' : '正在计算连接时延...');
-        const script = 'const engine=(' + global.createVisualWaveDromTimingEngine.toString() + ')();onmessage=(e)=>{try{postMessage({result:engine.analyze(e.data.source,e.data.edgeTimings,e.data.parameterConversions)})}catch(error){postMessage({error:error.message})}};';
+        const script = 'const engine=(' + global.createVisualWaveDromTimingEngine.toString() + ')();onmessage=(e)=>{try{postMessage({result:engine.analyze(e.data.source,e.data.edgeTimings,e.data.parameterConversions,{original:true})})}catch(error){postMessage({error:error.message})}};';
         const url = URL.createObjectURL(new Blob([script], { type: 'text/javascript' }));
         try { worker = new Worker(url); } finally { URL.revokeObjectURL(url); }
         worker.onmessage = (event) => {
@@ -894,9 +989,10 @@
       timer = frame = 0; worker = null; version++;
       observer.disconnect();
       if (sessions.get(host.id) === view) sessions.delete(host.id);
-      source = model = null; panDrag = drag = focusedProblem = null;
-      referenceOverrides.clear(); referenceToggles.clear(); highlighted.clear(); highlightedEdges.clear();
+      source = model = null; panDrag = drag = splitDrag = focusedProblem = null;
+      expectedScroll.clear(); highlighted.clear(); highlightedEdges.clear();
       canvas.width = canvas.height = 0;
+      originalCanvas.width = originalCanvas.height = 0;
       if (typeof host.dispose === 'function') host.dispose();
       host.log && host.log({ phase: 'disposed', activeSessions: sessions.size });
     }
@@ -918,10 +1014,9 @@
     $('locate').innerHTML = icon('locate') + '<span>定位原图</span>'; $('locate').disabled = true;
     $('locate').onclick = () => { if (selected >= 0) Promise.resolve(host.locate(selected, selectedColumn >= 0 ? [selectedColumn] : model.rows[selected].gaps.map((id) => model.gaps[id].col))).catch((error) => message(error.message, true)); };
     $('fit').onclick = fit;
-    $('reference-all').onclick = () => {
-      if (!model) return;
-      referenceDefault = $('reference-all').dataset.expanded !== 'true'; referenceOverrides.clear(); layoutRows();
-    };
+    $('original-fit').onclick = fitOriginal;
+    $('hide-original').onclick = () => showOriginal(false);
+    $('show-original').onclick = () => showOriginal(true);
     function zoom(factor) {
       if (!model || factor > 1 && end - start >= fullSpan() * (1 - 1e-10)) return;
       const pivot = active === 'a' ? a : b, center = pivot >= start && pivot <= end ? pivot : (start + end) / 2;
@@ -929,37 +1024,75 @@
     }
     $('zoom-in').onclick = () => zoom(0.5); $('zoom-out').onclick = () => zoom(2);
     $('start').onchange = $('end').onchange = () => { range(Number($('start').value), Number($('end').value)); refreshControls(); };
+    function zoomOriginal(factor, clientX) {
+      if (!model) return;
+      const bounds = originalScroll.getBoundingClientRect(), { width, left } = dimensions(originalScroll);
+      const fraction = Number.isFinite(clientX) ? Math.max(0, Math.min(1, (clientX - bounds.left - left) / Math.max(1, width - left - 16))) : 0.5;
+      const center = originalStart + (originalEnd - originalStart) * fraction;
+      originalRange(center - (center - originalStart) * factor, center + (originalEnd - center) * factor);
+    }
+    $('original-zoom-in').onclick = () => zoomOriginal(0.5); $('original-zoom-out').onclick = () => zoomOriginal(2);
+    $('original-start').onchange = $('original-end').onchange = () => {
+      originalRange(Number($('original-start').value), Number($('original-end').value)); refreshOriginalControls();
+    };
+    const splitter = $('splitter');
+    function moveSplit(event) {
+      if (splitDrag !== event.pointerId) return;
+      const bounds = $('plots').getBoundingClientRect();
+      updateSplit((event.clientY - bounds.top - 4) / Math.max(1, bounds.height - 8));
+    }
+    function endSplit(event) {
+      if (splitDrag !== event.pointerId) return;
+      splitDrag = null; doc.body.classList.remove('resizing-panes');
+      host.log && host.log({ phase: 'split-layout', originalVisible, splitRatio });
+    }
+    splitter.addEventListener('pointerdown', event => {
+      if (event.button !== 0) return;
+      event.preventDefault(); splitDrag = event.pointerId; splitter.focus({ preventScroll: true });
+      splitter.setPointerCapture(event.pointerId); doc.body.classList.add('resizing-panes'); moveSplit(event);
+    });
+    splitter.addEventListener('pointermove', moveSplit);
+    for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) splitter.addEventListener(type, endSplit);
+    splitter.addEventListener('keydown', event => {
+      if (!['ArrowUp', 'ArrowDown', 'Home'].includes(event.key)) return;
+      event.preventDefault(); updateSplit(event.key === 'Home' ? 0.5 : splitRatio + (event.key === 'ArrowUp' ? -0.05 : 0.05));
+    });
     function movePan(event) {
       if (!panDrag || panDrag.pointerId !== event.pointerId || !model) return;
-      const bounds = $('pan').getBoundingClientRect(), visible = end - start;
+      const original = panDrag.original, bounds = $(original ? 'original-pan' : 'pan').getBoundingClientRect();
+      const visible = original ? originalEnd - originalStart : end - start;
       if (!bounds.width) return;
-      const next = displayMinimum + (event.clientX - bounds.left) / bounds.width * fullSpan() - panDrag.grab * visible;
-      range(next, next + visible);
+      const next = (original ? originalMinimum : displayMinimum) + (event.clientX - bounds.left) / bounds.width * (original ? originalSpan() : fullSpan()) - panDrag.grab * visible;
+      (original ? originalRange : range)(next, next + visible);
     }
     function endPan(event) {
       if (!panDrag || event.pointerId !== panDrag.pointerId) return;
-      panDrag = null; $('pan').classList.remove('dragging');
+      $(panDrag.original ? 'original-pan' : 'pan').classList.remove('dragging'); panDrag = null;
     }
-    $('pan').addEventListener('pointerdown', (event) => {
-      if (event.button !== 0 || !model || $('pan-thumb').getAttribute('aria-disabled') === 'true') return;
-      event.preventDefault();
-      const bounds = $('pan-thumb').getBoundingClientRect();
-      panDrag = { pointerId: event.pointerId, grab: event.target === $('pan-thumb') && bounds.width
-        ? Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width)) : 0.5 };
-      $('pan-thumb').focus({ preventScroll: true });
-      $('pan').setPointerCapture(event.pointerId); $('pan').classList.add('dragging');
-      movePan(event);
-    });
-    $('pan').addEventListener('pointermove', movePan);
-    ['pointerup', 'pointercancel', 'lostpointercapture'].forEach((type) => $('pan').addEventListener(type, endPan));
-    $('pan-thumb').addEventListener('keydown', (event) => {
-      if (!model || event.currentTarget.getAttribute('aria-disabled') === 'true') return;
-      const visible = end - start;
-      const positions = { ArrowLeft: start - visible / 20, ArrowRight: start + visible / 20,
-        PageUp: start - visible, PageDown: start + visible, Home: displayMinimum, End: displayMinimum + fullSpan() - visible };
-      if (!Object.prototype.hasOwnProperty.call(positions, event.key)) return;
-      event.preventDefault(); event.stopPropagation(); range(positions[event.key], positions[event.key] + visible);
-    });
+    for (const original of [false, true]) {
+      const pan = $(original ? 'original-pan' : 'pan'), thumb = $(original ? 'original-pan-thumb' : 'pan-thumb');
+      pan.addEventListener('pointerdown', (event) => {
+        if (event.button !== 0 || !model || thumb.getAttribute('aria-disabled') === 'true') return;
+        event.preventDefault();
+        const bounds = thumb.getBoundingClientRect();
+        panDrag = { pointerId: event.pointerId, original, grab: event.target === thumb && bounds.width
+          ? Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width)) : 0.5 };
+        thumb.focus({ preventScroll: true });
+        pan.setPointerCapture(event.pointerId); pan.classList.add('dragging');
+        movePan(event);
+      });
+      pan.addEventListener('pointermove', movePan);
+      ['pointerup', 'pointercancel', 'lostpointercapture'].forEach((type) => pan.addEventListener(type, endPan));
+      thumb.addEventListener('keydown', (event) => {
+        if (!model || thumb.getAttribute('aria-disabled') === 'true') return;
+        const from = original ? originalStart : start, to = original ? originalEnd : end, visible = to - from;
+        const minimum = original ? originalMinimum : displayMinimum, total = original ? originalSpan() : fullSpan();
+        const positions = { ArrowLeft: from - visible / 20, ArrowRight: from + visible / 20,
+          PageUp: from - visible, PageDown: from + visible, Home: minimum, End: minimum + total - visible };
+        if (!Object.prototype.hasOwnProperty.call(positions, event.key)) return;
+        event.preventDefault(); event.stopPropagation(); (original ? originalRange : range)(positions[event.key], positions[event.key] + visible);
+      });
+    }
     ['a', 'b'].forEach((key) => {
       $('pick-' + key).onclick = () => { active = key; refreshControls(); drawSoon(); };
       $(key).onchange = () => { const value = Number($(key).value); if (!Number.isFinite(value)) return; if (key === 'a') a = value; else b = value; refreshControls(); drawSoon(); };
@@ -968,23 +1101,9 @@
       if (!model) return;
       const bounds = scroll.getBoundingClientRect(), { width, left } = dimensions(), px = event.clientX - bounds.left, py = event.clientY - bounds.top;
       const rowIndex = rowAt(py - ruler + scroll.scrollTop), row = model.rows[rowIndex];
-      const inReference = py >= ruler && row && referenceOpen(row) && py - ruler + scroll.scrollTop - rowOffsets[rowIndex] >= rowHeight;
       if (choose && row && py >= ruler) selectRow(rowIndex);
-      if (choose && !inReference) selectedColumn = -1;
+      if (choose) selectedColumn = -1;
       if (px < left || px > width - 8) return;
-      if (inReference) {
-        if (selected !== rowIndex) selectRow(rowIndex);
-        const value = start + (px - left) / Math.max(1, width - left - 16) * (end - start);
-        let index = firstRun(row, value, true);
-        if (row.referenceRuns[index]?.finish <= value) index++;
-        const run = row.referenceRuns[index];
-        const cellWidth = run && run.stretch ? (run.finish - run.start) / (run.end - run.col) : row.period;
-        selectedColumn = run && run.start <= value ? Math.min(run.end - 1, run.col + (run.gap && !run.stretch ? 0 : Math.floor((value - run.start) / cellWidth))) : -1;
-        $('position').textContent = '第' + (rowIndex + 1) + '行 ' + row.name + (selectedColumn < 0 ? ' · 该处没有参考波形'
-          : ' · 原列号 ' + selectedColumn + (run.provisional ? ' · 位置未定，仅绘图占位'
-            : run.mapped ? ' · 区间已确定，内部列仅按比例示意' : ' · ' + fmt(value) + ' cycle · 原序列参考'));
-        drawSoon(); return;
-      }
       selectedColumn = -1;
       let value = start + (px - left) / Math.max(1, width - left - 16) * (end - start);
       const radius = 8 / Math.max(1, width - left - 16) * (end - start);
@@ -1013,14 +1132,39 @@
     });
     scroll.addEventListener('pointermove', (event) => { if (drag === event.pointerId) pointer(event, false); });
     scroll.addEventListener('pointerup', () => { drag = null; }); scroll.addEventListener('pointercancel', () => { drag = null; });
-    scroll.addEventListener('scroll', drawSoon, { passive: true });
+    for (const surface of [scroll, originalScroll]) surface.addEventListener('scroll', () => {
+      const expected = expectedScroll.get(surface); expectedScroll.delete(surface);
+      if (expected === undefined || Math.abs(expected - surface.scrollTop) > 0.5) syncVerticalScroll(surface, surface === scroll ? originalScroll : scroll);
+      drawSoon();
+    }, { passive: true });
+    originalScroll.addEventListener('pointerdown', event => {
+      if (event.button !== 0 || !model) return;
+      const bounds = originalScroll.getBoundingClientRect(), { width, left } = dimensions(originalScroll);
+      const index = rowAt(event.clientY - bounds.top - ruler + originalScroll.scrollTop), row = model.originalRows?.[index];
+      if (!row || event.clientY - bounds.top < ruler) return;
+      selectRow(index); focusedProblem = null;
+      const px = event.clientX - bounds.left;
+      if (px >= left && px <= width - 16) {
+        const cycle = originalStart + (px - left) / Math.max(1, width - left - 16) * (originalEnd - originalStart);
+        selectedColumn = Math.max(0, Math.min(Math.max(0, row.length - 1), Math.floor((cycle + row.phase) / row.period)));
+        $('position').textContent = '第' + (index + 1) + '行 ' + row.name + ' · 原列 ' + selectedColumn + ' · ' + fmt(selectedColumn * row.period - row.phase) + ' cycle';
+      }
+      drawSoon();
+    });
     canvas.parentElement.addEventListener('wheel', (event) => {
       if (event.ctrlKey) { event.preventDefault(); zoom(event.deltaY > 0 ? 1.2 : 1 / 1.2); }
       else if (event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)) { event.preventDefault(); const delta = (event.deltaX || event.deltaY) / Math.max(1, scroll.clientWidth) * (end - start); range(start + delta, end + delta); }
-      else if ($('row-toggles').contains(event.target)) { event.preventDefault(); scroll.scrollTop += event.deltaY; }
+    }, { passive: false });
+    originalCanvas.parentElement.addEventListener('wheel', event => {
+      if (event.ctrlKey) { event.preventDefault(); zoomOriginal(event.deltaY > 0 ? 1.2 : 1 / 1.2, event.clientX); }
+      else if (event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
+        event.preventDefault(); const delta = (event.deltaX || event.deltaY) / Math.max(1, originalScroll.clientWidth) * (originalEnd - originalStart);
+        originalRange(originalStart + delta, originalEnd + delta);
+      }
     }, { passive: false });
     doc.addEventListener('keydown', (event) => { if (event.key === 'Escape') { highlighted.clear(); highlightedEdges.clear(); drawSoon(); } });
-    const observer = new view.ResizeObserver(drawSoon); observer.observe(scroll);
+    const observer = new view.ResizeObserver(() => { updateSplit(splitRatio); drawSoon(); });
+    observer.observe(scroll); observer.observe(originalScroll);
     view.addEventListener('pagehide', dispose, { once: true });
     timer = setInterval(() => { if (view.closed) dispose(); else void refresh(); }, 600);
     void refresh();

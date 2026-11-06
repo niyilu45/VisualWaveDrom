@@ -53,25 +53,29 @@ label { display: inline-flex; gap: 0.35rem; align-items: center; }
 .timing-detail .timing-problem-note { color: #f3c56a; }
 #timing-locate { margin-top: 0.3rem; }
 .timing-preview { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.timing-plots { min-height: 0; flex: 1; display: grid; grid-template-rows: minmax(0, 1fr) 8px minmax(0, 1fr); }
+.timing-pane { min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.timing-pane[hidden], #timing-splitter[hidden], button[hidden] { display: none; }
+.timing-pane .timing-toolbar { flex: none; }
+.timing-pane h2 { margin-right: 0.25rem; white-space: nowrap; }
+#timing-hide-original, #timing-show-original { margin-left: auto; }
+#timing-splitter { position: relative; background: var(--surface); cursor: row-resize; touch-action: none; user-select: none; }
+#timing-splitter::after { content: ''; position: absolute; width: 48px; height: 2px; left: calc(50% - 24px); top: 3px; background: #a8bbcd; }
+#timing-splitter:hover, #timing-splitter:focus-visible, .resizing-panes #timing-splitter { background: #245587; }
+.resizing-panes { cursor: row-resize; user-select: none; }
 .timing-range { gap: 0.35rem 0.5rem; }
 .timing-cursors { gap: 0.4rem; }
 .timing-cursors input { width: 5rem; }
 #timing-delta { margin-left: 0.5rem; overflow-wrap: anywhere; }
-.timing-plot { position: relative; flex: 1; min-height: 150px; background: white; color-scheme: light; }
-#timing-canvas { position: absolute; top: 0; left: 0; pointer-events: none; }
-#timing-scroll { position: absolute; inset: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; touch-action: pan-y; }
-#timing-spacer { width: 100%; pointer-events: none; }
-#timing-reference-all { position: absolute; z-index: 2; left: 6px; top: 3px; min-height: 26px; height: 26px; padding: 0 6px; color: #243e5d; background: #f0f3f7; border-color: #aebed1; font-size: 12px; }
-#timing-reference-all:hover { background: #dceaff; }
-#timing-row-toggles { position: absolute; top: 34px; bottom: 0; left: 0; width: 28px; overflow: hidden; pointer-events: none; }
-.timing-reference-toggle { position: absolute; left: 3px; width: 24px; height: 28px; pointer-events: auto; color: #294c81; }
-.timing-reference-toggle summary { width: 24px; height: 28px; padding: 3px; cursor: pointer; list-style-position: inside; font-size: 15px; line-height: 22px; border-radius: 3px; }
-.timing-reference-toggle summary:hover { background: #dceaff; }
-#timing-pan { position: relative; flex: none; height: 20px; margin: 0.2rem 0.75rem; background: #10171f; box-shadow: inset 0 0 0 1px var(--border); border-radius: 4px; touch-action: none; user-select: none; }
-#timing-pan-thumb { position: absolute; top: 3px; height: 14px; left: 0; width: 100%; border-radius: 3px; background: #829bb2; cursor: grab; }
-#timing-pan-thumb:hover, #timing-pan.dragging #timing-pan-thumb { background: #b1c6d9; }
-#timing-pan.dragging #timing-pan-thumb { cursor: grabbing; }
-#timing-pan-thumb[aria-disabled="true"] { background: #5c6b79; cursor: default; }
+.timing-plot { position: relative; flex: 1; min-height: 0; background: white; color-scheme: light; }
+.timing-plot canvas { position: absolute; top: 0; left: 0; pointer-events: none; }
+.timing-scroll { position: absolute; inset: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; touch-action: pan-y; }
+#timing-spacer, #timing-original-spacer { width: 100%; pointer-events: none; }
+.timing-pan { position: relative; flex: none; height: 20px; margin: 0.2rem 0.75rem; background: #10171f; box-shadow: inset 0 0 0 1px var(--border); border-radius: 4px; touch-action: none; user-select: none; }
+.timing-pan-thumb { position: absolute; top: 3px; height: 14px; left: 0; width: 100%; border-radius: 3px; background: #829bb2; cursor: grab; }
+.timing-pan-thumb:hover, .timing-pan.dragging .timing-pan-thumb { background: #b1c6d9; }
+.timing-pan.dragging .timing-pan-thumb { cursor: grabbing; }
+.timing-pan-thumb[aria-disabled="true"] { background: #5c6b79; cursor: default; }
 #timing-position { padding: 0.25rem 0.75rem; font-size: 0.75rem; color: var(--muted); }
 @media (max-width: 760px) {
   .timing-workspace { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(9rem, 30%); }
