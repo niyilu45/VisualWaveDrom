@@ -240,6 +240,8 @@
     const originalCanvas = $('original-canvas'), originalScroll = $('original-scroll'), originalContext = originalCanvas.getContext('2d');
     const originalPainter = createOriginalPainter();
     const dimensions = (surface = scroll) => ({ width: surface.clientWidth, height: surface.clientHeight, left: Math.min(190, Math.max(105, surface.clientWidth * 0.25)) });
+    const rowSize = index => rowOffsets[index + 1] - rowOffsets[index] || rowHeight;
+    const rowMiddle = index => rowSize(index) < rowHeight ? 20 : 25;
     function rowAt(offset) {
       if (offset < 0) return -1;
       let lo = 0, hi = rowOffsets.length - 1;
@@ -249,7 +251,12 @@
     function layoutRows() {
       const anchor = rowAt(scroll.scrollTop), offset = scroll.scrollTop - (rowOffsets[anchor] || 0);
       rowOffsets = [0]; displayMinimum = model.minimum; displayMaximum = model.maximum;
-      model.rows.forEach(() => rowOffsets.push(rowOffsets[rowOffsets.length - 1] + rowHeight));
+      model.rows.forEach(row => {
+        const multiline = model.originalRows?.[row.index]?.referenceRuns.some(run => run.state === 'bus' && /[\r\n]/.test(run.value));
+        const height = row.status !== 'ok' || multiline ? rowHeight
+          : row.gaps.some(id => !model.gaps[id].ignored) ? 56 : 44;
+        rowOffsets.push(rowOffsets[rowOffsets.length - 1] + height);
+      });
       updateScrollExtents();
       if (anchor >= 0 && anchor < model.rows.length) scroll.scrollTop = rowOffsets[anchor]
         + Math.min(offset, rowOffsets[anchor + 1] - rowOffsets[anchor] - 1);
@@ -339,7 +346,7 @@
     function locateRow(index) {
       updateScrollExtents();
       const available = Math.max(0, Math.min(scroll.clientHeight, originalVisible ? originalScroll.clientHeight : Infinity) - ruler);
-      const top = Math.max(0, rowOffsets[index] - Math.max(0, available - rowHeight) / 2);
+      const top = Math.max(0, rowOffsets[index] - Math.max(0, available - rowSize(index)) / 2);
       setScrollTop(scroll, top); setScrollTop(originalScroll, top);
     }
     function updateSplit(next) {
@@ -847,7 +854,7 @@
         const a = original ? edge.fromNode.col * fromRow.period - fromRow.phase : edge.start;
         const b = original ? edge.toNode.col * toRow.period - toRow.phase : edge.end;
         if (a === null || b === null || Math.max(a, b) < from || Math.min(a, b) > to) continue;
-        const x1 = x(a), x2 = x(b), y1 = y(edge.fromNode.row) + 25, y2 = y(edge.toNode.row) + 25;
+        const x1 = x(a), x2 = x(b), y1 = y(edge.fromNode.row) + rowMiddle(edge.fromNode.row), y2 = y(edge.toNode.row) + rowMiddle(edge.toNode.row);
         if (Math.max(y1, y2) < ruler || Math.min(y1, y2) > height) continue;
         context.strokeStyle = original ? '#0041c4' : edge.status === 'conflict' ? '#bd303e' : edge.status === 'unknown' ? '#946316' : highlightedEdges.has(edge.index) ? '#135bc5' : '#667085';
         context.lineWidth = highlightedEdges.has(edge.index) ? 2.5 : 1;
@@ -893,27 +900,28 @@
       }
       context.setLineDash([]);
       for (let index = first; index < last; index++) {
-        const row = model.originalRows[index], checked = model.rows[index], top = y(index);
-        if (highlighted.has(index)) { context.fillStyle = '#eaf3ff'; context.fillRect(0, Math.max(ruler, top), width, rowHeight); }
-        context.save(); context.beginPath(); context.rect(left, Math.max(ruler, top), width - left, Math.min(rowHeight, height - top)); context.clip();
-        if (originalPainter) originalPainter.paint(row, context, x, originalStart, originalEnd, top + 25, firstRun(row, originalStart, true));
-        else paintRuns(row, x, originalStart, originalEnd, left, width - 16, top + 25, true, context);
+        const row = model.originalRows[index], checked = model.rows[index], top = y(index), laneHeight = rowSize(index), mid = top + rowMiddle(index);
+        if (highlighted.has(index)) { context.fillStyle = '#eaf3ff'; context.fillRect(0, top, width, laneHeight); }
+        const clipTop = Math.max(ruler, top), clipHeight = Math.max(0, Math.min(top + laneHeight, height) - clipTop);
+        context.save(); context.beginPath(); context.rect(left, clipTop, width - left, clipHeight); context.clip();
+        if (originalPainter) originalPainter.paint(row, context, x, originalStart, originalEnd, mid, firstRun(row, originalStart, true));
+        else paintRuns(row, x, originalStart, originalEnd, left, width - 16, mid, true, context);
         const map = ranges => ranges.map(range => originalInterval(index, range));
-        paintProblemRanges(map(checked.dataUnknownRanges), x, left, width - 8, top, rowHeight, false, true, context);
-        paintProblemRanges(map(checked.conflictRanges), x, left, width - 8, top, rowHeight, false, false, context);
+        paintProblemRanges(map(checked.dataUnknownRanges), x, left, width - 8, top, laneHeight, false, true, context);
+        paintProblemRanges(map(checked.conflictRanges), x, left, width - 8, top, laneHeight, false, false, context);
         if (selected === index && selectedColumn >= 0) {
           const interval = originalInterval(index, { col: selectedColumn, end: selectedColumn + 1 });
           context.strokeStyle = '#135bc5'; context.lineWidth = 2;
-          context.strokeRect(x(interval.start), top + 6, Math.max(2, x(interval.finish) - x(interval.start)), rowHeight - 12);
+          context.strokeRect(x(interval.start), top + 6, Math.max(2, x(interval.finish) - x(interval.start)), laneHeight - 12);
         }
         context.restore();
-        context.save(); context.beginPath(); context.rect(0, Math.max(ruler, top), left - 1, rowHeight); context.clip();
-        context.fillStyle = highlighted.has(index) ? '#eaf3ff' : '#ffffff'; context.fillRect(0, top, left - 1, rowHeight);
-        context.fillStyle = '#0041c4'; context.textAlign = 'right'; context.fillText(row.name, left - 12, top + 30); context.restore();
+        context.save(); context.beginPath(); context.rect(0, clipTop, left - 1, clipHeight); context.clip();
+        context.fillStyle = highlighted.has(index) ? '#eaf3ff' : '#ffffff'; context.fillRect(0, top, left - 1, laneHeight);
+        context.fillStyle = '#0041c4'; context.textAlign = 'right'; context.fillText(row.name, left - 12, mid + 5); context.restore();
       }
       context.save(); context.beginPath(); context.rect(0, ruler, left - 1, height - ruler); context.clip();
       for (const group of originalPainter?.groups() || []) {
-        const top = y(group.start) + 8, bottom = y(group.end - 1) + 42, gx = 20 + group.depth * 18;
+        const top = y(group.start) + rowMiddle(group.start) - 17, bottom = y(group.end - 1) + rowMiddle(group.end - 1) + 17, gx = 20 + group.depth * 18;
         if (bottom < ruler || top > height) continue;
         context.strokeStyle = '#000000'; context.lineWidth = 1; context.beginPath();
         context.moveTo(gx + 5, top); context.lineTo(gx, top); context.lineTo(gx, bottom); context.lineTo(gx + 5, bottom); context.stroke();
@@ -925,14 +933,14 @@
       context.save(); context.beginPath(); context.rect(0, ruler, width, height - ruler); context.clip();
       for (let index = first; index < last; index++) if (highlighted.has(index)) {
         context.strokeStyle = '#135bc5'; context.lineWidth = index === selected ? 2.5 : 1; context.setLineDash(index === selected ? [] : [5, 4]);
-        context.strokeRect(2, y(index) + 2, width - 4, rowHeight - 4);
+        context.strokeRect(2, y(index) + 2, width - 4, rowSize(index) - 4);
       }
       context.setLineDash([]);
       if (focusedProblem) {
         const interval = originalInterval(focusedProblem.row, focusedProblem.target);
         if (interval) {
           const x1 = Math.max(left + 1, x(interval.start) - 3), x2 = Math.min(width - 2, x(interval.finish) + 4);
-          if (x2 >= x1) { context.strokeStyle = '#135bc5'; context.lineWidth = 2.5; context.strokeRect(x1, y(focusedProblem.row) + 2, Math.max(2, x2 - x1), rowHeight - 4); }
+          if (x2 >= x1) { context.strokeStyle = '#135bc5'; context.lineWidth = 2.5; context.strokeRect(x1, y(focusedProblem.row) + 2, Math.max(2, x2 - x1), rowSize(focusedProblem.row) - 4); }
         }
       }
       context.restore(); context.setLineDash([]);
@@ -962,13 +970,14 @@
         const px = x(tick); context.strokeStyle = '#e5e9ee'; context.beginPath(); context.moveTo(px, ruler); context.lineTo(px, height); context.stroke();
       }
       for (let i = first; i < last; i++) {
-        const row = model.rows[i], top = y(i), mid = top + 25;
+        const row = model.rows[i], top = y(i), laneHeight = rowSize(i), mid = top + rowMiddle(i);
         if (row.status === 'unknown' || highlighted.has(i)) {
           context.fillStyle = row.status === 'unknown' ? '#fff9e9' : '#eaf3ff';
-          context.fillRect(0, Math.max(top, ruler), width, rowHeight);
+          context.fillRect(0, top, width, laneHeight);
         }
-        context.strokeStyle = '#e2e8ed'; context.beginPath(); context.moveTo(0, top + rowHeight); context.lineTo(width, top + rowHeight); context.stroke();
-        context.save(); context.beginPath(); context.rect(left, Math.max(ruler, top), width - left, Math.min(rowHeight, height - top)); context.clip();
+        context.strokeStyle = '#e2e8ed'; context.beginPath(); context.moveTo(0, top + laneHeight); context.lineTo(width, top + laneHeight); context.stroke();
+        const clipTop = Math.max(ruler, top), clipHeight = Math.max(0, Math.min(top + laneHeight, height) - clipTop);
+        context.save(); context.beginPath(); context.rect(left, clipTop, width - left, clipHeight); context.clip();
         paintRuns(row, x, start, end, left, x(end), mid, false, context);
         row.gaps.forEach((id, gapIndex) => {
           const gap = model.gaps[id];
@@ -992,7 +1001,7 @@
                 : summary + (inferred ? ' · ' + alignmentNames[gap.durationSource] : '');
               if (context.measureText(label).width > x2 - x1 - 8) label = summary;
               if (context.measureText(label).width > x2 - x1 - 8) label = completion ? '补全 ' + (gap.series.count + gap.series.filledCount) + ' 项' : '= ' + fmt(gap.duration);
-              if (context.measureText(label).width <= x2 - x1 - 8) context.fillText(label, x1 + 4, top + 55);
+              if (context.measureText(label).width <= x2 - x1 - 8) context.fillText(label, x1 + 4, top + laneHeight - 9);
             }
           }
           if (gap.duration === undefined) {
@@ -1008,30 +1017,30 @@
             const far = finish === null ? width - 8 : x(finish);
             const boxLeft = Math.max(left, Math.min(px, far)), boxRight = Math.min(width - 8, Math.max(px + 5, far));
             context.fillStyle = '#ffefbc';
-            context.globalAlpha = 0.65; context.fillRect(boxLeft, top + 4, boxRight - boxLeft, rowHeight - 8); context.globalAlpha = 1;
+            context.globalAlpha = 0.65; context.fillRect(boxLeft, top + 4, boxRight - boxLeft, laneHeight - 8); context.globalAlpha = 1;
             context.strokeStyle = color; context.lineWidth = 2; context.setLineDash([5, 4]);
-            context.strokeRect(boxLeft, top + 4, boxRight - boxLeft, rowHeight - 8); context.setLineDash([]);
+            context.strokeRect(boxLeft, top + 4, boxRight - boxLeft, laneHeight - 8); context.setLineDash([]);
             context.fillStyle = color;
             context.fillText((gap.kind === 'stretch' ? gap.holdStart !== undefined ? '保持区域 ' : '同值区域 ' : '| ') + '? 时长分配未定 · 列' + gap.col
-              + (nextAnchor && nextAnchor !== gap ? '至' + nextAnchor.col : '') + (finish === null ? ' · 后续位置未定' : ''), boxLeft + 4, top + 55);
+              + (nextAnchor && nextAnchor !== gap ? '至' + nextAnchor.col : '') + (finish === null ? ' · 后续位置未定' : ''), boxLeft + 4, top + laneHeight - 9);
           }
         });
-        paintProblemRanges(row.dataUnknownRanges, x, left, width - 8, top, rowHeight, false, true, context);
-        paintProblemRanges(row.conflictRanges, x, left, width - 8, top, rowHeight, false, false, context);
+        paintProblemRanges(row.dataUnknownRanges, x, left, width - 8, top, laneHeight, false, true, context);
+        paintProblemRanges(row.conflictRanges, x, left, width - 8, top, laneHeight, false, false, context);
         if (row.status === 'unknown' && row.hasUnpositionedContent && !row.drawRuns.length) {
           context.strokeStyle = '#a97923'; context.lineWidth = 1;
           context.setLineDash([5, 4]);
-          context.strokeRect(left + 1, top + 1, width - left - 3, rowHeight - 2); context.setLineDash([]);
+          context.strokeRect(left + 1, top + 1, width - left - 3, laneHeight - 2); context.setLineDash([]);
           if (row.hasUnpositionedContent && !row.gaps.some((id) => !model.gaps[id].ignored && (model.gaps[id].start !== null || model.gaps[id].end !== null))) {
             context.fillStyle = '#8a5a08'; context.fillText('时间位置未定', left + 8, mid + 4);
           }
         }
         context.restore();
-        context.save(); context.beginPath(); context.rect(0, Math.max(ruler, top), left - 1, rowHeight); context.clip();
-        context.fillStyle = row.status === 'unknown' ? '#fff0c8' : highlighted.has(i) ? '#eaf3ff' : '#f4f6f8'; context.fillRect(0, top, left - 1, rowHeight);
-        context.fillStyle = '#1b2732'; context.fillText((i + 1) + '. ' + row.name, 10, top + 23);
+        context.save(); context.beginPath(); context.rect(0, clipTop, left - 1, clipHeight); context.clip();
+        context.fillStyle = row.status === 'unknown' ? '#fff0c8' : highlighted.has(i) ? '#eaf3ff' : '#f4f6f8'; context.fillRect(0, top, left - 1, laneHeight);
+        context.fillStyle = '#1b2732'; context.fillText((i + 1) + '. ' + row.name, 10, top + (laneHeight === 44 ? 17 : 23));
         context.fillStyle = row.status === 'conflict' ? '#b62e3b' : row.status === 'unknown' ? '#8a5a08' : '#21633d';
-        context.fillText(rowStatusName(row), 10, top + 43); context.restore();
+        context.fillText(rowStatusName(row), 10, top + (laneHeight === 44 ? 34 : 43)); context.restore();
       }
       paintEdges(context, width, height, left, x, y, start, end, false);
       context.fillStyle = '#f0f3f7'; context.fillRect(0, 0, width, ruler); context.fillStyle = '#3f5063'; context.textAlign = 'left';
@@ -1041,7 +1050,7 @@
         context.strokeStyle = color; context.lineWidth = active === key ? 2 : 1; context.setLineDash([5, 3]);
         context.save(); context.beginPath(); context.rect(left, ruler, width - left, height - ruler); context.clip();
         context.beginPath();
-        for (let i = first; i < last; i++) { context.moveTo(px, Math.max(ruler, y(i))); context.lineTo(px, Math.min(height, y(i) + rowHeight)); }
+        for (let i = first; i < last; i++) { context.moveTo(px, Math.max(ruler, y(i))); context.lineTo(px, Math.min(height, y(i) + rowSize(i))); }
         context.stroke(); context.restore(); context.setLineDash([]);
         context.fillStyle = color; context.fillRect(px - 9, 0, 18, 15); context.fillStyle = '#ffffff'; context.fillText(key.toUpperCase(), px - 4, 12);
       });
@@ -1060,7 +1069,7 @@
           if (Number.isFinite(a) && Number.isFinite(b) && Math.max(a, b) >= start && Math.min(a, b) <= end) {
             const x1 = Math.max(left + 1, x(Math.min(a, b)) - 3), x2 = Math.min(width - 2, x(Math.max(a, b)) + 4);
             context.strokeStyle = '#135bc5'; context.lineWidth = 2.5; context.setLineDash([]);
-            context.strokeRect(x1, y(row.index) + 2, Math.max(2, x2 - x1), rowHeight - 4);
+            context.strokeRect(x1, y(row.index) + 2, Math.max(2, x2 - x1), rowSize(row.index) - 4);
           }
         }
       }
@@ -1308,9 +1317,14 @@
       if (event.ctrlKey) { event.preventDefault(); zoom(event.deltaY > 0 ? 1.2 : 1 / 1.2); }
       else if (event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)) { event.preventDefault(); const delta = (event.deltaX || event.deltaY) / Math.max(1, scroll.clientWidth) * (end - start); range(start + delta, end + delta); }
     }, { passive: false });
+    $('original-pane').addEventListener('wheel', event => {
+      if (!event.ctrlKey) return;
+      event.preventDefault(); event.stopPropagation();
+      if (event.deltaY) zoomOriginal(event.deltaY > 0 ? 1.2 : 1 / 1.2, event.clientX);
+    }, { passive: false, capture: true });
     originalCanvas.parentElement.addEventListener('wheel', event => {
-      if (event.ctrlKey) { event.preventDefault(); zoomOriginal(event.deltaY > 0 ? 1.2 : 1 / 1.2, event.clientX); }
-      else if (event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
+      if (event.ctrlKey) return;
+      if (event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
         event.preventDefault(); const delta = (event.deltaX || event.deltaY) / Math.max(1, originalScroll.clientWidth) * (originalEnd - originalStart);
         originalRange(originalStart + delta, originalEnd + delta);
       }
