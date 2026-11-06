@@ -18,6 +18,146 @@
     locate: '<circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="8"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2"/>'
   };
   function icon(name) { return '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">' + icons[name] + '</svg>'; }
+  function createOriginalPainter() {
+    if (!global.WaveDrom || !global.WaveSkin?.default || !global.Path2D) return null;
+    const skin = global.WaveSkin.default, definitions = new Map(), styles = new Map(), glyphs = new Map(), recipes = new Map();
+    const sheet = document.createElement('style'); sheet.media = 'not all';
+    sheet.textContent = skin.find(node => Array.isArray(node) && node[0] === 'style')[2];
+    document.head.appendChild(sheet);
+    try {
+      for (const rule of sheet.sheet.cssRules) if (/^\.s\d+$/.test(rule.selectorText || '')) {
+        const style = rule.style;
+        styles.set(rule.selectorText.slice(1), { fill: style.fill || 'none', stroke: style.stroke || 'none',
+          width: parseFloat(style.strokeWidth) || 1, dash: style.strokeDasharray === 'none' ? []
+            : (style.strokeDasharray || '').split(/[ ,]+/).filter(Boolean).map(Number) });
+      }
+    } finally { sheet.remove(); }
+    function collect(node) {
+      if (!Array.isArray(node)) return;
+      if (node[1]?.id) definitions.set(node[1].id, node);
+      node.slice(2).forEach(collect);
+    }
+    collect(skin.find(node => Array.isArray(node) && node[0] === 'defs'));
+    function glyph(id) {
+      if (!glyphs.has(id)) glyphs.set(id, (definitions.get(id) || []).slice(2).filter(node => node[0] === 'path')
+        .map(node => ({ path: new Path2D(node[1].d), style: styles.get(node[1].class) })));
+      return glyphs.get(id);
+    }
+    function paintGlyph(context, id, x, y, width) {
+      for (const item of glyph(id)) {
+        if (!item.style) continue;
+        const path = new Path2D(); path.addPath(item.path, new DOMMatrix([width / 20, 0, 0, 1, x, y]));
+        const style = item.style;
+        if (style.fill !== 'none') { context.fillStyle = style.fill; context.fill(path); }
+        if (style.stroke !== 'none') {
+          context.strokeStyle = style.stroke; context.lineWidth = style.width; context.setLineDash(style.dash);
+          context.lineCap = 'round'; context.lineJoin = 'miter'; context.stroke(path);
+        }
+      }
+    }
+    let seedId = 0, signals = [], groups = [];
+    function recipe(previous, symbol) {
+      const supported = /^[01xzpPnNhHlLud2-9=]$/;
+      previous = previous ? supported.test(previous) ? previous : 'x' : '';
+      symbol = supported.test(symbol) ? symbol : 'x';
+      const key = previous + ':' + symbol;
+      if (recipes.has(key)) return recipes.get(key);
+      // Reuse the main diagram's parser on a tiny seed, never on a full source row.
+      const mount = document.createElement('div'), prefix = 'timing-native-seed-' + (++seedId) + '-';
+      mount.id = prefix + '0'; mount.hidden = true; document.body.appendChild(mount);
+      try {
+        const source = { signal: [{ wave: previous + symbol + '..' }], config: { hscale: 1 } };
+        global.WaveDrom.RenderWaveForm(0, source, prefix, false);
+        const svg = mount.querySelector('svg');
+        global.VisualWaveDromWaveGeometry?.alignDataTransitions(svg, source);
+        const uses = Array.from(svg.querySelector('[id^="wavelane_draw_"]').children).filter(node => node.localName === 'use');
+        const offset = previous ? 2 : 0, origin = offset * 20;
+        const read = (use, base) => ({ id: (use.getAttribute('href') || use.getAttribute('xlink:href')).slice(1),
+          x: (use.transform.baseVal.consolidate()?.matrix.e || 0) - base });
+        const result = { initial: uses.slice(offset, offset + 2).map(use => read(use, origin)),
+          repeat: uses.slice(offset + 2, offset + 4).map(use => read(use, origin + 40)) };
+        recipes.set(key, result); return result;
+      } finally { mount.remove(); }
+    }
+    function configure(source) {
+      signals = []; groups = [];
+      function walk(list, depth) {
+        for (const entry of list || []) {
+          if (Array.isArray(entry)) {
+            const start = signals.length, named = typeof entry[0] === 'string';
+            walk(entry.slice(named ? 1 : 0), depth + (named ? 1 : 0));
+            if (named && signals.length > start) groups.push({ name: entry[0], start, end: signals.length, depth });
+          } else if (entry && typeof entry === 'object') signals.push(entry);
+        }
+      }
+      walk(source.signal, 0);
+    }
+    function paint(row, context, x, from, to, mid, first) {
+      const runs = row.referenceRuns, wave = signals[row.index]?.wave || '', scale = x(from + 1) - x(from);
+      const cycleWidth = row.period * scale, top = mid - 10, labels = [];
+      let previousPixel = -Infinity;
+      context.save(); context.font = '14.6667px Helvetica, Arial, sans-serif';
+      for (let index = first; index < runs.length; index++) {
+        const run = runs[index]; if (run.start > to) break;
+        if (run.finish < from) continue;
+        const x1 = x(Math.max(from, run.start)), x2 = x(Math.min(to, run.finish));
+        if (x2 - x1 < 1 && x2 < previousPixel + 1) {
+          const time = from + (previousPixel + 1 - x(from)) / scale;
+          let lo = index + 1, hi = runs.length;
+          while (lo < hi) { const middle = (lo + hi) >> 1; if (row.referenceEnds[middle] < time) lo = middle + 1; else hi = middle; }
+          if (lo > index) { index = lo - 1; continue; }
+        }
+        previousPixel = x2;
+        const previous = runs[index - 1], continuation = /[.| ]/.test(wave[run.col] || '');
+        const native = recipe(continuation ? '' : previous?.symbol || '', run.symbol);
+        const clock = /[pn]/i.test(run.state), hatched = ['x', 'u', 'd'].includes(run.state.toLowerCase());
+        if (clock || hatched) {
+          const origin = clock ? run.clockOrigin : run.start;
+          const stride = Math.max(1, Math.ceil(3 / cycleWidth)), duration = row.period * stride;
+          const begin = Math.max(0, Math.floor((Math.max(from, run.start) - origin) / duration));
+          context.save(); context.beginPath(); context.rect(x1, top - 3, Math.max(0, x2 - x1), 26); context.clip();
+          for (let cell = begin; origin + cell * duration < Math.min(to, run.finish); cell++) {
+            const px = x(origin + cell * duration), width = cycleWidth * stride;
+            for (const use of native.repeat) paintGlyph(context, use.id, px + use.x / 40 * width, top, width / 2);
+          }
+          context.restore();
+        } else if (x2 > x1) paintGlyph(context, native.repeat[1].id, x1, top, x2 - x1);
+        if (!continuation && run.start >= from - row.period && run.start <= to) {
+          const width = clock ? cycleWidth / 2 : Math.min(20, cycleWidth / 2);
+          for (const use of native.initial) paintGlyph(context, use.id, x(run.start) + use.x / 20 * width, top, width);
+        }
+        if (run.gap) {
+          const begin = Math.max(run.col, Math.floor((from + row.phase) / row.period));
+          const finish = Math.min(run.end, Math.ceil((to + row.phase) / row.period));
+          const stride = Math.max(1, Math.ceil(8 / cycleWidth));
+          for (let col = wave.indexOf('|', begin); col >= 0 && col < finish; col = wave.indexOf('|', col + stride))
+            paintGlyph(context, 'gap', x((col + 0.5) * row.period - row.phase), top, Math.min(20, cycleWidth));
+        }
+        if (run.state === 'bus' && (!continuation || index === 0 || index === first)) {
+          let finish = run.finish;
+          for (let next = index + 1; next < runs.length && runs[next].state === 'bus'
+            && /[.| ]/.test(wave[runs[next].col] || ''); next++) finish = runs[next].finish;
+          if (!continuation || index === 0) labels.push({ start: run.start, finish, value: run.value });
+          else if (index === first) {
+            let begin = index;
+            while (begin > 0 && /[.| ]/.test(wave[runs[begin].col] || '')) begin--;
+            labels.push({ start: runs[begin].start, finish, value: run.value });
+          }
+        }
+      }
+      context.fillStyle = '#000000'; context.textAlign = 'center'; context.setLineDash([]);
+      for (const label of labels) {
+        const left = Math.max(x(label.start) + 4, x(from)), right = Math.min(x(label.finish) - 4, x(to));
+        if (right - left < 12) continue;
+        const lines = String(label.value).split(/\r\n|\r|\n/);
+        context.save(); context.beginPath(); context.rect(left, mid - 23, right - left, 46); context.clip();
+        lines.forEach((line, index) => context.fillText(line, (left + right) / 2, mid + 5 + (index - (lines.length - 1) / 2) * 16));
+        context.restore();
+      }
+      context.restore();
+    }
+    return { configure, paint, groups: () => groups, dispose() { signals = []; groups = []; glyphs.clear(); recipes.clear(); definitions.clear(); styles.clear(); } };
+  }
   function open(host) {
     const old = sessions.get(host.id);
     if (old && !old.closed) { old.focus(); return old; }
@@ -98,6 +238,7 @@
     const rowHeight = 64, ruler = 34;
     const canvas = $('canvas'), scroll = $('scroll'), context = canvas.getContext('2d');
     const originalCanvas = $('original-canvas'), originalScroll = $('original-scroll'), originalContext = originalCanvas.getContext('2d');
+    const originalPainter = createOriginalPainter();
     const dimensions = (surface = scroll) => ({ width: surface.clientWidth, height: surface.clientHeight, left: Math.min(190, Math.max(105, surface.clientWidth * 0.25)) });
     function rowAt(offset) {
       if (offset < 0) return -1;
@@ -708,7 +849,7 @@
         if (a === null || b === null || Math.max(a, b) < from || Math.min(a, b) > to) continue;
         const x1 = x(a), x2 = x(b), y1 = y(edge.fromNode.row) + 25, y2 = y(edge.toNode.row) + 25;
         if (Math.max(y1, y2) < ruler || Math.min(y1, y2) > height) continue;
-        context.strokeStyle = edge.status === 'conflict' ? '#bd303e' : edge.status === 'unknown' ? '#946316' : highlightedEdges.has(edge.index) ? '#135bc5' : '#667085';
+        context.strokeStyle = original ? '#0041c4' : edge.status === 'conflict' ? '#bd303e' : edge.status === 'unknown' ? '#946316' : highlightedEdges.has(edge.index) ? '#135bc5' : '#667085';
         context.lineWidth = highlightedEdges.has(edge.index) ? 2.5 : 1;
         context.beginPath(); context.moveTo(x1, y1);
         if (edge.arrow.includes('~')) context.bezierCurveTo((x1 + x2) / 2, y1, (x1 + x2) / 2, y2, x2, y2);
@@ -744,18 +885,19 @@
       const x = time => left + (time - originalStart) * Math.max(1, width - left - 16) / (originalEnd - originalStart);
       const y = row => ruler + rowOffsets[row] - originalScroll.scrollTop;
       const first = Math.max(0, rowAt(originalScroll.scrollTop)), last = Math.min(model.rows.length, rowAt(originalScroll.scrollTop + height - ruler) + 1);
-      context.font = '12px "Segoe UI", "Microsoft YaHei", sans-serif'; context.lineWidth = 1;
+      context.font = '14.6667px Helvetica, Arial, sans-serif'; context.lineWidth = 1;
       const rawStep = (originalEnd - originalStart) / Math.max(2, (width - left) / 85);
       const power = Math.pow(10, Math.floor(Math.log10(rawStep))), step = [1, 2, 5, 10].find(n => n * power >= rawStep) * power;
       for (let tick = Math.ceil(originalStart / step) * step, count = 0; tick <= originalEnd && count++ < 100; tick += step) {
-        const px = x(tick); context.strokeStyle = '#e5e9ee'; context.beginPath(); context.moveTo(px, ruler); context.lineTo(px, height); context.stroke();
+        const px = x(tick); context.strokeStyle = '#bbbbbb'; context.setLineDash([1, 3]); context.beginPath(); context.moveTo(px, ruler); context.lineTo(px, height); context.stroke();
       }
+      context.setLineDash([]);
       for (let index = first; index < last; index++) {
         const row = model.originalRows[index], checked = model.rows[index], top = y(index);
         if (highlighted.has(index)) { context.fillStyle = '#eaf3ff'; context.fillRect(0, Math.max(ruler, top), width, rowHeight); }
-        context.strokeStyle = '#e2e8ed'; context.beginPath(); context.moveTo(0, top + rowHeight); context.lineTo(width, top + rowHeight); context.stroke();
         context.save(); context.beginPath(); context.rect(left, Math.max(ruler, top), width - left, Math.min(rowHeight, height - top)); context.clip();
-        paintRuns(row, x, originalStart, originalEnd, left, width - 16, top + 25, true, context);
+        if (originalPainter) originalPainter.paint(row, context, x, originalStart, originalEnd, top + 25, firstRun(row, originalStart, true));
+        else paintRuns(row, x, originalStart, originalEnd, left, width - 16, top + 25, true, context);
         const map = ranges => ranges.map(range => originalInterval(index, range));
         paintProblemRanges(map(checked.dataUnknownRanges), x, left, width - 8, top, rowHeight, false, true, context);
         paintProblemRanges(map(checked.conflictRanges), x, left, width - 8, top, rowHeight, false, false, context);
@@ -766,10 +908,19 @@
         }
         context.restore();
         context.save(); context.beginPath(); context.rect(0, Math.max(ruler, top), left - 1, rowHeight); context.clip();
-        context.fillStyle = highlighted.has(index) ? '#eaf3ff' : '#f4f6f8'; context.fillRect(0, top, left - 1, rowHeight);
-        context.fillStyle = '#1b2732'; context.fillText((index + 1) + '. ' + row.name, 10, top + 23);
-        context.fillStyle = '#475569'; context.fillText(row.sourceLength ? '原列 0～' + (row.sourceLength - 1) : '空行', 10, top + 43); context.restore();
+        context.fillStyle = highlighted.has(index) ? '#eaf3ff' : '#ffffff'; context.fillRect(0, top, left - 1, rowHeight);
+        context.fillStyle = '#0041c4'; context.textAlign = 'right'; context.fillText(row.name, left - 12, top + 30); context.restore();
       }
+      context.save(); context.beginPath(); context.rect(0, ruler, left - 1, height - ruler); context.clip();
+      for (const group of originalPainter?.groups() || []) {
+        const top = y(group.start) + 8, bottom = y(group.end - 1) + 42, gx = 20 + group.depth * 18;
+        if (bottom < ruler || top > height) continue;
+        context.strokeStyle = '#000000'; context.lineWidth = 1; context.beginPath();
+        context.moveTo(gx + 5, top); context.lineTo(gx, top); context.lineTo(gx, bottom); context.lineTo(gx + 5, bottom); context.stroke();
+        context.save(); context.translate(gx - 5, (top + bottom) / 2); context.rotate(-Math.PI / 2);
+        context.fillStyle = '#000000'; context.textAlign = 'center'; context.fillText(group.name, 0, 0); context.restore();
+      }
+      context.restore();
       paintEdges(context, width, height, left, x, y, originalStart, originalEnd, true);
       context.save(); context.beginPath(); context.rect(0, ruler, width, height - ruler); context.clip();
       for (let index = first; index < last; index++) if (highlighted.has(index)) {
@@ -918,6 +1069,7 @@
     function receive(result) {
       const firstResult = !model;
       model = result;
+      originalPainter?.configure(source);
       const unknownByRow = model.rows.map(() => []);
       model.issues.forEach((entry, issueId) => {
         if (entry.kind === 'unknown') entry.rows.forEach((index) => unknownByRow[index].push({ entry, issueId }));
@@ -993,6 +1145,7 @@
       expectedScroll.clear(); highlighted.clear(); highlightedEdges.clear();
       canvas.width = canvas.height = 0;
       originalCanvas.width = originalCanvas.height = 0;
+      originalPainter?.dispose();
       if (typeof host.dispose === 'function') host.dispose();
       host.log && host.log({ phase: 'disposed', activeSessions: sessions.size });
     }
