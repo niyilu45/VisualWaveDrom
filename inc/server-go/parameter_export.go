@@ -61,10 +61,11 @@ func saveParameterToml(path, content string, overwrite bool) (bool, error) {
 
 func (s *service) handleParameterTomlExport(writer http.ResponseWriter, request *http.Request) {
 	var input struct {
-		Action    string `json:"action"`
-		Path      string `json:"path"`
-		Content   string `json:"content"`
-		Overwrite bool   `json:"overwrite"`
+		Action        string `json:"action"`
+		Path          string `json:"path"`
+		Content       string `json:"content"`
+		Overwrite     bool   `json:"overwrite"`
+		ReplaceSpaces bool   `json:"replaceSpaces"`
 	}
 	if err := decodeJSONBody(writer, request, 8*1024*1024, &input); err != nil {
 		sendJSON(writer, 400, map[string]any{"error": err.Error()})
@@ -74,8 +75,8 @@ func (s *service) handleParameterTomlExport(writer http.ResponseWriter, request 
 		sendJSON(writer, 400, map[string]any{"error": "Invalid TOML export action"})
 		return
 	}
-	path, err := normalizeLocalPathInput(input.Path, s.config.rootDir)
-	if err != nil || strings.TrimSpace(input.Path) == "" || !strings.EqualFold(filepath.Ext(path), ".toml") {
+	path, err := absoluteLocalPathInput(input.Path, s.config.rootDir)
+	if err != nil || !strings.EqualFold(filepath.Ext(path), ".toml") {
 		sendJSON(writer, 400, map[string]any{"error": "请指定以 .toml 结尾的保存路径"})
 		return
 	}
@@ -96,6 +97,9 @@ func (s *service) handleParameterTomlExport(writer http.ResponseWriter, request 
 	if !utf8.ValidString(input.Content) {
 		sendJSON(writer, 400, map[string]any{"error": "TOML 内容必须为有效 UTF-8 文本"})
 		return
+	}
+	if input.ReplaceSpaces {
+		path = filepath.Join(filepath.Dir(path), strings.ReplaceAll(filepath.Base(path), " ", "_"))
 	}
 	exists, err := saveParameterToml(path, input.Content, input.Overwrite)
 	if err != nil {

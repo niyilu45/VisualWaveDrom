@@ -5,6 +5,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"syscall"
 )
@@ -120,9 +121,12 @@ try {
 		"VWD_PICKER_KIND="+kind,
 		"VWD_PICKER_INITIAL="+initialPath,
 	)
-	output, err := command.CombinedOutput()
+	output, err := command.Output()
 	if err != nil {
-		detail := strings.TrimSpace(string(output))
+		var detail string
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			detail = strings.TrimSpace(string(exitErr.Stderr))
+		}
 		if detail == "" {
 			return "", false, fmt.Errorf("path picker failed: %w", err)
 		}

@@ -1527,6 +1527,10 @@
     });
     return { text: lines.join('\n'), count };
   }
+  function tomlFilenameWithUnderscores(path) {
+    const start = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')) + 1;
+    return path.slice(0, start) + path.slice(start).replace(/ /g, '_');
+  }
   function exportParameterTableToml(tableId, anchor) {
     if (modal) return;
     try {
@@ -1543,7 +1547,7 @@
       const overlay = element('div', 'modal-overlay parameter-modal');
       const dialog = element('form', 'modal-dialog parameter-export-dialog'); dialog.noValidate = true;
       dialog.setAttribute('role', 'dialog'); dialog.setAttribute('aria-modal', 'true'); dialog.setAttribute('aria-labelledby', 'parameter-export-title');
-      let busy = false, closed = false, confirmedPath = '';
+      let busy = false, closed = false, completed = false, confirmedPath = '';
       function close() {
         if (busy || closed) return;
         closed = true; overlay.remove(); modal = null;
@@ -1553,47 +1557,96 @@
       const dismiss = button('关闭', close, 'close'); header.append(title, dismiss); dialog.append(header);
       const body = element('div', 'modal-body');
       const label = element('label', 'parameter-count-label', serviceMode ? '保存路径' : '文件名');
-      const path = element('input'); path.id = 'parameter-export-path'; path.value = filename; label.htmlFor = path.id;
+      const path = element('input'); path.id = 'parameter-export-path'; path.value = tomlFilenameWithUnderscores(filename); label.htmlFor = path.id;
       path.autocomplete = 'off'; path.spellcheck = false;
+      function exportPath(value) {
+        let target = value.trim();
+        if (serviceMode && /^(["']).*\1$/.test(target)) target = target.slice(1, -1).trim();
+        if (!target || /[\\/]$/.test(target)) return '';
+        return /\.toml$/i.test(target) ? target : target + '.toml';
+      }
       const location = element('div', 'parameter-export-location'); location.append(path);
       const choose = button('选择保存路径', async () => {
         if (busy) return;
         setBusy(true); error.textContent = '';
+        let picked = false;
         try {
-          let initial = path.value.trim() || filename;
-          if (!/\.toml$/i.test(initial)) initial += '.toml';
+          const initial = exportPath(path.value) || (replaceSpaces.checked ? tomlFilenameWithUnderscores(filename) : filename);
           const result = await bridge.tomlExportRequest({ action: 'pick', path: initial });
           if (!result.cancelled && result.path) {
             path.value = result.path; confirmedPath = result.exists ? result.path : '';
             overwrite.checked = false; overwriteLabel.hidden = true;
+            path.removeAttribute('aria-invalid');
+            picked = !result.manual;
           }
-          if (result.manual) { error.textContent = '文件窗口不可用，请直接输入保存路径'; path.focus(); }
+          if (result.manual) error.textContent = '文件窗口不可用，请直接输入保存路径';
         } catch (cause) { error.textContent = cause.message; }
-        finally { setBusy(false); if (!closed) path.focus({ preventScroll: true }); }
+        finally { setBusy(false); if (!closed) (picked ? save : path).focus({ preventScroll: true }); }
       }, 'external'); choose.hidden = !serviceMode; location.append(choose);
       const option = element('label', 'parameter-export-option');
       const descriptions = element('input'); descriptions.type = 'checkbox'; descriptions.id = 'parameter-export-descriptions';
       option.append(descriptions, element('span', '', '导出变量说明'));
+      const filenameOption = element('label', 'parameter-export-option');
+      const replaceSpaces = element('input'); replaceSpaces.type = 'checkbox'; replaceSpaces.checked = true;
+      filenameOption.append(replaceSpaces, element('span', '', '自动替换文件名中的空格为下划线'));
       const error = element('p', 'parameter-count-error'); error.id = 'parameter-export-error'; error.setAttribute('role', 'alert');
       path.setAttribute('aria-describedby', error.id);
       if (!serviceMode && !canPick) body.append(element('p', 'parameter-export-note', '当前浏览器不支持页面选择保存目录，将使用浏览器下载设置。'));
       const overwriteLabel = element('label', 'parameter-export-option'); overwriteLabel.hidden = true;
       const overwrite = element('input'); overwrite.type = 'checkbox'; overwriteLabel.append(overwrite, element('span', '', '覆盖已有文件'));
-      path.addEventListener('input', () => { confirmedPath = ''; overwrite.checked = false; overwriteLabel.hidden = true; error.textContent = ''; path.removeAttribute('aria-invalid'); });
-      body.append(label, location, option, overwriteLabel, error); dialog.append(body);
+      function resetOverwrite() {
+        overwrite.checked = false; overwriteLabel.hidden = true; error.textContent = ''; path.removeAttribute('aria-invalid');
+      }
+      path.addEventListener('input', () => { confirmedPath = ''; resetOverwrite(); });
+      replaceSpaces.addEventListener('change', () => {
+        const normalized = tomlFilenameWithUnderscores(filename);
+        if (!confirmedPath && path.value === (replaceSpaces.checked ? filename : normalized)) {
+          path.value = replaceSpaces.checked ? normalized : filename;
+        }
+        resetOverwrite();
+      });
+      body.append(label, location, option, filenameOption, overwriteLabel, error); dialog.append(body);
       const footer = element('div', 'modal-footer'), cancel = button('取消', close), save = button('导出', () => {});
       save.type = 'submit'; save.classList.add('modal-btn-primary'); footer.append(cancel, save); dialog.append(footer);
       function setBusy(value) {
         busy = value; dialog.setAttribute('aria-busy', String(value));
-        [path, descriptions, overwrite, choose, cancel, dismiss, save].forEach((control) => { control.disabled = value; });
+        [path, descriptions, replaceSpaces, overwrite, choose, cancel, dismiss, save].forEach((control) => { control.disabled = value; });
         save.textContent = value ? '正在导出...' : '导出';
       }
+      function showExportResult(savedPath, count) {
+        completed = true;
+        const downloaded = !serviceMode && !canPick;
+        title.textContent = downloaded ? 'TOML 下载已开始' : 'TOML 导出完成';
+        const resultLabel = element('label', 'parameter-count-label', serviceMode ? '实际保存路径' : '文件名');
+        const resultPath = element('textarea');
+        resultPath.id = 'parameter-export-result'; resultPath.rows = 3;
+        resultPath.readOnly = true; resultPath.spellcheck = false; resultPath.value = savedPath;
+        resultLabel.htmlFor = resultPath.id;
+        const feedback = element('p', 'parameter-export-note', '已导出 ' + count + ' 个变量' +
+          (serviceMode ? '' : downloaded ? '。保存位置请查看浏览器下载记录。' : '。浏览器未提供完整路径。'));
+        feedback.setAttribute('role', 'status');
+        const copy = button(serviceMode ? '复制保存路径' : '复制文件名', async () => {
+          try { await global.navigator.clipboard.writeText(savedPath); }
+          catch (_) {
+            if (closed) return;
+            resultPath.focus(); resultPath.select();
+            if (!document.execCommand('copy')) { feedback.textContent = '无法访问剪贴板，请手动复制已选中的内容。'; return; }
+          }
+          feedback.textContent = serviceMode ? '已复制保存路径' : '已复制文件名';
+        }, 'copy');
+        const resultLocation = element('div', 'parameter-export-location');
+        resultLocation.append(resultPath, copy);
+        body.replaceChildren(resultLabel, resultLocation, feedback);
+        const done = button('完成', close); done.classList.add('modal-btn-primary');
+        footer.replaceChildren(done);
+        done.focus({ preventScroll: true });
+        status((downloaded ? '正在下载 ' : '已导出 ') + savedPath);
+      }
       dialog.addEventListener('submit', async (event) => {
-        event.preventDefault(); if (busy || closed || event.isComposing) return;
+        event.preventDefault(); if (busy || closed || completed || event.isComposing) return;
         error.textContent = ''; path.removeAttribute('aria-invalid');
-        let target = path.value.trim();
+        const target = exportPath(path.value);
         if (!target) { error.textContent = '请输入保存路径或文件名'; path.setAttribute('aria-invalid', 'true'); path.focus(); return; }
-        if (!/\.toml$/i.test(target)) target += '.toml';
         if (!serviceMode && /[<>:"/\\|?*\u0000-\u001f\u007f]/.test(target)) {
           error.textContent = '请输入文件名，保存目录将在浏览器保存窗口中选择'; path.setAttribute('aria-invalid', 'true'); path.focus(); return;
         }
@@ -1604,27 +1657,30 @@
           const current = effectiveTable(tableId);
           if (!current || identity !== libraryId) throw new Error('目标参数表已变化，请关闭后重新导出');
           const result = parameterTableToml(current, descriptions.checked);
-          let savedPath = target;
+          const output = replaceSpaces.checked ? tomlFilenameWithUnderscores(target) : target;
+          let savedPath = output;
           if (serviceMode) {
-            const response = await bridge.tomlExportRequest({ action: 'save', path: target, content: result.text,
-              overwrite: overwrite.checked || confirmedPath === target });
+            const response = await bridge.tomlExportRequest({ action: 'save', path: output, content: result.text,
+              replaceSpaces: replaceSpaces.checked, overwrite: overwrite.checked || confirmedPath === output });
             if (response.requiresOverwrite) {
-              error.textContent = '目标文件已存在，勾选“覆盖已有文件”后再次导出';
+              error.textContent = '目标文件已存在：' + response.path;
               overwriteLabel.hidden = false; return;
             }
+            if (!response.path) throw new Error('服务未返回保存路径，请重启 BAT / SH 后重试');
             savedPath = response.path;
           } else {
             const blob = new Blob([result.text], { type: 'application/toml;charset=utf-8' });
             if (canPick) {
-              const handle = await global.showSaveFilePicker({ id: 'vwd-parameter-toml', suggestedName: target,
+              const handle = await global.showSaveFilePicker({ id: 'vwd-parameter-toml', suggestedName: output,
                 types: [{ description: 'TOML 参数表', accept: { 'application/toml': ['.toml'] } }] });
               const writable = await handle.createWritable();
               try { await writable.write(blob); await writable.close(); }
               catch (cause) { try { await writable.abort(); } catch (_) {} throw cause; }
               savedPath = handle.name;
-            } else bridge.download(blob, target);
+            } else bridge.download(blob, output);
           }
-          setBusy(false); close(); status('已导出 ' + savedPath + '（' + result.count + ' 个变量）');
+          setBusy(false);
+          showExportResult(savedPath, result.count);
         } catch (cause) {
           if (cause.name !== 'AbortError') error.textContent = '导出 TOML 失败：' + cause.message;
         } finally { setBusy(false); }
@@ -1637,7 +1693,7 @@
         if (event.key === 'Escape') { event.preventDefault(); close(); }
         if (event.key === 'Enter' && event.isComposing) event.preventDefault();
         if (event.key === 'Tab') {
-          const controls = Array.from(dialog.querySelectorAll('button:not(:disabled):not([hidden]),input:not(:disabled)')).filter((node) => !node.closest('[hidden]'));
+          const controls = Array.from(dialog.querySelectorAll('button:not(:disabled),input:not(:disabled),textarea:not(:disabled)')).filter((node) => !node.closest('[hidden]'));
           if (!controls.length) { event.preventDefault(); return; }
           if (event.shiftKey && document.activeElement === controls[0]) { event.preventDefault(); controls[controls.length - 1].focus(); }
           else if (!event.shiftKey && document.activeElement === controls[controls.length - 1]) { event.preventDefault(); controls[0].focus(); }

@@ -968,9 +968,9 @@
                   title="留空跳到任意变化边沿；支持 and、or、&amp;&amp;、||；逗号表示连续 cycle 条件" disabled>
             </label>
             <button type="button" class="scope-icon-btn scope-small-icon" id="scope-cursor-prev"
-                title="跳到上一个匹配边沿（键盘左方向键）" aria-label="跳到上一个匹配边沿" disabled>◀</button>
+                title="跳到上一个匹配边沿（左方向键 / 鼠标上侧键）" aria-label="跳到上一个匹配边沿" disabled>◀</button>
             <button type="button" class="scope-icon-btn scope-small-icon" id="scope-cursor-next"
-                title="跳到下一个匹配边沿（键盘右方向键）" aria-label="跳到下一个匹配边沿" disabled>▶</button>
+                title="跳到下一个匹配边沿（右方向键 / 鼠标下侧键）" aria-label="跳到下一个匹配边沿" disabled>▶</button>
           </div>
           <div class="scope-toolbar-group scope-cursor-locate-controls" aria-label="跳转到游标">
             <span class="scope-toolbar-label">跳转到游标</span>
@@ -1044,7 +1044,7 @@
                       id="scope-zoom-out" title="缩小" aria-label="缩小全局预览">−</button>
                   <button type="button"
                       class="scope-command-btn scope-overview-fit-btn"
-                      id="scope-fit">适应窗口</button>
+                      id="scope-fit">适应全局</button>
                 </div>
               </div>
               <div class="scope-overview-label-footer">
@@ -1767,6 +1767,23 @@
       }, { passive: false });
       this.outputTitleInput.addEventListener('input', () => this.scheduleBuild());
 
+      const isTextInput = (target) => target && (/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)
+        || target.isContentEditable || target.closest?.('.CodeMirror, [role="textbox"], [role="combobox"]'));
+      const sideButtonDirection = (button) => button === 3 ? -1 : button === 4 ? 1 : 0;
+      const handleSideButton = (event) => {
+        const direction = sideButtonDirection(event.button);
+        if (!direction || this.destroyed || this.comparison?.active) return;
+        // Suppress history navigation on all mouse phases, but search only once.
+        event.preventDefault();
+        if (event.type !== 'mousedown' || !this.meta || isTextInput(event.target)
+            || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey
+            || this.drag || this.overviewDrag || this.signalRowDrag) return;
+        void this.navigateActiveCursor(direction);
+      };
+      ['mousedown', 'mouseup', 'auxclick'].forEach((type) => {
+        this.root.addEventListener(type, handleSideButton, { capture: true });
+      });
+
       global.addEventListener('keydown', (event) => {
         if (this.comparison && this.comparison.active) return;
         if (event.key === 'Escape' && this.signalRowDrag) {
@@ -1819,9 +1836,7 @@
           return;
         }
         const target = event.target;
-        const editingText = target && (/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)
-          || target.isContentEditable || target.closest?.('.CodeMirror, [role="textbox"], [role="combobox"]'));
-        if (editingText) return;
+        if (isTextInput(target)) return;
         if (!event.defaultPrevented && !event.ctrlKey && !event.metaKey && !event.altKey
             && !event.isComposing && /^(a|b|c)$/i.test(event.key)) {
           event.preventDefault();
@@ -1857,6 +1872,7 @@
       });
 
       this.root.addEventListener('pointerdown', (event) => {
+        if (sideButtonDirection(event.button)) return;
         if (this.formulaVariablePicker && !this.formulaVariablePicker.hidden
             && !this.formulaVariablePicker.contains(event.target)
             && event.target !== this.formulaInsertVariableButton) {

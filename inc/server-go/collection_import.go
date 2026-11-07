@@ -1064,6 +1064,14 @@ func expandCollectionTemplate(
 }
 
 func normalizeLocalPathInput(rawPath, baseDir string) (string, error) {
+	path, err := absoluteLocalPathInput(rawPath, baseDir)
+	if err != nil {
+		return "", err
+	}
+	return relocateLegacyImportPath(path, baseDir), nil
+}
+
+func absoluteLocalPathInput(rawPath, baseDir string) (string, error) {
 	value := strings.TrimSpace(rawPath)
 	if len(value) >= 2 {
 		first, last := value[0], value[len(value)-1]
@@ -1114,7 +1122,7 @@ func normalizeLocalPathInput(rawPath, baseDir string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("invalid local path: %w", err)
 	}
-	return relocateLegacyImportPath(filepath.Clean(resolved), baseDir), nil
+	return resolved, nil
 }
 
 func resolveCollectionRoot(rawPath, baseDir string) (string, error) {
