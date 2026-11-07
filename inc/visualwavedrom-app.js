@@ -1225,6 +1225,7 @@ ${lines.join('\n')}`;
     let waveLibrarySyncChannel = null;
     const scopeWindowOpenStates = new Map();
     const scopeWindowRefs = new Map();
+    const scopeComparisonSubscriptions = new Map();
     let scopeWindowCleanupTimer = 0;
     const scopeTransientStates = new Map();
     const presenterWindowOpenStates = new Map();
@@ -14991,6 +14992,7 @@ ${lines.join('\n')}`;
     }
 
     function releaseScopeWindow(opened) {
+      scopeComparisonSubscriptions.delete(opened);
       scopeWindowRefs.forEach((refs, name) => {
         refs.delete(opened);
         if (!refs.size) scopeWindowRefs.delete(name);
@@ -15567,6 +15569,16 @@ ${lines.join('\n')}`;
       await window.VisualWaveDromScope.mount({
         libraryName: currentWaveLibraryFile || 'SQLite 波形库',
         comparisonLibraryId: currentWaveLibraryId || requestedLibraryId,
+        watchComparisonDocuments: (waveIds) => {
+          if (!window.opener || window.opener.closed) return;
+          window.opener.postMessage({ type: 'visualwavedrom-scope-comparison-watch',
+            libraryId: currentWaveLibraryId || requestedLibraryId, waveId: requestedWaveDocumentName, waveIds }, '*');
+        },
+        comparisonSourceChanged: (waveId) => {
+          if (!window.opener || window.opener.closed) return;
+          window.opener.postMessage({ type: 'visualwavedrom-scope-comparison-change',
+            libraryId: currentWaveLibraryId || requestedLibraryId, waveId }, '*');
+        },
         listComparisonDocuments: async () => {
           const incoming = await requestComparisonFromOpener('list');
           if (incoming) return incoming;
@@ -16993,6 +17005,7 @@ ${lines.join('\n')}`;
             refreshWaveDocumentCard(remote.name);
             refreshWaveDocumentTitle(remote.name, true);
           }
+          notifyScopeComparisonWindows(remote.name, remote);
           vwdDebugLog('wave-library', {
             phase: 'cross-page-sync',
             documentName: remote.name,
@@ -17079,6 +17092,45 @@ ${lines.join('\n')}`;
       } catch (_error) {
         presenterLiveSyncChannel = null;
       }
+    }
+
+    function scopeComparisonTargets(waveId, except) {
+      const targets = new Set();
+      const comparison = window.__visualWaveDromScopeView?.comparison;
+      if (except !== window && comparison?.watches(waveId)) targets.add(window);
+      scopeComparisonSubscriptions.forEach((subscription, ref) => {
+        if (ref.closed) scopeComparisonSubscriptions.delete(ref);
+        else if (ref !== except && subscription.libraryId === currentWaveLibraryId
+            && subscription.waveIds.has(waveId)) targets.add(ref);
+      });
+      return targets;
+    }
+
+    function notifyScopeComparisonWindows(waveId, snapshot, except) {
+      for (const ref of scopeComparisonTargets(waveId, except)) {
+        if (ref === window) window.__visualWaveDromScopeView.comparison.sourceChanged(waveId, snapshot);
+        else try {
+          ref.postMessage({ type: 'visualwavedrom-scope-comparison-update', libraryId: currentWaveLibraryId,
+            waveId, document: snapshot }, '*');
+        } catch (_error) { /* Scope window closed during delivery. */ }
+      }
+    }
+
+    const scopeComparisonEditorTimers = new Map();
+    function scheduleScopeComparisonEditorSync(waveId) {
+      if (!scopeComparisonTargets(waveId).size) return;
+      const libraryId = currentWaveLibraryId;
+      const key = scopeTransientStateKey(libraryId, waveId);
+      clearTimeout(scopeComparisonEditorTimers.get(key));
+      scopeComparisonEditorTimers.set(key, setTimeout(() => {
+        scopeComparisonEditorTimers.delete(key);
+        if (libraryId !== currentWaveLibraryId || !scopeComparisonTargets(waveId).size) return;
+        const tag = getSavedTagByName(waveId);
+        const snapshot = getWaveDocumentServerSnapshot(tag, waveId === editingWaveDocumentName);
+        if (!snapshot) return;
+        snapshot.transientState = scopeTransientStates.get(key) || null;
+        notifyScopeComparisonWindows(waveId, snapshot);
+      }, 100));
     }
 
     function initScopeWindowSync() {
@@ -17200,6 +17252,27 @@ ${lines.join('\n')}`;
           }
           return;
         }
+        if (message.type === 'visualwavedrom-scope-comparison-change') {
+          const waveId = String(message.waveId || '');
+          if (message.libraryId === currentWaveLibraryId && scopeWindowRefs.get(waveId)?.has(event.source)) {
+            notifyScopeComparisonWindows(waveId, null, event.source);
+          }
+          return;
+        }
+        if (message.type === 'visualwavedrom-scope-comparison-watch') {
+          if (message.libraryId !== currentWaveLibraryId || !scopeWindowRefs.get(message.waveId)?.has(event.source)) return;
+          const waveIds = new Set(Array.isArray(message.waveIds) ? message.waveIds.slice(0, 2).map(String) : []);
+          if (waveIds.size) scopeComparisonSubscriptions.set(event.source, { libraryId: message.libraryId, waveIds });
+          else scopeComparisonSubscriptions.delete(event.source);
+          return;
+        }
+        if (message.type === 'visualwavedrom-scope-comparison-update') {
+          if (scopeWaveViewActive && event.source === window.opener
+              && message.libraryId === (currentWaveLibraryId || requestedLibraryId)) {
+            window.__visualWaveDromScopeView?.comparison?.sourceChanged(message.waveId, message.document);
+          }
+          return;
+        }
         if (message.type === 'visualwavedrom-scope-source-request') {
           const state = scopeWindowOpenStates.get(String(message.scopeToken || ''));
           if (!state || state.documentName !== String(message.waveId || '') || state.opened !== event.source
@@ -17296,6 +17369,7 @@ ${lines.join('\n')}`;
         renderNavTree();
         renderWaveLibrary();
         refreshWaveDocumentTitle(remote.name, true);
+        notifyScopeComparisonWindows(remote.name, remote, event.source);
         if (!waveLibraryServerMode) flushPersistSavedTags();
         setStatus(true, message.isNewInstance
           ? '示波器展示实例已同步到主窗口'
@@ -18253,10 +18327,13 @@ ${lines.join('\n')}`;
 
     function notifyOpenScopeWindowsAfterCollectionImport(documentName, transientState) {
       const refs = scopeWindowRefs.get(documentName);
-      if (!refs || !refs.size) return;
+      const comparisons = scopeComparisonTargets(documentName);
+      if ((!refs || !refs.size) && !comparisons.size) return;
       const tag = getSavedTagByName(documentName);
       const snapshot = getWaveDocumentServerSnapshot(tag, true);
       if (!snapshot) return;
+      if (comparisons.size) notifyScopeComparisonWindows(documentName, Object.assign({}, snapshot, { transientState }));
+      if (!refs || !refs.size) return;
       let notified = 0;
       Array.from(refs).forEach((scopeWindow) => {
         if (!scopeWindow || scopeWindow.closed) {
@@ -20012,6 +20089,7 @@ ${lines.join('\n')}`;
           if (editingWaveDocumentName) {
             refreshWaveDocumentCard(editingWaveDocumentName);
             schedulePresenterDocumentSync(editingWaveDocumentName);
+            scheduleScopeComparisonEditorSync(editingWaveDocumentName);
           }
           vwdMark('renderWaveform:done');
           if (!isInsertingEdge && !waveformRenderingBusy) {

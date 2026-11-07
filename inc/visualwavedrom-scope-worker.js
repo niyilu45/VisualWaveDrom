@@ -14,6 +14,7 @@ if (typeof document === 'undefined' && typeof global.importScripts === 'function
   global.importScripts('visualwavedrom-scope-compare-core.js?v=20261020');
 }
 let comparison = null;
+let retainedComparisonSessions = null;
 let comparisonGeneration = 0;
 let comparisonProgress = null;
 
@@ -2166,7 +2167,7 @@ function analogWindow(row, start, end, width, totalColumns) {
   };
 }
 
-async function createWindow(payload, session = activeSession) {
+async function createWindow(payload, session = activeSession, isCancelled) {
   if (!session) throw new Error('Scope session has not been prepared');
   const lifecycle = sessionGeneration;
   const generation = Math.max(0, Math.floor(finiteNumber(payload.windowGeneration) || 0));
@@ -2194,7 +2195,7 @@ async function createWindow(payload, session = activeSession) {
   );
   const rows = [];
   for (let rowOffset = 0; rowOffset < rowIndices.length; rowOffset += 1) {
-    if (lifecycle !== sessionGeneration || !payload.comparison && generation < latestWindowGeneration) {
+    if (isCancelled?.() || lifecycle !== sessionGeneration || !payload.comparison && generation < latestWindowGeneration) {
       return {
         cancelled: true,
         generation,
@@ -3084,19 +3085,19 @@ function conditionRisingColumn(row, column, direction, mode, expression, analogF
     : conditionSegmentColumn(row, column, direction, mode, testCondition);
 }
 
-function navigateCursor(payload) {
-  if (!activeSession) throw new Error('Scope session has not been prepared');
+function navigateCursor(payload, session = activeSession) {
+  if (!session || !session.rows.length) return { found: false };
   const startedAt = Date.now();
   const rowIndex = clamp(
     Math.floor(finiteNumber(payload.rowIndex) || 0),
     0,
-    Math.max(0, activeSession.rows.length - 1)
+    Math.max(0, session.rows.length - 1)
   );
-  const row = activeSession.rows[rowIndex];
+  const row = session.rows[rowIndex];
   const column = clamp(
     finiteNumber(payload.column) || 0,
     0,
-    Math.max(0, activeSession.totalColumns - 1e-7)
+    Math.max(0, session.totalColumns - 1e-7)
   );
   const direction = Number(payload.direction) < 0 ? -1 : 1;
   const mode = payload.mode || row.mode;
@@ -3649,14 +3650,25 @@ function comparisonValue(row, column, session) {
 async function startComparison(request) {
   if (!activeSession) throw new Error('示波器尚未加载完成');
   const generation = ++comparisonGeneration;
-  comparison = null;
+  const reusableLeft = request.reuseLeft ? (retainedComparisonSessions || comparison)?.left : null;
+  const reusableRight = request.reuseRight ? (retainedComparisonSessions || comparison)?.right : null;
+  retainedComparisonSessions = comparison = null;
+  if ((request.reuseLeft && !reusableLeft) || (request.reuseRight && !reusableRight)) {
+    throw new Error('比较数据已失效，请重新加载');
+  }
   comparisonProgress = { phase: '正在解析比较图并计算公式', fraction: 0 };
-  const original = request.currentContent ? await createSession(request.currentContent, null) : activeSession;
-  const left = Object.assign({}, original, { rows: original.rows.map((row, index) => Object.assign({}, row, {
-    name: Array.isArray(request.currentNames) ? String(request.currentNames[index] || row.name) : row.name
-  })) });
-  const right = await createSession(request.content, request.transient);
   const check = () => { if (generation !== comparisonGeneration) throw new Error('比较已取消'); };
+  let left = reusableLeft;
+  if (!left) {
+    const source = request.leftDocument
+      ? await createSession(request.leftDocument.content, request.leftDocument.transientState)
+      : request.currentContent ? await createSession(request.currentContent, null) : activeSession;
+    check();
+    left = Object.assign({}, source, { rows: source.rows.map((row, index) => Object.assign({}, row, {
+      name: Array.isArray(request.currentNames) ? String(request.currentNames[index] || row.name) : row.name
+    })) });
+  }
+  const right = reusableRight || await createSession(request.content, request.transient);
   check();
   const result = await global.VisualWaveDromScopeCompareCore.compare(left, right, {
     length: comparisonLength,
@@ -3676,15 +3688,18 @@ async function startComparison(request) {
 
 async function comparisonWindow(request) {
   const snapshot = comparison;
-  if (!snapshot || request.generation !== snapshot.generation) throw new Error('比较数据已失效，请重新加载');
+  const cancelled = () => !snapshot || comparison !== snapshot || request.generation !== snapshot.generation;
+  if (cancelled()) return { cancelled: true };
   const pairs = snapshot.pairs.slice(request.rowStart, request.rowEnd);
   const data = [];
   for (const side of ['left', 'right']) {
     const session = snapshot[side];
-    data.push(request.start >= session.totalColumns ? { rows: [] } : await createWindow(Object.assign({}, request, {
+    const window = request.start >= session.totalColumns ? { rows: [] } : await createWindow(Object.assign({}, request, {
       comparison: true, rowIndices: pairs.map((pair) => pair[side]).filter((index) => index >= 0),
       modes: request[side + 'Modes'], busFormats: request[side + 'BusFormats'], analogFormats: request[side + 'AnalogFormats']
-    }), session));
+    }), session, cancelled);
+    if (cancelled() || window.cancelled) return { cancelled: true };
+    data.push(window);
   }
   const errors = pairs.flatMap((pair) => {
     const first = findFirstSegment(pair.intervals, request.start);
@@ -3717,6 +3732,21 @@ async function comparisonWindow(request) {
   return { left: data[0], right: data[1], errors };
 }
 
+function swapComparison(generation) {
+  if (!comparison || comparison.generation !== generation) throw new Error('比较数据已失效，请重新加载');
+  // Keep pair and interval order so the current viewport and error indexes stay valid.
+  comparison.generation = ++comparisonGeneration;
+  [comparison.left, comparison.right] = [comparison.right, comparison.left];
+  comparison.pairs.forEach(pair => {
+    [pair.left, pair.right] = [pair.right, pair.left];
+    pair.diagnostics = [pair.diagnostics[1], pair.diagnostics[0]];
+  });
+  comparison.errors.forEach(error => {
+    [error.leftValue, error.rightValue] = [error.rightValue, error.leftValue];
+  });
+  return { generation: comparison.generation };
+}
+
 function inspectComparison(request) {
   if (!comparison || request.generation !== comparison.generation) return null;
   const pair = comparison.pairs[request.pair];
@@ -3740,14 +3770,20 @@ async function handleRequest(message) {
     let result;
     if (request.type === 'dispose') {
       sessionGeneration += 1; comparisonGeneration += 1; latestWindowGeneration += 1;
-      activeSession = comparison = comparisonProgress = null;
+      activeSession = retainedComparisonSessions = comparison = comparisonProgress = null;
       result = { cancelled: true };
     } else if (request.type === 'compare-start') {
       result = await startComparison(request);
+    } else if (request.type === 'compare-swap') {
+      result = swapComparison(request.generation);
     } else if (request.type === 'compare-close') {
       comparisonGeneration += 1;
-      comparison = null;
-      comparisonProgress = null;
+      const sessions = comparison || retainedComparisonSessions;
+      retainedComparisonSessions = sessions && (request.keepLeft || request.keepRight) ? {
+        left: request.keepLeft ? sessions.left : null,
+        right: request.keepRight ? sessions.right : null
+      } : null;
+      comparison = comparisonProgress = null;
       result = { cancelled: true };
     } else if (request.type === 'compare-progress') {
       result = comparisonProgress;
@@ -3755,6 +3791,10 @@ async function handleRequest(message) {
       result = await comparisonWindow(request);
     } else if (request.type === 'compare-inspect') {
       result = inspectComparison(request);
+    } else if (request.type === 'compare-navigate') {
+      result = comparison && comparison.generation === request.generation
+        ? navigateCursor(request, comparison[request.side === 'right' ? 'right' : 'left'])
+        : { found: false };
     } else if (request.type === 'compare-error') {
       result = comparison && comparison.generation === request.generation
         ? comparison.errors[request.index] || null : null;

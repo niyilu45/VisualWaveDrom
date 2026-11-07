@@ -17,6 +17,8 @@
   const JSON_ERROR_GUTTER = 'vwd-collection-json-error-gutter';
   const SEARCH_GUTTER = 'vwd-collection-search-gutter';
   const LAST_STATE_STORAGE_KEY = 'visualwavedrom.importCollection.lastState.v1';
+  const LAST_IMPORT_STORAGE_KEY = 'visualwavedrom.importCollection.lastImport.v1';
+  const WAVE_STATE_STORAGE_PREFIX = 'visualwavedrom.importCollection.waveState.v1:';
   const DEFAULT_PRESET_SEARCH_PATH = 'inc/import/SchemeCollection';
   const VARIABLE_NAME_PATTERN = /^[\p{L}_][\p{L}\p{N}_.-]*$/u;
   const PYTHON_VARIABLE_NAME_PATTERN = /^[\p{L}_][\p{L}\p{N}_]*$/u;
@@ -881,9 +883,14 @@
       }
     }
 
+    let waveStateKey = '', hasWaveState = false;
+
     function readRememberedState() {
       try {
-        const raw = window.localStorage.getItem(LAST_STATE_STORAGE_KEY);
+        const storage = window.localStorage;
+        const scoped = waveStateKey && storage.getItem(waveStateKey);
+        hasWaveState = !!scoped;
+        const raw = scoped || storage.getItem(LAST_IMPORT_STORAGE_KEY) || storage.getItem(LAST_STATE_STORAGE_KEY);
         if (!raw) return null;
         const value = JSON.parse(raw);
         if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -926,7 +933,13 @@
         variables
       };
       try {
-        window.localStorage.setItem(LAST_STATE_STORAGE_KEY, JSON.stringify(state));
+        const storage = window.localStorage, serialized = JSON.stringify(state);
+        if (reason === 'import-complete') storage.setItem(LAST_IMPORT_STORAGE_KEY, serialized);
+        if (waveStateKey && (hasWaveState || reason === 'import-complete'
+            || /^(preset-loaded|preset-discovered-loaded|preset-browser-loaded)$/.test(reason))) {
+          storage.setItem(waveStateKey, serialized);
+          hasWaveState = true;
+        }
         debug({
           phase: 'state-saved',
           reason: reason || 'changed',
@@ -3820,6 +3833,7 @@
           serverDurationMs: payload.durationMs,
           clientDurationMs: Math.round(progressNow() - startedAt)
         });
+        rememberState('import-complete');
         busy = false;
         close();
       } catch (error) {
@@ -3895,6 +3909,9 @@
       searchResult = null;
       singlePreviewStates.clear();
       clearPresetDiscovery();
+      const context = typeof settings.getContextToken === 'function' && settings.getContextToken();
+      waveStateKey = context && context.split('\u0000').every(Boolean)
+        ? WAVE_STATE_STORAGE_PREFIX + encodeURIComponent(context) : '';
       const restored = restoreRememberedState();
       if (!restored) {
         originalPresetPath = '';

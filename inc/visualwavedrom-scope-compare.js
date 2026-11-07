@@ -1,13 +1,16 @@
 (function (global) {
   'use strict';
-  const ROW_HEIGHT = 58;
-  const AXIS_HEIGHT = 30;
+  const AXIS_HEIGHT = 38;
   const NAME_WIDTH = 160;
   const COLORS = ['#176ca5', '#b45c0c'];
+  const CURSOR_COLORS = { A: '#1f68d5', B: '#d93025', C: '#565e68' };
+  const CURSORS = ['A', 'B', 'C'];
+  const SIDES = ['left', 'right'];
   const icons = {
     prev: '<path d="m15 18-6-6 6-6"/>', next: '<path d="m9 18 6-6-6-6"/>',
     close: '<path d="m18 6-12 12M6 6l12 12"/>', plus: '<path d="M12 5v14M5 12h14"/>',
-    minus: '<path d="M5 12h14"/>', edit: '<path d="m16 3 5 5-12 12H4v-5zM14 5l5 5"/>'
+    minus: '<path d="M5 12h14"/>', edit: '<path d="m16 3 5 5-12 12H4v-5zM14 5l5 5"/>',
+    swap: '<path d="m16 3 4 4-4 4M20 7H4m4 14-4-4 4-4m-4 4h16"/>'
   };
   function icon(name) { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">' + icons[name] + '</svg>'; }
   function button(action, label, symbol) {
@@ -28,24 +31,45 @@
       this.end = 1;
       this.layout = 'vertical';
       this.sequence = 0;
+      this.pendingChanges = new Map();
+      this.cursorSequence = 0;
     }
 
     async open() {
-      if (this.active) return;
+      if (this.active && !this.popup.closed) { this.popup.focus(); return; }
+      if (this.active) this.close({ fromWindow: true });
+      const width = Math.min(1440, global.screen.availWidth);
+      const height = Math.min(940, global.screen.availHeight);
+      const popup = global.open('', '_blank', 'popup=yes,resizable=yes,width=' + width + ',height=' + height);
+      if (!popup) { this.scope.setStatus('浏览器阻止了比较窗口，请允许弹出式窗口', true); return; }
+      this.popup = popup;
       this.active = true;
       this.layout = 'vertical';
       const opening = ++this.sequence;
-      this.root = document.createElement('section');
+      const doc = popup.document;
+      doc.title = this.scope.meta.title + ' - 示波器比较';
+      doc.documentElement.lang = 'zh-CN';
+      const css = document.querySelector('link[href*="visualwavedrom-scope-compare.css"]');
+      if (css) {
+        const link = doc.createElement('link');
+        link.rel = 'stylesheet'; link.href = css.href; doc.head.appendChild(link);
+      }
+      const viewport = doc.createElement('meta');
+      viewport.name = 'viewport'; viewport.content = 'width=device-width,initial-scale=1';
+      doc.head.appendChild(viewport);
+      popup.addEventListener('pagehide', () => {
+        if (this.popup === popup) this.close({ fromWindow: true });
+      }, { once: true });
+      this.root = doc.createElement('section');
       this.root.className = 'scope-comparison';
       this.root.setAttribute('aria-label', '示波器比较');
       this.root.innerHTML = `
         <header class="scope-compare-toolbar">
-          <strong>示波器比较</strong><span class="scope-compare-source"></span>
-          <label>比较图 <select class="scope-compare-source-select" aria-label="选择另一张波形图"></select></label>
-          ${button('load', '加载比较图')}
+          <strong>示波器比较</strong>
           <label>布局 <select class="scope-compare-layout" aria-label="比较布局">
             <option value="vertical">上下分屏</option><option value="horizontal">左右分屏</option><option value="overlay">信号重叠</option>
           </select></label>
+          <button type="button" data-action="swap" title="交换比较图 A 和 B">${icon('swap')}交换</button>
           ${button('close', '退出比较', 'close')}
         </header>
         <div class="scope-compare-controls">
@@ -56,34 +80,80 @@
           <label>显示 cycle <input class="scope-compare-span" type="number" min="0.5" step="0.5" value="1"></label>
           ${button('zoom-in', '放大', 'plus')}${button('zoom-out', '缩小', 'minus')}${button('fit', '适应窗口')}
         </div>
+        <div class="scope-compare-cursors">
+          <span>选择游标</span>
+          ${CURSORS.map(name => `<button type="button" data-cursor="${name}" title="选择游标 ${name}（${name.toLowerCase()}）" aria-keyshortcuts="${name}" aria-pressed="false">${name}</button>`).join('')}
+          <span>跳转到游标</span>
+          ${CURSORS.map(name => `<button type="button" data-locate="${name}" aria-keyshortcuts="Shift+${name}"></button>`).join('')}
+          <span class="scope-compare-cursor-signal"></span>
+          <label>跳转 <input type="text" class="scope-compare-condition" aria-label="游标跳转值或条件" placeholder="1,2 或 &gt;=1"></label>
+          ${button('edge-prev', '跳到上一个匹配边沿（左方向键 / 鼠标上侧键）', 'prev')}
+          ${button('edge-next', '跳到下一个匹配边沿（右方向键 / 鼠标下侧键）', 'next')}
+          <output class="scope-compare-measurements"></output>
+        </div>
         <div class="scope-compare-tags" aria-label="错误位置标签"></div>
         <div class="scope-compare-panes" data-layout="vertical"></div>
         <input class="scope-compare-pan" type="range" min="0" max="0" step="0.5" value="0" aria-label="横向滚动比较波形">
         <footer class="scope-compare-status" role="status" aria-live="polite"></footer>`;
-      document.body.appendChild(this.root);
-      this.scope.root.inert = true;
-      this.root.querySelector('.scope-compare-source').textContent = this.scope.meta.title;
-      this.select = this.root.querySelector('.scope-compare-source-select');
+      doc.body.appendChild(this.root);
+      this.activeCursor = ''; this.cursorPositions = { A: null, B: null, C: null };
+      this.cursorPair = 0; this.cursorSide = 'left';
       this.panesRoot = this.root.querySelector('.scope-compare-panes');
+      this.selects = Object.fromEntries(SIDES.map((side, index) => {
+        const select = doc.createElement('select');
+        const label = index ? 'B' : 'A';
+        select.className = 'scope-compare-source-select';
+        select.setAttribute('aria-label', '选择比较图 ' + label);
+        select.append(new popup.Option('请选择波形图', ''));
+        select.addEventListener('change', () => {
+          select.querySelector('option[value=""]').disabled = true;
+          if (SIDES.every(key => this.selects[key].value)) void this.load();
+        });
+        return [side, select];
+      }));
       this.count = this.root.querySelector('.scope-compare-count');
       this.status = this.root.querySelector('.scope-compare-status');
       this.startInput = this.root.querySelector('.scope-compare-start');
       this.spanInput = this.root.querySelector('.scope-compare-span');
       this.panInput = this.root.querySelector('.scope-compare-pan');
+      this.condition = this.root.querySelector('.scope-compare-condition');
+      this.cursorSignal = this.root.querySelector('.scope-compare-cursor-signal');
+      this.measurements = this.root.querySelector('.scope-compare-measurements');
       this.root.addEventListener('click', (event) => {
+        const cursor = event.target.closest('[data-cursor], [data-locate]');
+        if (cursor?.dataset.cursor) { this.selectCursor(cursor.dataset.cursor); return; }
+        if (cursor?.dataset.locate) { this.locateCursor(cursor.dataset.locate); return; }
         const target = event.target.closest('[data-action]');
         if (target) void Promise.resolve(this.action(target.dataset.action)).catch((error) => {
           if (this.active) this.status.textContent = error.message;
         });
       });
       this.root.addEventListener('keydown', (event) => {
-        event.stopPropagation();
-        if (event.key === 'Escape') this.close();
-        if (!event.target.matches('input,select,textarea') && /^(ArrowLeft|ArrowRight)$/.test(event.key)) {
+        if (event.key === 'Escape') { this.close(); return; }
+        if (event.defaultPrevented || event.isComposing || event.ctrlKey || event.altKey || event.metaKey) return;
+        if (event.target === this.condition && event.key === 'Enter') {
           event.preventDefault();
-          void this.navigate(event.key === 'ArrowRight' ? 1 : -1);
+          void this.navigateCursor(event.shiftKey ? -1 : 1);
+          return;
+        }
+        if (event.target.closest('input,select,textarea,[contenteditable]:not([contenteditable="false"]),[role="textbox"]')) return;
+        if (/^[abc]$/i.test(event.key)) {
+          event.preventDefault();
+          if (!event.repeat) (event.shiftKey ? this.locateCursor : this.selectCursor).call(this, event.key.toUpperCase());
+        } else if (/^(ArrowLeft|ArrowRight)$/.test(event.key)) {
+          event.preventDefault();
+          void this.navigateCursor(event.key === 'ArrowRight' ? 1 : -1);
         }
       });
+      const sideButton = (event) => {
+        if (event.button !== 3 && event.button !== 4) return;
+        event.preventDefault();
+        if (event.type === 'mousedown' && !event.target.closest('input,select,textarea')
+            && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) {
+          void this.navigateCursor(event.button === 3 ? -1 : 1);
+        }
+      };
+      ['mousedown', 'mouseup', 'auxclick'].forEach(type => this.root.addEventListener(type, sideButton, true));
       this.root.querySelector('.scope-compare-layout').addEventListener('change', (event) => {
         this.layout = event.target.value;
         this.buildPanes();
@@ -91,20 +161,22 @@
       this.startInput.addEventListener('change', () => this.setView(Number(this.startInput.value), this.end - this.start));
       this.spanInput.addEventListener('change', () => this.setView(this.start, Number(this.spanInput.value)));
       this.panInput.addEventListener('input', () => this.setView(Number(this.panInput.value), this.end - this.start));
-      this.resizeObserver = new ResizeObserver(() => this.schedule());
+      this.resizeObserver = new popup.ResizeObserver(() => this.schedule());
       this.resizeObserver.observe(this.panesRoot);
+      this.buildPanes();
       this.setBusy(true, '正在读取波形目录…');
       try {
         const documents = await this.scope.adapter.listComparisonDocuments();
         if (!this.active || opening !== this.sequence) return;
-        documents.filter((doc) => doc.name !== this.scope.document.name).forEach((doc) => {
-          const option = document.createElement('option');
-          option.value = doc.name;
-          option.textContent = doc.title || doc.name;
-          this.select.appendChild(option);
+        const choices = documents.some(item => item.name === this.scope.document.name) ? documents
+          : [{ name: this.scope.document.name, title: this.scope.meta.title }, ...documents];
+        SIDES.forEach(side => {
+          choices.forEach(item => this.selects[side].append(new popup.Option(item.title || item.name, item.name)));
         });
-        this.setBusy(false, this.select.options.length ? '请选择另一张波形图' : '当前波形库中没有其他波形图');
-        this.select.focus();
+        this.selects.left.value = this.scope.document.name;
+        this.selects.left.options[0].disabled = true;
+        this.setBusy(false, '请选择比较图 B');
+        this.selects.right.focus();
       } catch (error) { if (this.active && opening === this.sequence) this.setBusy(false, '读取目录失败：' + error.message); }
     }
 
@@ -113,21 +185,24 @@
       this.root.setAttribute('aria-busy', String(busy));
       this.root.querySelectorAll('[data-action]').forEach((el) => {
         const action = el.dataset.action;
-        el.disabled = action !== 'close' && (busy || (action === 'load' ? !this.select.value : !this.result));
+        el.disabled = action !== 'close' && (busy || !this.result
+          || (action === 'swap' && this.loadedNames.left === this.loadedNames.right));
       });
-      this.select.disabled = busy;
+      SIDES.forEach(side => { this.selects[side].disabled = busy; });
       this.root.querySelector('.scope-compare-layout').disabled = busy || !this.result;
       this.startInput.disabled = this.spanInput.disabled = this.panInput.disabled = busy || !this.result;
       if (message) this.status.textContent = message;
       this.updateErrorControls();
+      this.updateCursorControls();
     }
 
     async action(action) {
       if (action === 'close') return this.close();
       if (this.busy) return;
-      if (action === 'load') return this.load();
       if (!this.result) return;
+      if (action === 'swap') return this.swap();
       if (action === 'prev' || action === 'next') return this.navigate(action === 'next' ? 1 : -1);
+      if (action === 'edge-prev' || action === 'edge-next') return this.navigateCursor(action === 'edge-next' ? 1 : -1);
       if (action === 'tag') return this.addTag();
       if (action === 'fit') return this.setView(0, this.result.total);
       if (action.startsWith('zoom-')) {
@@ -137,20 +212,112 @@
       }
     }
 
-    async load() {
-      if (!this.select.value || this.busy) return;
+    watches(name) {
+      return this.active && !!this.loadedNames && Object.values(this.loadedNames).includes(name);
+    }
+
+    sourceChanged(name, document) {
+      if (!this.watches(name)) return;
+      this.pendingChanges.set(name, document || null);
+      this.scheduleRefresh();
+    }
+
+    scheduleRefresh() {
+      if (!this.active || this.busy || !(this.result || this.refreshAnchor) || !this.pendingChanges.size) return;
+      clearTimeout(this.refreshTimer);
+      this.refreshTimer = setTimeout(() => {
+        if (!this.active || this.busy) return;
+        if (this.scope.formulaRefreshInFlight || this.scope.formulaApplyInFlight) { this.scheduleRefresh(); return; }
+        const changes = this.pendingChanges;
+        this.pendingChanges = new Map();
+        void this.load(changes);
+      }, 160);
+    }
+
+    async swap() {
+      if (this.loadedNames.left === this.loadedNames.right) return;
       const sequence = ++this.sequence;
-      this.loadedName = this.select.value;
-      this.scope.log('scope-compare', { phase: 'load-start', source: this.scope.document.name, target: this.loadedName });
-      this.setBusy(true, '正在载入比较图并计算公式…');
-      this.result = null;
-      this.cache = null;
-      this.selectedError = null;
-      this.marker = null;
+      const generation = this.generation;
+      const selected = this.selectedError && { ...this.selectedError,
+        leftValue: this.selectedError.rightValue, rightValue: this.selectedError.leftValue };
+      this.setBusy(true);
+      try {
+        const result = await this.scope.worker.call('compare-swap', { generation });
+        if (!this.active || sequence !== this.sequence) return;
+        this.generation = this.result.generation = result.generation;
+        [this.result.left, this.result.right] = [this.result.right, this.result.left];
+        [this.leftRenderer, this.rightRenderer] = [this.rightRenderer, this.leftRenderer];
+        [this.loadedNames.left, this.loadedNames.right] = [this.loadedNames.right, this.loadedNames.left];
+        this.result.pairs.forEach(pair => {
+          [pair.left, pair.right] = [pair.right, pair.left];
+          pair.diagnostics = [pair.diagnostics[1], pair.diagnostics[0]];
+        });
+        SIDES.forEach(side => { this.selects[side].value = this.loadedNames[side]; });
+        this.updatePaneTitles();
+        this.cursorSide = this.cursorSide === 'left' ? 'right' : 'left';
+        if (this.cache?.view.generation === generation) {
+          [this.cache.left, this.cache.right] = [this.cache.right, this.cache.left];
+          this.cache.view.generation = this.generation;
+        }
+        this.selectedError = selected;
+        this.setBusy(false, '已交换比较图 A 和 B');
+        if (selected) this.chooseError(selected, false);
+        else this.draw();
+        this.schedule();
+      } finally {
+        if (this.active && sequence === this.sequence) {
+          if (this.busy) this.setBusy(false);
+          this.scheduleRefresh();
+        }
+      }
+    }
+
+    updatePaneTitles() {
+      SIDES.forEach(side => {
+        const option = this.selects[side].selectedOptions[0];
+        if (option && this.result[side].title) option.textContent = this.result[side].title;
+      });
+    }
+
+    async load(changes) {
+      if (!SIDES.every(side => this.selects[side].value) || this.busy) return;
+      const refresh = !!changes;
+      const sequence = ++this.sequence;
+      if (!refresh) {
+        this.refreshAnchor = null;
+        this.loadedNames = Object.fromEntries(SIDES.map(side => [side, this.selects[side].value]));
+        this.scope.adapter.watchComparisonDocuments?.(Object.values(this.loadedNames));
+        this.pendingChanges.clear();
+      }
+      const { left: leftName, right: rightName } = this.loadedNames;
+      const reuseLeft = refresh && !!this.leftRenderer && !changes.has(leftName);
+      const reuseRight = refresh && !!this.rightRenderer && !changes.has(rightName);
+      const leftDisplay = refresh && !reuseLeft ? this.captureDisplay(this.leftRenderer) : null;
+      const rightDisplay = refresh && !reuseRight ? this.captureDisplay(this.rightRenderer) : null;
+      if (refresh && this.result) {
+        const topPair = this.pairAtOffset(this.scrollTop);
+        this.refreshAnchor = {
+          start: this.start, span: this.end - this.start, scroll: this.scrollTop,
+          signal: this.result.pairs[this.cursorPair]?.name,
+          topSignal: this.result.pairs[topPair]?.name, topOffset: this.scrollTop - this.rowOffsets[topPair]
+        };
+      }
+      const anchor = this.refreshAnchor;
+      this.scope.log('scope-compare', { phase: 'load-start', source: leftName, target: rightName });
+      this.setBusy(true, refresh ? '正在同步比较数据…' : '正在载入比较图并计算公式…');
+      this.revision = (this.revision || 0) + 1;
+      this.cursorSequence++;
+      this.result = this.cache = this.selectedError = null;
+      if (!reuseLeft) this.leftRenderer = null;
+      if (!reuseRight) this.rightRenderer = null;
+      this.rowOffsets = [];
       this.count.textContent = '';
-      this.tags = [];
-      this.renderTags();
-      this.panesRoot.replaceChildren();
+      this.releaseCanvasBuffers();
+      if (!refresh) {
+        this.tags = [];
+        this.renderTags();
+        this.buildPanes();
+      }
       const started = performance.now();
       let polling = false;
       const timer = this.progressTimer = setInterval(async () => {
@@ -166,40 +333,145 @@
         finally { polling = false; }
       }, 250);
       try {
-        const document = await this.scope.adapter.loadComparisonDocument(this.loadedName);
+        // Keep only the untouched source, not the old difference table or viewport.
+        await Promise.all([
+          this.scope.worker.call('compare-close', { keepLeft: reuseLeft, keepRight: reuseRight }),
+          this.windowRequest?.catch(() => {})
+        ]);
         if (!this.active || sequence !== this.sequence) return;
-        const currentContent = this.scope.dataDraftDirty ? await this.scope.buildDraftSourceContent() : null;
-        this.rightDisplay = document.display || {};
-        const result = await this.scope.worker.call('compare-start', { content: document.content, transient: document.transientState,
-          currentContent, currentNames: this.scope.meta.rows.map((row) => this.scope.signalDisplayName(row.index)) });
+        const ownSource = this.scope.document.name;
+        const documents = new Map();
+        const getDocument = name => {
+          if (!documents.has(name)) documents.set(name, changes?.get(name) || (name === ownSource
+            ? this.scope.getComparisonDocument() : this.scope.adapter.loadComparisonDocument(name)));
+          return documents.get(name);
+        };
+        const [leftDocument, document] = await Promise.all([
+          !reuseLeft && (leftName !== ownSource || changes?.get(leftName)) ? getDocument(leftName) : null,
+          reuseRight ? null : getDocument(rightName)
+        ]);
+        if (!this.active || sequence !== this.sequence) return;
+        const currentContent = !reuseLeft && !leftDocument && this.scope.dataDraftDirty ? await this.scope.buildDraftSourceContent() : null;
+        if (!this.active || sequence !== this.sequence) return;
+        const result = await this.scope.worker.call('compare-start', { content: document?.content, transient: document?.transientState,
+          leftDocument, reuseLeft, reuseRight, currentContent,
+          currentNames: leftDocument ? null : this.scope.meta.rows.map((row) => this.scope.signalDisplayName(row.index)) });
         if (!this.active || sequence !== this.sequence) return;
         this.result = result;
         this.generation = result.generation;
-        this.start = 0;
-        this.end = result.total;
-        this.scrollTop = 0;
-        this.readTags();
-        this.buildPanes();
+        this.updatePaneTitles();
+        if (!reuseLeft) this.leftRenderer = this.scope.createComparisonRenderer(result.left,
+          leftDocument ? leftDocument.display || this.remapDisplay(leftDisplay, result.left)
+            : this.scope.comparisonDisplay(),
+          leftDocument ? leftDocument.transientState : this.scope.transientFormulaState);
+        if (!reuseRight) this.rightRenderer = this.scope.createComparisonRenderer(result.right,
+          document.display || this.remapDisplay(rightDisplay, result.right), document.transientState);
+        this.rebuildRowOffsets();
+        this.selectedError = null;
+        if (anchor) {
+          const newTop = result.pairs.findIndex(pair => pair.name === anchor.topSignal);
+          this.cursorPair = Math.max(0, result.pairs.findIndex(pair => pair.name === anchor.signal));
+          this.scrollTop = newTop >= 0
+            ? this.rowOffsets[newTop] + Math.min(anchor.topOffset, this.pairHeight(newTop) - 1) : anchor.scroll;
+          for (const name of CURSORS) if (this.cursorPositions[name] != null) {
+            this.cursorPositions[name] = Math.min(this.cursorPositions[name], this.snapColumn(result.total));
+          }
+          this.syncPaneGeometry();
+        } else {
+          this.scrollTop = 0;
+          this.activeCursor = ''; this.cursorPositions = { A: 0, B: Math.max(0, result.total - 1), C: null };
+          this.cursorPair = 0; this.cursorSide = 'left';
+          this.readTags();
+          this.buildPanes();
+        }
         const warnings = result.pairs.filter((pair) => pair.diagnostics.some(Boolean));
         this.setBusy(false, warnings.length ? warnings.map((pair) => pair.name + '：' + pair.diagnostics.filter(Boolean).join('；')).join(' / ')
           : '比较完成 · ' + result.pairs.length + ' 对信号 · ' + result.errorCount + ' 处差异');
         this.count.textContent = result.errorCount ? result.errorCount + ' 处差异' : '无差异';
-        this.setView(0, result.total);
-        this.scope.log('scope-compare', { phase: 'ready', target: this.loadedName, pairs: result.pairs.length,
+        this.setView(anchor?.start ?? 0, anchor?.span ?? result.total);
+        this.refreshAnchor = null;
+        this.scope.log('scope-compare', { phase: 'ready', target: rightName, pairs: result.pairs.length,
           errorCount: result.errorCount, totalColumns: result.total, elapsedMs: Math.round(performance.now() - started) });
       } catch (error) {
         if (this.active && sequence === this.sequence) {
+          this.result = this.cache = this.leftRenderer = this.rightRenderer = null;
+          if (!anchor) this.pendingChanges.clear();
+          await this.scope.worker.call('compare-close').catch(() => {});
+          if (!this.active || sequence !== this.sequence) return;
           this.setBusy(false, '比较失败：' + error.message);
-          this.scope.log('scope-compare', { phase: 'error', target: this.loadedName, message: error.message });
+          this.scope.log('scope-compare', { phase: 'error', target: rightName, message: error.message });
         }
-      } finally { clearInterval(timer); if (this.progressTimer === timer) this.progressTimer = 0; }
+      } finally {
+        clearInterval(timer);
+        if (this.progressTimer === timer) this.progressTimer = 0;
+        this.scheduleRefresh();
+      }
+    }
+
+    captureDisplay(renderer) {
+      if (!renderer) return null;
+      const rows = new Map();
+      renderer.meta.rows.forEach(row => {
+        const key = row.sourceName || row.name;
+        if (!rows.has(key)) rows.set(key, { entries: [], next: 0 });
+        rows.get(key).entries.push({
+          modes: renderer.modes[row.index], busFormats: renderer.busFormats[row.index],
+          analogFormats: renderer.analogFormats[row.index], rowStyles: renderer.rowStyles[row.index],
+          rowHeights: renderer.rowHeights[row.index]
+        });
+      });
+      return rows;
+    }
+
+    remapDisplay(rows, meta) {
+      if (!rows) return null;
+      const display = { modes: {}, busFormats: {}, analogFormats: {}, rowStyles: {}, rowHeights: {} };
+      meta.rows.forEach(row => {
+        const queue = rows.get(row.sourceName || row.name);
+        const entry = queue && queue.entries[queue.next++];
+        if (entry) Object.keys(display).forEach(key => { display[key][row.index] = entry[key]; });
+      });
+      return display;
+    }
+
+    rebuildRowOffsets() {
+      this.rowOffsets = [0];
+      this.result.pairs.forEach(pair => this.rowOffsets.push(this.rowOffsets.at(-1) + Math.max(
+        pair.left < 0 ? 0 : this.leftRenderer.rowHeight(pair.left),
+        pair.right < 0 ? 0 : this.rightRenderer.rowHeight(pair.right))));
+    }
+
+    pairHeight(index) { return this.rowOffsets[index + 1] - this.rowOffsets[index]; }
+
+    pairAtOffset(offset) {
+      let lo = 0, hi = this.result.pairs.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >>> 1;
+        if (this.rowOffsets[mid + 1] <= offset) lo = mid + 1;
+        else hi = mid;
+      }
+      return lo;
+    }
+
+    syncPaneGeometry() {
+      const total = this.rowOffsets.at(-1);
+      this.panes.forEach(pane => { pane.spacer.style.height = total + 'px'; });
+      const height = Math.max(...this.panes.map(pane => pane.viewport.clientHeight));
+      this.scrollTop = Math.max(0, Math.min(this.scrollTop, total - height));
+      this.panes.forEach(pane => { pane.viewport.scrollTop = this.scrollTop; });
+    }
+
+    releaseCanvasBuffers() {
+      this.panes?.forEach(({ canvas, cursorCanvas }) => {
+        canvas.width = canvas.height = cursorCanvas.width = cursorCanvas.height = 0;
+      });
     }
 
     buildPanes() {
+      this.releaseCanvasBuffers();
       this.panesRoot.replaceChildren();
       this.panes = [];
       this.cache = null;
-      if (!this.result) return;
       this.panesRoot.dataset.layout = this.layout;
       (this.layout === 'overlay' ? ['overlay'] : ['left', 'right']).forEach((side) => {
         const pane = document.createElement('section');
@@ -208,28 +480,33 @@
         (side === 'overlay' ? ['left', 'right'] : [side]).forEach((source) => {
           const label = document.createElement('span');
           label.style.color = COLORS[source === 'left' ? 0 : 1];
-          label.textContent = (source === 'left' ? 'A · ' : 'B · ') + this.result[source].title;
-          heading.appendChild(label);
+          label.textContent = source === 'left' ? 'A' : 'B';
+          heading.append(label, this.selects[source]);
         });
         const body = document.createElement('div');
         body.className = 'scope-compare-canvas-wrap';
         const viewport = document.createElement('div');
         viewport.className = 'scope-compare-scroll';
         const spacer = document.createElement('div');
-        spacer.style.height = this.result.pairs.length * ROW_HEIGHT + 'px';
+        spacer.style.height = (this.result ? this.rowOffsets.at(-1) : 0) + 'px';
         viewport.appendChild(spacer);
         const canvas = document.createElement('canvas');
+        const cursorCanvas = document.createElement('canvas');
+        cursorCanvas.className = 'scope-compare-cursor-layer';
+        cursorCanvas.setAttribute('aria-hidden', 'true');
         canvas.setAttribute('aria-label', heading.textContent + ' 比较波形');
         canvas.setAttribute('role', 'img');
-        body.append(viewport, canvas);
+        body.append(viewport, canvas, cursorCanvas);
         pane.append(heading, body);
         this.panesRoot.appendChild(pane);
-        const item = { side, viewport, canvas, body };
+        const item = { side, viewport, spacer, canvas, cursorCanvas };
         this.panes.push(item);
         viewport.scrollTop = this.scrollTop;
         viewport.addEventListener('scroll', () => {
-          this.scrollTop = viewport.scrollTop;
-          this.panes.forEach((other) => { if (other !== item && other.viewport.scrollTop !== this.scrollTop) other.viewport.scrollTop = this.scrollTop; });
+          if (!this.panes.includes(item)) return;
+          const limit = Math.min(...this.panes.map(pane => pane.viewport.scrollHeight - pane.viewport.clientHeight));
+          this.scrollTop = Math.min(viewport.scrollTop, limit);
+          this.panes.forEach(other => { if (other.viewport.scrollTop !== this.scrollTop) other.viewport.scrollTop = this.scrollTop; });
           this.schedule();
         });
         canvas.addEventListener('wheel', (event) => {
@@ -250,12 +527,14 @@
         });
         canvas.addEventListener('pointerdown', (event) => {
           const touch = event.pointerType === 'touch';
+          if (event.button === 0 && this.startCursorDrag(event, item)) return;
           if (event.button !== 1 && !touch) return;
           event.preventDefault();
           canvas.setPointerCapture(event.pointerId);
           item.drag = { x: event.clientX, y: event.clientY, start: this.start, scrollTop: viewport.scrollTop, touch, moved: false };
         });
         canvas.addEventListener('pointermove', (event) => {
+          if (item.cursorDrag) { this.moveCursorDrag(event, item); return; }
           if (!item.drag) return;
           const dx = event.clientX - item.drag.x;
           const dy = event.clientY - item.drag.y;
@@ -265,6 +544,7 @@
           else this.setView(item.drag.start - dx * (this.end - this.start) / Math.max(1, canvas.clientWidth - this.nameWidth()), this.end - this.start);
         });
         canvas.addEventListener('pointerup', (event) => {
+          if (item.cursorDrag) { this.finishCursorDrag(event, item); return; }
           const drag = item.drag;
           item.drag = null;
           if (drag && drag.moved) item.suppressClickUntil = performance.now() + 400;
@@ -273,8 +553,9 @@
             void this.selectAt(event, item);
           }
         });
-        canvas.addEventListener('pointercancel', () => { item.drag = null; });
+        canvas.addEventListener('pointercancel', () => { item.drag = item.cursorDrag = null; });
       });
+      if (this.result) this.syncPaneGeometry();
       this.schedule();
     }
 
@@ -299,7 +580,7 @@
       if (!this.active || !this.result) return;
       this.revision = (this.revision || 0) + 1;
       if (this.frame) return;
-      this.frame = requestAnimationFrame(() => { this.frame = 0; void this.render(); });
+      this.frame = this.popup.requestAnimationFrame(() => { this.frame = 0; void this.render(); });
     }
 
     async render() {
@@ -310,123 +591,284 @@
       const generation = this.generation;
       const width = Math.max(...this.panes.map((pane) => pane.canvas.clientWidth)) - this.nameWidth();
       const height = Math.max(...this.panes.map((pane) => pane.canvas.clientHeight));
-      const rowStart = Math.floor(this.scrollTop / ROW_HEIGHT);
-      const rowEnd = Math.min(this.result.pairs.length, Math.ceil((this.scrollTop + height) / ROW_HEIGHT));
+      const rowStart = this.pairAtOffset(this.scrollTop);
+      const rowEnd = Math.min(this.result.pairs.length, this.pairAtOffset(this.scrollTop + height - AXIS_HEIGHT) + 1);
+      const left = this.leftRenderer, right = this.rightRenderer;
       const view = { start: this.start, end: this.end, rowStart, rowEnd, generation, width: Math.max(32, width),
-        leftModes: this.scope.modes, leftBusFormats: this.scope.busFormats, leftAnalogFormats: this.scope.analogFormats,
-        rightModes: this.rightDisplay.modes, rightBusFormats: this.rightDisplay.busFormats, rightAnalogFormats: this.rightDisplay.analogFormats };
+        leftModes: left.modes, leftBusFormats: left.busFormats, leftAnalogFormats: left.analogFormats,
+        rightModes: right.modes, rightBusFormats: right.busFormats, rightAnalogFormats: right.analogFormats };
+      const request = this.windowRequest = this.scope.worker.call('compare-window', view);
       try {
-        const data = await this.scope.worker.call('compare-window', view);
-        if (this.active && generation === this.generation && revision === this.revision) {
-          this.cache = { data, view };
+        const data = await request;
+        if (!data.cancelled && this.active && generation === this.generation && revision === this.revision) {
+          const errors = new Map();
+          data.errors.forEach(error => {
+            if (!errors.has(error.pair)) errors.set(error.pair, []);
+            errors.get(error.pair).push(error);
+          });
+          this.cache = { view, errors,
+            left: new Map(data.left.rows.map(row => [row.index, row])),
+            right: new Map(data.right.rows.map(row => [row.index, row])) };
           this.draw();
         }
       } catch (error) { if (this.active && !this.busy && generation === this.generation) this.status.textContent = error.message; }
       finally {
+        this.windowRequest = null;
         this.rendering = false;
         if (this.renderQueued) { this.renderQueued = false; this.schedule(); }
       }
     }
 
     draw() {
-      if (!this.cache) return;
-      const { data, view } = this.cache;
+      if (!this.cache || this.cache.view.generation !== this.generation) return;
+      const { view, errors } = this.cache;
+      const renderers = { left: this.leftRenderer, right: this.rightRenderer };
+      SIDES.forEach(side => {
+        renderers[side].viewStart = view.start;
+        renderers[side].viewEnd = view.end;
+      });
       for (const pane of this.panes) {
         const width = pane.canvas.clientWidth;
         const height = pane.canvas.clientHeight;
-        const dpr = Math.min(2, global.devicePixelRatio || 1);
+        const dpr = Math.min(2, this.popup.devicePixelRatio || 1);
         pane.canvas.width = Math.max(1, Math.round(width * dpr));
         pane.canvas.height = Math.max(1, Math.round(height * dpr));
         const ctx = pane.canvas.getContext('2d');
         ctx.scale(dpr, dpr);
-        ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, width, height);
         const nameWidth = this.nameWidth();
-        const plotWidth = width - nameWidth;
-        const xFor = (column) => nameWidth + (column - view.start) / (view.end - view.start) * plotWidth;
-        ctx.font = '12px "Segoe UI", "Microsoft YaHei", sans-serif';
-        ctx.textBaseline = 'middle';
-        const tick = Math.max(0.5, Math.pow(10, Math.floor(Math.log10((view.end - view.start) / Math.max(2, plotWidth / 90)))));
-        for (let cycle = Math.ceil(view.start / tick) * tick; cycle <= view.end; cycle += tick) {
-          const x = xFor(cycle);
-          ctx.strokeStyle = '#e8ebee'; ctx.beginPath(); ctx.moveTo(x, AXIS_HEIGHT); ctx.lineTo(x, height); ctx.stroke();
-          ctx.fillStyle = '#4d5966'; ctx.fillText(String(Number(cycle.toFixed(3))), x + 3, AXIS_HEIGHT / 2);
+        const plotWidth = Math.max(1, width - nameWidth);
+        const plotHeight = Math.max(0, height - AXIS_HEIGHT);
+        const overlay = pane.side === 'overlay';
+        const sides = overlay ? SIDES : [pane.side];
+        const renderer = renderers[sides[0]];
+        ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, width, height);
+        ctx.save(); ctx.translate(nameWidth, 0);
+        ctx.beginPath(); ctx.rect(0, 0, plotWidth, height); ctx.clip();
+        renderer.drawTimeAxis(ctx, plotWidth, AXIS_HEIGHT);
+        ctx.translate(0, AXIS_HEIGHT);
+        ctx.beginPath(); ctx.rect(0, 0, plotWidth, plotHeight); ctx.clip();
+        if (!overlay) for (let index = view.rowStart; index < view.rowEnd; index += 1) {
+          const row = this.result.pairs[index][pane.side];
+          if (row >= 0) renderer.drawRowBackground(ctx, row, this.rowOffsets[index] - this.scrollTop, this.pairHeight(index), plotWidth);
         }
-        ctx.save(); ctx.beginPath(); ctx.rect(0, AXIS_HEIGHT, width, height - AXIS_HEIGHT); ctx.clip();
+        renderer.drawGridLines(ctx, plotWidth, plotHeight);
         for (let index = view.rowStart; index < view.rowEnd; index += 1) {
           const pair = this.result.pairs[index];
-          const y = AXIS_HEIGHT + index * ROW_HEIGHT - this.scrollTop;
-          ctx.fillStyle = '#f7f8fa'; ctx.fillRect(0, y, nameWidth, ROW_HEIGHT);
-          ctx.strokeStyle = '#dce1e6'; ctx.beginPath(); ctx.moveTo(0, y + ROW_HEIGHT); ctx.lineTo(width, y + ROW_HEIGHT); ctx.stroke();
-          ctx.save(); ctx.beginPath(); ctx.rect(6, y, nameWidth - 12, ROW_HEIGHT); ctx.clip();
-          ctx.fillStyle = '#25313e'; ctx.fillText(pair.name, 8, y + 20);
-          ctx.font = '11px "Segoe UI", "Microsoft YaHei", sans-serif';
-          ctx.fillStyle = '#626b75';
-          ctx.fillText(pair.left < 0 ? 'A 缺少信号' : pair.right < 0 ? 'B 缺少信号' : pair.errorCount ? pair.errorCount + ' 处差异' : '一致', 8, y + 39);
-          ctx.restore();
-          ctx.save(); ctx.beginPath(); ctx.rect(nameWidth, y + 1, plotWidth, ROW_HEIGHT - 2); ctx.clip();
-          for (const error of data.errors) {
-            if (error.pair !== index) continue;
-            const x = Math.max(nameWidth, xFor(error.start));
-            const w = Math.max(2, Math.min(width, xFor(error.end)) - x);
-            ctx.fillStyle = 'rgba(210, 45, 55, 0.17)'; ctx.fillRect(x, y + 2, w, ROW_HEIGHT - 4);
-            ctx.strokeStyle = '#bd2638'; ctx.strokeRect(x, y + 2, w, ROW_HEIGHT - 4);
-          }
-          const sides = pane.side === 'overlay' ? ['left', 'right'] : [pane.side];
-          let range = null;
-          if (pane.side === 'overlay') {
-            const ranges = sides.map((side) => data[side].rows.find((row) => row.index === pair[side]))
-              .map((row) => row && row.data.range).filter(Boolean);
-            if (ranges.length) range = { min: Math.min(...ranges.map((r) => r.min)), max: Math.max(...ranges.map((r) => r.max)) };
-          }
+          const y = this.rowOffsets[index] - this.scrollTop;
+          const rowHeight = this.pairHeight(index);
+          ctx.strokeStyle = '#dfe2e6'; ctx.beginPath(); ctx.moveTo(0, y + rowHeight - 0.5); ctx.lineTo(plotWidth, y + rowHeight - 0.5); ctx.stroke();
+          const twoBusLabels = overlay && SIDES.every(side => this.cache[side].get(pair[side])?.mode === 'bus');
           sides.forEach((side, layer) => {
-            const row = data[side].rows.find((item) => item.index === pair[side]);
+            const row = this.cache[side].get(pair[side]);
             if (!row) return;
-            const renderer = Object.create(this.scope);
-            renderer.viewStart = view.start; renderer.viewEnd = view.end;
-            renderer.visibleMultiWaveEntries = (_index, entries) => entries;
-            renderer.highlightedMultiWaveSource = () => '';
-            renderer.rowWaveColor = () => COLORS[side === 'left' ? 0 : 1];
-            const result = range ? Object.assign({}, row, { data: Object.assign({}, row.data, { range }) }) : row;
-            ctx.save(); ctx.translate(nameWidth, 0);
-            if (layer) { ctx.globalAlpha = 0.75; ctx.setLineDash([5, 3]); }
-            const overlayBus = pane.side === 'overlay' && row.mode === 'bus';
-            if (overlayBus) renderer.visibleBusLabelGeometry = () => null;
-            renderer.drawSegments(ctx, result, pair[side], y + 6, y + ROW_HEIGHT - 7, plotWidth, COLORS[side === 'left' ? 0 : 1]);
+            const source = renderers[side];
+            const naturalHeight = source.rowHeight(row.index);
+            const top = y + (rowHeight - naturalHeight) / 2;
+            ctx.save(); ctx.beginPath(); ctx.rect(0, y, plotWidth, rowHeight - 1); ctx.clip();
+            source.drawSegments(ctx, row, row.index, top + 3, top + naturalHeight - 3, plotWidth,
+              overlay ? COLORS[layer] : source.rowWaveColor(row.index), twoBusLabels ? (layer ? 7 : -7) : 0);
             ctx.restore();
-            if (overlayBus) {
-              ctx.fillStyle = COLORS[side === 'left' ? 0 : 1];
-              ctx.textAlign = 'center';
-              for (const segment of row.data.items || []) {
-                if (segment.value == null || segment.value === '*') continue;
-                const x1 = Math.max(nameWidth, xFor(segment.start));
-                const x2 = Math.min(width, xFor(segment.end));
-                if (x2 - x1 > 45) ctx.fillText((side === 'left' ? 'A: ' : 'B: ') + String(segment.value), (x1 + x2) / 2, y + (layer ? 39 : 20), x2 - x1 - 8);
-              }
-              ctx.textAlign = 'left';
-            }
           });
-          const marker = this.selectedError || this.marker;
-          if (marker && marker.pair === index) {
-            ctx.strokeStyle = '#a5192a'; ctx.lineWidth = 2;
-            ctx.beginPath(); const x = xFor(marker.position == null ? marker.start : marker.position); ctx.moveTo(x, y); ctx.lineTo(x, y + ROW_HEIGHT); ctx.stroke();
+          for (const error of errors.get(index) || []) {
+            const left = Math.max(0, renderer.xForColumn(error.start, plotWidth));
+            const right = Math.min(plotWidth, renderer.xForColumn(error.end, plotWidth));
+            const selected = this.selectedError;
+            ctx.strokeStyle = '#bd2638';
+            ctx.lineWidth = selected?.pair === index && selected.start < error.end && selected.end > error.start ? 2 : 1;
+            if (right > left) ctx.strokeRect(left + 0.5, y + 1, Math.max(0.5, right - left - 1), rowHeight - 3);
           }
-          ctx.restore();
+          ctx.lineWidth = 1;
         }
         ctx.restore();
         ctx.fillStyle = '#f0f2f5'; ctx.fillRect(0, 0, nameWidth, AXIS_HEIGHT);
+        ctx.font = '12px "Segoe UI", "Microsoft YaHei", sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
         ctx.fillStyle = '#42505d'; ctx.fillText('信号 / cycle', 8, AXIS_HEIGHT / 2);
+        ctx.save(); ctx.beginPath(); ctx.rect(0, AXIS_HEIGHT, nameWidth, plotHeight); ctx.clip();
+        for (let index = view.rowStart; index < view.rowEnd; index += 1) {
+          const pair = this.result.pairs[index], y = AXIS_HEIGHT + this.rowOffsets[index] - this.scrollTop;
+          const h = this.pairHeight(index);
+          ctx.fillStyle = '#f7f8fa'; ctx.fillRect(0, y, nameWidth, h - 1);
+          ctx.fillStyle = '#25313e'; ctx.fillText(pair.name, 8, y + h / 2 - 6, nameWidth - 16);
+          const missing = pair.left < 0 ? 'A 缺少信号' : pair.right < 0 ? 'B 缺少信号' : '';
+          ctx.fillStyle = '#626b75';
+          ctx.fillText(missing || (pair.errorCount ? pair.errorCount + ' 处差异' : '一致'), 8, y + h / 2 + 8);
+        }
+        ctx.restore();
       }
+      this.drawCursorOverlays();
     }
 
     async selectAt(event, pane) {
-      if (!this.cache) return;
+      if (!this.cache || this.cache.view.generation !== this.generation || this.busy) return;
       const rect = pane.canvas.getBoundingClientRect();
-      if (event.clientX - rect.left < this.nameWidth() || event.clientY - rect.top < AXIS_HEIGHT) return;
-      const row = Math.floor((event.clientY - rect.top - AXIS_HEIGHT + this.scrollTop) / ROW_HEIGHT);
-      const column = this.start + (event.clientX - rect.left - this.nameWidth()) / Math.max(1, rect.width - this.nameWidth()) * (this.end - this.start);
+      if (event.clientY - rect.top < AXIS_HEIGHT) return;
+      const row = this.pairAtOffset(event.clientY - rect.top - AXIS_HEIGHT + this.scrollTop);
+      if (!this.result.pairs[row]) return;
+      const column = this.columnAt(event, pane);
+      this.cursorPair = row;
+      if (pane.side !== 'overlay') this.cursorSide = pane.side;
+      if (event.clientX - rect.left < this.nameWidth()) {
+        this.cursorSequence++;
+        this.updateCursorControls();
+        return;
+      }
+      this.moveCursor(this.activeCursor || 'C', column);
       const generation = this.generation;
       const error = await this.scope.worker.call('compare-inspect', { generation, pair: row, column });
-      if (this.active && generation === this.generation && error) this.chooseError(error, false);
+      if (this.active && !this.busy && generation === this.generation && error) this.chooseError(error, false);
+    }
+
+    columnAt(event, pane) {
+      const rect = pane.canvas.getBoundingClientRect();
+      const { start, end } = this.cache.view;
+      return start + (event.clientX - rect.left - this.nameWidth())
+        / Math.max(1, rect.width - this.nameWidth()) * (end - start);
+    }
+
+    snapColumn(column) {
+      return Math.max(0, Math.min(Math.round(column * 2) / 2, Math.ceil(this.result.total * 2) / 2 - 0.5));
+    }
+
+    selectCursor(name) {
+      if (!this.result || this.busy) return;
+      this.cursorSequence++;
+      this.activeCursor = name === 'C' || name === this.activeCursor ? '' : name;
+      if (name === 'C' && this.cursorPositions.C == null) this.cursorPositions.C = this.snapColumn(this.start);
+      this.updateCursorControls();
+      this.drawCursorOverlays();
+    }
+
+    locateCursor(name) {
+      if (!this.result || this.busy || this.cursorPositions[name] == null) return;
+      const span = this.end - this.start;
+      this.setView(this.cursorPositions[name] - span / 2, span);
+    }
+
+    moveCursor(name, column) {
+      this.cursorSequence++;
+      this.cursorPositions[name] = this.snapColumn(column);
+      this.updateCursorControls();
+      this.drawCursorOverlays();
+    }
+
+    cursorTrack(pane) {
+      const offset = this.nameWidth(), width = Math.max(1, pane.canvas.clientWidth - offset);
+      const view = this.cache?.view || { start: this.start, end: this.end };
+      return CURSORS.filter(name => this.cursorPositions[name] != null).map(name => {
+        const column = this.cursorPositions[name];
+        const x = offset + (column - view.start) / (view.end - view.start) * width;
+        return { name, x, inView: column >= view.start && column <= view.end,
+          marker: Math.max(offset + 10, Math.min(offset + width - 10, x)) };
+      }).sort((a, b) => Number(a.name === (this.activeCursor || 'C')) - Number(b.name === (this.activeCursor || 'C')));
+    }
+
+    drawCursorOverlays() {
+      if (!this.result || !this.cache) return;
+      for (const pane of this.panes) {
+        const { canvas, cursorCanvas } = pane;
+        if (cursorCanvas.width !== canvas.width) cursorCanvas.width = canvas.width;
+        if (cursorCanvas.height !== canvas.height) cursorCanvas.height = canvas.height;
+        const ctx = cursorCanvas.getContext('2d');
+        const dpr = Math.min(2, this.popup.devicePixelRatio || 1);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        const width = canvas.clientWidth, height = canvas.clientHeight;
+        ctx.clearRect(0, 0, width, height);
+        ctx.save(); ctx.beginPath(); ctx.rect(this.nameWidth(), 0, width - this.nameWidth(), height); ctx.clip();
+        for (const cursor of this.cursorTrack(pane)) {
+          const active = cursor.name === (this.activeCursor || 'C');
+          const color = CURSOR_COLORS[cursor.name];
+          if (cursor.inView) {
+            ctx.strokeStyle = color; ctx.lineWidth = active ? 2 : 1.25;
+            ctx.setLineDash(cursor.name === 'C' ? [9, 5] : []);
+            ctx.beginPath(); ctx.moveTo(cursor.x, AXIS_HEIGHT); ctx.lineTo(cursor.x, height); ctx.stroke();
+          }
+          ctx.fillStyle = color; ctx.fillRect(cursor.marker - 10, 0, 20, active ? 20 : 17);
+          ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          ctx.font = 'bold 11px "Segoe UI", sans-serif';
+          ctx.fillText(cursor.name, cursor.marker, active ? 10 : 8.5);
+        }
+        ctx.restore();
+      }
+    }
+
+    startCursorDrag(event, pane) {
+      if (!this.result || !this.cache || this.cache.view.generation !== this.generation || this.busy) return false;
+      const rect = pane.canvas.getBoundingClientRect();
+      const x = event.clientX - rect.left, y = event.clientY - rect.top;
+      if (x < this.nameWidth()) return false;
+      const marker = this.cursorTrack(pane).reverse().find(cursor => y < 20
+        ? Math.abs(x - cursor.marker) <= 10
+        : y >= AXIS_HEIGHT && cursor.name !== 'C' && cursor.inView && Math.abs(x - cursor.x) <= 4);
+      if (!marker) return false;
+      event.preventDefault();
+      pane.canvas.setPointerCapture(event.pointerId);
+      pane.cursorDrag = { ...marker, pointerId: event.pointerId, startX: event.clientX, moved: false };
+      return true;
+    }
+
+    moveCursorDrag(event, pane) {
+      const drag = pane.cursorDrag;
+      if (drag.pointerId !== event.pointerId || !this.cache || this.busy) return;
+      if (Math.abs(event.clientX - drag.startX) > 2) drag.moved = true;
+      if (drag.moved) this.moveCursor(drag.name, this.columnAt(event, pane));
+    }
+
+    finishCursorDrag(event, pane) {
+      const drag = pane.cursorDrag;
+      if (drag.pointerId !== event.pointerId) return;
+      pane.cursorDrag = null;
+      pane.suppressClickUntil = performance.now() + 400;
+      if (!drag.moved) {
+        this.selectCursor(drag.name);
+        if (!drag.inView) this.locateCursor(drag.name);
+      }
+    }
+
+    updateCursorControls() {
+      const ready = !!this.result && !this.busy;
+      const format = value => value == null ? '未设置' : value + ' cycle';
+      for (const name of CURSORS) {
+        const select = this.root.querySelector('[data-cursor="' + name + '"]');
+        const locate = this.root.querySelector('[data-locate="' + name + '"]');
+        const value = this.cursorPositions[name];
+        select.disabled = !ready;
+        select.setAttribute('aria-pressed', String(name === this.activeCursor || (name === 'C' && !this.activeCursor && value != null)));
+        locate.disabled = !ready || value == null;
+        locate.textContent = name + ' · ' + format(value);
+        locate.title = '跳转到游标 ' + name + '（Shift+' + name + '）';
+      }
+      const { A, B, C } = this.cursorPositions;
+      const delta = (x, y) => x == null || y == null ? '--' : (x - y > 0 ? '+' : '') + (x - y) + ' cycle';
+      this.measurements.textContent = 'B-A：' + delta(B, A) + '  Cur-A：' + delta(C, A) + '  Cur-B：' + delta(C, B);
+      const pair = this.result?.pairs[this.cursorPair];
+      const side = pair?.[this.cursorSide] >= 0 ? this.cursorSide : this.cursorSide === 'left' ? 'right' : 'left';
+      this.cursorSignal.textContent = pair ? (side === 'left' ? 'A · ' : 'B · ') + pair.name : '';
+      this.cursorSignal.title = this.cursorSignal.textContent;
+      const enabled = ready && !!pair && this.cursorPositions[this.activeCursor || 'C'] != null;
+      this.condition.disabled = !enabled;
+      for (const action of ['edge-prev', 'edge-next']) this.root.querySelector('[data-action="' + action + '"]').disabled = !enabled;
+    }
+
+    async navigateCursor(direction) {
+      if (!this.result || this.busy || this.condition.disabled) return;
+      const pair = this.result.pairs[this.cursorPair];
+      const side = pair[this.cursorSide] >= 0 ? this.cursorSide : this.cursorSide === 'left' ? 'right' : 'left';
+      const renderer = side === 'left' ? this.leftRenderer : this.rightRenderer;
+      const rowIndex = pair[side], name = this.activeCursor || 'C';
+      const condition = this.condition.value.trim();
+      const sequence = ++this.cursorSequence, generation = this.generation;
+      try {
+        const result = await this.scope.worker.call('compare-navigate', { generation, side, rowIndex,
+          column: this.cursorPositions[name], direction, kind: condition ? 'condition' : 'edge',
+          condition, mode: renderer.modes[rowIndex], analogFormat: renderer.analogFormats[rowIndex] });
+        if (!this.active || sequence !== this.cursorSequence || generation !== this.generation) return;
+        if (!result.found) { this.status.textContent = '没有匹配的边沿'; return; }
+        this.moveCursor(name, result.column);
+        if (result.column < this.start || result.column > this.end) this.locateCursor(name);
+        this.status.textContent = name + ' 已跳到 ' + pair.name + ' 的匹配边沿：' + result.column + ' cycle';
+      } catch (error) {
+        if (this.active && sequence === this.cursorSequence) this.status.textContent = error.message;
+      }
     }
 
     async navigate(direction) {
@@ -435,12 +877,11 @@
       const index = this.selectedError ? (this.selectedError.index + direction + count) % count : (direction > 0 ? 0 : count - 1);
       const generation = this.generation;
       const error = await this.scope.worker.call('compare-error', { generation, index });
-      if (this.active && generation === this.generation && error) this.chooseError(error, true);
+      if (this.active && !this.busy && generation === this.generation && error) this.chooseError(error, true);
     }
 
     chooseError(error, jump) {
       this.selectedError = error;
-      this.marker = null;
       const pair = this.result.pairs[error.pair];
       this.count.textContent = (error.index + 1) + ' / ' + this.result.errorCount + ' 处差异';
       this.status.textContent = pair.name + ' · cycle ' + error.start + '–' + error.end + ' · ' + error.reason
@@ -458,18 +899,37 @@
     }
 
     jump(pair, start, end) {
-      this.scrollTop = Math.max(0, pair * ROW_HEIGHT - ROW_HEIGHT);
+      this.scrollTop = this.rowOffsets[Math.max(0, pair - 1)];
       this.panes.forEach((pane) => { pane.viewport.scrollTop = this.scrollTop; });
       const span = Math.max(8, Math.min(this.end - this.start, Math.max(16, (end - start) * 3)));
       this.setView(start - span / 4, span);
     }
 
     tagKey() {
-      return 'vwd-scope-comparison-tags:' + JSON.stringify([this.scope.adapter.comparisonLibraryId || '', this.scope.document.name, this.loadedName]);
+      return 'vwd-scope-comparison-tags-v2:' + JSON.stringify([
+        this.scope.adapter.comparisonLibraryId || '', ...Object.values(this.loadedNames).sort()
+      ]);
     }
     readTags() {
-      try { this.tags = JSON.parse(localStorage.getItem(this.tagKey()) || '[]').filter((tag) => tag && typeof tag.name === 'string' && Number.isFinite(tag.start) && Number.isFinite(tag.end)); }
-      catch (_error) { this.tags = []; }
+      const read = key => {
+        try {
+          return JSON.parse(localStorage.getItem(key) || '[]').filter((tag) =>
+            tag && typeof tag.name === 'string' && Number.isFinite(tag.start) && Number.isFinite(tag.end));
+        } catch (_error) { return []; }
+      };
+      const key = this.tagKey();
+      this.tags = read(key);
+      try {
+        if (localStorage.getItem(key) == null) {
+          const library = this.scope.adapter.comparisonLibraryId || '';
+          const { left, right } = this.loadedNames;
+          const legacyKeys = [[left, right], [right, left]].map(pair =>
+            'vwd-scope-comparison-tags:' + JSON.stringify([library, ...pair]));
+          const legacy = new Map(legacyKeys.flatMap(read).map(tag => [JSON.stringify([tag.name, tag.signal, tag.start, tag.end]), tag]));
+          this.tags = [...legacy.values()];
+          if (this.tags.length) localStorage.setItem(key, JSON.stringify(this.tags));
+        }
+      } catch (_error) { /* Browser storage is optional. */ }
       this.renderTags();
     }
     saveTags() {
@@ -482,7 +942,7 @@
       const error = this.selectedError;
       const pair = this.result.pairs[error.pair];
       const start = error.position == null ? error.start : error.position;
-      const name = global.prompt('错误标签名称', pair.name + ' @ ' + start);
+      const name = this.popup.prompt('错误标签名称', pair.name + ' @ ' + start);
       if (name == null || !name.trim()) return;
       this.tags.push({ name: name.trim(), signal: pair.name, start, end: error.end });
       this.saveTags();
@@ -506,7 +966,6 @@
           if (error) this.chooseError(error, false);
           else {
             this.selectedError = null;
-            this.marker = { pair, start: tag.start };
             this.count.textContent = this.result.errorCount + ' 处差异';
             this.updateErrorControls();
           }
@@ -520,7 +979,7 @@
           control.addEventListener('click', () => {
             if (symbol === 'close') this.tags.splice(index, 1);
             else {
-              const name = global.prompt('错误标签名称', tag.name);
+              const name = this.popup.prompt('错误标签名称', tag.name);
               if (name == null || !name.trim()) return;
               tag.name = name.trim();
             }
@@ -536,20 +995,30 @@
       if (!this.active) return;
       this.active = false;
       this.sequence += 1;
+      this.cursorSequence += 1;
       this.revision = (this.revision || 0) + 1;
       clearInterval(this.progressTimer); this.progressTimer = 0;
       this.result = null;
       this.cache = null;
-      if (this.frame) cancelAnimationFrame(this.frame);
+      this.selectedError = this.refreshAnchor = null;
+      this.tags = this.rowOffsets = [];
+      clearTimeout(this.refreshTimer); this.refreshTimer = 0;
+      this.pendingChanges.clear();
+      this.scope.adapter.watchComparisonDocuments?.([]);
+      if (this.frame) this.popup.cancelAnimationFrame(this.frame);
       this.frame = 0;
       if (this.resizeObserver) this.resizeObserver.disconnect();
       this.resizeObserver = null;
-      (this.panes || []).forEach(({ canvas }) => { canvas.width = canvas.height = 0; });
-      this.panes = []; this.rightDisplay = null; this.renderQueued = false;
+      this.releaseCanvasBuffers();
+      this.panes = []; this.leftRenderer = this.rightRenderer = null; this.loadedNames = null; this.renderQueued = false;
       this.root.remove();
       this.root.replaceChildren();
       this.root = this.panesRoot = null;
-      this.scope.root.inert = false;
+      this.selects = this.count = this.status = this.startInput = this.spanInput = this.panInput = null;
+      this.condition = this.cursorSignal = this.measurements = null;
+      const popup = this.popup;
+      this.popup = null;
+      if (!options?.fromWindow && !popup.closed) popup.close();
       if (!options?.destroying) {
         void this.scope.worker.call('compare-close').catch(() => {});
         this.scope.root.querySelector('#scope-compare')?.focus();

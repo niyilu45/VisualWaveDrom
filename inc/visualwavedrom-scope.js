@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=scope-point-labels-v1';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=scope-compare-release-v1';
   const FormulaEngine = global.VisualWaveDromFormula || null;
   const DEFAULT_ROW_HEIGHT = 42;
   const DEFAULT_MULTI_WAVE_ROW_HEIGHT = 68;
@@ -1772,7 +1772,7 @@
       const sideButtonDirection = (button) => button === 3 ? -1 : button === 4 ? 1 : 0;
       const handleSideButton = (event) => {
         const direction = sideButtonDirection(event.button);
-        if (!direction || this.destroyed || this.comparison?.active) return;
+        if (!direction || this.destroyed) return;
         // Suppress history navigation on all mouse phases, but search only once.
         event.preventDefault();
         if (event.type !== 'mousedown' || !this.meta || isTextInput(event.target)
@@ -1785,7 +1785,6 @@
       });
 
       global.addEventListener('keydown', (event) => {
-        if (this.comparison && this.comparison.active) return;
         if (event.key === 'Escape' && this.signalRowDrag) {
           event.preventDefault();
           this.finishSignalRowDrag(null, true);
@@ -1960,6 +1959,7 @@
       if (kind === 'data') this.dataDraftDirty = true;
       else this.presentationDraftDirty = true;
       this.updateDraftState();
+      this.notifyComparisonChanged();
       this.log('scope-draft', {
         phase: 'changed',
         kind: kind === 'data' ? 'data' : 'presentation',
@@ -2341,6 +2341,7 @@
     persistTransientFormulaState() {
       if (this.destroyed) return;
       this.overviewBaseCache = null;
+      this.notifyComparisonChanged();
       if (typeof this.adapter.setTransientState !== 'function') return;
       try {
         this.adapter.setTransientState(clone(this.transientFormulaState));
@@ -5197,9 +5198,10 @@
 
     drawAxis() {
       const resized = this.resizeCanvas(this.axisCanvas, this.plotViewport.clientWidth, AXIS_HEIGHT);
-      const context = resized.context;
-      const width = resized.width;
-      const height = resized.height;
+      this.drawTimeAxis(resized.context, resized.width, resized.height);
+    }
+
+    drawTimeAxis(context, width, height) {
       context.clearRect(0, 0, width, height);
       context.fillStyle = '#f7f8fa';
       context.fillRect(0, 0, width, height);
@@ -5390,7 +5392,7 @@
       context.restore();
     }
 
-    drawSegments(context, rowResult, rowIndex, yTop, yBottom, width, color) {
+    drawSegments(context, rowResult, rowIndex, yTop, yBottom, width, color, labelOffset = 0) {
       const data = rowResult.data;
       const mode = rowResult.mode;
       if (data.kind === 'multi-analog') {
@@ -5497,7 +5499,7 @@
             context.fillText(
               compactBusLabel(busLabel, busLabelGeometry.width),
               busLabelGeometry.center,
-              (yTop + yBottom) / 2
+              (yTop + yBottom) / 2 + labelOffset
             );
           }
           if (!bucket.bus) {
@@ -5576,7 +5578,7 @@
             context.fillText(
               compactBusLabel(label, busLabelGeometry.width),
               busLabelGeometry.center,
-              (top + bottom) / 2
+              (top + bottom) / 2 + labelOffset
             );
           }
           previousY = null;
@@ -8373,6 +8375,7 @@
       this.scheduleWindowRequest();
       this.scheduleBuild();
       this.updateDraftState();
+      this.notifyComparisonChanged();
       this.draw();
     }
 
@@ -8610,7 +8613,35 @@
         transientState.signalNames[row.rowId] = this.signalDisplayName(row.index);
       });
       return Object.assign({}, this.document, { content, transientState,
-        display: { modes: clone(this.modes), busFormats: clone(this.busFormats), analogFormats: clone(this.analogFormats) } });
+        display: this.comparisonDisplay() });
+    }
+
+    comparisonDisplay() {
+      return { modes: clone(this.modes), busFormats: clone(this.busFormats),
+        analogFormats: clone(this.analogFormats), rowStyles: clone(this.rowStyles), rowHeights: this.rowHeights.slice() };
+    }
+
+    notifyComparisonChanged() {
+      if (!this.document || this.destroyed) return;
+      this.comparison?.sourceChanged(this.document.name);
+      this.adapter.comparisonSourceChanged?.(this.document.name);
+    }
+
+    createComparisonRenderer(meta, display, transientState) {
+      const renderer = Object.assign(Object.create(ScopeView.prototype), {
+        meta, modes: {}, busFormats: {}, analogFormats: {}, rowStyles: {}, rowHeights: [],
+        collapsedRows: new Set(), transientFormulaState: normalizeTransientFormulaState(transientState)
+      });
+      meta.rows.forEach((row) => {
+        const index = row.index;
+        renderer.modes[index] = renderer.isMultiWaveRow(index) ? 'analog' : display?.modes?.[index] || 'bus';
+        renderer.busFormats[index] = normalizeBusFormat(display?.busFormats?.[index] || row.busFormat);
+        renderer.analogFormats[index] = normalizeAnalogFormat(display?.analogFormats?.[index] || row.analogFormat,
+          row.detectedMode === 'analog' ? 'float' : 'unsigned');
+        renderer.rowStyles[index] = normalizeRowStyle(display?.rowStyles?.[index] || row.style);
+        renderer.rowHeights[index] = display?.rowHeights?.[index] || row.rowHeight || DEFAULT_ROW_HEIGHT;
+      });
+      return renderer;
     }
 
     async buildDraftSourceContent() {
@@ -8773,6 +8804,7 @@
       this.persistTransientFormulaState();
       this.clearDraftDirty();
       if (retained && retained.presentationDirty) this.markDraftDirty('presentation');
+      else this.notifyComparisonChanged();
       this.setStatus('预设波形已同步；同名临时波形已由导入内容覆盖');
       this.log('scope-sync', {
         phase: 'import-applied',
@@ -8798,6 +8830,7 @@
         if (this.destroyed) return;
         await this.reloadSavedDocument(saved);
         this.clearDraftDirty();
+        this.notifyComparisonChanged();
         this.setStatus(replacesSourceData ? '简化结果已保存到原波形' : '示波器修改已保存');
         this.log('scope-save', {
           phase: 'source-saved',
