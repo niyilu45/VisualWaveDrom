@@ -134,35 +134,7 @@
           if (this.active) this.status.textContent = error.message;
         });
       });
-      this.root.addEventListener('keydown', (event) => {
-        if (event.key === 'Escape') { this.close(); return; }
-        if (event.defaultPrevented || event.isComposing || event.ctrlKey || event.altKey || event.metaKey) return;
-        if (event.target === this.condition && event.key === 'Enter') {
-          event.preventDefault();
-          void this.navigateCursor(event.shiftKey ? -1 : 1);
-          return;
-        }
-        if (event.target.closest('input,select,textarea,[contenteditable]:not([contenteditable="false"]),[role="textbox"]')) return;
-        if (/^[abc]$/i.test(event.key)) {
-          event.preventDefault();
-          if (!event.repeat) (event.shiftKey ? this.locateCursor : this.selectCursor).call(this, event.key.toUpperCase());
-        } else if (/^(ArrowLeft|ArrowRight)$/.test(event.key)) {
-          event.preventDefault();
-          void this.navigateCursor(event.key === 'ArrowRight' ? 1 : -1);
-        } else if (event.key.toLowerCase() === 'z' && !event.shiftKey) {
-          event.preventDefault();
-          if (!event.repeat) this.fitSelection();
-        }
-      });
-      const sideButton = (event) => {
-        if (event.button !== 3 && event.button !== 4) return;
-        event.preventDefault();
-        if (event.type === 'mousedown' && !event.target.closest('input,select,textarea')
-            && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) {
-          void this.navigateCursor(event.button === 3 ? -1 : 1);
-        }
-      };
-      ['mousedown', 'mouseup', 'auxclick'].forEach(type => this.root.addEventListener(type, sideButton, true));
+      this.bindShortcuts(doc);
       this.root.querySelector('.scope-compare-layout').addEventListener('change', (event) => {
         this.layout = event.target.value;
         this.buildPanes();
@@ -185,6 +157,42 @@
         this.setBusy(false, '请选择比较图 B');
         this.selects.right.focus();
       } catch (error) { if (this.active && opening === this.sequence) this.setBusy(false, '读取目录失败：' + error.message); }
+    }
+
+    bindShortcuts(doc) {
+      this.shortcutEvents = new this.popup.AbortController();
+      const { signal } = this.shortcutEvents;
+      doc.addEventListener('keydown', (event) => {
+        if (!this.active || event.defaultPrevented || event.isComposing) return;
+        if (event.key === 'Escape') { this.close(); return; }
+        const historyDirection = this.scope.cursorHistoryDirection(event);
+        if (historyDirection) {
+          event.preventDefault();
+          if (!this.scope.isCursorShortcutInput(event.target) && !event.repeat) {
+            this.scope.log('scope-side-button', { key: event.key, direction: historyDirection, window: 'comparison' });
+            void this.navigateCursor(historyDirection);
+          }
+          return;
+        }
+        if (event.ctrlKey || event.altKey || event.metaKey) return;
+        if (event.target === this.condition && event.key === 'Enter') {
+          event.preventDefault();
+          void this.navigateCursor(event.shiftKey ? -1 : 1);
+          return;
+        }
+        if (this.scope.isCursorShortcutInput(event.target) || this.busy || !this.result) return;
+        if (/^[abc]$/i.test(event.key)) {
+          event.preventDefault();
+          if (!event.repeat) (event.shiftKey ? this.locateCursor : this.selectCursor).call(this, event.key.toUpperCase());
+        } else if (/^(ArrowLeft|ArrowRight)$/.test(event.key)) {
+          event.preventDefault();
+          void this.navigateCursor(event.key === 'ArrowRight' ? 1 : -1);
+        } else if (event.key.toLowerCase() === 'z' && !event.shiftKey) {
+          event.preventDefault();
+          if (!event.repeat) this.fitSelection();
+        }
+      }, { signal });
+      this.scope.bindCursorSideButtons(doc, direction => { void this.navigateCursor(direction); }, signal);
     }
 
     populateSources(select, choices) {
@@ -430,6 +438,7 @@
           : '比较完成 · ' + result.pairs.length + ' 对信号 · ' + result.errorCount + ' 处差异');
         this.count.textContent = result.errorCount ? result.errorCount + ' 处差异' : '无差异';
         this.setView(anchor?.start ?? 0, anchor?.span ?? result.total);
+        if (!refresh) this.panes[0]?.canvas.focus({ preventScroll: true });
         this.refreshAnchor = null;
         this.scope.log('scope-compare', { phase: 'ready', target: rightName, pairs: result.pairs.length,
           errorCount: result.errorCount, totalColumns: result.total, elapsedMs: Math.round(performance.now() - started) });
@@ -608,6 +617,7 @@
         spacer.style.height = (this.result ? this.rowOffsets.at(-1) : 0) + 'px';
         viewport.appendChild(spacer);
         const canvas = document.createElement('canvas');
+        canvas.tabIndex = 0;
         const cursorCanvas = document.createElement('canvas');
         cursorCanvas.className = 'scope-compare-cursor-layer';
         cursorCanvas.setAttribute('aria-hidden', 'true');
@@ -646,6 +656,9 @@
         });
         canvas.addEventListener('pointerdown', (event) => {
           const touch = event.pointerType === 'touch';
+          if (this.result && !this.busy && (event.button === 0 || event.button === 1)) {
+            canvas.focus({ preventScroll: true });
+          }
           if (event.button === 0 && this.startCursorDrag(event, item)) return;
           if (event.button === 0 && !touch && !this.activeCursor && this.startRangeDrag(event, item)) return;
           if (event.button !== 1 && !touch) return;
@@ -1070,14 +1083,14 @@
       const side = pair?.[this.cursorSide] >= 0 ? this.cursorSide : this.cursorSide === 'left' ? 'right' : 'left';
       this.cursorSignal.textContent = pair ? (side === 'left' ? 'A · ' : 'B · ') + pair.name : '';
       this.cursorSignal.title = this.cursorSignal.textContent;
-      const enabled = ready && !!pair && this.cursorPositions[this.activeCursor || 'C'] != null;
+      const enabled = ready && !!pair;
       this.condition.disabled = !enabled;
       for (const action of ['edge-prev', 'edge-next']) this.root.querySelector('[data-action="' + action + '"]').disabled = !enabled;
     }
 
     async navigateCursor(direction) {
-      if (!this.result || this.busy || this.condition.disabled) return;
-      const pair = this.result.pairs[this.cursorPair];
+      const pair = this.result?.pairs[this.cursorPair];
+      if (!pair || this.busy) return;
       const side = pair[this.cursorSide] >= 0 ? this.cursorSide : this.cursorSide === 'left' ? 'right' : 'left';
       const renderer = side === 'left' ? this.leftRenderer : this.rightRenderer;
       const rowIndex = pair[side], name = this.activeCursor || 'C';
@@ -1085,7 +1098,7 @@
       const sequence = ++this.cursorSequence, generation = this.generation;
       try {
         const result = await this.scope.worker.call('compare-navigate', { generation, side, rowIndex,
-          column: this.cursorPositions[name], direction, kind: condition ? 'condition' : 'edge',
+          column: this.cursorPositions[name] ?? this.start, direction, kind: condition ? 'condition' : 'edge',
           condition, mode: renderer.modes[rowIndex], analogFormat: renderer.analogFormats[rowIndex] });
         if (!this.active || sequence !== this.cursorSequence || generation !== this.generation) return;
         if (!result.found) { this.status.textContent = '没有匹配的边沿'; return; }
@@ -1220,6 +1233,8 @@
     close(options) {
       if (!this.active) return;
       this.active = false;
+      this.shortcutEvents?.abort();
+      this.shortcutEvents = null;
       this.sequence += 1;
       this.cursorSequence += 1;
       clearInterval(this.progressTimer); this.progressTimer = 0;

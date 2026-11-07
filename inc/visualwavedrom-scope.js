@@ -762,6 +762,7 @@
     dispose() {
       if (this.destroyed) return;
       this.destroyed = true;
+      this.shortcutEvents?.abort();
       this.pointLabels.dispose();
       ['windowRequestSequence', 'visibleWindowRequestSequence', 'overviewDataRequestSequence',
         'formulaRefreshSequence', 'cursorInspectSequence', 'cursorNavigationSequence', 'buildSequence'].forEach((key) => { this[key]++; });
@@ -1767,24 +1768,14 @@
       }, { passive: false });
       this.outputTitleInput.addEventListener('input', () => this.scheduleBuild());
 
-      const isTextInput = (target) => target && (/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)
-        || target.isContentEditable || target.closest?.('.CodeMirror, [role="textbox"], [role="combobox"]'));
-      const sideButtonDirection = (button) => button === 3 ? -1 : button === 4 ? 1 : 0;
-      const handleSideButton = (event) => {
-        const direction = sideButtonDirection(event.button);
-        if (!direction || this.destroyed) return;
-        // Suppress history navigation on all mouse phases, but search only once.
-        event.preventDefault();
-        if (event.type !== 'mousedown' || !this.meta || isTextInput(event.target)
-            || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey
-            || this.drag || this.overviewDrag || this.signalRowDrag) return;
-        void this.navigateActiveCursor(direction);
-      };
-      ['mousedown', 'mouseup', 'auxclick'].forEach((type) => {
-        this.root.addEventListener(type, handleSideButton, { capture: true });
-      });
+      this.shortcutEvents = new AbortController();
+      const { signal } = this.shortcutEvents;
+      this.bindCursorSideButtons(document, direction => {
+        if (!this.drag && !this.overviewDrag && !this.signalRowDrag) void this.navigateActiveCursor(direction);
+      }, signal);
 
       global.addEventListener('keydown', (event) => {
+        if (this.destroyed) return;
         if (event.key === 'Escape' && this.signalRowDrag) {
           event.preventDefault();
           this.finishSignalRowDrag(null, true);
@@ -1835,7 +1826,16 @@
           return;
         }
         const target = event.target;
-        if (isTextInput(target)) return;
+        const historyDirection = this.cursorHistoryDirection(event);
+        if (historyDirection) {
+          event.preventDefault();
+          if (!this.isCursorShortcutInput(target) && !event.repeat) {
+            this.log('scope-side-button', { key: event.key, direction: historyDirection, window: 'scope' });
+            void this.navigateActiveCursor(historyDirection);
+          }
+          return;
+        }
+        if (this.isCursorShortcutInput(target)) return;
         if (!event.defaultPrevented && !event.ctrlKey && !event.metaKey && !event.altKey
             && !event.isComposing && /^(a|b|c)$/i.test(event.key)) {
           event.preventDefault();
@@ -1868,10 +1868,10 @@
           else if (this.selectedPoint) this.deleteSelectedPoint();
           else void this.deleteActiveSignal();
         }
-      });
+      }, { signal });
 
       this.root.addEventListener('pointerdown', (event) => {
-        if (sideButtonDirection(event.button)) return;
+        if (event.button === 3 || event.button === 4) return;
         if (this.formulaVariablePicker && !this.formulaVariablePicker.hidden
             && !this.formulaVariablePicker.contains(event.target)
             && event.target !== this.formulaInsertVariableButton) {
@@ -7749,14 +7749,8 @@
 
     updateCursorJumpAvailability() {
       if (!this.cursorPrevButton || !this.cursorNextButton || !this.cursorJumpInput) return;
-      const activeA = this.activeCursor === 'A';
-      const activeB = this.activeCursor === 'B';
-      const hasActiveCursor = activeA || activeB;
-      const hasSelectionCursor = !hasActiveCursor && this.selectionCursorColumn() != null;
-      const hasNavigationCursor = hasActiveCursor || hasSelectionCursor;
-      this.cursorPrevButton.disabled = !hasNavigationCursor;
-      this.cursorNextButton.disabled = !hasNavigationCursor;
-      this.cursorJumpInput.disabled = !hasNavigationCursor;
+      const disabled = !this.meta?.rows.length;
+      this.cursorPrevButton.disabled = this.cursorNextButton.disabled = this.cursorJumpInput.disabled = disabled;
     }
 
     updateCursorLocationControls() {
@@ -7921,18 +7915,48 @@
       this.centerViewOnColumn(column);
     }
 
+    isCursorShortcutInput(target) {
+      return target?.isContentEditable || target?.closest?.(
+        'input,select,textarea,.CodeMirror,[role="textbox"],[role="combobox"]'
+      );
+    }
+
+    cursorHistoryDirection(event) {
+      if (event.defaultPrevented || event.isComposing || event.ctrlKey || event.metaKey || event.shiftKey) return 0;
+      if (event.key === 'BrowserBack' || (event.altKey && event.key === 'ArrowLeft')) return -1;
+      if (event.key === 'BrowserForward' || (event.altKey && event.key === 'ArrowRight')) return 1;
+      return 0;
+    }
+
+    bindCursorSideButtons(target, navigate, signal) {
+      const phases = new Map();
+      const handle = (event) => {
+        const { button, type, timeStamp } = event;
+        if (button !== 3 && button !== 4) return;
+        event.preventDefault();
+        const previous = phases.get(button);
+        const down = type === 'pointerdown' || type === 'mousedown';
+        // Native pointer, mouse and auxiliary-click events can describe the same press.
+        const duplicate = down ? type === 'mousedown' && previous?.type === 'pointerdown'
+          && timeStamp - previous.timeStamp < 100
+          : previous && previous.type !== type && (previous.type.endsWith('down') || timeStamp - previous.timeStamp < 100);
+        if (type === 'auxclick') phases.delete(button);
+        else phases.set(button, { type, timeStamp });
+        if (duplicate || this.isCursorShortcutInput(event.target)
+            || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+        const direction = button === 3 ? -1 : 1;
+        this.log('scope-side-button', { type, button, direction, window: target === document ? 'scope' : 'comparison' });
+        navigate(direction);
+      };
+      ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'auxclick'].forEach(type => {
+        target.addEventListener(type, handle, { capture: true, signal });
+      });
+    }
+
     async navigateActiveCursor(direction) {
-      if (!this.meta.rows.length) return;
-      const selectionCursorColumn = this.selectionCursorColumn();
-      const navigationCursor = this.activeCursor
-        || (selectionCursorColumn == null ? '' : 'C');
-      const navigationColumn = this.activeCursor
-        ? this.activeCursorColumn()
-        : selectionCursorColumn;
-      if (!navigationCursor || navigationColumn == null) {
-        this.setStatus('请先选择 A、B 游标或 C 位置', true);
-        return;
-      }
+      if (!this.meta?.rows.length || this.destroyed) return;
+      const navigationCursor = this.activeCursor || 'C';
+      const navigationColumn = this.cursorLocation(navigationCursor) ?? this.viewStart;
       const row = this.meta.rows[this.activeCursorRow];
       const mode = this.modes[this.activeCursorRow] || row.mode;
       const expression = this.cursorJumpInput.value.trim();
