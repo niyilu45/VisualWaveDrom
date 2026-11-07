@@ -219,7 +219,24 @@ function normalizeAnalogFormat(candidate, fallbackType) {
     || requestedInterpolation === 'step'
     ? 'discrete'
     : 'continuous';
-  return { type, bitWidth, fractionalBits, interpolation };
+  const format = { type, bitWidth, fractionalBits, interpolation };
+  ['displayMin', 'displayMax'].forEach(key => {
+    const value = finiteNumber(source[key]);
+    if (value != null) format[key] = value;
+  });
+  return format;
+}
+
+function resolveAnalogDisplayRange(candidate, format) {
+  let min = finiteNumber(candidate && candidate.min), max = finiteNumber(candidate && candidate.max);
+  if (min == null || max == null) { min = -1; max = 1; }
+  if (!(max > min)) { min -= 1; max += 1; }
+  const lower = finiteNumber(format && format.displayMin), upper = finiteNumber(format && format.displayMax);
+  if (lower != null && upper != null) return upper > lower && Number.isFinite(upper - lower) ? { min: lower, max: upper } : { min, max };
+  const span = Math.max(1e-12, max - min, Math.abs(lower == null ? upper || 0 : lower) * 1e-6);
+  if (lower != null) { min = lower; if (!(max > min)) max = min + span; }
+  if (upper != null) { max = upper; if (!(max > min)) min = max - span; }
+  return { min, max };
 }
 
 function normalizeBusFormat(candidate) {
@@ -2196,6 +2213,7 @@ async function createWindow(payload, session = activeSession) {
       ? 'analog'
       : (payload.modes && payload.modes[index] || row.mode);
     if (row.multiWave) {
+      const range = resolveAnalogDisplayRange(row.range, payload.analogFormats && payload.analogFormats[index] || row.analogFormat);
       const series = row.multiWave.sources.map((source) => {
         const sourceRow = session.rows[source.rowIndex];
         if (!sourceRow) return null;
@@ -2205,7 +2223,7 @@ async function createWindow(payload, session = activeSession) {
           total
         );
         const data = analogWindow(analogRow, start, end, width, total);
-        data.range = row.range;
+        data.range = range;
         return {
           name: source.name,
           rowId: source.rowId,
@@ -2216,7 +2234,7 @@ async function createWindow(payload, session = activeSession) {
       rows.push({
         index,
         mode: 'analog',
-        data: { kind: 'multi-analog', range: row.range, series }
+        data: { kind: 'multi-analog', range, series }
       });
     } else {
       const analogRow = mode === 'analog'
@@ -2237,6 +2255,8 @@ async function createWindow(payload, session = activeSession) {
           total,
           payload.busFormats && payload.busFormats[index] || row.busFormat
         );
+      if (mode === 'analog') data.range = resolveAnalogDisplayRange(data.range,
+        payload.analogFormats && payload.analogFormats[index] || row.analogFormat);
       rows.push({ index, mode, data });
     }
     if ((rowOffset + 1) % 2 === 0 && rowOffset + 1 < rowIndices.length) {
@@ -2332,6 +2352,33 @@ function analogRowForFormat(row, requestedFormat, totalColumns) {
   });
   if (row.analogCache) row.analogCache.set(key, derived);
   return derived;
+}
+
+function labelPoints(payload) {
+  if (!activeSession) return [];
+  const formats = payload.analogFormats || {}, points = [];
+  (payload.queries || []).forEach(query => {
+    const row = activeSession.rows[query.rowIndex], column = finiteNumber(query.column);
+    if (!row || column == null || column < 0 || column >= activeSession.totalColumns) return;
+    const sources = row.multiWave ? row.multiWave.sources.filter(source => !Array.isArray(query.sources)
+      || query.sources.includes(source.rowId)).map(source => ({ source, row: activeSession.rows[source.rowIndex] }))
+      : [{ row, source: null }];
+    sources.forEach(entry => {
+      if (!entry.row) return;
+      const analog = analogRowForFormat(entry.row, formats[entry.row.index], activeSession.totalColumns);
+      const step = rowSampleStep(analog), position = column / step, index = Math.floor(position);
+      if (!analog.samples || index >= analog.samples.length) return;
+      const left = analog.samples[index], right = analog.samples[index + 1], fraction = position - index;
+      if (!Number.isFinite(left)) return;
+      if (!analog.stepInterpolation && index === analog.samples.length - 1 && fraction > 1e-9) return;
+      const value = analog.stepInterpolation || !Number.isFinite(right) ? left : left * (1 - fraction) + right * fraction;
+      if (!Number.isFinite(value)) return;
+      points.push({ id: query.id || '', rowIndex: row.index, rowId: row.rowId, column, value,
+        sourceRowId: entry.source ? entry.source.rowId : '', name: entry.source ? entry.source.name : row.name,
+        range: resolveAnalogDisplayRange(row.multiWave ? row.range : analog.range, formats[row.index] || row.analogFormat) });
+    });
+  });
+  return points;
 }
 
 function clockSymbolAt(row, column) {
@@ -3301,6 +3348,11 @@ function applyRowDisplayConfig(target, row, rowIndex, payload) {
     scope.fractionalBits = format.fractionalBits;
     scope.interpolation = format.interpolation;
   }
+  const displayFormat = normalizeAnalogFormat(source.analogFormats && source.analogFormats[rowIndex] || row.analogFormat);
+  ['displayMin', 'displayMax'].forEach(key => {
+    if (displayFormat[key] != null) scope[key] = displayFormat[key];
+    else delete scope[key];
+  });
   const rowHeight = normalizeRowHeight(
     source.rowHeights && source.rowHeights[rowIndex] != null
       ? source.rowHeights[rowIndex]
@@ -3736,6 +3788,8 @@ async function handleRequest(message) {
         Math.max(0, Math.floor(finiteNumber(request.windowGeneration) || 0))
       );
       result = await createWindow(request);
+    } else if (request.type === 'label-points') {
+      result = labelPoints(request);
     } else if (request.type === 'inspect') {
       result = inspectCursor(request);
     } else if (request.type === 'snap') {
@@ -3771,7 +3825,8 @@ if (typeof document === 'undefined' && global && typeof global.postMessage === '
   });
 } else if (global) {
   global.VisualWaveDromScopeWorkerCore = {
-    handleRequest
+    handleRequest,
+    resolveAnalogDisplayRange
   };
 }
 })(typeof self !== 'undefined' ? self : this);

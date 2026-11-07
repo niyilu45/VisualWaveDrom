@@ -253,6 +253,24 @@ body.scope-wave-view > #vim-help-modal {
   background: #d93025;
 }
 
+#scope-cursor-c.active {
+  border-color: #2f73bf;
+  color: #ffffff;
+  background: #2f73bf;
+}
+
+.scope-cursor-locate-controls { flex-wrap: wrap; max-width: 100%; }
+.scope-cursor-locate {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  width: 132px;
+  height: 28px;
+  font-variant-numeric: tabular-nums;
+}
+.scope-cursor-locate span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+
 .scope-cursor-signal {
   max-width: 120px;
   overflow: hidden;
@@ -948,6 +966,41 @@ body.scope-multi-wave-legend-dragging * {
   cursor: crosshair;
 }
 
+.scope-point-label-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 3;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.scope-point-label-layer > svg { position: absolute; inset: 0; pointer-events: none; }
+.scope-point-label-leader { stroke: #6b7178; stroke-width: 1; }
+.scope-point-label-marker { fill: #000; stroke: #fff; stroke-width: 0.5; }
+.scope-point-label {
+  position: absolute;
+  display: grid;
+  gap: 2px;
+  min-width: 104px;
+  max-width: calc(100% - 8px);
+  padding: 5px 8px;
+  border: 1px solid #848b92;
+  border-radius: 4px;
+  background: #fff;
+  color: #20252b;
+  font: 12px/16px "Segoe UI", "Microsoft YaHei", sans-serif;
+  white-space: nowrap;
+  pointer-events: auto;
+  touch-action: none;
+  user-select: none;
+  cursor: grab;
+}
+.scope-point-label[hidden] { display: none; }
+.scope-point-label.selected { border-color: #1769aa; background: #f2f7fc; }
+.scope-point-label:active { cursor: grabbing; }
+.scope-point-label:focus-visible { outline: 2px solid #1769aa; outline-offset: 1px; }
+
 .scope-plot.connection-mode,
 .scope-plot.connection-mode:active {
   cursor: crosshair;
@@ -1271,6 +1324,17 @@ body.scope-multi-wave-legend-dragging * {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
+}
+
+.scope-field-error {
+  margin: 0;
+  color: #b3261e;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.scope-analog-settings input[aria-invalid="true"] {
+  border-color: #b3261e;
 }
 
 .scope-formula-settings {

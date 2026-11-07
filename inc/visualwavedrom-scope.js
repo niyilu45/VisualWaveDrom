@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=scope-dispose-v1';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=scope-point-labels-v1';
   const FormulaEngine = global.VisualWaveDromFormula || null;
   const DEFAULT_ROW_HEIGHT = 42;
   const DEFAULT_MULTI_WAVE_ROW_HEIGHT = 68;
@@ -310,7 +310,12 @@
       || requestedInterpolation === 'step'
       ? 'discrete'
       : 'continuous';
-    return { type, bitWidth, fractionalBits, interpolation };
+    const format = { type, bitWidth, fractionalBits, interpolation };
+    ['displayMin', 'displayMax'].forEach(key => {
+      const value = finiteScopeNumber(source[key]);
+      if (value != null) format[key] = value;
+    });
+    return format;
   }
 
   function normalizeBusFormat(candidate) {
@@ -638,6 +643,7 @@
       this.cursorA = null;
       this.cursorB = null;
       this.activeCursor = '';
+      this.cursorC = null;
       this.activeCursorRow = 0;
       this.connectionMode = false;
       this.connectionDraftStart = null;
@@ -749,12 +755,14 @@
         event.returnValue = '';
       };
       this.handlePageHide = (event) => { if (!event.persisted) this.dispose(); };
-      this.handleResize = () => this.updateLayout();
+      this.handleResize = () => { this.updateLayout(); this.positionDisplayPopover(); };
+      this.pointLabels = global.VisualWaveDromScopeLabels.create(this);
     }
 
     dispose() {
       if (this.destroyed) return;
       this.destroyed = true;
+      this.pointLabels.dispose();
       ['windowRequestSequence', 'visibleWindowRequestSequence', 'overviewDataRequestSequence',
         'formulaRefreshSequence', 'cursorInspectSequence', 'cursorNavigationSequence', 'buildSequence'].forEach((key) => { this[key]++; });
       ['scheduleWindowRequest', 'scheduleBuild', 'scheduleOverviewDataRequest',
@@ -945,11 +953,14 @@
                 title="删除当前选中的波形，可通过撤销恢复" disabled>删除波形</button>
             <button type="button" class="scope-command-btn" id="scope-connections"
                 aria-pressed="false">连接线</button>
+            <button type="button" class="scope-command-btn" id="scope-point-labels"
+                aria-pressed="false" title="模拟波形 X/Y 标签；Shift+单击新增，拖动卡片调整位置">标签</button>
           </div>
           <div class="scope-toolbar-group scope-cursor-controls" aria-label="游标工具">
-            <span class="scope-toolbar-label">游标</span>
-            <button type="button" class="scope-cursor-choice" id="scope-cursor-a" aria-pressed="false" aria-keyshortcuts="a" title="选择 / 取消游标 A（a）">A</button>
-            <button type="button" class="scope-cursor-choice" id="scope-cursor-b" aria-pressed="false" aria-keyshortcuts="b" title="选择 / 取消游标 B（b）">B</button>
+            <span class="scope-toolbar-label">选择游标</span>
+            <button type="button" class="scope-cursor-choice" id="scope-cursor-a" aria-pressed="false" aria-keyshortcuts="a" title="选择 / 取消游标 A（a），不跳转视图">A</button>
+            <button type="button" class="scope-cursor-choice" id="scope-cursor-b" aria-pressed="false" aria-keyshortcuts="b" title="选择 / 取消游标 B（b），不跳转视图">B</button>
+            <button type="button" class="scope-cursor-choice" id="scope-cursor-c" aria-pressed="false" aria-keyshortcuts="c" title="选择游标 C（c），不跳转视图">C</button>
             <span class="scope-cursor-signal" id="scope-cursor-signal"></span>
             <label>跳转
               <input type="text" id="scope-cursor-jump" placeholder="1,2 或 &gt;=1 and &lt;=2"
@@ -960,6 +971,15 @@
                 title="跳到上一个匹配边沿（键盘左方向键）" aria-label="跳到上一个匹配边沿" disabled>◀</button>
             <button type="button" class="scope-icon-btn scope-small-icon" id="scope-cursor-next"
                 title="跳到下一个匹配边沿（键盘右方向键）" aria-label="跳到下一个匹配边沿" disabled>▶</button>
+          </div>
+          <div class="scope-toolbar-group scope-cursor-locate-controls" aria-label="跳转到游标">
+            <span class="scope-toolbar-label">跳转到游标</span>
+            <button type="button" class="scope-command-btn scope-cursor-locate" data-scope-locate-cursor="A"
+                aria-keyshortcuts="Shift+A" title="跳转到游标 A（Shift+A）" disabled><b>A</b><span>未设置</span></button>
+            <button type="button" class="scope-command-btn scope-cursor-locate" data-scope-locate-cursor="B"
+                aria-keyshortcuts="Shift+B" title="跳转到游标 B（Shift+B）" disabled><b>B</b><span>未设置</span></button>
+            <button type="button" class="scope-command-btn scope-cursor-locate" data-scope-locate-cursor="C"
+                aria-keyshortcuts="Shift+C" title="跳转到游标 C（Shift+C）" disabled><b>C</b><span>未设置</span></button>
           </div>
           <div class="scope-toolbar-group scope-style-controls" aria-label="波形显示样式">
             <span class="scope-toolbar-label">行样式</span>
@@ -1154,6 +1174,15 @@
               </label>
             </div>
           </div>
+          <div class="scope-analog-settings" id="scope-signal-analog-range-settings" hidden>
+            <div class="scope-analog-number-fields">
+              <label><span>最小值</span><input type="number" id="scope-signal-analog-min" step="any"
+                  aria-label="模拟显示最小值" aria-describedby="scope-signal-analog-range-error"></label>
+              <label><span>最大值</span><input type="number" id="scope-signal-analog-max" step="any"
+                  aria-label="模拟显示最大值" aria-describedby="scope-signal-analog-range-error"></label>
+            </div>
+            <p class="scope-field-error" id="scope-signal-analog-range-error" role="alert" hidden></p>
+          </div>
           <div class="scope-multi-wave-settings" id="scope-multi-wave-settings" hidden>
             <span class="scope-display-field-label">叠加信号</span>
             <div class="scope-multi-wave-source-list" id="scope-multi-wave-source-list"
@@ -1295,6 +1324,8 @@
       this.deleteSignalButton = root.querySelector('#scope-delete-signal');
       this.cursorAButton = root.querySelector('#scope-cursor-a');
       this.cursorBButton = root.querySelector('#scope-cursor-b');
+      this.cursorCButton = root.querySelector('#scope-cursor-c');
+      this.cursorLocateButtons = Array.from(root.querySelectorAll('[data-scope-locate-cursor]'));
       this.cursorSignalEl = root.querySelector('#scope-cursor-signal');
       this.cursorJumpInput = root.querySelector('#scope-cursor-jump');
       this.cursorPrevButton = root.querySelector('#scope-cursor-prev');
@@ -1330,6 +1361,10 @@
       this.signalAnalogInterpolationOptions = root.querySelector('#scope-signal-analog-interpolation');
       this.signalAnalogWidthInput = root.querySelector('#scope-signal-analog-width');
       this.signalAnalogFractionInput = root.querySelector('#scope-signal-analog-fraction');
+      this.signalAnalogRangeSettings = root.querySelector('#scope-signal-analog-range-settings');
+      this.signalAnalogMinInput = root.querySelector('#scope-signal-analog-min');
+      this.signalAnalogMaxInput = root.querySelector('#scope-signal-analog-max');
+      this.signalAnalogRangeError = root.querySelector('#scope-signal-analog-range-error');
       this.multiWaveSettings = root.querySelector('#scope-multi-wave-settings');
       this.multiWaveSourceList = root.querySelector('#scope-multi-wave-source-list');
       this.multiWaveFeedback = root.querySelector('#scope-multi-wave-feedback');
@@ -1367,6 +1402,7 @@
     }
 
     bindEvents() {
+      this.pointLabels.attach();
       this.root.querySelector('#scope-zoom-in').addEventListener('click', () => this.zoom(0.5));
       this.root.querySelector('#scope-zoom-out').addEventListener('click', () => this.zoom(2));
       this.root.querySelector('#scope-fit').addEventListener('click', () => this.fit());
@@ -1389,6 +1425,10 @@
       this.connectionButton.addEventListener('click', () => this.toggleConnectionMode());
       this.cursorAButton.addEventListener('click', () => this.toggleActiveCursor('A'));
       this.cursorBButton.addEventListener('click', () => this.toggleActiveCursor('B'));
+      this.cursorCButton.addEventListener('click', () => this.selectCursorC());
+      this.cursorLocateButtons.forEach(button => button.addEventListener('click', () => {
+        this.locateCursor(button.dataset.scopeLocateCursor);
+      }));
       this.cursorPrevButton.addEventListener('click', () => {
         void this.navigateActiveCursor(-1);
       });
@@ -1477,6 +1517,12 @@
       this.signalAnalogTypeSelect.addEventListener('change', () => this.applySignalAnalogFormat());
       this.signalAnalogWidthInput.addEventListener('change', () => this.applySignalAnalogFormat());
       this.signalAnalogFractionInput.addEventListener('change', () => this.applySignalAnalogFormat());
+      [this.signalAnalogMinInput, this.signalAnalogMaxInput].forEach(input => {
+        input.addEventListener('change', () => this.applySignalAnalogRange());
+        input.addEventListener('keydown', event => {
+          if (event.key === 'Enter' && !event.isComposing) { event.preventDefault(); this.applySignalAnalogRange(); }
+        });
+      });
       this.signalAnalogInterpolationOptions.addEventListener('click', (event) => {
         const button = event.target.closest('[data-scope-analog-interpolation]');
         if (!button) return;
@@ -1745,6 +1791,10 @@
           this.closeStylePopover();
           return;
         }
+        if (event.key === 'Escape' && (this.pointLabels.active || this.pointLabels.gesture || this.pointLabels.selectedId)) {
+          event.preventDefault(); this.pointLabels.stop(true); this.pointLabels.setMode(false);
+          this.pointLabels.selectedId = ''; this.pointLabels.redraw(); return;
+        }
         if (event.key === 'Escape' && this.connectionDraftStart) {
           event.preventDefault();
           this.connectionDraftStart = null;
@@ -1770,12 +1820,16 @@
         }
         const target = event.target;
         const editingText = target && (/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)
-          || target.isContentEditable);
+          || target.isContentEditable || target.closest?.('.CodeMirror, [role="textbox"], [role="combobox"]'));
         if (editingText) return;
         if (!event.defaultPrevented && !event.ctrlKey && !event.metaKey && !event.altKey
-            && !event.isComposing && /^(a|b)$/i.test(event.key)) {
+            && !event.isComposing && /^(a|b|c)$/i.test(event.key)) {
           event.preventDefault();
-          if (!event.repeat) this.toggleActiveCursor(event.key.toUpperCase());
+          if (!event.repeat) {
+            if (event.shiftKey) this.locateCursor(event.key.toUpperCase());
+            else if (event.key.toLowerCase() === 'c') this.selectCursorC();
+            else this.toggleActiveCursor(event.key.toUpperCase());
+          }
         } else if (!event.ctrlKey && !event.metaKey && !event.altKey
             && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
           event.preventDefault();
@@ -1795,6 +1849,7 @@
             && !event.altKey && !event.isComposing && !event.repeat) {
           event.preventDefault();
           if (this.signalList.contains(target)) void this.deleteActiveSignal();
+          else if (this.pointLabels.selectedVisible()) this.pointLabels.deleteSelected();
           else if (this.selectedConnectionId) this.deleteSelectedConnection();
           else if (this.selectedPoint) this.deleteSelectedPoint();
           else void this.deleteActiveSignal();
@@ -1820,7 +1875,7 @@
       });
 
       if (typeof ResizeObserver === 'function') {
-        this.resizeObserver = new ResizeObserver(() => this.updateLayout());
+        this.resizeObserver = new ResizeObserver(this.handleResize);
         this.resizeObserver.observe(this.plotViewport);
       } else {
         global.addEventListener('resize', this.handleResize);
@@ -1881,6 +1936,10 @@
     }
 
     markDraftDirty(kind) {
+      if (kind === 'data') {
+        this.pointLabels.invalidate();
+        this.updateAnalogRangePlaceholders();
+      }
       this.overviewBaseCache = null;
       if (kind === 'data') this.dataDraftDirty = true;
       else this.presentationDraftDirty = true;
@@ -3960,6 +4019,7 @@
       });
       const analogMode = mode === 'analog';
       this.signalAnalogSettings.hidden = !analogMode || multiWave;
+      this.signalAnalogRangeSettings.hidden = !analogMode;
       const format = normalizeAnalogFormat(
         this.analogFormats[row.index],
         row.detectedMode === 'analog' ? 'float' : 'unsigned'
@@ -3968,6 +4028,12 @@
       this.signalAnalogTypeSelect.value = format.type;
       this.signalAnalogWidthInput.value = String(format.bitWidth);
       this.signalAnalogFractionInput.value = String(format.fractionalBits);
+      this.signalAnalogMinInput.value = format.displayMin == null ? '' : String(format.displayMin);
+      this.signalAnalogMaxInput.value = format.displayMax == null ? '' : String(format.displayMax);
+      this.updateAnalogRangePlaceholders();
+      this.signalAnalogRangeError.hidden = true;
+      this.signalAnalogMinInput.removeAttribute('aria-invalid');
+      this.signalAnalogMaxInput.removeAttribute('aria-invalid');
       this.signalAnalogInterpolationOptions.querySelectorAll('[data-scope-analog-interpolation]')
         .forEach((button) => {
           button.classList.toggle(
@@ -4076,6 +4142,8 @@
         type: this.signalAnalogTypeSelect.value,
         bitWidth: this.signalAnalogWidthInput.value,
         fractionalBits: this.signalAnalogFractionInput.value,
+        displayMin: previous.displayMin,
+        displayMax: previous.displayMax,
         interpolation: requestedInterpolation || previous.interpolation
       }, previous.type);
       const changed = previous.type !== next.type
@@ -4100,6 +4168,59 @@
         row.name + ' 已按' + typeLabel + '解析，'
         + (next.interpolation === 'discrete' ? '离散保持' : '连续折线')
       );
+    }
+
+    updateAnalogRangePlaceholders(windowData = this.windowData) {
+      if (!this.displayPopover || this.displayPopover.hidden || this.displayControlRow == null) return;
+      const row = this.meta && this.meta.rows[this.displayControlRow];
+      if (!row || this.modes[row.index] !== 'analog') return;
+      const simplified = this.simplifiedDisplayActive && !row.multiWave
+        && this.simplified && this.simplified.model.rows[row.index];
+      const data = windowData && windowData.rows[row.index] && windowData.rows[row.index].data;
+      const range = simplified ? this.analogDisplayRange(row.index, null, simplified.values)
+        : data && data.range || this.analogDisplayRange(row.index, row.range);
+      this.signalAnalogMinInput.placeholder = String(range.min);
+      this.signalAnalogMaxInput.placeholder = String(range.max);
+    }
+
+    applySignalAnalogRange() {
+      const row = this.meta && this.meta.rows[this.displayControlRow];
+      if (!row || this.modes[row.index] !== 'analog') return;
+      const inputs = [this.signalAnalogMinInput, this.signalAnalogMaxInput];
+      const values = inputs.map(input => input.value.trim() ? Number(input.value) : null);
+      const invalid = inputs.some((input, index) => input.validity.badInput || values[index] != null && !Number.isFinite(values[index]));
+      const invalidOrder = values[0] != null && values[1] != null
+        && (!(values[1] > values[0]) || !Number.isFinite(values[1] - values[0]));
+      if (invalid || invalidOrder) {
+        inputs.forEach(input => input.setAttribute('aria-invalid', 'true'));
+        this.signalAnalogRangeError.textContent = invalid ? '请输入有效数字，或清空以使用自动范围' : '最大值必须大于最小值，且范围必须为有限数值';
+        this.signalAnalogRangeError.hidden = false;
+        this.positionDisplayPopover(); return;
+      }
+      const previous = normalizeAnalogFormat(this.analogFormats[row.index]);
+      const next = Object.assign({}, previous);
+      ['displayMin', 'displayMax'].forEach((key, index) => { if (values[index] == null) delete next[key]; else next[key] = values[index]; });
+      const changed = previous.displayMin !== next.displayMin || previous.displayMax !== next.displayMax;
+      if (changed) this.pushHistory();
+      this.analogFormats[row.index] = next;
+      this.updateDisplayPopover();
+      if (!changed) return;
+      this.markDraftDirty('presentation');
+      this.scheduleWindowRequest(); this.scheduleOverviewDataRequest(); this.scheduleBuild();
+      this.draw();
+      this.setStatus(row.name + ' 已更新模拟显示范围');
+    }
+
+    analogDisplayRange(rowIndex, range, values) {
+      if (!range && values) {
+        let min = Infinity, max = -Infinity;
+        values.forEach(value => {
+          const number = finiteScopeNumber(value); if (number == null) return;
+          min = Math.min(min, number); max = Math.max(max, number);
+        });
+        range = Number.isFinite(min) && Number.isFinite(max) ? { min, max } : null;
+      }
+      return global.VisualWaveDromScopeWorkerCore.resolveAnalogDisplayRange(range, this.analogFormats[rowIndex]);
     }
 
     rowStyle(rowIndex) {
@@ -4539,6 +4660,7 @@
     }
 
     positionPlotCanvas() {
+      this.pointLabels.position();
       const transform = 'translateY(' + this.plotViewport.scrollTop + 'px)';
       if (this.plotCanvas.style.transform !== transform) {
         this.plotCanvas.style.transform = transform;
@@ -4869,6 +4991,7 @@
         if (!row || row.index < 0 || row.index >= cache.rows.length) return;
         if (!cache.rows[row.index]) cache.computedRowCount += 1;
         cache.rows[row.index] = row;
+        if (row.index === this.displayControlRow) this.updateAnalogRangePlaceholders(cache);
       });
     }
 
@@ -5479,6 +5602,7 @@
 
     drawAnalog(context, data, yTop, yBottom, width, color, options) {
       const settings = options || {};
+      context.save(); context.beginPath(); context.rect(0, yTop + 4, width, Math.max(0, yBottom - yTop - 8)); context.clip();
       const range = data.range || { min: -1, max: 1 };
       const scale = Math.max(1e-12, range.max - range.min);
       const yFor = (value) => yBottom - 4
@@ -5528,6 +5652,7 @@
         }
         context.stroke();
       }
+      context.restore();
       if (settings.drawGuide !== false) {
         context.strokeStyle = '#cfd3d8';
         context.lineWidth = 1;
@@ -5577,22 +5702,8 @@
       for (let index = firstPoint; index <= lastPoint; index += 1) visible.push(index);
       if (!visible.length) return;
       if (row.mode === 'analog') {
-        let min = Number.POSITIVE_INFINITY;
-        let max = Number.NEGATIVE_INFINITY;
-        row.values.forEach((value) => {
-          const number = finiteScopeNumber(value);
-          if (number == null) return;
-          min = Math.min(min, number);
-          max = Math.max(max, number);
-        });
-        if (!Number.isFinite(min) || !Number.isFinite(max)) {
-          min = -1;
-          max = 1;
-        }
-        if (Math.abs(max - min) < 1e-12) {
-          min -= 1;
-          max += 1;
-        }
+        const { min, max } = this.analogDisplayRange(rowIndex, null, row.values);
+        context.save(); context.beginPath(); context.rect(0, yTop + 4, width, Math.max(0, yBottom - yTop - 8)); context.clip();
         context.strokeStyle = color;
         context.lineWidth = 1.7;
         context.beginPath();
@@ -5624,6 +5735,7 @@
           previousY = y;
         });
         if (started) context.stroke();
+        context.restore();
       } else if (row.mode === 'bus') {
         const busSegments = simplifiedBusSegments(
           row,
@@ -6175,6 +6287,7 @@
       if (!this.meta || !this.plotViewport.clientWidth) return;
       const settings = options || {};
       const isolated = !!settings.isolated;
+      if (!isolated) this.pointLabels.draw();
       const overlayOnly = !isolated && !!settings.overlayOnly;
       const plotOnly = isolated || overlayOnly || !!settings.plotOnly;
       if (!plotOnly) this.drawAxis();
@@ -6435,7 +6548,7 @@
         context.lineWidth = 1;
         const multiWave = this.meta.rows[rowIndex] && this.meta.rows[rowIndex].multiWave;
         if (multiWave && Array.isArray(multiWave.sources)) {
-          const range = this.meta.rows[rowIndex].range || { min: -1, max: 1 };
+          const range = this.analogDisplayRange(rowIndex, this.meta.rows[rowIndex].range);
           const scale = Math.max(1e-12, Number(range.max) - Number(range.min));
           let highlighted = this.highlightedMultiWaveSource(rowIndex);
           const layered = this.visibleMultiWaveEntries(rowIndex, multiWave.sources).map(
@@ -6547,6 +6660,7 @@
             previousY = y;
           });
         } else if (row.mode === 'analog') {
+          const range = this.analogDisplayRange(rowIndex, null, row.values);
           context.beginPath();
           let started = false;
           let previousY = null;
@@ -6569,7 +6683,7 @@
               previousY = null;
               return;
             }
-            const y = yBottom - clamp((number + 1) / 2, 0, 1) * (yBottom - yTop);
+            const y = yBottom - clamp((number - range.min) / Math.max(1e-12, range.max - range.min), 0, 1) * (yBottom - yTop);
             if (!started) {
               context.moveTo(x1, y);
               started = true;
@@ -6813,6 +6927,7 @@
         end,
         cursorColumn: end - start === 1 ? (Number.isFinite(cursorColumn) ? cursorColumn : start + 0.5) : null
       };
+      this.cursorC = this.currentMeasurementColumn();
       if (this.styleColumnsInput) {
         const first = start + 1;
         const last = end;
@@ -6827,6 +6942,7 @@
     onPlotPointerDown(event) {
       if (!this.meta.rows.length || (event.button !== 0 && event.button !== 1)) return;
       this.plotCanvas.focus({ preventScroll: true });
+      if (this.pointLabels.pointerDown(event)) { event.preventDefault(); return; }
       const rect = this.plotCanvas.getBoundingClientRect();
       const x = event.clientX - rect.left;
       const y = event.clientY - rect.top;
@@ -6962,6 +7078,7 @@
     }
 
     onPlotPointerMove(event) {
+      if (this.pointLabels.move(event)) return;
       if (this.drag && this.drag.kind === 'pan') {
         if (this.drag.pointerId !== event.pointerId) return;
         event.preventDefault();
@@ -7057,6 +7174,7 @@
     }
 
     onPlotPointerUp(event) {
+      if (this.pointLabels.end(event)) return;
       if (!this.drag || this.drag.pointerId !== event.pointerId) return;
       const drag = this.drag;
       try { this.plotCanvas.releasePointerCapture(event.pointerId); } catch (_error) {}
@@ -7108,6 +7226,7 @@
     }
 
     cancelPlotDrag(event) {
+      if (this.pointLabels.cancel(event)) return;
       if (!this.drag || this.drag.pointerId !== event.pointerId) return;
       const drag = this.drag;
       try { this.plotCanvas.releasePointerCapture(event.pointerId); } catch (_error) {}
@@ -7235,6 +7354,7 @@
       const next = !!enabled;
       this.connectionMode = next;
       if (this.connectionMode) {
+        this.pointLabels.setMode(false); this.pointLabels.selectedId = '';
         this.columnSelection = null;
         this.selectedPoint = null;
         this.selectedConnectionId = '';
@@ -7385,6 +7505,7 @@
         end: Math.min(this.meta.totalColumns, start + 1),
         cursorColumn: value
       };
+      this.cursorC = value;
       if (this.selectedPoint) {
         this.selectedPoint = null;
         this.updatePointEditor();
@@ -7458,11 +7579,44 @@
 
     toggleActiveCursor(name) {
       const requested = name === 'B' ? 'B' : 'A';
-      this.setActiveCursor(this.activeCursor === requested ? '' : requested, true);
+      this.setActiveCursor(this.activeCursor === requested ? '' : requested);
+    }
+
+    cursorLocation(name) {
+      const column = name === 'A' ? this.cursorA : name === 'B' ? this.cursorB
+        : this.currentMeasurementColumn() ?? this.cursorC;
+      return column == null || !Number.isFinite(Number(column)) ? null : Number(column);
+    }
+
+    locateCursor(name) {
+      const column = this.cursorLocation(name);
+      if (column == null || !this.meta || !this.meta.rows.length) {
+        this.setStatus(name + ' 游标尚未设置', true);
+        return;
+      }
+      const changed = this.centerViewOnColumn(column);
+      this.draw(changed ? undefined : { overlayOnly: true });
+      this.setStatus('已跳转到游标 ' + name + '：' + column + ' cycle');
+    }
+
+    selectCursorC() {
+      if (!this.meta || !this.meta.rows.length) return;
+      const column = this.cursorLocation('C') ?? this.activeCursorColumn() ?? this.viewStart;
+      this.pointLabels.setMode(false);
+      this.pointLabels.selectedId = '';
+      this.setConnectionMode(false);
+      this.selectedConnectionId = '';
+      this.setActiveCursor('');
+      this.setSelectionCursorPosition(column, this.activeCursorRow, true);
+      this.setStatus('当前工作游标：C');
     }
 
     setActiveCursor(name, centerView) {
       const next = name === 'A' || name === 'B' ? name : '';
+      if (next) {
+        this.pointLabels.setMode(false); this.pointLabels.selectedId = '';
+        this.setConnectionMode(false); this.selectedConnectionId = '';
+      }
       this.cursorNavigationSequence += 1;
       this.activeCursor = next;
       this.updateCursorControls();
@@ -7566,6 +7720,7 @@
       this.cursorBButton.classList.toggle('active', activeB);
       this.cursorAButton.setAttribute('aria-pressed', String(activeA));
       this.cursorBButton.setAttribute('aria-pressed', String(activeB));
+      this.updateCursorLocationControls();
       this.updateCursorJumpAvailability();
       const row = this.meta && this.meta.rows[this.activeCursorRow];
       this.cursorSignalEl.textContent = row ? row.name : '';
@@ -7584,6 +7739,28 @@
       this.cursorPrevButton.disabled = !hasNavigationCursor;
       this.cursorNextButton.disabled = !hasNavigationCursor;
       this.cursorJumpInput.disabled = !hasNavigationCursor;
+    }
+
+    updateCursorLocationControls() {
+      if (!this.cursorLocateButtons || !this.meta) return;
+      const column = this.currentMeasurementColumn();
+      if (column != null) this.cursorC = column;
+      const activeC = !this.activeCursor && this.selectionCursorColumn() != null
+        && !this.connectionMode && !this.pointLabels.active;
+      this.cursorCButton.classList.toggle('active', activeC);
+      this.cursorCButton.setAttribute('aria-pressed', String(activeC));
+      this.cursorLocateButtons.forEach(button => {
+        const name = button.dataset.scopeLocateCursor, position = this.cursorLocation(name);
+        const text = position == null ? '未设置' : String(Number(position.toFixed(6))) + ' cycle';
+        const value = button.querySelector('span');
+        if (value.textContent !== text) value.textContent = text;
+        button.disabled = position == null || !this.meta.rows.length;
+        const title = '跳转到游标 ' + name + '（Shift+' + name + '）：' + text;
+        if (button.title !== title) {
+          button.title = title;
+          button.setAttribute('aria-label', title);
+        }
+      });
     }
 
     updateRowOperationControls() {
@@ -7845,6 +8022,7 @@
     }
 
     updateMeasurements() {
+      this.updateCursorLocationControls();
       const aText = this.cursorA == null ? 'A：未设置' : 'A：' + this.formatTime(this.cursorA);
       const bText = this.cursorB == null ? 'B：未设置' : 'B：' + this.formatTime(this.cursorB);
       const currentColumn = this.currentMeasurementColumn();
@@ -8084,6 +8262,7 @@
         lockedColumns: Array.from(this.lockedColumns),
         selectedPoint: this.selectedPoint ? Object.assign({}, this.selectedPoint) : null,
         connections: clone(this.connections),
+        pointLabels: this.pointLabels.snapshot(),
         selectedConnectionId: this.selectedConnectionId,
         connectionSequence: this.connectionSequence,
         outputTitle: this.outputTitleInput.value,
@@ -8145,6 +8324,7 @@
       this.lockedColumns = new Set(snapshot.lockedColumns || []);
       this.selectedPoint = snapshot.selectedPoint ? Object.assign({}, snapshot.selectedPoint) : null;
       this.connections = clone(snapshot.connections || []);
+      this.pointLabels.restore(snapshot.pointLabels);
       this.selectedConnectionId = this.connections.some(
         (connection) => connection.id === snapshot.selectedConnectionId
       ) ? snapshot.selectedConnectionId : '';
@@ -8451,7 +8631,7 @@
         rangeStart: this.rangeStartInput.value, rangeEnd: this.rangeEndInput.value,
         target: this.targetInput.value, presentationDirty: this.presentationDraftDirty,
         rows: this.meta.rows.map(row => ({
-          index: row.index, name: String(row.sourceName == null ? row.name || '' : row.sourceName),
+          index: row.index, rowId: String(row.rowId), name: String(row.sourceName == null ? row.name || '' : row.sourceName),
           mode: this.modes[row.index], busFormat: this.busFormats[row.index], analogFormat: this.analogFormats[row.index],
           style: this.rowStyles[row.index], height: this.rowHeights[row.index], collapsed: this.collapsedRows.has(row.index)
         }))
@@ -8500,6 +8680,7 @@
       this.viewStart = previousView ? clamp(previousView.start, 0, Math.max(0, this.meta.totalColumns - span)) : 0;
       this.viewEnd = this.viewStart + span;
       const lastColumn = Math.max(0, this.meta.totalColumns - (previousView ? 1e-7 : 1));
+      if (this.cursorC != null) this.cursorC = clamp(this.cursorC, 0, lastColumn);
       this.cursorA = clamp(
         this.cursorA == null ? 0 : this.cursorA,
         0,
@@ -8525,6 +8706,7 @@
       this.selectedPoint = null;
       this.columnSelection = null;
       if (previousView) {
+        this.pointLabels.remapRows(previousView.rows, remappedRows);
         const selection = previousView.selection;
         if (selection && remappedRows.has(selection.rowIndex) && selection.start < this.meta.totalColumns) {
           this.columnSelection = Object.assign({}, selection, { rowIndex: remappedRows.get(selection.rowIndex),
