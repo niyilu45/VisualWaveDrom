@@ -79,6 +79,8 @@
           <label>起始 cycle <input class="scope-compare-start" type="number" min="0" step="0.5" value="0"></label>
           <label>显示 cycle <input class="scope-compare-span" type="number" min="0.5" step="0.5" value="1"></label>
           ${button('zoom-in', '放大', 'plus')}${button('zoom-out', '缩小', 'minus')}${button('fit', '适应窗口')}
+          <button type="button" data-action="fit-cursors" title="显示 A、B 游标之间的区域">适应游标</button>
+          <button type="button" data-action="fit-selection" title="显示当前框选区域（Z）" aria-keyshortcuts="z">适应选区</button>
         </div>
         <div class="scope-compare-cursors">
           <span>选择游标</span>
@@ -92,11 +94,14 @@
           <output class="scope-compare-measurements"></output>
         </div>
         <div class="scope-compare-tags" aria-label="错误位置标签"></div>
-        <div class="scope-compare-panes" data-layout="vertical"></div>
-        <input class="scope-compare-pan" type="range" min="0" max="0" step="0.5" value="0" aria-label="横向滚动比较波形">
+        <div id="scope-compare-panes" class="scope-compare-panes" data-layout="vertical"></div>
+        <div class="scope-compare-pan"><div class="scope-compare-pan-thumb" role="scrollbar" tabindex="-1"
+          aria-controls="scope-compare-panes" aria-orientation="horizontal" aria-label="横向滚动比较波形"
+          aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-disabled="true"></div></div>
         <footer class="scope-compare-status" role="status" aria-live="polite"></footer>`;
       doc.body.appendChild(this.root);
       this.activeCursor = ''; this.cursorPositions = { A: null, B: null, C: null };
+      this.rangeSelection = null;
       this.cursorPair = 0; this.cursorSide = 'left';
       this.panesRoot = this.root.querySelector('.scope-compare-panes');
       this.selects = Object.fromEntries(SIDES.map((side, index) => {
@@ -115,7 +120,8 @@
       this.status = this.root.querySelector('.scope-compare-status');
       this.startInput = this.root.querySelector('.scope-compare-start');
       this.spanInput = this.root.querySelector('.scope-compare-span');
-      this.panInput = this.root.querySelector('.scope-compare-pan');
+      this.pan = this.root.querySelector('.scope-compare-pan');
+      this.panThumb = this.pan.firstElementChild;
       this.condition = this.root.querySelector('.scope-compare-condition');
       this.cursorSignal = this.root.querySelector('.scope-compare-cursor-signal');
       this.measurements = this.root.querySelector('.scope-compare-measurements');
@@ -143,6 +149,9 @@
         } else if (/^(ArrowLeft|ArrowRight)$/.test(event.key)) {
           event.preventDefault();
           void this.navigateCursor(event.key === 'ArrowRight' ? 1 : -1);
+        } else if (event.key.toLowerCase() === 'z' && !event.shiftKey) {
+          event.preventDefault();
+          if (!event.repeat) this.fitSelection();
         }
       });
       const sideButton = (event) => {
@@ -160,7 +169,7 @@
       });
       this.startInput.addEventListener('change', () => this.setView(Number(this.startInput.value), this.end - this.start));
       this.spanInput.addEventListener('change', () => this.setView(this.start, Number(this.spanInput.value)));
-      this.panInput.addEventListener('input', () => this.setView(Number(this.panInput.value), this.end - this.start));
+      this.bindPan();
       this.resizeObserver = new popup.ResizeObserver(() => this.schedule());
       this.resizeObserver.observe(this.panesRoot);
       this.buildPanes();
@@ -170,14 +179,34 @@
         if (!this.active || opening !== this.sequence) return;
         const choices = documents.some(item => item.name === this.scope.document.name) ? documents
           : [{ name: this.scope.document.name, title: this.scope.meta.title }, ...documents];
-        SIDES.forEach(side => {
-          choices.forEach(item => this.selects[side].append(new popup.Option(item.title || item.name, item.name)));
-        });
+        SIDES.forEach(side => this.populateSources(this.selects[side], choices));
         this.selects.left.value = this.scope.document.name;
         this.selects.left.options[0].disabled = true;
         this.setBusy(false, '请选择比较图 B');
         this.selects.right.focus();
       } catch (error) { if (this.active && opening === this.sequence) this.setBusy(false, '读取目录失败：' + error.message); }
+    }
+
+    populateSources(select, choices) {
+      const doc = select.ownerDocument;
+      const groups = new Map();
+      choices.forEach(item => {
+        const key = item.directoryId || 'nav-root';
+        if (!groups.has(key)) {
+          const group = doc.createElement('optgroup');
+          group.label = item.directoryPath?.join(' / ') || '根目录';
+          groups.set(key, group);
+        }
+        const group = groups.get(key);
+        const option = new this.popup.Option(
+          (item.number ? item.number + ' ' : '') + (item.title || item.name), item.name
+        );
+        if (item.number) option.dataset.number = item.number;
+        group.appendChild(option);
+      });
+      const fragment = doc.createDocumentFragment();
+      groups.forEach(group => fragment.appendChild(group));
+      select.appendChild(fragment);
     }
 
     setBusy(busy, message) {
@@ -190,7 +219,8 @@
       });
       SIDES.forEach(side => { this.selects[side].disabled = busy; });
       this.root.querySelector('.scope-compare-layout').disabled = busy || !this.result;
-      this.startInput.disabled = this.spanInput.disabled = this.panInput.disabled = busy || !this.result;
+      this.startInput.disabled = this.spanInput.disabled = busy || !this.result;
+      this.updatePan();
       if (message) this.status.textContent = message;
       this.updateErrorControls();
       this.updateCursorControls();
@@ -205,6 +235,8 @@
       if (action === 'edge-prev' || action === 'edge-next') return this.navigateCursor(action === 'edge-next' ? 1 : -1);
       if (action === 'tag') return this.addTag();
       if (action === 'fit') return this.setView(0, this.result.total);
+      if (action === 'fit-cursors') return this.fitCursors();
+      if (action === 'fit-selection') return this.fitSelection();
       if (action.startsWith('zoom-')) {
         const span = (this.end - this.start) * (action === 'zoom-in' ? 0.5 : 2);
         const center = this.selectedError ? this.selectedError.start : (this.start + this.end) / 2;
@@ -258,6 +290,7 @@
         if (this.cache?.view.generation === generation) {
           [this.cache.left, this.cache.right] = [this.cache.right, this.cache.left];
           this.cache.view.generation = this.generation;
+          if (this.drawnView) this.drawnView.generation = this.generation;
         }
         this.selectedError = selected;
         this.setBusy(false, '已交换比较图 A 和 B');
@@ -275,7 +308,9 @@
     updatePaneTitles() {
       SIDES.forEach(side => {
         const option = this.selects[side].selectedOptions[0];
-        if (option && this.result[side].title) option.textContent = this.result[side].title;
+        if (option && this.result[side].title) {
+          option.textContent = (option.dataset.number ? option.dataset.number + ' ' : '') + this.result[side].title;
+        }
       });
     }
 
@@ -285,6 +320,7 @@
       const sequence = ++this.sequence;
       if (!refresh) {
         this.refreshAnchor = null;
+        this.rangeSelection = null;
         this.loadedNames = Object.fromEntries(SIDES.map(side => [side, this.selects[side].value]));
         this.scope.adapter.watchComparisonDocuments?.(Object.values(this.loadedNames));
         this.pendingChanges.clear();
@@ -305,7 +341,6 @@
       const anchor = this.refreshAnchor;
       this.scope.log('scope-compare', { phase: 'load-start', source: leftName, target: rightName });
       this.setBusy(true, refresh ? '正在同步比较数据…' : '正在载入比较图并计算公式…');
-      this.revision = (this.revision || 0) + 1;
       this.cursorSequence++;
       this.result = this.cache = this.selectedError = null;
       if (!reuseLeft) this.leftRenderer = null;
@@ -375,6 +410,12 @@
             ? this.rowOffsets[newTop] + Math.min(anchor.topOffset, this.pairHeight(newTop) - 1) : anchor.scroll;
           for (const name of CURSORS) if (this.cursorPositions[name] != null) {
             this.cursorPositions[name] = Math.min(this.cursorPositions[name], this.snapColumn(result.total));
+          }
+          if (this.rangeSelection) {
+            const pair = result.pairs.findIndex(item => item.name === this.rangeSelection.signal);
+            const end = Math.min(result.total, this.rangeSelection.end);
+            if (pair < 0 || end <= this.rangeSelection.start) this.rangeSelection = null;
+            else Object.assign(this.rangeSelection, { pair, end });
           }
           this.syncPaneGeometry();
         } else {
@@ -461,9 +502,85 @@
       this.panes.forEach(pane => { pane.viewport.scrollTop = this.scrollTop; });
     }
 
+    fitCursors() {
+      if (!this.result || this.busy) return;
+      const { A, B } = this.cursorPositions;
+      if (A == null || B == null) return;
+      const span = Math.max(1, Math.abs(B - A));
+      this.setView((A + B - span) / 2, span);
+    }
+
+    fitSelection() {
+      if (!this.result || this.busy) return;
+      const range = this.rangeSelection;
+      clearTimeout(this.selectionHintTimer);
+      if (!range || range.end <= range.start) {
+        const previous = this.status.textContent;
+        const message = '请选中一段波形';
+        this.status.textContent = message;
+        this.selectionHintTimer = setTimeout(() => {
+          if (this.active && this.status.textContent === message) this.status.textContent = previous === message ? '' : previous;
+        }, 1000);
+        return;
+      }
+      this.setView(range.start, range.end - range.start);
+    }
+
+    updatePan() {
+      const total = this.result?.total || 1;
+      const span = this.result ? this.end - this.start : total;
+      const max = Math.max(0, total - span);
+      const enabled = !this.busy && max > 1e-9;
+      this.panThumb.style.width = Math.min(100, span / total * 100) + '%';
+      this.panThumb.style.left = Math.min(max, this.start) / total * 100 + '%';
+      this.panThumb.tabIndex = enabled ? 0 : -1;
+      this.panThumb.setAttribute('aria-disabled', String(!enabled));
+      this.panThumb.setAttribute('aria-valuemax', String(Number(max.toFixed(6))));
+      this.panThumb.setAttribute('aria-valuenow', String(Number(Math.min(max, this.start).toFixed(6))));
+    }
+
+    bindPan() {
+      const pan = this.pan, thumb = this.panThumb;
+      let drag = null;
+      const move = (event) => {
+        if (drag?.id !== event.pointerId || drag.generation !== this.generation || this.busy || !this.result) return;
+        const start = (event.clientX - drag.left) * drag.scale - drag.offset;
+        this.setView(start, this.end - this.start);
+      };
+      pan.addEventListener('pointerdown', event => {
+        if (event.button !== 0 || thumb.tabIndex < 0) return;
+        event.preventDefault();
+        const rect = pan.getBoundingClientRect();
+        const span = this.end - this.start;
+        const scale = this.result.total / Math.max(1, rect.width);
+        const column = (event.clientX - rect.left) * scale;
+        const offset = event.target === thumb ? Math.max(0, Math.min(span, column - this.start)) : span / 2;
+        drag = { id: event.pointerId, offset, left: rect.left, scale, generation: this.generation };
+        thumb.focus({ preventScroll: true });
+        pan.setPointerCapture(event.pointerId);
+        pan.classList.add('dragging');
+        move(event);
+      });
+      pan.addEventListener('pointermove', move);
+      pan.addEventListener('lostpointercapture', () => { drag = null; pan.classList.remove('dragging'); });
+      thumb.addEventListener('keydown', event => {
+        if (thumb.tabIndex < 0) return;
+        const span = this.end - this.start;
+        const key = event.key;
+        const step = Math.max(0.5, span / 20);
+        const target = { ArrowLeft: this.start - step, ArrowRight: this.start + step,
+          PageUp: this.start - span, PageDown: this.start + span, Home: 0, End: this.result.total }[key];
+        if (target === undefined) return;
+        event.preventDefault(); event.stopPropagation();
+        this.setView(target, span);
+      });
+    }
+
     releaseCanvasBuffers() {
-      this.panes?.forEach(({ canvas, cursorCanvas }) => {
-        canvas.width = canvas.height = cursorCanvas.width = cursorCanvas.height = 0;
+      this.drawnView = null;
+      this.panes?.forEach(pane => {
+        pane.canvas.width = pane.canvas.height = pane.cursorCanvas.width = pane.cursorCanvas.height = 0;
+        pane.drag = pane.rangeDrag = pane.cursorDrag = null;
       });
     }
 
@@ -505,9 +622,11 @@
         viewport.addEventListener('scroll', () => {
           if (!this.panes.includes(item)) return;
           const limit = Math.min(...this.panes.map(pane => pane.viewport.scrollHeight - pane.viewport.clientHeight));
-          this.scrollTop = Math.min(viewport.scrollTop, limit);
+          const next = Math.min(viewport.scrollTop, limit);
+          const changed = next !== this.scrollTop;
+          this.scrollTop = next;
           this.panes.forEach(other => { if (other.viewport.scrollTop !== this.scrollTop) other.viewport.scrollTop = this.scrollTop; });
-          this.schedule();
+          if (changed) this.schedule();
         });
         canvas.addEventListener('wheel', (event) => {
           event.preventDefault();
@@ -528,6 +647,7 @@
         canvas.addEventListener('pointerdown', (event) => {
           const touch = event.pointerType === 'touch';
           if (event.button === 0 && this.startCursorDrag(event, item)) return;
+          if (event.button === 0 && !touch && !this.activeCursor && this.startRangeDrag(event, item)) return;
           if (event.button !== 1 && !touch) return;
           event.preventDefault();
           canvas.setPointerCapture(event.pointerId);
@@ -535,6 +655,7 @@
         });
         canvas.addEventListener('pointermove', (event) => {
           if (item.cursorDrag) { this.moveCursorDrag(event, item); return; }
+          if (item.rangeDrag) { this.moveRangeDrag(event, item); return; }
           if (!item.drag) return;
           const dx = event.clientX - item.drag.x;
           const dy = event.clientY - item.drag.y;
@@ -545,6 +666,7 @@
         });
         canvas.addEventListener('pointerup', (event) => {
           if (item.cursorDrag) { this.finishCursorDrag(event, item); return; }
+          if (item.rangeDrag) { this.finishRangeDrag(event, item); return; }
           const drag = item.drag;
           item.drag = null;
           if (drag && drag.moved) item.suppressClickUntil = performance.now() + 400;
@@ -553,7 +675,10 @@
             void this.selectAt(event, item);
           }
         });
-        canvas.addEventListener('pointercancel', () => { item.drag = item.cursorDrag = null; });
+        canvas.addEventListener('pointercancel', (event) => {
+          if (item.rangeDrag) this.finishRangeDrag(event, item, true);
+          item.drag = item.cursorDrag = null;
+        });
       });
       if (this.result) this.syncPaneGeometry();
       this.schedule();
@@ -565,42 +690,68 @@
       if (!this.result) return;
       if (!Number.isFinite(span) || !Number.isFinite(start)) return;
       span = Math.max(0.5, Math.min(this.result.total, span));
-      this.start = Math.max(0, Math.min(this.result.total - span, start));
-      this.end = this.start + span;
+      const nextStart = Math.max(0, Math.min(this.result.total - span, start));
+      const nextEnd = nextStart + span;
+      const changed = this.start !== nextStart || this.end !== nextEnd;
+      this.start = nextStart;
+      this.end = nextEnd;
       this.startInput.value = Number(this.start.toFixed(3));
       this.spanInput.value = Number(span.toFixed(3));
       this.startInput.max = Math.max(0, this.result.total - 0.5);
       this.spanInput.max = this.result.total;
-      this.panInput.max = Math.max(0, this.result.total - span);
-      this.panInput.value = this.start;
-      this.schedule();
+      this.updatePan();
+      if (changed || !this.cache) this.schedule();
     }
 
     schedule() {
       if (!this.active || !this.result) return;
-      this.revision = (this.revision || 0) + 1;
       if (this.frame) return;
       this.frame = this.popup.requestAnimationFrame(() => { this.frame = 0; void this.render(); });
     }
 
-    async render() {
-      if (!this.active || !this.result || !this.panes.length) return;
-      if (this.rendering) { this.renderQueued = true; return; }
-      this.rendering = true;
-      const revision = this.revision;
-      const generation = this.generation;
-      const width = Math.max(...this.panes.map((pane) => pane.canvas.clientWidth)) - this.nameWidth();
+    viewport() {
+      const width = Math.max(32, Math.max(...this.panes.map(pane => pane.canvas.clientWidth)) - this.nameWidth());
       const height = Math.max(...this.panes.map((pane) => pane.canvas.clientHeight));
       const rowStart = this.pairAtOffset(this.scrollTop);
-      const rowEnd = Math.min(this.result.pairs.length, this.pairAtOffset(this.scrollTop + height - AXIS_HEIGHT) + 1);
+      const rowEnd = Math.min(this.result.pairs.length, this.pairAtOffset(this.scrollTop + Math.max(0, height - AXIS_HEIGHT)) + 1);
+      return { start: this.start, end: this.end, rowStart, rowEnd, width, scrollTop: this.scrollTop, generation: this.generation };
+    }
+
+    covers(coverage, view, precise = true) {
+      if (!coverage || coverage.generation !== view.generation || coverage.start > view.start + 1e-9
+          || coverage.end < view.end - 1e-9 || coverage.rowStart > view.rowStart || coverage.rowEnd < view.rowEnd) return false;
+      if (!precise) return true;
+      const density = view.width / (view.end - view.start);
+      return Math.abs(coverage.density - density) <= density * 0.05;
+    }
+
+    async render() {
+      if (!this.active || !this.result || !this.panes.length) return;
+      const viewport = this.viewport();
+      if (this.covers(this.cache?.view, viewport)) { this.draw(viewport); return; }
+      if (this.covers(this.cache?.view, viewport, false)) this.draw(viewport);
+      if (this.rendering) { this.renderQueued = true; return; }
+      this.rendering = true;
+      const { generation } = viewport;
+      const span = viewport.end - viewport.start;
+      const density = viewport.width / span;
+      const start = Math.max(0, viewport.start - span / 2);
+      const end = Math.min(this.result.total, viewport.end + span / 2);
+      const margin = Math.min(8, Math.max(2, Math.ceil((viewport.rowEnd - viewport.rowStart) / 3)));
       const left = this.leftRenderer, right = this.rightRenderer;
-      const view = { start: this.start, end: this.end, rowStart, rowEnd, generation, width: Math.max(32, width),
+      const view = { start, end, rowStart: Math.max(0, viewport.rowStart - margin),
+        rowEnd: Math.min(this.result.pairs.length, viewport.rowEnd + margin),
+        generation, density, width: Math.min(8192, Math.ceil((end - start) * density)),
         leftModes: left.modes, leftBusFormats: left.busFormats, leftAnalogFormats: left.analogFormats,
         rightModes: right.modes, rightBusFormats: right.busFormats, rightAnalogFormats: right.analogFormats };
       const request = this.windowRequest = this.scope.worker.call('compare-window', view);
+      let paintedCurrent = false;
       try {
         const data = await request;
-        if (!data.cancelled && this.active && generation === this.generation && revision === this.revision) {
+        if (!data.cancelled && this.active && this.result && generation === this.generation) {
+          const current = this.viewport();
+          const exact = this.covers(view, current);
+          if (!exact && (!this.covers(view, current, false) || this.covers(this.cache?.view, current))) return;
           const errors = new Map();
           data.errors.forEach(error => {
             if (!errors.has(error.pair)) errors.set(error.pair, []);
@@ -609,19 +760,27 @@
           this.cache = { view, errors,
             left: new Map(data.left.rows.map(row => [row.index, row])),
             right: new Map(data.right.rows.map(row => [row.index, row])) };
-          this.draw();
+          this.draw(current);
+          paintedCurrent = exact;
         }
       } catch (error) { if (this.active && !this.busy && generation === this.generation) this.status.textContent = error.message; }
       finally {
         this.windowRequest = null;
         this.rendering = false;
-        if (this.renderQueued) { this.renderQueued = false; this.schedule(); }
+        if (this.renderQueued) {
+          this.renderQueued = false;
+          if (!paintedCurrent) this.schedule();
+        }
       }
     }
 
-    draw() {
+    draw(view = this.drawnView) {
       if (!this.cache || this.cache.view.generation !== this.generation) return;
-      const { view, errors } = this.cache;
+      view = view || this.viewport();
+      this.drawnView = view;
+      const { errors } = this.cache;
+      const scrollTop = view.scrollTop;
+      const nameWidth = this.nameWidth();
       const renderers = { left: this.leftRenderer, right: this.rightRenderer };
       SIDES.forEach(side => {
         renderers[side].viewStart = view.start;
@@ -631,11 +790,12 @@
         const width = pane.canvas.clientWidth;
         const height = pane.canvas.clientHeight;
         const dpr = Math.min(2, this.popup.devicePixelRatio || 1);
-        pane.canvas.width = Math.max(1, Math.round(width * dpr));
-        pane.canvas.height = Math.max(1, Math.round(height * dpr));
+        const pixelWidth = Math.max(1, Math.round(width * dpr));
+        const pixelHeight = Math.max(1, Math.round(height * dpr));
+        if (pane.canvas.width !== pixelWidth) pane.canvas.width = pixelWidth;
+        if (pane.canvas.height !== pixelHeight) pane.canvas.height = pixelHeight;
         const ctx = pane.canvas.getContext('2d');
-        ctx.scale(dpr, dpr);
-        const nameWidth = this.nameWidth();
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         const plotWidth = Math.max(1, width - nameWidth);
         const plotHeight = Math.max(0, height - AXIS_HEIGHT);
         const overlay = pane.side === 'overlay';
@@ -649,14 +809,27 @@
         ctx.beginPath(); ctx.rect(0, 0, plotWidth, plotHeight); ctx.clip();
         if (!overlay) for (let index = view.rowStart; index < view.rowEnd; index += 1) {
           const row = this.result.pairs[index][pane.side];
-          if (row >= 0) renderer.drawRowBackground(ctx, row, this.rowOffsets[index] - this.scrollTop, this.pairHeight(index), plotWidth);
+          if (row >= 0) renderer.drawRowBackground(ctx, row, this.rowOffsets[index] - scrollTop, this.pairHeight(index), plotWidth);
         }
         renderer.drawGridLines(ctx, plotWidth, plotHeight);
         for (let index = view.rowStart; index < view.rowEnd; index += 1) {
           const pair = this.result.pairs[index];
-          const y = this.rowOffsets[index] - this.scrollTop;
+          const y = this.rowOffsets[index] - scrollTop;
           const rowHeight = this.pairHeight(index);
           ctx.strokeStyle = '#dfe2e6'; ctx.beginPath(); ctx.moveTo(0, y + rowHeight - 0.5); ctx.lineTo(plotWidth, y + rowHeight - 0.5); ctx.stroke();
+          for (const error of errors.get(index) || []) {
+            const left = Math.max(0, renderer.xForColumn(error.start, plotWidth));
+            const right = Math.min(plotWidth, renderer.xForColumn(error.end, plotWidth));
+            if (right <= left) continue;
+            const selected = this.selectedError;
+            const active = selected?.pair === index && selected.start < error.end && selected.end > error.start;
+            ctx.fillStyle = active ? 'rgba(189, 38, 56, 0.18)' : 'rgba(189, 38, 56, 0.12)';
+            ctx.fillRect(left, y + 1, right - left, rowHeight - 3);
+            ctx.strokeStyle = '#bd2638';
+            ctx.lineWidth = active ? 2 : 1;
+            ctx.strokeRect(left + 0.5, y + 1, Math.max(0.5, right - left - 1), rowHeight - 3);
+          }
+          ctx.lineWidth = 1;
           const twoBusLabels = overlay && SIDES.every(side => this.cache[side].get(pair[side])?.mode === 'bus');
           sides.forEach((side, layer) => {
             const row = this.cache[side].get(pair[side]);
@@ -669,15 +842,6 @@
               overlay ? COLORS[layer] : source.rowWaveColor(row.index), twoBusLabels ? (layer ? 7 : -7) : 0);
             ctx.restore();
           });
-          for (const error of errors.get(index) || []) {
-            const left = Math.max(0, renderer.xForColumn(error.start, plotWidth));
-            const right = Math.min(plotWidth, renderer.xForColumn(error.end, plotWidth));
-            const selected = this.selectedError;
-            ctx.strokeStyle = '#bd2638';
-            ctx.lineWidth = selected?.pair === index && selected.start < error.end && selected.end > error.start ? 2 : 1;
-            if (right > left) ctx.strokeRect(left + 0.5, y + 1, Math.max(0.5, right - left - 1), rowHeight - 3);
-          }
-          ctx.lineWidth = 1;
         }
         ctx.restore();
         ctx.fillStyle = '#f0f2f5'; ctx.fillRect(0, 0, nameWidth, AXIS_HEIGHT);
@@ -685,7 +849,7 @@
         ctx.fillStyle = '#42505d'; ctx.fillText('信号 / cycle', 8, AXIS_HEIGHT / 2);
         ctx.save(); ctx.beginPath(); ctx.rect(0, AXIS_HEIGHT, nameWidth, plotHeight); ctx.clip();
         for (let index = view.rowStart; index < view.rowEnd; index += 1) {
-          const pair = this.result.pairs[index], y = AXIS_HEIGHT + this.rowOffsets[index] - this.scrollTop;
+          const pair = this.result.pairs[index], y = AXIS_HEIGHT + this.rowOffsets[index] - scrollTop;
           const h = this.pairHeight(index);
           ctx.fillStyle = '#f7f8fa'; ctx.fillRect(0, y, nameWidth, h - 1);
           ctx.fillStyle = '#25313e'; ctx.fillText(pair.name, 8, y + h / 2 - 6, nameWidth - 16);
@@ -699,10 +863,10 @@
     }
 
     async selectAt(event, pane) {
-      if (!this.cache || this.cache.view.generation !== this.generation || this.busy) return;
+      if (!this.drawnView || this.drawnView.generation !== this.generation || this.busy) return;
       const rect = pane.canvas.getBoundingClientRect();
       if (event.clientY - rect.top < AXIS_HEIGHT) return;
-      const row = this.pairAtOffset(event.clientY - rect.top - AXIS_HEIGHT + this.scrollTop);
+      const row = this.pairAtOffset(event.clientY - rect.top - AXIS_HEIGHT + this.drawnView.scrollTop);
       if (!this.result.pairs[row]) return;
       const column = this.columnAt(event, pane);
       this.cursorPair = row;
@@ -712,6 +876,7 @@
         this.updateCursorControls();
         return;
       }
+      if (!this.activeCursor) this.rangeSelection = null;
       this.moveCursor(this.activeCursor || 'C', column);
       const generation = this.generation;
       const error = await this.scope.worker.call('compare-inspect', { generation, pair: row, column });
@@ -720,7 +885,7 @@
 
     columnAt(event, pane) {
       const rect = pane.canvas.getBoundingClientRect();
-      const { start, end } = this.cache.view;
+      const { start, end } = this.drawnView;
       return start + (event.clientX - rect.left - this.nameWidth())
         / Math.max(1, rect.width - this.nameWidth()) * (end - start);
     }
@@ -753,7 +918,7 @@
 
     cursorTrack(pane) {
       const offset = this.nameWidth(), width = Math.max(1, pane.canvas.clientWidth - offset);
-      const view = this.cache?.view || { start: this.start, end: this.end };
+      const view = this.drawnView || { start: this.start, end: this.end };
       return CURSORS.filter(name => this.cursorPositions[name] != null).map(name => {
         const column = this.cursorPositions[name];
         const x = offset + (column - view.start) / (view.end - view.start) * width;
@@ -763,7 +928,7 @@
     }
 
     drawCursorOverlays() {
-      if (!this.result || !this.cache) return;
+      if (!this.result || !this.drawnView) return;
       for (const pane of this.panes) {
         const { canvas, cursorCanvas } = pane;
         if (cursorCanvas.width !== canvas.width) cursorCanvas.width = canvas.width;
@@ -774,6 +939,21 @@
         const width = canvas.clientWidth, height = canvas.clientHeight;
         ctx.clearRect(0, 0, width, height);
         ctx.save(); ctx.beginPath(); ctx.rect(this.nameWidth(), 0, width - this.nameWidth(), height); ctx.clip();
+        if (this.rangeSelection && this.result.pairs[this.rangeSelection.pair]) {
+          const view = this.drawnView;
+          const { start, end, pair } = this.rangeSelection;
+          const left = this.nameWidth();
+          const scale = (width - left) / (view.end - view.start);
+          const x = left + (Math.max(start, view.start) - view.start) * scale;
+          const right = left + (Math.min(end, view.end) - view.start) * scale;
+          const y = AXIS_HEIGHT + this.rowOffsets[pair] - view.scrollTop;
+          const top = Math.max(y, AXIS_HEIGHT), bottom = Math.min(y + this.pairHeight(pair), height);
+          if (right > x && bottom > top) {
+            ctx.fillStyle = 'rgba(31, 104, 213, 0.13)'; ctx.fillRect(x, top, right - x, bottom - top);
+            ctx.strokeStyle = '#1f68d5'; ctx.lineWidth = 1;
+            ctx.strokeRect(x + 0.5, top + 0.5, Math.max(0.5, right - x - 1), Math.max(0.5, bottom - top - 1));
+          }
+        }
         for (const cursor of this.cursorTrack(pane)) {
           const active = cursor.name === (this.activeCursor || 'C');
           const color = CURSOR_COLORS[cursor.name];
@@ -791,8 +971,54 @@
       }
     }
 
+    startRangeDrag(event, pane) {
+      if (!this.drawnView || this.drawnView.generation !== this.generation || this.busy) return false;
+      const rect = pane.canvas.getBoundingClientRect();
+      if (event.clientX - rect.left < this.nameWidth() || event.clientY - rect.top < AXIS_HEIGHT) return false;
+      const pair = this.pairAtOffset(event.clientY - rect.top - AXIS_HEIGHT + this.drawnView.scrollTop);
+      const signal = this.result.pairs[pair]?.name;
+      if (signal == null) return false;
+      const column = this.rangeColumn(event, pane);
+      pane.rangeDrag = { id: event.pointerId, x: event.clientX, column, pair, signal,
+        previous: this.rangeSelection, cursor: this.cursorPositions.C, moved: false };
+      event.preventDefault();
+      pane.canvas.setPointerCapture(event.pointerId);
+      return true;
+    }
+
+    rangeColumn(event, pane) {
+      return Math.max(0, Math.min(Math.ceil(this.result.total) - 1, Math.floor(this.columnAt(event, pane))));
+    }
+
+    moveRangeDrag(event, pane) {
+      const drag = pane.rangeDrag;
+      if (drag.id !== event.pointerId || !this.drawnView || !this.result || this.busy) return;
+      if (!drag.moved && Math.abs(event.clientX - drag.x) < 4) return;
+      drag.moved = true;
+      const column = this.rangeColumn(event, pane);
+      const start = Math.min(column, drag.column), end = Math.min(this.result.total, Math.max(column, drag.column) + 1);
+      if (this.rangeSelection?.start === start && this.rangeSelection?.end === end && this.rangeSelection?.pair === drag.pair) return;
+      this.rangeSelection = { start, end, pair: drag.pair, signal: drag.signal };
+      this.cursorPair = drag.pair;
+      if (pane.side !== 'overlay') this.cursorSide = pane.side;
+      this.moveCursor('C', start);
+    }
+
+    finishRangeDrag(event, pane, cancelled) {
+      const drag = pane.rangeDrag;
+      if (drag.id !== event.pointerId) return;
+      pane.rangeDrag = null;
+      pane.suppressClickUntil = performance.now() + 400;
+      if (cancelled && drag.moved) {
+        this.rangeSelection = drag.previous;
+        this.cursorPositions.C = drag.cursor;
+        this.updateCursorControls();
+        this.drawCursorOverlays();
+      } else if (!cancelled && !drag.moved) void this.selectAt(event, pane);
+    }
+
     startCursorDrag(event, pane) {
-      if (!this.result || !this.cache || this.cache.view.generation !== this.generation || this.busy) return false;
+      if (!this.result || !this.drawnView || this.drawnView.generation !== this.generation || this.busy) return false;
       const rect = pane.canvas.getBoundingClientRect();
       const x = event.clientX - rect.left, y = event.clientY - rect.top;
       if (x < this.nameWidth()) return false;
@@ -808,7 +1034,7 @@
 
     moveCursorDrag(event, pane) {
       const drag = pane.cursorDrag;
-      if (drag.pointerId !== event.pointerId || !this.cache || this.busy) return;
+      if (drag.pointerId !== event.pointerId || !this.drawnView || this.busy) return;
       if (Math.abs(event.clientX - drag.startX) > 2) drag.moved = true;
       if (drag.moved) this.moveCursor(drag.name, this.columnAt(event, pane));
     }
@@ -996,13 +1222,13 @@
       this.active = false;
       this.sequence += 1;
       this.cursorSequence += 1;
-      this.revision = (this.revision || 0) + 1;
       clearInterval(this.progressTimer); this.progressTimer = 0;
       this.result = null;
       this.cache = null;
-      this.selectedError = this.refreshAnchor = null;
+      this.selectedError = this.refreshAnchor = this.rangeSelection = null;
       this.tags = this.rowOffsets = [];
       clearTimeout(this.refreshTimer); this.refreshTimer = 0;
+      clearTimeout(this.selectionHintTimer);
       this.pendingChanges.clear();
       this.scope.adapter.watchComparisonDocuments?.([]);
       if (this.frame) this.popup.cancelAnimationFrame(this.frame);
@@ -1014,7 +1240,7 @@
       this.root.remove();
       this.root.replaceChildren();
       this.root = this.panesRoot = null;
-      this.selects = this.count = this.status = this.startInput = this.spanInput = this.panInput = null;
+      this.selects = this.count = this.status = this.startInput = this.spanInput = this.pan = this.panThumb = null;
       this.condition = this.cursorSignal = this.measurements = null;
       const popup = this.popup;
       this.popup = null;

@@ -1536,6 +1536,32 @@ ${lines.join('\n')}`;
       return prefix ? (prefix + ' ' + title) : title;
     }
 
+    function listScopeComparisonDocuments() {
+      const remaining = new Map(savedTags.map(tag => [tag.name, tag]));
+      const choices = [];
+      function append(tag, node, path, number) {
+        choices.push({ name: tag.name, title: getSavedTagTitle(tag), number,
+          directoryId: node?.id || 'nav-root', directoryPath: path });
+        remaining.delete(tag.name);
+      }
+      function walk(node, path, prefix) {
+        (node.documents || []).forEach((name, index) => {
+          const tag = remaining.get(name);
+          if (tag) append(tag, node, path, prefix ? prefix + '.' + (index + 1) : (index + 1) + '.');
+        });
+        let index = 0;
+        (node.children || []).forEach(child => {
+          if (!child?.isCustom) return;
+          index++;
+          const number = prefix ? prefix + '.' + index : String(index);
+          walk(child, [...path, number + (prefix ? ' ' : '. ') + child.label], number);
+        });
+      }
+      if (navTreeState) walk(navTreeState, [], '');
+      remaining.forEach(tag => append(tag, null, [], ''));
+      return choices;
+    }
+
     function cloneObjectShallow(value) {
       if (!value || typeof value !== 'object') return value;
       if (Array.isArray(value)) return value.slice();
@@ -15583,7 +15609,7 @@ ${lines.join('\n')}`;
           const incoming = await requestComparisonFromOpener('list');
           if (incoming) return incoming;
           await ensureScopeLibraryState();
-          return savedTags.map((tag) => ({ name: tag.name, title: getSavedTagTitle(tag) }));
+          return listScopeComparisonDocuments();
         },
         loadComparisonDocument: async (name) => {
           const incoming = await requestComparisonFromOpener('load', name);
@@ -17223,7 +17249,7 @@ ${lines.join('\n')}`;
           const respond = (result, error) => event.source.postMessage({ type: 'visualwavedrom-scope-compare-response',
             requestId: message.requestId, libraryId, result, error }, '*');
           if (message.action === 'list') {
-            respond(savedTags.map((tag) => ({ name: tag.name, title: getSavedTagTitle(tag) })));
+            respond(listScopeComparisonDocuments());
           } else if (message.action === 'load') {
             event.source.postMessage({ type: 'visualwavedrom-scope-compare-response', requestId: message.requestId,
               libraryId, pending: true }, '*');

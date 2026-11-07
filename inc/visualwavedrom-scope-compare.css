@@ -60,7 +60,11 @@
 .scope-compare-scroll { position: absolute; inset: 38px 0 0; overflow-y: scroll; overflow-x: hidden; }
 .scope-compare-canvas-wrap canvas { position: absolute; inset: 0 18px 0 0; width: calc(100% - 18px); height: 100%; touch-action: none; }
 .scope-compare-canvas-wrap .scope-compare-cursor-layer { pointer-events: none; }
-.scope-comparison .scope-compare-pan { min-height: 20px; width: calc(100% - 24px); padding: 0; margin: 0 12px; accent-color: #176ca5; }
+.scope-compare-pan { position: relative; flex: none; height: 18px; margin: 0 12px 6px; border-radius: 4px; background: #dfe6ed; touch-action: none; user-select: none; }
+.scope-compare-pan-thumb { position: absolute; top: 2px; bottom: 2px; left: 0; width: 100%; border-radius: 3px; background: #397da9; cursor: grab; }
+.scope-compare-pan-thumb::after { content: ''; position: absolute; inset: 0 -4px; }
+.scope-compare-pan.dragging .scope-compare-pan-thumb { cursor: grabbing; }
+.scope-compare-pan-thumb[aria-disabled="true"] { background: #8296a8; cursor: default; }
 .scope-compare-status { padding: 6px 12px; min-height: 30px; max-height: 90px; overflow: auto; border-top: 1px solid #ced5dd; overflow-wrap: anywhere; }
 @media (max-width: 640px) {
   .scope-compare-toolbar, .scope-compare-controls, .scope-compare-cursors { gap: 5px; padding: 6px; }
