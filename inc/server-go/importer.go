@@ -772,6 +772,26 @@ func normalizeParserSignalResult(result map[string]any) error {
 }
 
 func normalizeCompletedParserResult(result map[string]any) error {
+	if raw, exists := result["arrayElements"]; exists {
+		rawElements, ok := raw.([]any)
+		if !ok || len(rawElements) < 2 {
+			return errors.New("array parser result must contain at least two elements")
+		}
+		elements := make([]map[string]any, 0, len(rawElements))
+		for index, rawElement := range rawElements {
+			element, ok := rawElement.(map[string]any)
+			if !ok || element["arrayElements"] != nil ||
+				boolValue(element["complexDetected"], false) != boolValue(result["complexDetected"], false) {
+				return fmt.Errorf("invalid array parser element %d", index)
+			}
+			if err := normalizeCompletedParserResult(element); err != nil {
+				return fmt.Errorf("array element %d: %w", index, err)
+			}
+			elements = append(elements, element)
+		}
+		result["arrayElements"] = elements
+		return nil
+	}
 	if !boolValue(result["complexDetected"], false) {
 		return normalizeParserSignalResult(result)
 	}
@@ -972,6 +992,26 @@ func importUpdates(
 	result map[string]any,
 	signalName string,
 ) ([]map[string]any, error) {
+	if elements, ok := result["arrayElements"].([]map[string]any); ok {
+		updates := make([]map[string]any, 0, len(elements))
+		for index, element := range elements {
+			elementUpdates, err := importUpdates(mapping, element, signalName)
+			if err != nil {
+				return nil, err
+			}
+			for _, update := range elementUpdates {
+				group := stringValue(update["signal"])
+				name, err := normalizeSignalName(group + "_" + strconv.Itoa(index))
+				if err != nil {
+					return nil, err
+				}
+				update["signal"] = name
+				update["arrayGroup"] = map[string]any{"name": group, "index": index, "length": len(elements)}
+				updates = append(updates, update)
+			}
+		}
+		return updates, nil
+	}
 	if !boolValue(result["complexDetected"], false) {
 		return []map[string]any{importUpdate(mapping, result, signalName)}, nil
 	}

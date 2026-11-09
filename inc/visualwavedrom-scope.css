@@ -466,6 +466,10 @@ body.scope-wave-view > #vim-help-modal {
   background: #fbfcfc;
 }
 
+.scope-array-row {
+  grid-template-columns: 16px 16px 12px minmax(0, 1fr) 68px;
+}
+
 .scope-signal-row:hover {
   background: #f2f7fc;
 }
@@ -643,11 +647,24 @@ body.scope-row-dragging * {
 
 .scope-signal-name small,
 .scope-signal-name-button,
+.scope-array-name,
 .scope-signal-name em {
   overflow: hidden;
   line-height: 1;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.scope-array-name {
+  padding: 2px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.scope-array-mode {
+  padding-inline: 8px;
+  color: #4f555d;
+  font-size: 11px;
 }
 
 .scope-signal-name small {

@@ -778,6 +778,10 @@
       if (!row) return;
       const name = lane.querySelector('text.info');
       bind(name, row.name);
+      if (row.scope?.arrayGroup) {
+        lane.querySelectorAll('[id^="wavelane_draw_"] > text').forEach((node) => boundNodes.add(node));
+        return;
+      }
       const data = dataLabels(row);
       lane.querySelectorAll('[id^="wavelane_draw_"] > text').forEach((node, index) => {
         const context = renderWindow && renderWindow.rows && renderWindow.rows[Number(match[1])];

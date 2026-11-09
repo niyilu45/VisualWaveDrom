@@ -38,14 +38,22 @@
   }
 
   async function compare(left, right, api) {
-    const leftNames = namesFor(left.rows);
-    const rightNames = namesFor(right.rows);
-    const rightMap = new Map(rightNames.map((name, index) => [name, index]));
-    const pairs = leftNames.map((name, index) => ({ name, left: index, right: rightMap.has(name) ? rightMap.get(name) : -1 }));
+    const rows = (session) => session.rows.map((row, index) => ({ row, index }))
+      .filter(({ row }) => !(row.arrayGroup?.index < 0));
+    const leftRows = rows(left);
+    const rightRows = rows(right);
+    const leftNames = namesFor(leftRows.map(({ row }) => row));
+    const rightNames = namesFor(rightRows.map(({ row }) => row));
+    const rightMap = new Map(rightNames.map((name, index) => [name, rightRows[index].index]));
+    const pairs = leftNames.map((name, index) => ({ name, left: leftRows[index].index, right: rightMap.get(name) ?? -1 }));
     const leftSet = new Set(leftNames);
-    rightNames.forEach((name, index) => { if (!leftSet.has(name)) pairs.push({ name, left: -1, right: index }); });
+    rightNames.forEach((name, index) => { if (!leftSet.has(name)) pairs.push({ name, left: -1, right: rightRows[index].index }); });
     const errors = [];
     const total = Math.max(left.totalColumns, right.totalColumns, 1);
+    if (api.single) {
+      pairs.forEach((pair) => Object.assign(pair, { diagnostics: ['', ''], intervals: [], errorCount: 0 }));
+      return { pairs, errors, total };
+    }
     for (let p = 0; p < pairs.length; p += 1) {
       const pair = pairs[p];
       const a = left.rows[pair.left];

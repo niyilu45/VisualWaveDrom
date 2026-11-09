@@ -2,6 +2,9 @@
   'use strict';
   const AXIS_HEIGHT = 38;
   const NAME_WIDTH = 160;
+  const COLLAPSED_ROW_HEIGHT = 24;
+  const ROW_TOGGLE_SIZE = 20;
+  const ROW_NAME_X = 32;
   const COLORS = ['#176ca5', '#b45c0c'];
   const CURSOR_COLORS = { A: '#1f68d5', B: '#d93025', C: '#565e68' };
   const CURSORS = ['A', 'B', 'C'];
@@ -33,6 +36,7 @@
       this.sequence = 0;
       this.pendingChanges = new Map();
       this.cursorSequence = 0;
+      this.collapsedPairs = new Set();
     }
 
     async open() {
@@ -45,6 +49,7 @@
       this.popup = popup;
       this.active = true;
       this.layout = 'vertical';
+      this.collapsedPairs.clear();
       const opening = ++this.sequence;
       const doc = popup.document;
       doc.title = this.scope.meta.title + ' - 示波器比较';
@@ -70,6 +75,7 @@
             <option value="vertical">上下分屏</option><option value="horizontal">左右分屏</option><option value="overlay">信号重叠</option>
           </select></label>
           <button type="button" data-action="swap" title="交换比较图 A 和 B">${icon('swap')}交换</button>
+          ${button('expand-all', '全部展开')}
           ${button('close', '退出比较', 'close')}
         </header>
         <div class="scope-compare-controls">
@@ -109,10 +115,9 @@
         const label = index ? 'B' : 'A';
         select.className = 'scope-compare-source-select';
         select.setAttribute('aria-label', '选择比较图 ' + label);
-        select.append(new popup.Option('请选择波形图', ''));
+        select.append(new popup.Option(index ? '选择比较图 B（可选）' : '请选择波形图', ''));
         select.addEventListener('change', () => {
-          select.querySelector('option[value=""]').disabled = true;
-          if (SIDES.every(key => this.selects[key].value)) void this.load();
+          if (this.selects.left.value) void this.load();
         });
         return [side, select];
       }));
@@ -154,8 +159,8 @@
         SIDES.forEach(side => this.populateSources(this.selects[side], choices));
         this.selects.left.value = this.scope.document.name;
         this.selects.left.options[0].disabled = true;
-        this.setBusy(false, '请选择比较图 B');
-        this.selects.right.focus();
+        this.setBusy(false);
+        await this.load();
       } catch (error) { if (this.active && opening === this.sequence) this.setBusy(false, '读取目录失败：' + error.message); }
     }
 
@@ -165,15 +170,6 @@
       doc.addEventListener('keydown', (event) => {
         if (!this.active || event.defaultPrevented || event.isComposing) return;
         if (event.key === 'Escape') { this.close(); return; }
-        const historyDirection = this.scope.cursorHistoryDirection(event);
-        if (historyDirection) {
-          event.preventDefault();
-          if (!this.scope.isCursorShortcutInput(event.target) && !event.repeat) {
-            this.scope.log('scope-side-button', { key: event.key, direction: historyDirection, window: 'comparison' });
-            void this.navigateCursor(historyDirection);
-          }
-          return;
-        }
         if (event.ctrlKey || event.altKey || event.metaKey) return;
         if (event.target === this.condition && event.key === 'Enter') {
           event.preventDefault();
@@ -223,15 +219,16 @@
       this.root.querySelectorAll('[data-action]').forEach((el) => {
         const action = el.dataset.action;
         el.disabled = action !== 'close' && (busy || !this.result
-          || (action === 'swap' && this.loadedNames.left === this.loadedNames.right));
+          || (action === 'swap' && (!this.loadedNames.right || this.loadedNames.left === this.loadedNames.right)));
       });
       SIDES.forEach(side => { this.selects[side].disabled = busy; });
-      this.root.querySelector('.scope-compare-layout').disabled = busy || !this.result;
+      this.root.querySelector('.scope-compare-layout').disabled = busy || !this.result || !this.loadedNames.right;
       this.startInput.disabled = this.spanInput.disabled = busy || !this.result;
       this.updatePan();
       if (message) this.status.textContent = message;
       this.updateErrorControls();
       this.updateCursorControls();
+      this.updateExpandAllControl();
     }
 
     async action(action) {
@@ -239,6 +236,11 @@
       if (this.busy) return;
       if (!this.result) return;
       if (action === 'swap') return this.swap();
+      if (action === 'expand-all') {
+        this.collapsedPairs.clear();
+        this.refreshCollapsedLayout();
+        return;
+      }
       if (action === 'prev' || action === 'next') return this.navigate(action === 'next' ? 1 : -1);
       if (action === 'edge-prev' || action === 'edge-next') return this.navigateCursor(action === 'edge-next' ? 1 : -1);
       if (action === 'tag') return this.addTag();
@@ -275,7 +277,7 @@
     }
 
     async swap() {
-      if (this.loadedNames.left === this.loadedNames.right) return;
+      if (!this.loadedNames.right || this.loadedNames.left === this.loadedNames.right) return;
       const sequence = ++this.sequence;
       const generation = this.generation;
       const selected = this.selectedError && { ...this.selectedError,
@@ -316,21 +318,21 @@
     updatePaneTitles() {
       SIDES.forEach(side => {
         const option = this.selects[side].selectedOptions[0];
-        if (option && this.result[side].title) {
+        if (option?.value && this.result[side].title) {
           option.textContent = (option.dataset.number ? option.dataset.number + ' ' : '') + this.result[side].title;
         }
       });
     }
 
     async load(changes) {
-      if (!SIDES.every(side => this.selects[side].value) || this.busy) return;
+      if (!this.selects.left.value || this.busy) return;
       const refresh = !!changes;
       const sequence = ++this.sequence;
       if (!refresh) {
         this.refreshAnchor = null;
         this.rangeSelection = null;
         this.loadedNames = Object.fromEntries(SIDES.map(side => [side, this.selects[side].value]));
-        this.scope.adapter.watchComparisonDocuments?.(Object.values(this.loadedNames));
+        this.scope.adapter.watchComparisonDocuments?.(Object.values(this.loadedNames).filter(Boolean));
         this.pendingChanges.clear();
       }
       const { left: leftName, right: rightName } = this.loadedNames;
@@ -391,12 +393,13 @@
         };
         const [leftDocument, document] = await Promise.all([
           !reuseLeft && (leftName !== ownSource || changes?.get(leftName)) ? getDocument(leftName) : null,
-          reuseRight ? null : getDocument(rightName)
+          reuseRight ? null : rightName ? getDocument(rightName) : { content: '{}' }
         ]);
         if (!this.active || sequence !== this.sequence) return;
         const currentContent = !reuseLeft && !leftDocument && this.scope.dataDraftDirty ? await this.scope.buildDraftSourceContent() : null;
         if (!this.active || sequence !== this.sequence) return;
         const result = await this.scope.worker.call('compare-start', { content: document?.content, transient: document?.transientState,
+          single: !rightName,
           leftDocument, reuseLeft, reuseRight, currentContent,
           currentNames: leftDocument ? null : this.scope.meta.rows.map((row) => this.scope.signalDisplayName(row.index)) });
         if (!this.active || sequence !== this.sequence) return;
@@ -409,6 +412,10 @@
           leftDocument ? leftDocument.transientState : this.scope.transientFormulaState);
         if (!reuseRight) this.rightRenderer = this.scope.createComparisonRenderer(result.right,
           document.display || this.remapDisplay(rightDisplay, result.right), document.transientState);
+        const pairNames = new Set(result.pairs.map(pair => pair.name));
+        for (const name of this.collapsedPairs) {
+          if (!pairNames.has(name)) this.collapsedPairs.delete(name);
+        }
         this.rebuildRowOffsets();
         this.selectedError = null;
         if (anchor) {
@@ -435,8 +442,9 @@
         }
         const warnings = result.pairs.filter((pair) => pair.diagnostics.some(Boolean));
         this.setBusy(false, warnings.length ? warnings.map((pair) => pair.name + '：' + pair.diagnostics.filter(Boolean).join('；')).join(' / ')
-          : '比较完成 · ' + result.pairs.length + ' 对信号 · ' + result.errorCount + ' 处差异');
-        this.count.textContent = result.errorCount ? result.errorCount + ' 处差异' : '无差异';
+          : rightName ? '比较完成 · ' + result.pairs.length + ' 对信号 · ' + result.errorCount + ' 处差异'
+            : result.pairs.length + ' 个信号 · 可选择比较图 B');
+        this.count.textContent = rightName ? (result.errorCount ? result.errorCount + ' 处差异' : '无差异') : '';
         this.setView(anchor?.start ?? 0, anchor?.span ?? result.total);
         if (!refresh) this.panes[0]?.canvas.focus({ preventScroll: true });
         this.refreshAnchor = null;
@@ -486,9 +494,115 @@
 
     rebuildRowOffsets() {
       this.rowOffsets = [0];
-      this.result.pairs.forEach(pair => this.rowOffsets.push(this.rowOffsets.at(-1) + Math.max(
-        pair.left < 0 ? 0 : this.leftRenderer.rowHeight(pair.left),
-        pair.right < 0 ? 0 : this.rightRenderer.rowHeight(pair.right))));
+      this.collapsedRuns = new Map();
+      let runStart = -1;
+      this.result.pairs.forEach((pair, index) => {
+        const collapsed = this.collapsedPairs.has(pair.name);
+        let height;
+        if (collapsed) {
+          height = runStart < 0 ? COLLAPSED_ROW_HEIGHT : 0;
+          if (runStart < 0) runStart = index;
+          this.collapsedRuns.set(runStart, index + 1);
+        } else {
+          runStart = -1;
+          height = Math.max(
+            pair.left < 0 ? 0 : this.leftRenderer.rowHeight(pair.left),
+            pair.right < 0 ? 0 : this.rightRenderer.rowHeight(pair.right));
+        }
+        this.rowOffsets.push(this.rowOffsets.at(-1) + height);
+      });
+    }
+
+    updateExpandAllControl() {
+      this.root.querySelector('[data-action="expand-all"]').disabled =
+        this.busy || !this.result || !this.collapsedPairs.size;
+    }
+
+    refreshCollapsedLayout() {
+      const top = this.pairAtOffset(this.scrollTop);
+      const offset = this.scrollTop - this.rowOffsets[top];
+      this.rebuildRowOffsets();
+      if (top < this.result.pairs.length) {
+        const visibleTop = this.pairHeight(top) ? top : this.pairAtOffset(this.rowOffsets[top] - 1);
+        this.scrollTop = this.rowOffsets[visibleTop] + Math.min(offset, this.pairHeight(visibleTop) - 1);
+      }
+      this.syncPaneGeometry();
+      this.updateExpandAllControl();
+      this.updateCursorControls();
+      this.schedule();
+    }
+
+    togglePairCollapsed(index, pane) {
+      const pair = this.result?.pairs[index];
+      if (!pair || this.busy) return;
+      if (!this.collapsedPairs.delete(pair.name)) {
+        this.collapsedPairs.add(pair.name);
+        if (this.rangeSelection?.pair === index) this.rangeSelection = null;
+      }
+      if (pane) pane.focusPairToggle = index;
+      this.refreshCollapsedLayout();
+    }
+
+    createPairToggle(doc, index, collapsed) {
+      const button = doc.createElement('button');
+      button.type = 'button';
+      button.dataset.pair = String(index);
+      button.title = (collapsed ? '展开信号：' : '收起信号：') + this.result.pairs[index].name;
+      button.setAttribute('aria-label', button.title);
+      button.setAttribute('aria-expanded', String(!collapsed));
+      button.innerHTML = icon(collapsed ? 'plus' : 'minus');
+      return button;
+    }
+
+    drawRowControls(pane, view, height, nameWidth) {
+      const visible = new Set();
+      const width = nameWidth + 'px';
+      if (pane.rowControls.style.width !== width) pane.rowControls.style.width = width;
+      for (let index = view.rowStart; index < view.rowEnd; index += 1) {
+        const y = this.rowOffsets[index] - view.scrollTop;
+        const rowHeight = this.pairHeight(index);
+        if (!rowHeight || y + rowHeight <= 0 || y >= height) continue;
+        visible.add(index);
+        const runEnd = this.collapsedRuns.get(index);
+        let entry = pane.rowButtons.get(index);
+        if (!entry || entry.runEnd !== runEnd) {
+          const doc = pane.rowControls.ownerDocument;
+          let element;
+          if (runEnd != null) {
+            element = doc.createElement('div');
+            element.className = 'scope-compare-collapsed-run';
+            element.setAttribute('role', 'group');
+            element.setAttribute('aria-label', '连续收起的 ' + (runEnd - index) + ' 个信号');
+            for (let row = index; row < runEnd; row += 1) {
+              element.appendChild(this.createPairToggle(doc, row, true));
+            }
+          } else {
+            element = this.createPairToggle(doc, index, false);
+          }
+          if (entry) entry.element.replaceWith(element);
+          else pane.rowControls.appendChild(element);
+          entry = { element, runEnd };
+          pane.rowButtons.set(index, entry);
+        }
+        const top = (runEnd == null ? y + (rowHeight - ROW_TOGGLE_SIZE) / 2 : y) + 'px';
+        if (entry.element.style.top !== top) entry.element.style.top = top;
+      }
+      for (const [index, entry] of pane.rowButtons) {
+        if (visible.has(index)) continue;
+        entry.element.remove();
+        pane.rowButtons.delete(index);
+      }
+      if (pane.focusPairToggle != null) {
+        const button = pane.rowControls.querySelector('button[data-pair="' + pane.focusPairToggle + '"]');
+        if (button) {
+          button.focus({ preventScroll: true });
+          const run = button.closest('.scope-compare-collapsed-run');
+          if (run && button.offsetLeft + button.offsetWidth > run.scrollLeft + run.clientWidth) {
+            run.scrollLeft = button.offsetLeft + button.offsetWidth - run.clientWidth;
+          }
+        }
+        pane.focusPairToggle = null;
+      }
     }
 
     pairHeight(index) { return this.rowOffsets[index + 1] - this.rowOffsets[index]; }
@@ -590,6 +704,8 @@
       this.panes?.forEach(pane => {
         pane.canvas.width = pane.canvas.height = pane.cursorCanvas.width = pane.cursorCanvas.height = 0;
         pane.drag = pane.rangeDrag = pane.cursorDrag = null;
+        pane.rowControls.replaceChildren();
+        pane.rowButtons.clear();
       });
     }
 
@@ -598,12 +714,13 @@
       this.panesRoot.replaceChildren();
       this.panes = [];
       this.cache = null;
-      this.panesRoot.dataset.layout = this.layout;
-      (this.layout === 'overlay' ? ['overlay'] : ['left', 'right']).forEach((side) => {
+      const single = !this.selects.right.value;
+      this.panesRoot.dataset.layout = single ? 'single' : this.layout;
+      (single ? ['left'] : this.layout === 'overlay' ? ['overlay'] : ['left', 'right']).forEach((side) => {
         const pane = document.createElement('section');
         pane.className = 'scope-compare-pane';
         const heading = document.createElement('header');
-        (side === 'overlay' ? ['left', 'right'] : [side]).forEach((source) => {
+        (single || side === 'overlay' ? SIDES : [side]).forEach((source) => {
           const label = document.createElement('span');
           label.style.color = COLORS[source === 'left' ? 0 : 1];
           label.textContent = source === 'left' ? 'A' : 'B';
@@ -621,12 +738,19 @@
         const cursorCanvas = document.createElement('canvas');
         cursorCanvas.className = 'scope-compare-cursor-layer';
         cursorCanvas.setAttribute('aria-hidden', 'true');
-        canvas.setAttribute('aria-label', heading.textContent + ' 比较波形');
+        canvas.setAttribute('aria-label', side === 'overlay' ? 'A 与 B 重叠波形'
+          : (side === 'left' ? 'A 波形' : 'B 波形'));
         canvas.setAttribute('role', 'img');
-        body.append(viewport, canvas, cursorCanvas);
+        const rowControls = document.createElement('div');
+        rowControls.className = 'scope-compare-row-controls';
+        rowControls.addEventListener('click', (event) => {
+          const control = event.target.closest('button[data-pair]');
+          if (control) this.togglePairCollapsed(Number(control.dataset.pair), item);
+        });
+        body.append(viewport, canvas, cursorCanvas, rowControls);
         pane.append(heading, body);
         this.panesRoot.appendChild(pane);
-        const item = { side, viewport, spacer, canvas, cursorCanvas };
+        const item = { side, viewport, spacer, canvas, cursorCanvas, rowControls, rowButtons: new Map() };
         this.panes.push(item);
         viewport.scrollTop = this.scrollTop;
         viewport.addEventListener('scroll', () => {
@@ -638,7 +762,7 @@
           this.panes.forEach(other => { if (other.viewport.scrollTop !== this.scrollTop) other.viewport.scrollTop = this.scrollTop; });
           if (changed) this.schedule();
         });
-        canvas.addEventListener('wheel', (event) => {
+        body.addEventListener('wheel', (event) => {
           event.preventDefault();
           if (event.ctrlKey || event.metaKey) {
             const rect = canvas.getBoundingClientRect();
@@ -647,6 +771,11 @@
             const span = old * Math.exp(Math.max(-1, Math.min(1, event.deltaY / 400)));
             this.setView(this.start + ratio * (old - span), span);
           } else if (event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
+            const run = event.target.closest('.scope-compare-collapsed-run');
+            if (run && run.scrollWidth > run.clientWidth) {
+              run.scrollLeft += event.deltaX || event.deltaY;
+              return;
+            }
             this.setView(this.start + (event.deltaX || event.deltaY) * (this.end - this.start) / Math.max(1, canvas.clientWidth), this.end - this.start);
           } else viewport.scrollTop += event.deltaY * 0.5;
         }, { passive: false });
@@ -713,7 +842,7 @@
       this.startInput.max = Math.max(0, this.result.total - 0.5);
       this.spanInput.max = this.result.total;
       this.updatePan();
-      if (changed || !this.cache) this.schedule();
+      if (changed || this.drawnView?.start !== nextStart || this.drawnView?.end !== nextEnd) this.schedule();
     }
 
     schedule() {
@@ -734,15 +863,27 @@
       if (!coverage || coverage.generation !== view.generation || coverage.start > view.start + 1e-9
           || coverage.end < view.end - 1e-9 || coverage.rowStart > view.rowStart || coverage.rowEnd < view.rowEnd) return false;
       if (!precise) return true;
+      if (coverage.collapsedPairs?.size) {
+        for (let index = view.rowStart; index < view.rowEnd; index += 1) {
+          const name = this.result.pairs[index].name;
+          if (!this.collapsedPairs.has(name) && coverage.collapsedPairs.has(name)) return false;
+        }
+      }
       const density = view.width / (view.end - view.start);
       return Math.abs(coverage.density - density) <= density * 0.05;
+    }
+
+    canPreview(coverage, view) {
+      if (!this.covers(coverage, view, false)) return false;
+      const ratio = coverage.density * (view.end - view.start) / view.width;
+      return ratio >= 0.5 && ratio <= 2;
     }
 
     async render() {
       if (!this.active || !this.result || !this.panes.length) return;
       const viewport = this.viewport();
       if (this.covers(this.cache?.view, viewport)) { this.draw(viewport); return; }
-      if (this.covers(this.cache?.view, viewport, false)) this.draw(viewport);
+      if (this.canPreview(this.cache?.view, viewport)) this.draw(viewport);
       if (this.rendering) { this.renderQueued = true; return; }
       this.rendering = true;
       const { generation } = viewport;
@@ -755,6 +896,7 @@
       const view = { start, end, rowStart: Math.max(0, viewport.rowStart - margin),
         rowEnd: Math.min(this.result.pairs.length, viewport.rowEnd + margin),
         generation, density, width: Math.min(8192, Math.ceil((end - start) * density)),
+        collapsedPairs: new Set(this.collapsedPairs),
         leftModes: left.modes, leftBusFormats: left.busFormats, leftAnalogFormats: left.analogFormats,
         rightModes: right.modes, rightBusFormats: right.busFormats, rightAnalogFormats: right.analogFormats };
       const request = this.windowRequest = this.scope.worker.call('compare-window', view);
@@ -764,7 +906,7 @@
         if (!data.cancelled && this.active && this.result && generation === this.generation) {
           const current = this.viewport();
           const exact = this.covers(view, current);
-          if (!exact && (!this.covers(view, current, false) || this.covers(this.cache?.view, current))) return;
+          if (!exact && (!this.canPreview(view, current) || this.covers(this.cache?.view, current))) return;
           const errors = new Map();
           data.errors.forEach(error => {
             if (!errors.has(error.pair)) errors.set(error.pair, []);
@@ -821,7 +963,9 @@
         ctx.translate(0, AXIS_HEIGHT);
         ctx.beginPath(); ctx.rect(0, 0, plotWidth, plotHeight); ctx.clip();
         if (!overlay) for (let index = view.rowStart; index < view.rowEnd; index += 1) {
-          const row = this.result.pairs[index][pane.side];
+          const pair = this.result.pairs[index];
+          if (this.collapsedPairs.has(pair.name)) continue;
+          const row = pair[pane.side];
           if (row >= 0) renderer.drawRowBackground(ctx, row, this.rowOffsets[index] - scrollTop, this.pairHeight(index), plotWidth);
         }
         renderer.drawGridLines(ctx, plotWidth, plotHeight);
@@ -829,7 +973,9 @@
           const pair = this.result.pairs[index];
           const y = this.rowOffsets[index] - scrollTop;
           const rowHeight = this.pairHeight(index);
+          if (!rowHeight) continue;
           ctx.strokeStyle = '#dfe2e6'; ctx.beginPath(); ctx.moveTo(0, y + rowHeight - 0.5); ctx.lineTo(plotWidth, y + rowHeight - 0.5); ctx.stroke();
+          if (this.collapsedPairs.has(pair.name)) continue;
           for (const error of errors.get(index) || []) {
             const left = Math.max(0, renderer.xForColumn(error.start, plotWidth));
             const right = Math.min(plotWidth, renderer.xForColumn(error.end, plotWidth));
@@ -864,13 +1010,20 @@
         for (let index = view.rowStart; index < view.rowEnd; index += 1) {
           const pair = this.result.pairs[index], y = AXIS_HEIGHT + this.rowOffsets[index] - scrollTop;
           const h = this.pairHeight(index);
-          ctx.fillStyle = '#f7f8fa'; ctx.fillRect(0, y, nameWidth, h - 1);
-          ctx.fillStyle = '#25313e'; ctx.fillText(pair.name, 8, y + h / 2 - 6, nameWidth - 16);
+          if (!h) continue;
+          const collapsed = this.collapsedPairs.has(pair.name);
+          ctx.fillStyle = collapsed ? '#edf0f3' : '#f7f8fa'; ctx.fillRect(0, y, nameWidth, h - 1);
+          if (collapsed) continue;
+          ctx.fillStyle = '#25313e';
+          const showStatus = this.loadedNames.right;
+          ctx.fillText(pair.name, ROW_NAME_X, y + h / 2 - (showStatus ? 6 : 0), nameWidth - ROW_NAME_X - 8);
+          if (!showStatus) continue;
           const missing = pair.left < 0 ? 'A 缺少信号' : pair.right < 0 ? 'B 缺少信号' : '';
           ctx.fillStyle = '#626b75';
-          ctx.fillText(missing || (pair.errorCount ? pair.errorCount + ' 处差异' : '一致'), 8, y + h / 2 + 8);
+          ctx.fillText(missing || (pair.errorCount ? pair.errorCount + ' 处差异' : '一致'), ROW_NAME_X, y + h / 2 + 8);
         }
         ctx.restore();
+        this.drawRowControls(pane, view, plotHeight, nameWidth);
       }
       this.drawCursorOverlays();
     }
@@ -880,11 +1033,13 @@
       const rect = pane.canvas.getBoundingClientRect();
       if (event.clientY - rect.top < AXIS_HEIGHT) return;
       const row = this.pairAtOffset(event.clientY - rect.top - AXIS_HEIGHT + this.drawnView.scrollTop);
-      if (!this.result.pairs[row]) return;
+      const pair = this.result.pairs[row];
+      const inNameColumn = event.clientX - rect.left < this.nameWidth();
+      if (!pair || (!inNameColumn && this.collapsedPairs.has(pair.name))) return;
       const column = this.columnAt(event, pane);
       this.cursorPair = row;
       if (pane.side !== 'overlay') this.cursorSide = pane.side;
-      if (event.clientX - rect.left < this.nameWidth()) {
+      if (inNameColumn) {
         this.cursorSequence++;
         this.updateCursorControls();
         return;
@@ -990,7 +1145,7 @@
       if (event.clientX - rect.left < this.nameWidth() || event.clientY - rect.top < AXIS_HEIGHT) return false;
       const pair = this.pairAtOffset(event.clientY - rect.top - AXIS_HEIGHT + this.drawnView.scrollTop);
       const signal = this.result.pairs[pair]?.name;
-      if (signal == null) return false;
+      if (signal == null || this.collapsedPairs.has(signal)) return false;
       const column = this.rangeColumn(event, pane);
       pane.rangeDrag = { id: event.pointerId, x: event.clientX, column, pair, signal,
         previous: this.rangeSelection, cursor: this.cursorPositions.C, moved: false };
@@ -1138,10 +1293,15 @@
     }
 
     jump(pair, start, end) {
+      if (this.collapsedPairs.delete(this.result.pairs[pair]?.name)) {
+        this.rebuildRowOffsets();
+        this.updateExpandAllControl();
+      }
       this.scrollTop = this.rowOffsets[Math.max(0, pair - 1)];
-      this.panes.forEach((pane) => { pane.viewport.scrollTop = this.scrollTop; });
+      this.syncPaneGeometry();
       const span = Math.max(8, Math.min(this.end - this.start, Math.max(16, (end - start) * 3)));
       this.setView(start - span / 4, span);
+      this.schedule();
     }
 
     tagKey() {

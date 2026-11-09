@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=scope-compare-release-v1';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=scope-compare-fold-runs-v1';
   const FormulaEngine = global.VisualWaveDromFormula || null;
   const DEFAULT_ROW_HEIGHT = 42;
   const DEFAULT_MULTI_WAVE_ROW_HEIGHT = 68;
@@ -630,6 +630,7 @@
       this.rowStyles = {};
       this.rowHeights = [];
       this.collapsedRows = new Set();
+      this.expandedArrayGroups = new Set();
       this.signalNames = [];
       this.signalRowTargets = new Map();
       this.signalNameEditor = null;
@@ -1674,6 +1675,11 @@
           this.suppressSignalRowClickUntil = 0;
           return;
         }
+        const arrayToggle = event.target.closest('[data-scope-toggle-array]');
+        if (arrayToggle) {
+          this.toggleArrayGroup(Number(arrayToggle.dataset.scopeToggleArray));
+          return;
+        }
         const rowToggle = event.target.closest('[data-scope-toggle-row]');
         if (rowToggle) {
           event.preventDefault();
@@ -1826,15 +1832,6 @@
           return;
         }
         const target = event.target;
-        const historyDirection = this.cursorHistoryDirection(event);
-        if (historyDirection) {
-          event.preventDefault();
-          if (!this.isCursorShortcutInput(target) && !event.repeat) {
-            this.log('scope-side-button', { key: event.key, direction: historyDirection, window: 'scope' });
-            void this.navigateActiveCursor(historyDirection);
-          }
-          return;
-        }
         if (this.isCursorShortcutInput(target)) return;
         if (!event.defaultPrevented && !event.ctrlKey && !event.metaKey && !event.altKey
             && !event.isComposing && /^(a|b|c)$/i.test(event.key)) {
@@ -1977,14 +1974,59 @@
       return this.collapsedRows.has(Math.floor(Number(rowIndex)));
     }
 
+    isArrayElementHidden(rowIndex) {
+      const group = this.meta?.rows[rowIndex]?.arrayGroup;
+      return group?.index >= 0 && (this.isRowCollapsed(group.anchor)
+        || !this.expandedArrayGroups.has(group.name));
+    }
+
+    hiddenArrayElements() {
+      return this.meta.rows.filter((row) => row.arrayGroup?.index < 0
+        && (this.isRowCollapsed(row.index) || !this.expandedArrayGroups.has(row.arrayGroup.name)))
+        .map((row) => row.index);
+    }
+
+    toggleArrayGroup(rowIndex) {
+      const group = this.meta?.rows[rowIndex]?.arrayGroup;
+      if (group?.index !== -1) return;
+      if (this.signalNameEditor) this.finishSignalNameEdit(true);
+      const anchor = this.captureVerticalScrollAnchor();
+      if (this.expandedArrayGroups.delete(group.name)) {
+        const member = (index) => this.meta.rows[index]?.arrayGroup?.anchor === rowIndex;
+        if (member(anchor.rowIndex)) anchor.rowIndex = rowIndex;
+        if (member(this.activeCursorRow)) this.activeCursorRow = rowIndex;
+        if (this.columnSelection && member(this.columnSelection.rowIndex)) this.columnSelection = null;
+      } else {
+        this.expandedArrayGroups.add(group.name);
+      }
+      this.windowSessionRevision += 1;
+      this.windowData = null;
+      this.overviewData = null;
+      this.renderSignalRows();
+      this.signalList.querySelector('[data-scope-toggle-array="' + rowIndex + '"]')
+        ?.focus({ preventScroll: true });
+      this.restoreVerticalScrollAnchor(anchor);
+      this.positionPlotCanvas();
+      this.scheduleWindowRequest();
+      this.scheduleOverviewDataRequest();
+      void this.updateCursorReadout();
+      this.draw();
+    }
+
     isCollapsedRunStart(rowIndex) {
       const index = Math.floor(Number(rowIndex));
-      return this.isRowCollapsed(index) && !this.isRowCollapsed(index - 1);
+      let previous = index - 1;
+      while (this.isArrayElementHidden(previous)) previous -= 1;
+      return this.isRowCollapsed(index) && !this.isRowCollapsed(previous);
     }
 
     collapsedRunStart(rowIndex) {
       let index = Math.floor(Number(rowIndex));
-      while (index > 0 && this.isRowCollapsed(index - 1)) index -= 1;
+      let previous = index - 1;
+      while (previous >= 0 && (this.isRowCollapsed(previous) || this.isArrayElementHidden(previous))) {
+        if (!this.isArrayElementHidden(previous)) index = previous;
+        previous -= 1;
+      }
       return index;
     }
 
@@ -2014,9 +2056,9 @@
     restoreVerticalScrollAnchor(anchor) {
       if (!anchor || !this.meta || !this.meta.rows.length) return;
       const requestedIndex = clamp(anchor.rowIndex, 0, this.meta.rows.length - 1);
-      const rowIndex = this.isRowCollapsed(requestedIndex)
-        ? this.collapsedRunStart(requestedIndex)
-        : requestedIndex;
+      const visibleIndex = this.isArrayElementHidden(requestedIndex)
+        ? this.meta.rows[requestedIndex].arrayGroup.anchor : requestedIndex;
+      const rowIndex = this.isRowCollapsed(visibleIndex) ? this.collapsedRunStart(visibleIndex) : visibleIndex;
       const rowOffset = Math.min(
         Math.max(0, Number(anchor.offset) || 0),
         Math.max(0, this.rowHeight(rowIndex) - 1)
@@ -2037,11 +2079,13 @@
       if (collapse) this.collapsedRows.add(index);
       else this.collapsedRows.delete(index);
       if (collapse) {
-        if (this.columnSelection && this.columnSelection.rowIndex === index) {
+        const hidden = (row) => row === index || this.isArrayElementHidden(row);
+        if (this.isArrayElementHidden(this.activeCursorRow)) this.activeCursorRow = index;
+        if (this.columnSelection && hidden(this.columnSelection.rowIndex)) {
           this.columnSelection = null;
           this.updateCursorControls();
         }
-        if (this.selectedPoint && this.selectedPoint.rowIndex === index) {
+        if (this.selectedPoint && hidden(this.selectedPoint.rowIndex)) {
           this.selectedPoint = null;
           this.updatePointEditor();
         }
@@ -2049,14 +2093,14 @@
           (connection) => connection.id === this.selectedConnectionId
         );
         if (selectedConnection
-            && (selectedConnection.start.rowIndex === index
-              || selectedConnection.end.rowIndex === index)) {
+            && (hidden(selectedConnection.start.rowIndex)
+              || hidden(selectedConnection.end.rowIndex))) {
           this.selectedConnectionId = '';
         }
-        if (this.connectionDraftStart && this.connectionDraftStart.rowIndex === index) {
+        if (this.connectionDraftStart && hidden(this.connectionDraftStart.rowIndex)) {
           this.connectionDraftStart = null;
           this.connectionHover = null;
-        } else if (this.connectionHover && this.connectionHover.rowIndex === index) {
+        } else if (this.connectionHover && hidden(this.connectionHover.rowIndex)) {
           this.connectionHover = null;
         }
       }
@@ -2066,7 +2110,9 @@
       this.scheduleWindowRequest();
       this.scheduleOverviewDataRequest();
       this.updateCollapsedRowControls();
+      this.updateRowOperationControls();
       this.updateMeasurements();
+      void this.updateCursorReadout();
       this.draw();
       const rowName = this.signalDisplayName(index);
       this.setStatus(collapse ? '已收起信号：' + rowName : '已展开信号：' + rowName);
@@ -2098,9 +2144,11 @@
     }
 
     rowHeight(rowIndex) {
+      if (this.isArrayElementHidden(rowIndex)) return 0;
       if (this.isRowCollapsed(rowIndex)) {
         return this.isCollapsedRunStart(rowIndex) ? COLLAPSED_ROW_HEIGHT : 0;
       }
+      if (this.meta?.rows[rowIndex]?.arrayGroup?.index < 0) return DEFAULT_ROW_HEIGHT;
       if (this.modes[rowIndex] !== 'analog') return DEFAULT_ROW_HEIGHT;
       return clamp(
         Math.round(Number(this.rowHeights[rowIndex]) || DEFAULT_ROW_HEIGHT),
@@ -2484,10 +2532,13 @@
       if (!FormulaEngine) return null;
       return FormulaEngine.analyzeDefinitions(
         this.scopeFormulaDefinitions(overrides),
-        this.meta.rows.map((row) => String(
-          this.signalNames[row.index] == null ? row.name : this.signalNames[row.index]
-        ))
+        this.formulaSignalNames()
       );
+    }
+
+    formulaSignalNames() {
+      return this.meta.rows.filter((row) => row.arrayGroup?.index !== -1)
+        .map((row) => this.signalDisplayName(row.index));
     }
 
     formulaItemForRow(rowIndex, analysis) {
@@ -2512,9 +2563,7 @@
       if (!this.meta || !this.formulaVariableList) return;
       const query = String(this.formulaVariableSearch.value || '').trim().toLocaleLowerCase();
       const seen = new Set();
-      this.formulaVariablePickerNames = this.meta.rows.map((row) => String(
-        this.signalNames[row.index] == null ? row.name || '' : this.signalNames[row.index]
-      )).filter((name) => {
+      this.formulaVariablePickerNames = this.formulaSignalNames().filter((name) => {
         if (!name || seen.has(name)) return false;
         seen.add(name);
         return !query || name.toLocaleLowerCase().includes(query);
@@ -2612,7 +2661,7 @@
 
     availableMultiWaveSourceRows(rowIndex) {
       return this.meta.rows.filter((row) => (
-        row.index !== rowIndex && !this.isMultiWaveRow(row.index)
+        row.index !== rowIndex && row.arrayGroup?.index !== -1 && !this.isMultiWaveRow(row.index)
       ));
     }
 
@@ -2793,9 +2842,7 @@
       }
       const analysis = dirty ? null : this.analyzeScopeFormulas();
       const item = dirty ? null : this.formulaItemForRow(row.index, analysis);
-      const names = this.meta.rows.map((entry) => String(
-        this.signalNames[entry.index] == null ? entry.name : this.signalNames[entry.index]
-      ));
+      const names = this.formulaSignalNames();
       this.formulaCycle0Highlight.innerHTML = FormulaEngine
         ? FormulaEngine.highlightExpression(
           displayedFormula.cycle0 || '', item && item.cycle0, names, row.name)
@@ -3114,7 +3161,7 @@
         suffix += 1;
         name = 'multiWave' + suffix;
       }
-      const availableRows = this.meta.rows.filter((row) => !this.isMultiWaveRow(row.index));
+      const availableRows = this.availableMultiWaveSourceRows(-1);
       const active = availableRows.find((row) => row.index === this.activeCursorRow);
       const orderedSources = active
         ? [active].concat(availableRows.filter((row) => row !== active))
@@ -3147,7 +3194,7 @@
 
     async deleteActiveSignal() {
       const row = this.meta && this.meta.rows[this.activeCursorRow];
-      if (!row) return;
+      if (!row || row.arrayGroup?.index < 0) return;
       const rowId = String(row.rowId || ('source:' + row.index));
       const name = this.signalDisplayName(row.index);
       const order = this.visibleRowIds().filter((candidate) => candidate !== rowId);
@@ -3817,8 +3864,12 @@
       this.signalList.innerHTML = this.meta.rows.map((row) => {
         const group = row.groups && row.groups.length ? row.groups.join(' / ') : '';
         const rowHeight = this.rowHeight(row.index);
+        if (!rowHeight) return '';
+        const packedArray = row.arrayGroup?.index < 0 ? row.arrayGroup : null;
+        const arrayExpanded = packedArray && this.expandedArrayGroups.has(packedArray.name);
+        const name = row.name;
         const collapsed = this.isRowCollapsed(row.index);
-        const analogMode = this.modes[row.index] === 'analog';
+        const analogMode = !packedArray && this.modes[row.index] === 'analog';
         const multiWave = this.isMultiWaveRow(row.index);
         const rawMultiWaveSources = row.multiWave && Array.isArray(row.multiWave.sources)
           ? row.multiWave.sources
@@ -3837,9 +3888,9 @@
         if (collapsed) {
           if (!this.isCollapsedRunStart(row.index)) return '';
           const runRows = [];
-          for (let index = row.index;
-            index < this.meta.rows.length && this.isRowCollapsed(index);
-            index += 1) {
+          for (let index = row.index; index < this.meta.rows.length; index += 1) {
+            if (this.isArrayElementHidden(index)) continue;
+            if (!this.isRowCollapsed(index)) break;
             runRows.push(this.meta.rows[index]);
           }
           const runEnd = runRows[runRows.length - 1].index;
@@ -3861,26 +3912,30 @@
           `;
         }
         return `
-          <div class="scope-signal-row${row.index === this.activeCursorRow ? ' active' : ''}${analogMode ? ' scope-signal-row-analog' : ''}${multiWave ? ' scope-signal-row-multi-wave' : ''}"
+          <div class="scope-signal-row${packedArray ? ' scope-array-row' : ''}${row.index === this.activeCursorRow ? ' active' : ''}${analogMode ? ' scope-signal-row-analog' : ''}${multiWave ? ' scope-signal-row-multi-wave' : ''}"
               data-row-index="${row.index}" data-scope-signal-row="${row.index}"
-              tabindex="0" aria-label="选择信号 ${escapeHtml(row.name)}"
+              tabindex="0" aria-label="选择信号 ${escapeHtml(name)}"
               style="height:${rowHeight}px">
             <button type="button" class="scope-row-collapse-button"
                 data-scope-toggle-row="${row.index}" aria-expanded="true"
                 title="收起信号：${escapeHtml(row.name)}"
                 aria-label="收起信号 ${escapeHtml(row.name)}">-</button>
+            ${packedArray ? `<button type="button" class="scope-row-collapse-button"
+                data-scope-toggle-array="${row.index}" aria-expanded="${!!arrayExpanded}"
+                title="${arrayExpanded ? '收起数组' : '展开数组'} ${escapeHtml(name)}"
+                aria-label="${arrayExpanded ? '收起数组' : '展开数组'} ${escapeHtml(name)}">${arrayExpanded ? '▾' : '▸'}</button>` : ''}
             <button type="button" class="scope-swatch" data-scope-swatch-row="${row.index}"
                 style="background:${waveColor}"
                 title="设置 ${escapeHtml(row.name)} 的波形和背景颜色"
                 aria-label="设置 ${escapeHtml(row.name)} 的波形和背景颜色"
                 aria-haspopup="dialog" aria-expanded="false"></button>
-            <span class="scope-signal-name" data-scope-row-drag="${row.index}"
-                title="${escapeHtml(row.name)}；按住鼠标左键拖动调整行顺序">
+            <span class="scope-signal-name" ${packedArray ? '' : `data-scope-row-drag="${row.index}"`}
+                title="${escapeHtml(name)}${packedArray ? '' : '；按住鼠标左键拖动调整行顺序'}">
               ${group ? `<small>${escapeHtml(group)}</small>` : ''}
-              <button type="button" class="scope-signal-name-button"
+              ${packedArray ? `<strong class="scope-array-name">${escapeHtml(name)}</strong>` : `<button type="button" class="scope-signal-name-button"
                   data-scope-name-row="${row.index}"
                   title="点击修改信号名：${escapeHtml(row.name)}"
-                  aria-label="修改信号名 ${escapeHtml(row.name)}">${escapeHtml(row.name)}</button>
+                  aria-label="修改信号名 ${escapeHtml(row.name)}">${escapeHtml(row.name)}</button>`}
               ${multiWave ? `
                 <span class="scope-multi-wave-legend" aria-label="多波形线条图例">
                   ${multiWaveSources.length ? multiWaveSources.map((source, sourceIndex) => {
@@ -3903,11 +3958,11 @@
                 </span>
               ` : ''}
               <em>
-                <span>${escapeHtml(String(row.sampleCount || 0))} 点${row.unit ? ` · ${escapeHtml(row.unit)}` : ''}</span>
+                <span>${packedArray ? packedArray.length + ' 个元素' : escapeHtml(String(row.sampleCount || 0)) + ' 点'}${row.unit ? ` · ${escapeHtml(row.unit)}` : ''}</span>
                 <b data-scope-cursor-value-row="${row.index}">${escapeHtml(this.activeCursor || '游标')}：--</b>
               </em>
             </span>
-            <button type="button" class="scope-display-mode-button"
+            ${packedArray ? `<span class="scope-array-mode">总线</span>` : `<button type="button" class="scope-display-mode-button"
                 data-scope-display-row="${row.index}"
                 aria-label="${escapeHtml(row.name)} 显示设置"
                 aria-haspopup="dialog" aria-expanded="false"
@@ -3917,7 +3972,7 @@
                   ? ' · fx'
                   : ''
               }</span>
-            </button>
+            </button>`}
             ${analogMode ? `
               <span class="scope-row-resize-handle" data-scope-row-resize="${row.index}"
                   role="separator" aria-orientation="horizontal"
@@ -4895,6 +4950,7 @@
         end,
         width,
         rowCount: this.meta.rows.length,
+        hiddenArrayElements: this.hiddenArrayElements(),
         modes: Object.assign({}, this.modes),
         busFormats: clone(this.busFormats),
         analogFormats: clone(this.analogFormats)
@@ -4905,7 +4961,7 @@
       if (!this.meta || !Array.isArray(this.meta.rows)) return [];
       return this.meta.rows
         .map((row) => row.index)
-        .filter((rowIndex) => !this.isRowCollapsed(rowIndex))
+        .filter((rowIndex) => !this.isRowCollapsed(rowIndex) && this.rowHeight(rowIndex) > 0)
         .slice(0, 8);
     }
 
@@ -4918,6 +4974,7 @@
           this.overviewCanvas.clientWidth || this.plotViewport.clientWidth || 1
         )),
         rowIndices,
+        hiddenArrayElements: this.hiddenArrayElements(),
         modes: Object.assign({}, this.modes),
         busFormats: clone(this.busFormats),
         analogFormats: clone(this.analogFormats)
@@ -4930,6 +4987,7 @@
         config.end,
         config.width,
         config.rowIndices,
+        config.hiddenArrayElements,
         config.modes,
         config.busFormats,
         config.analogFormats
@@ -4984,6 +5042,7 @@
         Math.round(config.end * 10000000) / 10000000,
         config.width,
         config.rowCount,
+        config.hiddenArrayElements,
         config.modes,
         config.busFormats,
         config.analogFormats
@@ -4997,6 +5056,7 @@
         width: config.width,
         rowStart,
         rowEnd,
+        hiddenArrayElements: config.hiddenArrayElements,
         modes: config.modes,
         busFormats: config.busFormats,
         analogFormats: config.analogFormats
@@ -5327,14 +5387,16 @@
       context.restore();
     }
 
-    drawUnknownDigitalSegment(context, x1, x2, yTop, yBottom, lineWidth, compact) {
-      const left = Math.min(x1, x2);
-      const right = Math.max(x1, x2);
+    drawUnknownDigitalSegment(context, x1, x2, yTop, yBottom, lineWidth, compact, width) {
+      const origin = Math.min(x1, x2);
+      const left = Math.max(0, origin);
+      const right = Math.min(width, Math.max(x1, x2));
       const segmentWidth = Math.max(1, right - left);
       const inset = Math.min(5, Math.max(1, (yBottom - yTop) * 0.2));
       const highY = Math.min(yBottom, yTop + inset);
       const lowY = Math.max(yTop, yBottom - inset);
       const centerY = (highY + lowY) / 2;
+      if (!(right > left)) return centerY;
       const hatchWidth = compact ? 8 : 14;
       context.save();
       context.fillStyle = 'rgba(111, 118, 128, 0.14)';
@@ -5347,7 +5409,9 @@
       context.moveTo(left, lowY);
       context.lineTo(right, lowY);
       if (segmentWidth >= (compact ? 3 : 7)) {
-        for (let hatchX = left; hatchX < right; hatchX += hatchWidth) {
+        // Preserve the pattern phase without walking through the offscreen segment.
+        const firstHatch = left - (left - origin) % hatchWidth;
+        for (let hatchX = firstHatch; hatchX < right; hatchX += hatchWidth) {
           const hatchRight = Math.min(right, hatchX + hatchWidth);
           context.moveTo(hatchX, highY);
           context.lineTo(hatchRight, lowY);
@@ -5487,7 +5551,7 @@
             }
           }
           if (bucket.unknown) {
-            this.drawUnknownDigitalSegment(context, x1, x2, yTop, yBottom, 1, true);
+            this.drawUnknownDigitalSegment(context, x1, x2, yTop, yBottom, 1, true, width);
           }
           const busLabel = String(bucket.value == null ? '' : bucket.value);
           if (bucket.bus && !bucket.unknown && busLabel && busLabel !== '*'
@@ -5497,7 +5561,7 @@
             context.textAlign = 'center';
             context.textBaseline = 'middle';
             context.fillText(
-              compactBusLabel(busLabel, busLabelGeometry.width),
+              compactBusLabel(data.packedArray ? 'arr' : busLabel, busLabelGeometry.width),
               busLabelGeometry.center,
               (yTop + yBottom) / 2 + labelOffset
             );
@@ -5543,7 +5607,8 @@
             yTop,
             yBottom,
             1.5,
-            false
+            false,
+            width
           );
           return;
         }
@@ -5574,7 +5639,7 @@
             context.font = '11px "Segoe UI", sans-serif';
             context.textAlign = 'center';
             context.textBaseline = 'middle';
-            const label = String(segment.value == null ? '' : segment.value);
+            const label = data.packedArray ? 'arr' : String(segment.value == null ? '' : segment.value);
             context.fillText(
               compactBusLabel(label, busLabelGeometry.width),
               busLabelGeometry.center,
@@ -5592,7 +5657,8 @@
             yTop,
             yBottom,
             1.5,
-            false
+            false,
+            width
           );
           return;
         }
@@ -5691,7 +5757,8 @@
             yTop,
             yBottom,
             1,
-            true
+            true,
+            width
           );
         });
       }
@@ -5737,7 +5804,7 @@
               context.lineTo(x, previousY);
               context.stroke();
             }
-            this.drawUnknownDigitalSegment(context, x, x2, yTop, yBottom, 1, true);
+            this.drawUnknownDigitalSegment(context, x, x2, yTop, yBottom, 1, true, width);
             context.beginPath();
             started = false;
             previousY = null;
@@ -5773,7 +5840,8 @@
               yTop,
               yBottom,
               1.5,
-              false
+              false,
+              width
             );
             return;
           }
@@ -5852,7 +5920,8 @@
               yTop,
               yBottom,
               1.7,
-              false
+              false,
+              width
             );
             return;
           }
@@ -6413,7 +6482,7 @@
           context.lineTo(width, rowTop + rowHeight - 0.5);
           context.stroke();
           const simplifiedRow = this.simplified && this.simplified.model.rows[rowIndex];
-          if (this.isMultiWaveRow(rowIndex)) {
+          if (this.isMultiWaveRow(rowIndex) || this.meta.rows[rowIndex]?.arrayGroup?.index < 0) {
             this.drawSegments(
               context,
               rowResult,
@@ -6657,7 +6726,8 @@
                 yTop,
                 yBottom,
                 1,
-                true
+                true,
+                width
               );
               return;
             }
@@ -6695,7 +6765,7 @@
                 context.lineTo(x1, previousY);
                 context.stroke();
               }
-              this.drawUnknownDigitalSegment(context, x1, x2, yTop, yBottom, 1, true);
+              this.drawUnknownDigitalSegment(context, x1, x2, yTop, yBottom, 1, true, width);
               context.beginPath();
               started = false;
               previousY = null;
@@ -6728,7 +6798,8 @@
                 yTop,
                 yBottom,
                 1,
-                true
+                true,
+                width
               );
               return;
             }
@@ -7784,7 +7855,8 @@
         || this.formulaRefreshInFlight;
       this.addSignalButton.disabled = busy || !ready;
       this.addMultiWaveButton.disabled = busy || !ready;
-      this.deleteSignalButton.disabled = busy || !ready || rowCount === 0;
+      this.deleteSignalButton.disabled = busy || !ready || rowCount === 0
+        || this.meta.rows[this.activeCursorRow]?.arrayGroup?.index < 0;
       this.deleteSignalButton.title = rowCount
         ? '删除当前选中的波形，可通过撤销恢复'
         : '当前没有可删除的波形';
@@ -7875,8 +7947,10 @@
           const target = this.cursorValueTargets.get(Number(row.index));
           if (!target) return;
           const text = reference.label + '：' + this.formatCursorValue(row.value);
-          const title = reference.title + ' @ ' + this.formatTime(result.column)
-            + ' = ' + this.formatCursorValue(row.value);
+          const value = Array.isArray(row.arrayValues)
+            ? '[' + row.arrayValues.join(', ') + ']'
+            : this.formatCursorValue(row.value);
+          const title = reference.title + ' @ ' + this.formatTime(result.column) + ' = ' + value;
           if (target.textContent !== text) target.textContent = text;
           if (target.title !== title) target.title = title;
         });
@@ -7923,34 +7997,98 @@
 
     cursorHistoryDirection(event) {
       if (event.defaultPrevented || event.isComposing || event.ctrlKey || event.metaKey || event.shiftKey) return 0;
-      if (event.key === 'BrowserBack' || (event.altKey && event.key === 'ArrowLeft')) return -1;
-      if (event.key === 'BrowserForward' || (event.altKey && event.key === 'ArrowRight')) return 1;
+      if (event.key === 'BrowserBack' || event.code === 'BrowserBack' || event.keyCode === 166
+          || (event.altKey && event.key === 'ArrowLeft')) return -1;
+      if (event.key === 'BrowserForward' || event.code === 'BrowserForward' || event.keyCode === 167
+          || (event.altKey && event.key === 'ArrowRight')) return 1;
       return 0;
     }
 
     bindCursorSideButtons(target, navigate, signal) {
+      const view = target.defaultView;
+      const scopeWindow = target === document ? 'scope' : 'comparison';
       const phases = new Map();
+      const recentDirect = new Map();
+      const dispatch = (direction, type, eventTarget, fields = {}) => {
+        const input = this.isCursorShortcutInput(eventTarget);
+        this.log('scope-side-button', { type, direction, window: scopeWindow, input: !!input, ...fields });
+        if (!input) navigate(direction);
+      };
       const handle = (event) => {
-        const { button, type, timeStamp } = event;
+        const { type, timeStamp } = event;
+        const down = type === 'pointerdown' || type === 'mousedown';
+        const button = event.button === 3 || event.button === 4 ? event.button
+          : down && event.buttons === 8 ? 3 : down && event.buttons === 16 ? 4 : -1;
         if (button !== 3 && button !== 4) return;
         event.preventDefault();
+        if (event.button !== button) event.stopPropagation();
+        const direction = button === 3 ? -1 : 1;
+        recentDirect.set(direction, view.performance.now());
         const previous = phases.get(button);
-        const down = type === 'pointerdown' || type === 'mousedown';
         // Native pointer, mouse and auxiliary-click events can describe the same press.
         const duplicate = down ? type === 'mousedown' && previous?.type === 'pointerdown'
           && timeStamp - previous.timeStamp < 100
           : previous && previous.type !== type && (previous.type.endsWith('down') || timeStamp - previous.timeStamp < 100);
         if (type === 'auxclick') phases.delete(button);
         else phases.set(button, { type, timeStamp });
-        if (duplicate || this.isCursorShortcutInput(event.target)
-            || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
-        const direction = button === 3 ? -1 : 1;
-        this.log('scope-side-button', { type, button, direction, window: target === document ? 'scope' : 'comparison' });
-        navigate(direction);
+        if (duplicate || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+        dispatch(direction, type, event.target, { button, buttons: event.buttons });
       };
       ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'auxclick'].forEach(type => {
         target.addEventListener(type, handle, { capture: true, signal });
       });
+      view.addEventListener('keydown', (event) => {
+        const direction = this.cursorHistoryDirection(event);
+        if (!direction) return;
+        event.preventDefault();
+        recentDirect.set(direction, view.performance.now());
+        if (!event.repeat) dispatch(direction, event.type, event.target, { key: event.key });
+      }, { capture: true, signal });
+      if (target === document) {
+        this.bindCursorHistoryFallback(target, (direction, pointerTarget) => {
+          if (view.performance.now() - (recentDirect.get(direction) ?? -Infinity) < 250) return;
+          dispatch(direction, 'popstate', pointerTarget);
+        }, signal);
+      }
+    }
+
+    bindCursorHistoryFallback(target, navigate, signal) {
+      const view = target.defaultView;
+      const history = view.history;
+      const key = '__vwdScopeSideSlot';
+      // Some browsers consume side buttons before sending DOM events. Only
+      // reserve history entries in a fresh, dedicated scope popup.
+      if (!view.opener || (history.length !== 1 && !Number.isInteger(history.state?.[key]))) return;
+      let pointerTarget = null;
+      target.addEventListener('pointerover', (event) => { pointerTarget = event.target; }, { capture: true, signal });
+      target.addEventListener('pointerout', (event) => { pointerTarget = event.relatedTarget; }, { capture: true, signal });
+      view.addEventListener('blur', () => { pointerTarget = null; }, { signal });
+      const arm = (event) => {
+        if (!event.isTrusted || event.button !== 0) return;
+        pointerTarget = event.target;
+        try {
+          const slot = history.state?.[key];
+          if (slot === -1 || slot === 1) history.go(-slot);
+          else if (history.length === 1) {
+            const state = history.state || {};
+            history.replaceState({ ...state, [key]: -1 }, '');
+            history.pushState({ ...state, [key]: 0 }, '');
+            history.pushState({ ...state, [key]: 1 }, '');
+            history.back();
+            this.log('scope-side-button', { type: 'history-armed', window: 'scope' });
+          }
+        } catch (error) {
+          this.log('scope-side-button', { type: 'history-unavailable', message: error.message });
+        }
+      };
+      target.addEventListener('click', arm, { capture: true, signal });
+      view.addEventListener('popstate', (event) => {
+        const slot = event.state?.[key];
+        if ((slot !== -1 && slot !== 1) || !pointerTarget
+            || !target.documentElement.contains(pointerTarget)) return;
+        history.go(-slot);
+        navigate(slot, pointerTarget);
+      }, { signal });
     }
 
     async navigateActiveCursor(direction) {
@@ -8654,7 +8792,9 @@
     createComparisonRenderer(meta, display, transientState) {
       const renderer = Object.assign(Object.create(ScopeView.prototype), {
         meta, modes: {}, busFormats: {}, analogFormats: {}, rowStyles: {}, rowHeights: [],
-        collapsedRows: new Set(), transientFormulaState: normalizeTransientFormulaState(transientState)
+        collapsedRows: new Set(),
+        expandedArrayGroups: new Set(meta.rows.flatMap((row) => row.arrayGroup ? [row.arrayGroup.name] : [])),
+        transientFormulaState: normalizeTransientFormulaState(transientState)
       });
       meta.rows.forEach((row) => {
         const index = row.index;

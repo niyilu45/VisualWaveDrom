@@ -2008,9 +2008,9 @@
         if (!Number.isSafeInteger(value)) {
           return '第 ' + candidate.line + ' 行序号超出可支持范围：' + candidate.value;
         }
-        if (value <= previous) {
+        if (value < previous) {
           return '第 ' + candidate.line + ' 行序号 ' + value
-            + ' 没有大于上一序号 ' + previous;
+            + ' 小于上一序号 ' + previous + '，序号不能倒退';
         }
         previous = value;
       }

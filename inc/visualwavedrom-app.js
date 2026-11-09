@@ -13082,9 +13082,11 @@ ${lines.join('\n')}`;
         oldValue = entry.signal.name || '';
       } else if (field === 'data') {
         const dataValues = normalizeWaveDataValues(entry.signal.data);
+        const arraySlot = entry.signal.scope?.arrayGroup
+          ? getWaveDataSlots(entry.signal.wave || '')[dataIdx] : null;
         oldValue = (dataValues[dataIdx] !== undefined
           ? dataValues[dataIdx]
-          : textEl.textContent);
+          : arraySlot ? getWaveCellHoverValue(entry.signal, arraySlot.col) : textEl.textContent);
       } else if (field === 'description') {
         oldValue = getSignalDescribeOldValue(entry.signal);
       } else {
@@ -13986,17 +13988,22 @@ ${lines.join('\n')}`;
         if (drawGroup) {
           const dataTexts = drawGroup.querySelectorAll('text');
           const parameterData = Array.isArray(entry.signal.data) ? entry.signal.data : normalizeWaveDataValues(entry.signal.data);
+          const arrayLabelSlots = entry.signal.scope?.arrayGroup
+            ? arrayDisplaySlots(renderedWave) : null;
           dataTexts.forEach((textEl, dataIdx) => {
             if (textEl.dataset.vwdDataBound === '1') return;
             textEl.dataset.vwdDataBound = '1';
+            const slot = arrayLabelSlots ? arrayLabelSlots[dataIdx] : dataIdx;
             const fullDataIndex = renderContext.dataIndices
-              && Number.isInteger(renderContext.dataIndices[dataIdx])
-              ? renderContext.dataIndices[dataIdx]
-              : dataIdx;
+              && Number.isInteger(renderContext.dataIndices[slot])
+              ? renderContext.dataIndices[slot]
+              : slot;
             textEl.dataset.vwdDataIndex = String(fullDataIndex);
-            window.VisualWaveDromParameters.decorateText(
-              textEl, parameterData[fullDataIndex], documentSource || parsedSource
-            );
+            if (!arrayLabelSlots) {
+              window.VisualWaveDromParameters.decorateText(
+                textEl, parameterData[fullDataIndex], documentSource || parsedSource
+              );
+            }
             textEl.classList.add('wave-data-text');
             textEl.addEventListener('click', (e) => {
               if (isTextEditModeActive()) return;
@@ -14562,21 +14569,33 @@ ${lines.join('\n')}`;
       }
     }
 
-    function prepareEmptyWaveRowsForRender(signals) {
+    function arrayDisplaySlots(wave) {
+      let index = 0;
+      return (wave.match(/[0-9=]/g) || []).map((token) => /[01]/.test(token) ? -1 : index++);
+    }
+
+    function prepareWaveRowsForRender(signals, arrayLabels) {
       if (!Array.isArray(signals)) return signals;
       let changed = false;
       const prepared = signals.map((signal) => {
         let row = signal;
         if (Array.isArray(signal)) {
-          row = prepareEmptyWaveRowsForRender(signal);
+          row = prepareWaveRowsForRender(signal, arrayLabels);
         } else if (signal && typeof signal === 'object') {
           // WaveDrom renders wave: '' as one unknown cell; an omitted wave is a blank row.
           if (signal.wave === '') {
             row = Object.assign({}, signal);
             delete row.wave;
           }
+          if (arrayLabels && signal.scope?.arrayGroup && typeof signal.wave === 'string' && signal.wave) {
+            const wave = signal.wave.replace(/[01]/g, '=');
+            row = Object.assign({}, row, {
+              wave,
+              data: (wave.match(/[=2-9]/g) || []).map(() => 'arr')
+            });
+          }
           if (Array.isArray(signal.children)) {
-            const children = prepareEmptyWaveRowsForRender(signal.children);
+            const children = prepareWaveRowsForRender(signal.children, arrayLabels);
             if (children !== signal.children) row = Object.assign({}, row, { children });
           }
         }
@@ -14586,10 +14605,10 @@ ${lines.join('\n')}`;
       return changed ? prepared : signals;
     }
 
-    function getWaveRenderSource(source, parametersResolved) {
+    function getWaveRenderSource(source, parametersResolved, arrayLabels) {
       if (!source || typeof source !== 'object') return source;
       if (!parametersResolved) source = window.VisualWaveDromParameters.resolve(source);
-      const signal = prepareEmptyWaveRowsForRender(source.signal);
+      const signal = prepareWaveRowsForRender(source.signal, arrayLabels);
       if (signal !== source.signal) source = Object.assign({}, source, { signal });
       const title = typeof source.title === 'string' ? source.title.trim() : '';
       const head = source.head && typeof source.head.text === 'string' ? source.head.text.trim() : '';
@@ -17727,6 +17746,17 @@ ${lines.join('\n')}`;
         if (item.data.length) item.target.signal.data = item.data;
         else delete item.target.signal.data;
         const signalScope = Object.assign({}, item.target.signal.scope || {});
+        const arrayGroup = item.update.arrayGroup;
+        if (arrayGroup && typeof arrayGroup.name === 'string'
+            && Number.isInteger(arrayGroup.length) && arrayGroup.length > 1
+            && Number.isInteger(arrayGroup.index) && arrayGroup.index >= 0
+            && arrayGroup.index < arrayGroup.length) {
+          signalScope.arrayGroup = {
+            name: arrayGroup.name, index: arrayGroup.index, length: arrayGroup.length
+          };
+        } else {
+          delete signalScope.arrayGroup;
+        }
         if (item.sampleKind) {
           signalScope.mode = item.sampleKind;
           if (item.changePoints && item.sampleKind !== 'analog') {
@@ -20080,7 +20110,7 @@ ${lines.join('\n')}`;
             clearHistory: false
           });
         }
-        const renderSource = bigWaveWindow ? getWaveRenderSource(bigWaveWindow.source, true) : fullSource;
+        const renderSource = getWaveRenderSource(bigWaveWindow ? bigWaveWindow.source : fullSource, true, true);
 
         const displayDiv = document.createElement('div');
         displayDiv.id = 'wave-display-0';
@@ -21949,10 +21979,11 @@ ${lines.join('\n')}`;
       host.appendChild(display);
       document.body.appendChild(host);
       try {
-        WaveDrom.RenderWaveForm(0, getWaveRenderSource(renderWindow.source, true), prefix, false);
+        const renderSource = getWaveRenderSource(renderWindow.source, true, true);
+        WaveDrom.RenderWaveForm(0, renderSource, prefix, false);
         const svg = display.querySelector('svg');
         if (!svg) throw new Error('所选列范围未生成 SVG');
-        alignWaveDataToCycleGrid(svg, renderWindow.source);
+        alignWaveDataToCycleGrid(svg, renderSource);
         window.VisualWaveDromParameters.decorate(display, parameterSource || source, renderWindow);
         return {
           svg,
@@ -22682,9 +22713,10 @@ ${lines.join('\n')}`;
         if (useCanvas) {
           if (!renderLargeWaveCanvasPreview(entry, meta.renderSource, metrics)) throw new Error('未生成 Canvas');
         } else {
-          WaveDrom.RenderWaveForm(0, meta.renderSource, entry.prefix, false);
+          const renderSource = getWaveRenderSource(meta.renderSource, true, true);
+          WaveDrom.RenderWaveForm(0, renderSource, entry.prefix, false);
           if (!display.querySelector('svg')) throw new Error('未生成 SVG');
-          alignWaveDataToCycleGrid(display, meta.renderSource);
+          alignWaveDataToCycleGrid(display, renderSource);
         }
         syncWaveDocumentDescriptionWidth(display);
         window.VisualWaveDromParameters.decorate(display, meta.source || getWaveDocumentMeta(tag, false).source);

@@ -11,7 +11,7 @@ if (typeof document === 'undefined' && typeof global.importScripts === 'function
 const FormulaEngine = global.VisualWaveDromFormula || null;
 
 if (typeof document === 'undefined' && typeof global.importScripts === 'function') {
-  global.importScripts('visualwavedrom-scope-compare-core.js?v=20261020');
+  global.importScripts('visualwavedrom-scope-compare-core.js?v=array-layout-v2');
 }
 let comparison = null;
 let retainedComparisonSessions = null;
@@ -1586,6 +1586,7 @@ async function createSession(content, transientState, previousSession) {
     row.busFormat = getBusFormat(source, flatRow, flatRow.sourceIndex, row);
   });
   configureMultiWaveRows(rows, transient, totalColumns);
+  const { groups: arrays, displayRows } = scopeArrayGroups(rows);
   totalColumns = Math.max(1, Math.ceil(totalColumns));
   const scope = source.scope && typeof source.scope === 'object' ? source.scope : {};
   const samplePeriod = finiteNumber(scope.samplePeriod) || 1;
@@ -1602,7 +1603,8 @@ async function createSession(content, transientState, previousSession) {
       evaluationDurationMs: Number(formulaEvaluation.evaluationDurationMs || 0)
     } : null,
     baseRowsById,
-    rows,
+    rows: displayRows,
+    arrays,
     totalColumns,
     samplePeriod,
     timeUnit,
@@ -1612,6 +1614,142 @@ async function createSession(content, transientState, previousSession) {
       || 'Untitled waveform'
     )
   };
+}
+
+function scopeArrayGroups(rows) {
+  const candidates = new Map();
+  rows.forEach((row) => {
+    const group = row.source.scope?.arrayGroup;
+    if (!group || typeof group.name !== 'string' || !group.name
+        || !Number.isInteger(group.length) || group.length < 2 || group.length > rows.length
+        || !Number.isInteger(group.index) || group.index < 0 || group.index >= group.length) return;
+    const key = JSON.stringify([group.name, group.length]);
+    if (!candidates.has(key)) candidates.set(key, { name: group.name, members: new Array(group.length) });
+    const candidate = candidates.get(key);
+    if (candidate.members[group.index]) candidate.duplicate = true;
+    candidate.members[group.index] = row;
+  });
+  const groups = new Map();
+  const groupByRow = new Map();
+  candidates.forEach((group) => {
+    if (group.duplicate || group.members.includes(undefined)) return;
+    group.members.forEach((row) => groupByRow.set(row, group));
+  });
+  if (!groupByRow.size) return { groups, displayRows: rows };
+
+  const displayRows = [];
+  const placed = new Set();
+  rows.forEach((row) => {
+    const group = groupByRow.get(row);
+    if (!group) {
+      displayRows.push(row);
+      return;
+    }
+    if (placed.has(group)) return;
+    placed.add(group);
+    const anchor = displayRows.length;
+    const first = group.members[0];
+    const metadata = { name: group.name, anchor, length: group.members.length };
+    displayRows.push({
+      index: anchor, rowId: 'array:' + group.name, name: group.name, sourceName: group.name,
+      source: { scope: first.source.scope }, path: null, groups: first.groups, mode: 'bus',
+      detectedMode: 'bus', wave: '', segments: [], transitions: [], clockRanges: [],
+      clockEdges: [], gaps: [], sampleStep: first.sampleStep, busFormat: first.busFormat,
+      analogFormat: first.analogFormat, arrayGroup: { ...metadata, index: -1 }
+    });
+    group.members.forEach((member, index) => {
+      member.arrayGroup = { ...metadata, index };
+      displayRows.push(member);
+    });
+    groups.set(anchor, group);
+  });
+  const indexes = new Map(displayRows.map((row, index) => [row.rowId, index]));
+  displayRows.forEach((row, index) => {
+    row.index = index;
+    row.multiWave?.sources.forEach((source) => {
+      source.rowIndex = indexes.get(source.rowId) ?? -1;
+    });
+  });
+  return { groups, displayRows };
+}
+
+function scopeArraySample(row, column) {
+  const end = baseRowColumnCount(row);
+  if (column >= end) return 'x';
+  const value = sourceValueAtHalfIndex(row, column * 2);
+  return value == null || value === '' || value === FormulaEngine?.UNKNOWN ? 'x' : value;
+}
+
+function scopeArrayBoundaries(group, total) {
+  if (group.boundaries) return group.boundaries;
+  const boundaries = new Set([0, total]);
+  // A tuple changes precisely when any component changes. Cache only those
+  // times, not another full copy of the imported samples or tuple strings.
+  group.members.forEach((row) => {
+    if (row.samples && !row.changePoints && !row.scopeValues) {
+      let previous = Number.NaN;
+      const step = rowSampleStep(row);
+      for (let index = 0; index < row.samples.length; index += 1) {
+        const sample = row.samples[index];
+        if (sample !== previous && (Number.isFinite(sample) || Number.isFinite(previous))) {
+          boundaries.add(index * step);
+        }
+        previous = sample;
+      }
+      if (Number.isFinite(previous)) boundaries.add(row.samples.length * step);
+      return;
+    }
+    let previous = 'x';
+    for (const segment of row.segments) {
+      const value = segment.kind === 'bus' ? segment.value : segment.state;
+      if (value !== previous) boundaries.add(segment.start);
+      previous = value;
+    }
+    if (previous !== 'x' && row.segments.length) boundaries.add(row.segments[row.segments.length - 1].end);
+  });
+  group.boundaries = Array.from(boundaries).filter((value) => value <= total).sort((a, b) => a - b);
+  return group.boundaries;
+}
+
+function packedArrayWindow(group, start, end, width, total) {
+  const boundaries = scopeArrayBoundaries(group, total);
+  const after = (position, inclusive = true) => {
+    let lo = 0;
+    let hi = boundaries.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (boundaries[mid] < position || inclusive && boundaries[mid] === position) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  };
+  const first = after(start) - 1;
+  const last = after(end, false) - 1;
+  const items = [];
+  if (last - first < windowPixelBudget(width)) {
+    for (let index = first; index <= last; index += 1) {
+      items.push({
+        start: Math.max(start, boundaries[index]),
+        end: Math.min(end, boundaries[index + 1]),
+        kind: 'bus', state: 'bus', value: String(index)
+      });
+    }
+    return { kind: 'segments', items, packedArray: true };
+  }
+  const count = Math.floor(width);
+  for (let pixel = 0; pixel < count; pixel += 1) {
+    const left = start + (end - start) * pixel / count;
+    const right = start + (end - start) * (pixel + 1) / count;
+    const from = after(left) - 1;
+    const to = after(right, false) - 1;
+    const changes = Math.max(0, to - from);
+    items.push({
+      start: left, end: right, bus: true, value: changes ? '*' : String(from), changes,
+      eventStart: changes ? boundaries[from + 1] : null,
+      eventEnd: changes ? boundaries[to] : null
+    });
+  }
+  return { kind: 'buckets', items, packedArray: true };
 }
 
 function sourceValueAtHalfIndex(row, halfIndex) {
@@ -2193,6 +2331,7 @@ async function createWindow(payload, session = activeSession, isCancelled) {
     { length: Math.max(0, rowEnd - rowStart) },
     (_value, index) => rowStart + index
   );
+  const hiddenArrays = new Set(payload.hiddenArrayElements || []);
   const rows = [];
   for (let rowOffset = 0; rowOffset < rowIndices.length; rowOffset += 1) {
     if (isCancelled?.() || lifecycle !== sessionGeneration || !payload.comparison && generation < latestWindowGeneration) {
@@ -2210,6 +2349,16 @@ async function createWindow(payload, session = activeSession, isCancelled) {
     }
     const index = rowIndices[rowOffset];
     const row = session.rows[index];
+    const array = row.arrayGroup;
+    if (array && (array.index < 0 || hiddenArrays.has(array.anchor))) {
+      rows.push({
+        index, mode: 'bus',
+        data: array.index < 0
+          ? packedArrayWindow(session.arrays.get(index), start, end, width, total)
+          : { kind: 'segments', items: [], packedArray: true }
+      });
+      continue;
+    }
     const mode = row.multiWave
       ? 'analog'
       : (payload.modes && payload.modes[index] || row.mode);
@@ -2698,6 +2847,13 @@ function inspectCursor(payload) {
   return {
     column,
     rows: activeSession.rows.map((row) => {
+      if (row.arrayGroup?.index < 0) {
+        const group = activeSession.arrays.get(row.arrayGroup.anchor);
+        return {
+          index: row.index, mode: 'bus', value: 'arr',
+          arrayValues: group.members.map((member) => scopeArraySample(member, column))
+        };
+      }
       const mode = modes[row.index] || row.mode;
       const value = stateAtColumn(row, column, mode, analogFormats[row.index]);
       return {
@@ -3105,7 +3261,11 @@ function navigateCursor(payload, session = activeSession) {
   const kind = String(payload.kind || 'edge');
   let targetColumn = null;
   if (kind === 'edge') {
-    targetColumn = edgeColumn(row, column, direction, mode);
+    const array = row.arrayGroup?.index < 0 ? session.arrays.get(rowIndex) : null;
+    targetColumn = array
+      ? directionalSortedColumn(scopeArrayBoundaries(array, session.totalColumns), column, direction)
+      : edgeColumn(row, column, direction, mode);
+    if (array && targetColumn >= session.totalColumns) targetColumn = null;
   } else if (kind === 'value') {
     if (mode === 'analog') {
       targetColumn = analogValueColumn(row, column, direction, payload.value, analogFormat);
@@ -3618,6 +3778,7 @@ function prepareResponse(session = activeSession) {
       style: normalizeRowStyle(row.source.scope, session.totalColumns),
       formula: row.formula || null,
       multiWave: row.multiWave || null,
+      arrayGroup: row.arrayGroup || null,
       sampleStep: rowSampleStep(row),
       cursorStep: rowCursorStep(row),
       sampleCount: row.multiWave
@@ -3671,6 +3832,7 @@ async function startComparison(request) {
   const right = reusableRight || await createSession(request.content, request.transient);
   check();
   const result = await global.VisualWaveDromScopeCompareCore.compare(left, right, {
+    single: request.single === true,
     length: comparisonLength,
     value: comparisonValue,
     step: rowCursorStep,
@@ -3690,7 +3852,8 @@ async function comparisonWindow(request) {
   const snapshot = comparison;
   const cancelled = () => !snapshot || comparison !== snapshot || request.generation !== snapshot.generation;
   if (cancelled()) return { cancelled: true };
-  const pairs = snapshot.pairs.slice(request.rowStart, request.rowEnd);
+  const pairs = snapshot.pairs.slice(request.rowStart, request.rowEnd)
+    .filter((pair) => !request.collapsedPairs?.has(pair.name));
   const data = [];
   for (const side of ['left', 'right']) {
     const session = snapshot[side];

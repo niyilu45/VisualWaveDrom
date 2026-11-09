@@ -2840,6 +2840,7 @@ func (s *service) parseCollectionEntry(
 				"tbl":                     preparedRule.Tbl,
 				"compactNumericData":      true,
 				"compactNumericThreshold": collectionCompactNumericThreshold,
+				"groupRepeatedSequence":   preparedRule.HasSeq,
 			},
 		)
 	}

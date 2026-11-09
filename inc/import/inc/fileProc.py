@@ -135,7 +135,10 @@ def _normalize_value(value, options):
         mapped = mapped.lower()
 
     value_mode = str(options.get("valueMode") or "auto").lower()
-    if value_mode == "data":
+    if value_mode == "data" or (
+        value_mode == "auto" and options.get("arrayElement") and mapped in "23456789"
+        and len(mapped) == 1
+    ):
         return "=", mapped
     if len(mapped) == 1 and mapped in WAVE_SYMBOLS:
         return mapped, ""
@@ -203,7 +206,9 @@ def parse_index_data(file_path, options=None):
         has_index_column = forced_has_index
 
     points = []
+    repeated_index = False
     if has_index_column:
+        allow_arrays = forced_has_index is True and opts.get("groupRepeatedSequence") is True
         previous_index = -1
         for line_number, columns in rows:
             index = _parse_index(columns[0], line_number)
@@ -211,10 +216,12 @@ def parse_index_data(file_path, options=None):
                 raise FileProcError(
                     "line %d sequence number exceeds maxColumns" % line_number
                 )
-            if index <= previous_index:
+            if index < previous_index or (index == previous_index and not allow_arrays):
                 raise FileProcError(
-                    "line %d sequence number must be greater than %d" % (line_number, previous_index)
+                    "line %d: sequence number %d must be %s %d"
+                    % (line_number, index, "at least" if allow_arrays else "greater than", previous_index)
                 )
+            repeated_index = repeated_index or index == previous_index
             previous_index = index
             if len(columns) < 2:
                 raise FileProcError(
@@ -238,7 +245,8 @@ def parse_index_data(file_path, options=None):
     return {
         "points": points,
         "explicitIndex": has_index_column,
-        "sourceRowCount": len(rows)
+        "sourceRowCount": len(rows),
+        "repeatedIndex": repeated_index
     }
 
 
@@ -773,11 +781,51 @@ def _complete_scalar_signal(parsed_signal, points, options):
     return result
 
 
-def complete_previous_value(parsed_signal, options=None):
+def _complete_indexed_array(parsed_signal, options):
+    points = parsed_signal["points"]
+    elements = None
+    start = 0
+    while start < len(points):
+        index = points[start]["index"]
+        end = start + 1
+        while end < len(points) and points[end]["index"] == index:
+            end += 1
+        size = end - start
+        if elements is None:
+            elements = [[] for _ in range(size)]
+        elif size != len(elements):
+            raise FileProcError(
+                "line %d: sequence %d has %d array elements; expected %d (from sequence %d)"
+                % (points[start]["lineNumber"], index, size, len(elements), points[0]["index"])
+            )
+        for offset in range(size):
+            elements[offset].append(points[start + offset])
+        start = end
+
+    complex_detected = any(_complex_components(point["value"]) is not None for point in points)
+    component_base = dict(parsed_signal, repeatedIndex=False)
+    element_options = dict(options, arrayElement=True)
+    completed = [
+        complete_previous_value(dict(component_base, points=element), element_options, complex_detected)
+        for element in elements
+    ]
+    return {
+        "arrayElements": completed,
+        "complexDetected": complex_detected,
+        "pointCount": len(elements[0]),
+        "firstIndex": points[0]["index"],
+        "lastIndex": points[-1]["index"],
+        "explicitIndex": True
+    }
+
+
+def complete_previous_value(parsed_signal, options=None, force_complex=False):
     opts = dict(options or {})
+    if isinstance(parsed_signal, dict) and parsed_signal.get("repeatedIndex"):
+        return _complete_indexed_array(parsed_signal, opts)
     points = _validated_points(parsed_signal, opts)
     detected_components = []
-    complex_detected = False
+    complex_detected = force_complex
     for point in points:
         components = _complex_components(point["value"])
         detected_components.append(components)
@@ -794,7 +842,7 @@ def complete_previous_value(parsed_signal, options=None):
     for point, components in zip(points, detected_components):
         if components is None:
             raw_value = str(point["value"]).strip()
-            if len(raw_value) == 1 and raw_value in WAVE_SYMBOLS:
+            if len(raw_value) == 1 and raw_value in WAVE_SYMBOLS and not raw_value.isdigit():
                 components = (raw_value, raw_value)
             else:
                 components = (_normalized_number_text(raw_value), "0")
