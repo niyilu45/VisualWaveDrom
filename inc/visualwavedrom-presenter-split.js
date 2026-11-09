@@ -171,12 +171,23 @@
         return;
       }
       if (drag.kind === 'pen' && drag.mark) {
-        if (!drag.mirrorInk || drag.mirrorInk.parentNode == null) {
-          drag.mirrorInk = target.overlay.querySelector(
-            'path.presenter-annotation-ink[data-mark-id="' + drag.mark.id + '"]'
-          );
+        const part = drag.liveInk.dataset.inkPart;
+        const selector = 'path.presenter-annotation-ink[data-mark-id="' + drag.mark.id + '"]';
+        if (drag.mirrorInk?.ownerSVGElement !== target.overlay || drag.mirrorInk.dataset.inkPart !== part) {
+          const first = target.overlay.querySelector(selector);
+          if (!first) return;
+          if (part === '0') {
+            drag.mirrorInk = first;
+            first.dataset.inkPart = part;
+          } else {
+            drag.mirrorInk = target.overlay.querySelector(selector + '[data-ink-part="' + part + '"]');
+            if (!drag.mirrorInk) {
+              drag.mirrorInk = drag.liveInk.cloneNode(false);
+              first.parentNode.appendChild(drag.mirrorInk);
+            }
+          }
         }
-        if (drag.liveInk && drag.mirrorInk) drag.mirrorInk.setAttribute('d', drag.liveInk.getAttribute('d'));
+        drag.mirrorInk.setAttribute('d', drag.liveInk.getAttribute('d'));
         return;
       }
       if ((drag.kind === 'arrow' || drag.kind === 'rectangle') && drag.mark) {

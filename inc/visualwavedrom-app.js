@@ -7779,7 +7779,7 @@ ${lines.join('\n')}`;
       }
     }
 
-    function applyEdgeLabelPosition(svg, labelText, index, source, requestedOffset) {
+    function applyEdgeLabelPosition(svg, labelText, index, source, requestedOffset, safeBounds) {
       const storedOffset = requestedOffset == null
         ? getEdgeLabelOffsetOption(source, index)
         : normalizeEdgeLabelOffset(requestedOffset);
@@ -7791,7 +7791,7 @@ ${lines.join('\n')}`;
         labelText.__vwdEdgeLabelEffectiveOffset = storedOffset;
         return storedOffset;
       }
-      const safe = getEdgeLabelSafeBounds(svg);
+      const safe = safeBounds || getEdgeLabelSafeBounds(svg);
       const availableWidth = Math.max(0, safe.right - safe.left);
       const availableHeight = Math.max(0, safe.bottom - safe.top);
       const labelWidth = Math.max(0, bounds.right - bounds.x);
@@ -15866,6 +15866,7 @@ ${lines.join('\n')}`;
           await ensureLibraryReady();
           return saveWavePresentation(payload);
         },
+        alignRenderedWave: alignWaveDataToCycleGrid,
         renderScreenshot: renderWaveSvgScreenshot,
         downloadImage: downloadBlobFile,
         close: () => {
@@ -19798,31 +19799,37 @@ ${lines.join('\n')}`;
       const svg = container.localName === 'svg' ? container : container.querySelector('svg');
       if (!svg) return null;
       const result = geometry.alignDataTransitions(svg, source);
-      // Active labels are positioned by their editing handlers; previews and exports need the same saved offsets.
-      if (!waveContainer.contains(svg)) restoreSavedEdgeLabelPositions(svg, source);
+      // Active edges are styled by their editing handlers.
+      if (!waveContainer.contains(svg)) applyReadOnlyEdgePresentation(svg, source);
       return result;
     }
 
-    function restoreSavedEdgeLabelPositions(svg, source) {
-      if (!source || !Array.isArray(source.edge) || !Array.isArray(source.edgeOptions)) return;
+    function applyReadOnlyEdgePresentation(svg, source) {
+      if (!source || !Array.isArray(source.edge)) return;
       const indexes = new Map();
-      source.edge.forEach((edge, index) => {
-        const { from, to } = parseEdgeString(edge);
-        if (!from || !to) return;
-        const id = 'gmark_' + from + '_' + to;
-        if (!indexes.has(id)) indexes.set(id, []);
-        indexes.get(id).push(index);
+      const edgeLabels = source.edge.map((edge, index) => {
+        const { from, to, label } = parseEdgeString(edge);
+        if (from && to) {
+          const id = 'gmark_' + from + '_' + to;
+          if (!indexes.has(id)) indexes.set(id, []);
+          indexes.get(id).push(index);
+        }
+        return label;
       });
+      let safeBounds;
       svg.querySelectorAll('[id^="wavearcs_"] > path[id^="gmark_"]').forEach((path) => {
         const matches = indexes.get(path.id);
         if (!matches || !matches.length) return;
         const index = matches.shift();
-        const option = source.edgeOptions[index];
-        if (!option || !option.labelOffset || !parseEdgeString(source.edge[index]).label) return;
+        applyEdgeLineVisual(path, getEdgePresentation(source.edge[index], source, index));
+        if (!edgeLabels[index]) return;
         let group = path.nextElementSibling;
         while (group && group.classList.contains('wave-edge-hit-target')) group = group.nextElementSibling;
         const text = group && group.localName === 'g' && group.querySelector('text');
-        if (text) applyEdgeLabelPosition(svg, text, index, source);
+        if (text) {
+          safeBounds = safeBounds || getEdgeLabelSafeBounds(svg);
+          applyEdgeLabelPosition(svg, text, index, source, null, safeBounds);
+        }
       });
     }
 

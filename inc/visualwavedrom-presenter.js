@@ -9,6 +9,7 @@
 
   const SVG_NS = 'http://www.w3.org/2000/svg';
   const MAX_DIRECT_COLUMNS = 800;
+  const LIVE_INK_CHUNK_POINTS = 256;
   const LARGE_WINDOW_COLUMNS = 320;
   const MIN_SCALE = 0.05;
   const MAX_SCALE = 3;
@@ -157,9 +158,11 @@
   }
 
   function pointsPath(points) {
-    return points.map(function (point, index) {
-      return (index ? 'L' : 'M') + point.x.toFixed(2) + ' ' + point.y.toFixed(2);
-    }).join(' ');
+    return points.map((point, index) => pathPoint(point, index ? 'L' : 'M')).join(' ');
+  }
+
+  function pathPoint(point, command) {
+    return command + point.x.toFixed(2) + ' ' + point.y.toFixed(2);
   }
 
   function sourceTitle(source, fallback) {
@@ -296,6 +299,7 @@
     constructor(adapter) {
       this.adapter = adapter || {};
       this.log = typeof this.adapter.log === 'function' ? this.adapter.log : function () {};
+      this.alignRenderedWave = this.adapter.alignRenderedWave || alignWaveDataToCycleGrid;
       this.document = null;
       this.source = null;
       this.renderSource = null;
@@ -1255,7 +1259,7 @@
         root.WaveDrom.RenderWaveForm(0, source, prefix, false);
         const svg = this.display.querySelector('svg');
         if (!svg) throw new Error('WaveDrom 未生成波形 SVG');
-        alignWaveDataToCycleGrid(svg, source);
+        this.alignRenderedWave(svg, source);
         if (root.VisualWaveDromParameters) {
           root.VisualWaveDromParameters.decorate(this.display, this.source, this.renderWindow);
         }
@@ -1754,7 +1758,7 @@
           root.WaveDrom.RenderWaveForm(0, cloneValue(request.source), prefix, false);
           svg = display.querySelector('svg');
           if (!svg) throw new Error('missing-waveform');
-          alignWaveDataToCycleGrid(svg, request.source);
+          this.alignRenderedWave(svg, request.source);
           if (root.VisualWaveDromParameters && request.parameterSource) {
             root.VisualWaveDromParameters.decorate(display, request.parameterSource,
               fullRender ? null : request.parameterWindow);
@@ -2557,15 +2561,7 @@
         return true;
       }
       if (drag.kind === 'pen' && drag.mark) {
-        drag.liveInk = drag.liveInk || this.overlay.querySelector(
-          'path.presenter-annotation-ink[data-mark-id="' + drag.mark.id + '"]'
-        );
-        if (!drag.liveInk) return false;
-        const points = drag.mark.points.map((anchor) => this.pointFromAnchor(anchor));
-        drag.liveInk.setAttribute('d', pointsPath(points));
-        this.markGeometry.set(drag.mark.id, { points: points, strokeWidth: 2.5 / this.scale });
-        if (this.split) this.split.syncLiveGesture(drag);
-        return true;
+        return this.drawLivePen(drag);
       }
       if (isShapeKind(drag.kind) && drag.mark) {
         const points = this.shapePoints(drag.mark);
@@ -2584,18 +2580,57 @@
       return false;
     }
 
-    clientPoint(event) {
-      if (!this.overlay || typeof this.overlay.createSVGPoint !== 'function') return null;
-      const matrix = this.overlay.getScreenCTM && this.overlay.getScreenCTM();
-      if (!matrix) return null;
+    drawLivePen(drag) {
+      if (!drag.liveInk || drag.liveInk.ownerSVGElement !== this.overlay) {
+        drag.liveInk = this.overlay.querySelector(
+          'path.presenter-annotation-ink[data-mark-id="' + drag.mark.id + '"]'
+        );
+        if (!drag.liveInk) return false;
+        drag.liveInk.dataset.inkPart = '0';
+        drag.livePointCount = 0;
+        drag.livePartStart = 0;
+        drag.livePath = '';
+        drag.mirrorInk = null;
+      }
+      const points = drag.mark.points;
+      if (drag.livePointCount === points.length) return true;
+      const flush = () => {
+        drag.liveInk.setAttribute('d', drag.livePath);
+        if (this.split) this.split.syncLiveGesture(drag);
+      };
+      // Keep the in-progress SVG paths bounded. The saved mark is still one stroke.
+      while (drag.livePointCount < points.length) {
+        const index = drag.livePointCount++;
+        if (index - drag.livePartStart >= LIVE_INK_CHUNK_POINTS) {
+          flush();
+          const next = drag.liveInk.cloneNode(false);
+          next.dataset.inkPart = String(Number(drag.liveInk.dataset.inkPart) + 1);
+          drag.liveInk.parentNode.appendChild(next);
+          drag.liveInk = next;
+          drag.livePartStart = index - 1;
+          drag.livePath = pathPoint(drag.liveTail, 'M');
+        }
+        drag.liveTail = this.pointFromAnchor(points[index]);
+        drag.livePath += (drag.livePath ? ' ' : '') + pathPoint(drag.liveTail, drag.livePath ? 'L' : 'M');
+      }
+      flush();
+      return true;
+    }
+
+    pointerInverse() {
       try {
-        const point = this.overlay.createSVGPoint();
-        point.x = event.clientX;
-        point.y = event.clientY;
-        return point.matrixTransform(matrix.inverse());
+        return this.overlay?.getScreenCTM?.()?.inverse() || null;
       } catch (_error) {
         return null;
       }
+    }
+
+    clientPoint(event, inverse = this.pointerInverse()) {
+      if (!inverse) return null;
+      return {
+        x: inverse.a * event.clientX + inverse.c * event.clientY + inverse.e,
+        y: inverse.b * event.clientX + inverse.d * event.clientY + inverse.f
+      };
     }
 
     cycleFromX(x) {
@@ -2721,6 +2756,25 @@
         this.moveCanvasPan(event);
         return;
       }
+      if (this.drag.kind === 'pen' || this.drag.kind === 'pointer') {
+        const pointer = this.drag.kind === 'pointer';
+        const points = pointer ? this.pointerStroke : this.drag.mark.points;
+        const inverse = this.pointerInverse();
+        if (!inverse) return;
+        const previousCount = points.length;
+        const samples = typeof event.getCoalescedEvents === 'function' ? event.getCoalescedEvents() : [];
+        for (const sample of samples.length ? samples : [event]) {
+          const next = this.clientPoint(sample, inverse);
+          if (Math.hypot(next.x - this.drag.lastPoint.x, next.y - this.drag.lastPoint.y) * this.scale < 1) continue;
+          points.push(this.anchorFromPoint(next));
+          this.drag.lastPoint = next;
+        }
+        if (points.length !== previousCount) {
+          if (pointer) this.schedulePointerStrokeDraw();
+          else this.scheduleAnnotationDraw();
+        }
+        return;
+      }
       const point = this.clientPoint(event);
       if (!point) return;
       if (this.drag.kind === 'move') {
@@ -2731,24 +2785,13 @@
         this.annotations.focus.end = anchor;
       } else if (this.drag.kind === 'cursor') {
         this.annotations[this.drag.cursor === 'B' ? 'cursorB' : 'cursorA'] = this.cycleFromX(point.x);
-      } else if (this.drag.kind === 'pen' || this.drag.kind === 'pointer') {
-        const points = this.drag.kind === 'pointer' ? this.pointerStroke : this.drag.mark.points;
-        const samples = typeof event.getCoalescedEvents === 'function' ? event.getCoalescedEvents() : [];
-        (samples.length ? samples : [event]).forEach((sample) => {
-          const next = this.clientPoint(sample);
-          if (next && Math.hypot(next.x - this.drag.lastPoint.x, next.y - this.drag.lastPoint.y) * this.scale >= 1) {
-            points.push(this.anchorFromPoint(next));
-            this.drag.lastPoint = next;
-          }
-        });
       } else if (isShapeKind(this.drag.kind)) {
         this.drag.mark.end = this.anchorFromPoint(point);
       } else if (this.drag.kind === 'eraser') {
         this.eraseMarks(this.drag.lastPoint, point);
         this.drag.lastPoint = point;
       }
-      if (this.drag.kind === 'pointer') this.schedulePointerStrokeDraw();
-      else this.scheduleAnnotationDraw();
+      this.scheduleAnnotationDraw();
     }
 
     handleOverlayPointerUp(event) {
