@@ -763,6 +763,12 @@ func normalizeParserSignalResult(result map[string]any) error {
 	if len([]rune(wave)) > importMaxWaveColumns {
 		return fmt.Errorf("imported waveform exceeds %d columns", importMaxWaveColumns)
 	}
+	if points, ok := result["changePoints"].(map[string]any); ok {
+		total := intValue(points["totalSamples"], 0)
+		if total < 1 || total > importMaxWaveColumns || intValue(points["sampleStep"], 0) != 1 {
+			return fmt.Errorf("invalid indexed waveform length; maximum is %d columns", importMaxWaveColumns)
+		}
+	}
 	normalizedData := make([]string, len(data))
 	for index, value := range data {
 		normalizedData[index] = stringValue(value)
@@ -983,6 +989,10 @@ func importUpdate(mapping importMapping, result map[string]any, signalName strin
 	}
 	if table, supplied := mapping.Options["tbl"]; supplied && table != nil {
 		update["tbl"] = table
+	}
+	if points, ok := result["changePoints"].(map[string]any); ok {
+		update["changePoints"] = points
+		update["sparseImport"] = result["sparseImport"]
 	}
 	return update
 }
@@ -1300,6 +1310,7 @@ type tableImportOptions struct {
 	Columns            []collectionColumnConfig
 	Tbl                map[string]string
 	CompactNumericData bool
+	SparseIndexedData  bool
 }
 
 func (m *importManager) runTableSourceFileWithOptions(
@@ -1352,6 +1363,9 @@ func (m *importManager) runTableSourceFileWithOptionsContext(
 	if tableOptions.CompactNumericData {
 		mapping.Options["compactNumericData"] = true
 		mapping.Options["compactNumericThreshold"] = collectionCompactNumericThreshold
+	}
+	if tableOptions.SparseIndexedData {
+		mapping.Options["sparseIndexedData"] = true
 	}
 	if strings.TrimSpace(tableOptions.IndexColumn) != "" {
 		mapping.Options["indexColumn"] = strings.TrimSpace(tableOptions.IndexColumn)

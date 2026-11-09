@@ -2646,6 +2646,10 @@
       overflow-y: auto;
     }
 
+    #wave-collection-import-title {
+      overflow-wrap: anywhere;
+    }
+
     .wave-collection-path-field {
       display: grid;
       gap: 6px;

@@ -708,6 +708,41 @@ def _complete_scalar_signal(parsed_signal, points, options):
         "compactNumericThreshold",
         2000
     )
+    target_length = max(
+        points[-1]["index"] + 1,
+        int(parsed_signal.get("targetLength", opts.get("targetLength")) or 0)
+    )
+    if (opts.get("sparseIndexedData") and parsed_signal.get("explicitIndex")
+            and fill_leading == "x" and fill_gap == "." and fill_trailing == "x"
+            and target_length >= max(2000, compact_numeric_threshold)):
+        indices, values = [], []
+        has_data = False
+        previous = None
+        for i, point in enumerate(points):
+            token, label = _normalize_value(point["value"], opts)
+            token = token.lower()
+            if token not in DATA_SYMBOLS and token not in "01xz":
+                break
+            value = numeric_values[i] if all_numeric else (label if token in DATA_SYMBOLS else token)
+            has_data = has_data or token in DATA_SYMBOLS
+            state = (token, value)
+            if state != previous:
+                indices.append(point["index"])
+                values.append(value)
+                previous = state
+        else:
+            if target_length > points[-1]["index"] + 1 and previous != ("x", "x"):
+                indices.append(points[-1]["index"] + 1)
+                values.append("x")
+            if len(indices) * 8 <= target_length:
+                return {
+                    "wave": "", "data": [], "pointCount": len(points),
+                    "firstIndex": points[0]["index"], "lastIndex": points[-1]["index"],
+                    "explicitIndex": True, "sampleKind": "bus",
+                    "changePoints": {"sampleStep": 1, "totalSamples": target_length,
+                                     "indices": indices, "values": values},
+                    "sparseImport": {"data": has_data, "numeric": all_numeric}
+                }
     include_data_values = not (
         all_numeric
         and bool(opts.get("compactNumericData"))
@@ -738,10 +773,6 @@ def _complete_scalar_signal(parsed_signal, points, options):
         cursor = index + 1
         has_previous_value = True
 
-    target_length = max(
-        cursor,
-        int(parsed_signal.get("targetLength", opts.get("targetLength")) or cursor)
-    )
     while cursor < target_length:
         append_wave_state(fill_trailing)
         if all_numeric:

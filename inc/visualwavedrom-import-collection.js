@@ -95,6 +95,8 @@
     const modal = document.getElementById('wave-collection-import-modal');
     if (!modal) return null;
 
+    const title = document.getElementById('wave-collection-import-title');
+    const defaultTitle = title.textContent;
     const rootPathInput = document.getElementById('wave-collection-root-path');
     const presetSearchPathInput = document.getElementById('wave-collection-preset-search-path');
     const presetPathInput = document.getElementById('wave-collection-preset-path');
@@ -123,6 +125,7 @@
     let busy = false;
     let busyAction = '';
     let activeImportController = null;
+    let openedContextToken = '';
     let activeImportProgressToken = '';
     let importCancelRequested = false;
     let importCancellationAllowed = false;
@@ -1322,9 +1325,19 @@
         });
         if (Object.keys(table).length) config.tbl = table;
       }
+      if (!fieldPath.endsWith('.autoGen') && value.dly !== undefined) {
+        config.dly = normalizePresetDelay(value.dly, fieldPath + '.dly');
+      }
       const columns = normalizeColumnRules(value.columns, value.renames, fieldPath);
       if (columns.length) config.columns = columns;
       return config;
+    }
+
+    function normalizePresetDelay(value, fieldPath) {
+      if (typeof value !== 'number' || Math.abs(value) > 10000000 || !Number.isInteger(value * 2)) {
+        throw validationError(fieldPath + ' 必须是 ±10000000 范围内的 0.5 cycle 倍数', fieldPath);
+      }
+      return value;
     }
 
     function normalizeFormulaConfig(value, fieldPath) {
@@ -1437,13 +1450,13 @@
         if (!usrGen.name) {
           throw validationError(path + '.usrGen.name 必须是非空信号名', path + '.usrGen.name');
         }
-        return { usrGen: { name: usrGen.name, formula }, autoGen };
+        return { usrGen: { name: usrGen.name, formula, dly: usrGen.dly }, autoGen };
       }
       if (multiWave) {
         if (!usrGen.name) {
           throw validationError(path + '.usrGen.name 必须是非空信号名', path + '.usrGen.name');
         }
-        return { usrGen: { name: usrGen.name, multiWave }, autoGen };
+        return { usrGen: { name: usrGen.name, multiWave, dly: usrGen.dly }, autoGen };
       }
       if (!usrGen.folder) usrGen.folder = '.';
       if (!usrGen.grepKeys) {
@@ -1553,7 +1566,8 @@
         addedNames.add(name);
         vars.push(name);
       });
-      return { vars, paths };
+      return { vars, paths, ...(value.commDly === undefined
+        ? {} : { commDly: normalizePresetDelay(value.commDly, 'commDly') }) };
     }
 
     function synchronizeLoadedPresetVariables(preset) {
@@ -3676,6 +3690,11 @@
 
     async function confirmImport() {
       if (busy || !searchResult) return;
+      const contextToken = openedContextToken;
+      if (typeof settings.getContextToken === 'function' && settings.getContextToken() !== contextToken) {
+        setHint('目标波形图或波形库已切换，请关闭后重新打开导入窗口', true);
+        return;
+      }
       const selection = collectionSelectionStatus();
       if (!selection.valid) {
         setHint(selection.errors[0] || '请先完成表格列选择', true);
@@ -3691,14 +3710,16 @@
         return;
       }
       const rootPath = String(rootPathInput.value || '').trim();
-      const contextToken = typeof settings.getContextToken === 'function'
-        ? settings.getContextToken()
-        : '';
       const fileCount = (searchResult.entries || []).filter((entry) =>
         entry.importMode !== 'formula' && entry.importMode !== 'multi-wave'
           && Array.isArray(entry.matches) && entry.matches.length > 0).length;
-      const formulas = validFormulaDefinitions();
-      const multiWaves = validMultiWaveDefinitions();
+      const expandedPreset = collectionAnalysisPreset(preset, searchResult);
+      const withDelay = (item) => Object.assign(item, {
+        commDly: preset.commDly || 0,
+        dly: expandedPreset.paths[Number(item.id)]?.usrGen?.dly || 0
+      });
+      const formulas = validFormulaDefinitions().map(withDelay);
+      const multiWaves = validMultiWaveDefinitions().map(withDelay);
       const progressToken = createImportProgressToken();
       const importController = typeof window.AbortController === 'function'
         ? new window.AbortController()
@@ -3909,9 +3930,11 @@
       searchResult = null;
       singlePreviewStates.clear();
       clearPresetDiscovery();
-      const context = typeof settings.getContextToken === 'function' && settings.getContextToken();
-      waveStateKey = context && context.split('\u0000').every(Boolean)
-        ? WAVE_STATE_STORAGE_PREFIX + encodeURIComponent(context) : '';
+      openedContextToken = typeof settings.getContextToken === 'function' ? settings.getContextToken() : '';
+      const targetTitle = typeof settings.getTargetTitle === 'function' ? settings.getTargetTitle() : '';
+      title.textContent = defaultTitle + ' → ' + (targetTitle || '未选中波形图');
+      waveStateKey = openedContextToken && openedContextToken.split('\u0000').every(Boolean)
+        ? WAVE_STATE_STORAGE_PREFIX + encodeURIComponent(openedContextToken) : '';
       const restored = restoreRememberedState();
       if (!restored) {
         originalPresetPath = '';

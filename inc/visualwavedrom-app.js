@@ -1092,7 +1092,7 @@ ${lines.join('\n')}`;
     const WAVE_PREVIEW_WORKER_PARSE_THRESHOLD = 50000;
     const WAVE_PREVIEW_CANVAS_CELL_THRESHOLD = BIG_WAVE_CELL_THRESHOLD;
     const WAVE_PREVIEW_CANVAS_COLUMN_THRESHOLD = 1500;
-    const WAVE_ANALYSIS_WORKER_URL = 'inc/visualwavedrom-worker.js?v=20260729-json-bigdata-v1';
+    const WAVE_ANALYSIS_WORKER_URL = 'inc/visualwavedrom-worker.js?v=sparse-import-v1';
     const DRAG_THRESHOLD = 5;
     let backBtnDrag = null;
     let waveEditMode = 'modify';
@@ -5532,8 +5532,9 @@ ${lines.join('\n')}`;
 
     function getMaxWaveBoundaryIndex(sourceMap) {
       return (sourceMap || []).reduce((max, entry) => {
-        const wave = entry && entry.signal ? (entry.signal.wave || '') : '';
-        return Math.max(max, wave.length);
+        const signal = entry?.signal;
+        const points = getBigWaveApi()?.sparsePointData(signal);
+        return Math.max(max, signal?.wave?.length || 0, points?.totalSamples || 0);
       }, 0);
     }
 
@@ -5718,6 +5719,12 @@ ${lines.join('\n')}`;
       return forInsert ? wave.length : 0;
     }
 
+    function canEditWaveCells(signal) {
+      if (!getBigWaveApi()?.sparsePointData(signal)) return true;
+      setStatus(false, '压缩导入行不能直接逐格修改；可在示波器中提取展示实例后编辑');
+      return false;
+    }
+
     function applyWaveCharAtColumn(rowIndex, colIndex, char) {
       if (rowIndex < 0) {
         setStatus(false, '波形为空，无法删除');
@@ -5742,6 +5749,7 @@ ${lines.join('\n')}`;
       }
 
       const wave = entry.signal.wave || '';
+      if (!canEditWaveCells(entry.signal)) return false;
       const safeCol = colIndex < 0 ? 0 : Math.floor(colIndex);
       const wasEmpty = wave.length === 0;
       const targetsEmptyPosition = safeCol >= wave.length;
@@ -5807,6 +5815,7 @@ ${lines.join('\n')}`;
       }
 
       const wave = entry.signal.wave || '';
+      if (!canEditWaveCells(entry.signal)) return false;
       const paintCol = Math.max(0, Math.floor(colIndex));
       const paddedWave = paintCol >= wave.length ? wave.padEnd(paintCol, EMPTY_WAVE_FILL_CHAR) : wave;
       const newWave = paintCol >= paddedWave.length
@@ -5872,6 +5881,7 @@ ${lines.join('\n')}`;
       }
 
       const wave = entry.signal.wave || '';
+      if (!canEditWaveCells(entry.signal)) return false;
       const insertCol = colIndex < 0 ? wave.length : Math.max(0, Math.floor(colIndex));
       const paddedWave = insertCol > wave.length
         ? wave.padEnd(insertCol, EMPTY_WAVE_FILL_CHAR)
@@ -5926,6 +5936,7 @@ ${lines.join('\n')}`;
       }
 
       const safeStart = Math.max(0, Math.floor(Math.min(startCol, endCol)));
+      if (!canEditWaveCells(entry.signal)) return false;
       const safeEnd = Math.min(wave.length - 1, Math.floor(Math.max(startCol, endCol)));
       if (safeStart >= wave.length || safeEnd < safeStart) {
         setStatus(false, '选中的空位置没有可删除波形');
@@ -6426,6 +6437,7 @@ ${lines.join('\n')}`;
         setStatus(false, '未找到要修改的信号行');
         return false;
       }
+      if (!canEditWaveCells(entry.signal)) return false;
 
       const text = editor.value;
       const wave = entry.signal.wave || '';
@@ -6527,6 +6539,7 @@ ${lines.join('\n')}`;
         setStatus(false, '粘贴起点下方没有足够的信号行');
         return false;
       }
+      if (targetRows.some((row, index) => row.text && !canEditWaveCells(locations[safeStartRow + index].signal))) return false;
 
       let changedCount = 0;
       targetRows.forEach((replacement, offset) => {
@@ -6632,9 +6645,10 @@ ${lines.join('\n')}`;
         return false;
       }
       const rows = entries.map((entry) => {
+        const sparse = getBigWaveApi()?.sparseWaveSlice(entry.signal, block.start, block.end + 1);
+        if (sparse) return { text: sparse.wave, dataSlots: collectWaveClipboardDataSlots(sparse, sparse.wave, sparse.wave, 0) };
         const wave = entry.signal.wave || '';
-        let copied = wave.padEnd(block.end + 1, EMPTY_WAVE_FILL_CHAR)
-          .slice(block.start, block.end + 1);
+        let copied = wave.slice(block.start, block.end + 1).padEnd(columnCount, EMPTY_WAVE_FILL_CHAR);
         if (copied[0] === '.') {
           copied = getWaveContinuationSourceChar(wave, block.start) + copied.slice(1);
         }
@@ -8700,12 +8714,6 @@ ${lines.join('\n')}`;
       }
 
       const signalName = entry.signal.name || ('row' + deletedIndex);
-      const deletedNodeChars = new Set();
-      const nodeStr = entry.signal.node || '';
-      for (let i = 0; i < nodeStr.length; i++) {
-        if (nodeStr[i] !== '.') deletedNodeChars.add(nodeStr[i]);
-      }
-
       pushUndoBeforeChange();
       let newText = removeSignalFromText(text, deletedIndex);
       if (newText === text) {
@@ -8721,12 +8729,9 @@ ${lines.join('\n')}`;
         return;
       }
 
-      const nodeUpdates = cleanupOrphanedNodeUpdates(parsed);
-      if (nodeUpdates.length) {
-        newText = applySignalUpdatesInText(newText, nodeUpdates);
-        parsed = JSON.parse(newText);
-      }
-      if (adjustEdgeLabelOffsetsAfterRowChange(parsed, sourceMap.map((item) => item.signal))) {
+      const cleanup = cleanupConnectionsAfterRowDelete(parsed);
+      const offsetsChanged = adjustEdgeLabelOffsetsAfterRowChange(parsed, sourceMap.map((item) => item.signal));
+      if (cleanup.changed || offsetsChanged) {
         newText = JSON.stringify(parsed, null, 2);
       }
 
@@ -8743,13 +8748,7 @@ ${lines.join('\n')}`;
       scheduleFormatAfterWaveChange();
 
       let statusMsg = '已删除信号行: ' + signalName;
-      const affectedEdges = (parsed.edge || []).filter((edgeStr) => {
-        const { from, to } = parseEdgeString(edgeStr);
-        return deletedNodeChars.has(from) || deletedNodeChars.has(to);
-      });
-      if (affectedEdges.length) {
-        statusMsg += ' , affected edges: ' + affectedEdges.length + ' related connections removed';
-      }
+      if (cleanup.removed) statusMsg += '，移除 ' + cleanup.removed + ' 条连接';
       setStatus(true, statusMsg);
     }
 
@@ -10612,6 +10611,20 @@ ${lines.join('\n')}`;
       };
     }
 
+    function cleanupConnectionsAfterRowDelete(parsed) {
+      const nodes = getSignalNodeIds(parsed.signal);
+      const edges = Array.isArray(parsed.edge) ? parsed.edge : [];
+      const kept = edges.map((text, index) => ({ text, index, ...parseEdgeString(text) }))
+        .filter(({ from, to }) => !from || !to || (nodes.has(from) && nodes.has(to)));
+      const removed = edges.length - kept.length;
+      if (removed) {
+        parsed.edge = kept.map((edge) => edge.text);
+        if (Array.isArray(parsed.edgeOptions)) parsed.edgeOptions = kept.map((edge) => parsed.edgeOptions[edge.index] || null);
+      }
+      const cleanup = cleanupOrphanedNodesInParsedSource(parsed);
+      return { removed, changed: removed > 0 || cleanup.changedSignalCount > 0 };
+    }
+
     function cleanupDeletedEdgeEndpointUpdates(parsed, removedEdge) {
       const edge = parseEdgeString(removedEdge);
       const endpoints = new Set([edge.from, edge.to].filter(Boolean));
@@ -10644,30 +10657,6 @@ ${lines.join('\n')}`;
         removedNodes: [...removableNodes],
         retainedNodes: [...endpoints].filter((nodeId) => remainingUsedNodes.has(nodeId))
       };
-    }
-
-    function cleanupOrphanedNodeUpdates(parsed) {
-      const used = getNodeIdsFromEdges(parsed.edge || []);
-      const updates = [];
-      flattenSignals(parsed.signal || []).forEach((sig, rowIndex) => {
-        if (!sig.node) return;
-        let node = String(sig.node);
-        let changed = false;
-        node = node.split('').map((ch) => {
-          if (ch !== '.' && !used.has(ch)) {
-            changed = true;
-            return '.';
-          }
-          return ch;
-        }).join('');
-        if (!changed) return;
-        node = node.replace(/\.+$/, '');
-        const updatedSignal = Object.assign({}, sig);
-        if (node) updatedSignal.node = node;
-        else delete updatedSignal.node;
-        updates.push({ rowIndex, signal: updatedSignal });
-      });
-      return updates;
     }
 
     function removeEdgeFromText(text, index) {
@@ -11616,7 +11605,8 @@ ${lines.join('\n')}`;
       const sampleValues = Array.isArray(scope.values)
         ? scope.values
         : (Array.isArray(scope.samples) ? scope.samples : null);
-      let value;
+      let value = getBigWaveApi()?.sparsePointData(signalValue)
+        ? getBigWaveApi().scopeValueAtColumn(signalValue, columnIndex) : undefined;
       if (sampleValues) {
         const sampleStep = Number(scope.sampleStep) > 0 ? Number(scope.sampleStep) : 1;
         const sampleIndex = Math.floor(Math.max(0, columnIndex) / sampleStep + 1e-9);
@@ -17741,12 +17731,22 @@ ${lines.join('\n')}`;
 
       let extendedColumns = 0;
       prepared.forEach((item) => {
-        const aligned = importedWaveWithPreservedNodes(item.target.signal, item.wave);
+        const sparse = item.changePoints && item.update.sparseImport;
+        const aligned = sparse ? { wave: '', extendedColumns: 0 }
+          : importedWaveWithPreservedNodes(item.target.signal, item.wave);
         item.target.signal.wave = aligned.wave;
         extendedColumns += aligned.extendedColumns;
         if (item.data.length) item.target.signal.data = item.data;
         else delete item.target.signal.data;
         const signalScope = Object.assign({}, item.target.signal.scope || {});
+        if (sparse) signalScope.sparseImport = { data: sparse.data === true, numeric: sparse.numeric === true };
+        else delete signalScope.sparseImport;
+        for (const key of ['commDly', 'dly']) {
+          if (!Object.prototype.hasOwnProperty.call(item.update, key)) continue;
+          const delay = Number(item.update[key]);
+          if (delay) signalScope[key] = delay;
+          else delete signalScope[key];
+        }
         const arrayGroup = item.update.arrayGroup;
         if (arrayGroup && typeof arrayGroup.name === 'string'
             && Number.isInteger(arrayGroup.length) && arrayGroup.length > 1
@@ -18186,7 +18186,8 @@ ${lines.join('\n')}`;
       const invalid = built.analysis.items.filter((item) => !item.valid);
       const merged = [];
       const positions = new Map();
-      importedUpdates.concat(built.updates).forEach((update) => {
+      const delays = new Map(definitions.map((item) => [item.name, { commDly: item.commDly, dly: item.dly }]));
+      importedUpdates.concat(built.updates.map((update) => Object.assign(update, delays.get(update.signal)))).forEach((update) => {
         const name = String(update && update.signal || '').trim();
         if (!name) return;
         if (positions.has(name)) {
@@ -18243,6 +18244,8 @@ ${lines.join('\n')}`;
         data: [],
         sampleKind: 'analog',
         createIfMissing: true,
+        commDly: definition.commDly,
+        dly: definition.dly,
         multiWave: normalizeImportedMultiWaveDefinition(
           definition && (definition.multiWave || definition.signals)
         )
@@ -18291,7 +18294,7 @@ ${lines.join('\n')}`;
         const key = String(id);
         return sourceRowReplacements && sourceRowReplacements.get(key) || key;
       };
-      ['formulas', 'multiWaves', 'multiWaveHidden', 'signalNames'].forEach((field) => {
+      ['formulas', 'multiWaves', 'multiWaveHidden', 'signalNames', 'delays'].forEach((field) => {
         state[field] = Object.fromEntries(Object.entries(state[field] || {})
           .map(([id, value]) => [remapSourceRow(id), value]));
       });
@@ -18326,6 +18329,7 @@ ${lines.join('\n')}`;
         delete state.multiWaves[rowId];
         delete state.multiWaveHidden[rowId];
         delete state.signalNames[rowId];
+        delete state.delays[rowId];
         return false;
       });
 
@@ -18354,6 +18358,8 @@ ${lines.join('\n')}`;
         if (!sourceRowId) return;
         state.signalNames[sourceRowId] = name;
         state.hiddenRows = state.hiddenRows.filter((rowId) => rowId !== sourceRowId);
+        if (Object.prototype.hasOwnProperty.call(update, 'commDly')
+            || Object.prototype.hasOwnProperty.call(update, 'dly')) delete state.delays[sourceRowId];
         if (Object.prototype.hasOwnProperty.call(update, 'formula') && update.formula != null) {
           state.formulas[sourceRowId] = formulaEngine
             ? formulaEngine.normalizeDefinition(update.formula)
@@ -22618,11 +22624,12 @@ ${lines.join('\n')}`;
     function renderLargeWaveCanvasPreview(entry, source, metrics) {
       const rows = flattenWavePreviewSignals(source && source.signal, []);
       const visibleRows = rows.slice(0, 360);
-      const maxWaveLength = Math.max(1, metrics && metrics.maxWaveLength || 1);
+      const maxWaveLength = Math.max(1, Math.min(4000, metrics && metrics.maxWaveLength || 1));
       const rowHeight = 22;
       const labelWidth = 140;
       const columnWidth = Math.max(2, Math.min(12, Math.floor((8192 - labelWidth) / maxWaveLength)));
       const width = Math.min(8192, Math.max(640, labelWidth + maxWaveLength * columnWidth));
+      const previewScale = metrics?.sparseCount ? (width - labelWidth) / metrics.maxWaveLength : columnWidth;
       const height = Math.max(70, 28 + visibleRows.length * rowHeight);
       const canvas = document.createElement('canvas');
       canvas.className = 'wave-fast-preview';
@@ -22649,19 +22656,34 @@ ${lines.join('\n')}`;
         context.fillRect(0, y, width, rowHeight);
         context.fillStyle = '#334155';
         context.fillText(String(signal.name || ''), 8, y + rowHeight / 2);
+        const sparse = getBigWaveApi()?.sparsePointData(signal);
+        if (sparse) {
+          const starts = sparse.indices, values = sparse.values;
+          let start = 0;
+          for (let run = -1; run < starts.length; run++) {
+            const end = starts[run + 1] ?? sparse.totalSamples;
+            const value = String(values[run] ?? 'x');
+            context.fillStyle = value === 'x' ? colors.x : colors['='];
+            if (end > start) context.fillRect(labelWidth + start * previewScale, y + 5,
+              Math.max(1, (end - start) * previewScale), rowHeight - 10);
+            start = end;
+          }
+          return;
+        }
         const wave = typeof signal.wave === 'string' ? signal.wave : '';
         let previous = 'x';
-        for (let column = 0; column < maxWaveLength; column += 1) {
+        const limit = Math.min(wave.length, Math.ceil((width - labelWidth) / previewScale));
+        for (let column = 0; column < limit; column += 1) {
           const token = wave[column] || '';
           if (token && token !== '.') previous = token;
           const effective = token === '.' ? previous : token;
-          const x = labelWidth + column * columnWidth;
+          const x = labelWidth + column * previewScale;
           context.fillStyle = colors[effective] || '#94a3b8';
           if (effective === '0' || effective === '1') {
             const lineY = y + (effective === '1' ? 6 : rowHeight - 6);
-            context.fillRect(x, lineY, Math.max(1, columnWidth), 2);
+            context.fillRect(x, lineY, Math.max(1, previewScale), 2);
           } else if (effective) {
-            context.fillRect(x, y + 5, Math.max(1, columnWidth - 1), rowHeight - 10);
+            context.fillRect(x, y + 5, Math.max(1, previewScale - 1), rowHeight - 10);
           }
         }
       });
@@ -24034,14 +24056,8 @@ ${lines.join('\n')}`;
       }
       pruneEmptySignalGroups(parsed.signal);
 
-      const remainingNodeIds = getSignalNodeIds(parsed.signal);
-      if (Array.isArray(parsed.edge)) {
-        parsed.edge = parsed.edge.filter((edgeText) => {
-          const edge = parseEdgeString(edgeText);
-          if (!edge.from || !edge.to) return true;
-          return remainingNodeIds.has(edge.from) && remainingNodeIds.has(edge.to);
-        });
-      }
+      cleanupConnectionsAfterRowDelete(parsed);
+      adjustEdgeLabelOffsetsAfterRowChange(parsed, locations.map((location) => location.signal));
 
       pushUndoBeforeChange();
       vimRegister = { type: 'row', rows: deletedRows };
@@ -25236,6 +25252,10 @@ ${lines.join('\n')}`;
       ? window.VWDImportCollection.create({
         isServerMode: () => waveLibraryServerMode,
         getContextToken: () => currentWaveLibraryId + '\u0000' + editingWaveDocumentName,
+        getTargetTitle: () => {
+          const tag = getSavedTagByName(editingWaveDocumentName);
+          return tag ? getNavDocumentDisplayName(tag) : getCurrentWaveTitle();
+        },
         getFormulaSignalNames: () => {
           try {
             const source = JSON.parse(editor.value);

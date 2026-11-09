@@ -1144,6 +1144,18 @@ body.scope-multi-wave-legend-dragging * {
   scrollbar-gutter: stable;
 }
 
+.scope-delay-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.scope-delay-fields label { display: grid; gap: 4px; min-width: 0; }
+.scope-delay-fields input { width: 100%; min-width: 0; box-sizing: border-box; }
+.scope-display-popover.delay-only .scope-display-popover-body > :not(.scope-delay-fields) {
+  display: none;
+}
+
 .scope-display-popover-section {
   display: grid;
   gap: 6px;

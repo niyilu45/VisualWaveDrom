@@ -1,41 +1,13 @@
 'use strict';
 
-function flattenSignalMetrics(signals, metrics) {
-  if (!Array.isArray(signals)) return;
-  for (let i = 0; i < signals.length; i += 1) {
-    const signal = signals[i];
-    if (Array.isArray(signal)) {
-      metrics.groupCount += 1;
-      flattenSignalMetrics(signal.slice(1), metrics);
-      continue;
-    }
-    if (!signal || typeof signal !== 'object') continue;
-    const hasChildren = Array.isArray(signal.children);
-    const hasSignalField = ['name', 'wave', 'node', 'data', 'period', 'phase']
-      .some((key) => Object.prototype.hasOwnProperty.call(signal, key));
-    if (!hasChildren || hasSignalField) {
-      metrics.signalCount += 1;
-      const waveLength = typeof signal.wave === 'string' ? signal.wave.length : 0;
-      if (waveLength > metrics.maxWaveLength) metrics.maxWaveLength = waveLength;
-      metrics.cellCount += waveLength;
-    }
-    if (hasChildren) flattenSignalMetrics(signal.children, metrics);
-  }
-}
+importScripts('visualwavedrom-bigdata.js?v=sparse-import-v1');
 
 function analyzeDocument(text) {
   const source = JSON.parse(text);
   if (!source || typeof source !== 'object' || Array.isArray(source)) {
     throw new Error('JSON 根节点必须是对象');
   }
-  const metrics = {
-    signalCount: 0,
-    groupCount: 0,
-    maxWaveLength: 0,
-    cellCount: 0,
-    edgeCount: Array.isArray(source.edge) ? source.edge.length : 0
-  };
-  flattenSignalMetrics(source.signal, metrics);
+  const metrics = self.VisualWaveDromBigData.measureSource(source);
   const title = typeof source.title === 'string'
     ? source.title.trim()
     : (source.head && typeof source.head.text === 'string' ? source.head.text.trim() : '');

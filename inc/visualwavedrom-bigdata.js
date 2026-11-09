@@ -20,7 +20,16 @@
   }
 
   function getWaveLength(signal) {
-    return isSignalObject(signal) && typeof signal.wave === 'string' ? signal.wave.length : 0;
+    if (!isSignalObject(signal)) return 0;
+    return Math.max(typeof signal.wave === 'string' ? signal.wave.length : 0,
+      sparsePointData(signal)?.totalSamples || 0);
+  }
+
+  function sparsePointData(signal) {
+    const scope = signal && signal.scope;
+    const points = scope && scope.sparseImport && scope.changePoints;
+    return points && Number.isSafeInteger(points.totalSamples) && points.totalSamples > 0
+      && points.sampleStep === 1 && Array.isArray(points.indices) && Array.isArray(points.values) ? points : null;
   }
 
   function isRenderedSignalRow(signal) {
@@ -45,6 +54,7 @@
         const waveLength = getWaveLength(signal);
         metrics.signalCount += 1;
         metrics.cellCount += waveLength;
+        if (sparsePointData(signal)) metrics.sparseCount += 1;
         metrics.maxWaveLength = Math.max(metrics.maxWaveLength, waveLength);
       }
       if (Array.isArray(signal.children)) measureSignals(signal.children, metrics);
@@ -55,6 +65,7 @@
   function measureSource(source) {
     return measureSignals(source && source.signal, {
       signalCount: 0,
+      sparseCount: 0,
       groupCount: 0,
       maxWaveLength: 0,
       cellCount: 0,
@@ -97,6 +108,7 @@
   function changePointValueAt(changePoints, index) {
     if (!changePoints || !Array.isArray(changePoints.indices)
         || !Array.isArray(changePoints.values)) return undefined;
+    if (index >= changePoints.totalSamples) return 'x';
     let low = 0;
     let high = Math.min(changePoints.indices.length, changePoints.values.length);
     while (low < high) {
@@ -148,6 +160,26 @@
     return found ? labels : null;
   }
 
+  function sparseWaveSlice(signal, start, end) {
+    const points = sparsePointData(signal);
+    if (!points) return null;
+    const wave = [], data = [];
+    let previous;
+    for (let column = start; column < end; column++) {
+      const value = column < points.totalSamples ? changePointValueAt(points, column) : 'x';
+      const text = String(value == null ? 'x' : value);
+      const token = /^(x|z)$/i.test(text) || (!signal.scope.sparseImport.data && /^[01]$/.test(text))
+        ? text.toLowerCase() : '=';
+      if (column > start && previous === text) wave.push('.');
+      else {
+        wave.push(token);
+        if (token === '=') data.push(scopeDataLabel(signal, column));
+      }
+      previous = text;
+    }
+    return { wave: wave.join(''), data };
+  }
+
   function findContinuationSource(wave, column) {
     const value = String(wave || '');
     for (let index = Math.min(column, value.length - 1); index >= 0; index -= 1) {
@@ -196,7 +228,8 @@
 
   function sliceSignalObject(signal, start, end, rows) {
     const copy = Object.assign({}, signal);
-    const waveSlice = sliceWave(signal, start, end);
+    const sparse = sparsePointData(signal);
+    const waveSlice = sparse ? { fullWave: '', wave: '', dataIndices: [] } : sliceWave(signal, start, end);
     if (signal.scope && typeof signal.scope === 'object' && !Array.isArray(signal.scope)
         && Array.isArray(signal.scope.samples)) {
       copy.scope = Object.assign({}, signal.scope);
@@ -228,6 +261,15 @@
     } else {
       const generatedData = dataLabelsFromScope(signal, waveSlice.wave, start);
       if (generatedData) copy.data = generatedData;
+    }
+
+    if (sparse) {
+      const rendered = sparseWaveSlice(signal, start, end);
+      copy.wave = waveSlice.wave = rendered.wave;
+      copy.data = rendered.data;
+      copy.scope = Object.assign({}, signal.scope);
+      delete copy.scope.changePoints;
+      delete copy.scope.sparseImport;
     }
 
     if (isRenderedSignalRow(signal)) {
@@ -396,6 +438,9 @@
   return {
     version: '1.0.0',
     measureSource: measureSource,
+    sparsePointData: sparsePointData,
+    sparseWaveSlice: sparseWaveSlice,
+    scopeValueAtColumn: scopeValueAtColumn,
     collectDataSlots: collectDataSlots,
     createRenderWindow: createRenderWindow
   };

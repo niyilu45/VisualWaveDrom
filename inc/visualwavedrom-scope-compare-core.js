@@ -61,29 +61,37 @@
       const aLength = api.length(a, left);
       const bLength = api.length(b, right);
       const end = Math.max(aLength, bLength, !a || !b ? 1 : 0);
-      const step = Math.min(a ? api.step(a) : 1, b ? api.step(b) : 1, 1);
+      const step = Math.min(a ? api.step(a, left) : 1, b ? api.step(b, right) : 1, 1);
+      const padded = api.padded?.(a, b);
       const intervals = [];
       let current = null;
       let checked = 0;
       const diagnostics = [a, b].map((row) => row && row.formula && row.formula.valid === false
         ? row.formula.error || (row.formula.errors || []).join('; ') || '公式无法计算' : '');
       pair.diagnostics = diagnostics;
-      for (let index = 0; index < Math.ceil(end / step); index += 1) {
+      const first = a && b && !diagnostics.some(Boolean) && api.start
+        ? Math.max(0, Math.min(api.start(a, left), api.start(b, right))) : 0;
+      const limit = Math.ceil(end / step);
+      for (let index = Math.floor(first / step); index < limit;) {
         const start = index * step;
         const av = api.value(a, start, left);
         const bv = api.value(b, start, right);
+        const boundary = api.next ? Math.min(api.next(a, start, left), api.next(b, start, right)) : start + step;
+        const next = Math.min(limit, Math.max(index + 1, Math.ceil(boundary / step - 1e-9)));
+        const stop = Math.min(end, next * step);
         const reason = diagnostics.some(Boolean) ? '公式错误'
           : (!a || !b) ? '缺少信号'
-          : (start >= aLength || start >= bLength) ? '数据长度不同'
+          : !padded && (start >= aLength || start >= bLength) ? '数据长度不同'
           : valueKey(av) !== valueKey(bv) ? '值不同' : '';
         if (reason) {
-          if (current && current.reason === reason) current.end = Math.min(end, start + step);
+          if (current && current.reason === reason) current.end = stop;
           else {
-            current = { pair: p, start, end: Math.min(end, start + step), reason, leftValue: av, rightValue: bv };
+            current = { pair: p, start, end: stop, reason, leftValue: av, rightValue: bv };
             intervals.push(current);
             errors.push(current);
           }
         } else current = null;
+        index = next;
         if (++checked % 4096 === 0) {
           api.progress({ row: p + 1, rows: pairs.length, name: pair.name, fraction: (p + start / Math.max(1, end)) / Math.max(1, pairs.length) });
           await new Promise((resolve) => setTimeout(resolve, 0));

@@ -87,7 +87,9 @@
       }
       if (!isObject(signal)) return;
       if (isRenderedSignalRow(signal)) {
-        const waveLength = typeof signal.wave === 'string' ? signal.wave.length : 0;
+        const sparse = globalThis.VisualWaveDromBigData?.sparsePointData(signal);
+        const waveLength = sparse?.totalSamples || (typeof signal.wave === 'string' ? signal.wave.length : 0);
+        if (sparse) metrics.sparseCount += 1;
         metrics.signalCount += 1;
         metrics.cellCount += waveLength;
         metrics.maxWaveLength = Math.max(metrics.maxWaveLength, waveLength);
@@ -101,6 +103,7 @@
   function measureSource(source) {
     return measureSignalList(source && source.signal, {
       signalCount: 0,
+      sparseCount: 0,
       groupCount: 0,
       maxWaveLength: 0,
       cellCount: 0,

@@ -80,7 +80,24 @@
       const config = source.timingCheck || {};
       const tolerance = Number.isFinite(Number(config.tolerance)) && Number(config.tolerance) >= 0 ? Number(config.tolerance) : 1e-7;
       const rows = [], gaps = [], nodes = new Map(), duplicates = new Set(), graph = [[]], constraints = [], issues = [], edges = [];
-      const sourceEdges = Array.isArray(source.edge) ? source.edge : [];
+      const signals = flatten(source.signal, []);
+      const existingNodes = new Set(signals.flatMap((signal) => String(signal.node || '').match(/[a-zA-Z0-9]/g) || []));
+      const edgeEntries = (Array.isArray(source.edge) ? source.edge : []).map((raw, index) => ({ raw, index }))
+        .filter(({ raw }) => {
+          const { from, to } = edgeParts(raw);
+          return !from || !to || (existingNodes.has(from) && existingNodes.has(to));
+        });
+      const sourceEdges = edgeEntries.map(({ raw }) => raw);
+      if (Array.isArray(source.edge) && edgeEntries.length !== source.edge.length) {
+        source = { ...source, edgeOptions: edgeEntries.map(({ index }) => source.edgeOptions?.[index]) };
+        if (edgeTimings) edgeTimings = edgeEntries.map(({ index }) => edgeTimings[index]);
+        const indices = new Map(edgeEntries.map(({ index }, current) => [index, current]));
+        parameterConversions = (parameterConversions || []).flatMap((item) => {
+          if (item.path?.[0] !== 'edge') return [item];
+          const index = indices.get(Number(item.path[1]));
+          return index === undefined ? [] : [{ ...item, path: ['edge', index, ...item.path.slice(2)] }];
+        });
+      }
       const edgeTiming = (raw, index) => normalizeDelay(edgeTimings && edgeTimings[index] || parseDelay(edgeParts(raw).label, config.cycleTimeNs));
       const referencedNodes = new Set(sourceEdges.flatMap((raw) => {
         const parsed = edgeParts(raw);
@@ -101,12 +118,16 @@
         const entry = { kind, reason, rows: markedRows, relatedRows, edges: Array.from(new Set(edgeIds || [])), gaps: gapIds || [], locations: locations || [] };
         issues.push(entry); return entry;
       }
-      const signals = flatten(source.signal, []), stretches = new Map(), holdStarts = new Map(), dataEnds = [], terminalMarkers = new Map();
+      const stretches = new Map(), holdStarts = new Map(), dataEnds = [], terminalMarkers = new Map();
       const dataOmissions = new Map();
       function buildRows() { signals.forEach((signal, index) => {
         const wave = String(signal.wave || ''), node = String(signal.node || '');
         let lastNode = node.length - 1;
         while (lastNode >= 0 && !/[a-zA-Z0-9]/.test(node[lastNode])) lastNode--;
+        const points = signal.scope?.sparseImport && signal.scope.changePoints;
+        const sparse = points?.sampleStep === 1 && Number.isSafeInteger(points.totalSamples)
+          && points.totalSamples > 0 && Array.isArray(points.indices) && Array.isArray(points.values);
+        const sourceLength = sparse ? points.totalSamples : wave.length;
         let lastWave = wave.length - 1, lastReferencedNode = lastNode;
         while (lastWave >= 0 && /[|\s]/.test(wave[lastWave])) lastWave--;
         while (lastReferencedNode >= 0 && !referencedNodes.has(node[lastReferencedNode])) lastReferencedNode--;
@@ -121,13 +142,21 @@
           if (char !== '|' && char !== ' ' && finalState !== 'x') lastKnownWave = col;
         }
         if (/[2-9=]/.test(finalState)) dataEndColumns.add(wave.length - 1);
+        if (sparse) {
+          lastWave = sourceLength - 1;
+          points.indices.forEach((col, i) => {
+            const value = String(points.values[i] ?? 'x').toLowerCase();
+            if (col < sourceLength && value !== 'x') lastKnownWave = Math.min(sourceLength, points.indices[i + 1] ?? sourceLength) - 1;
+            finalState = value;
+          });
+        }
         dataEnds[index] = dataEndColumns;
-        const unknownTailStart = finalState === 'x' && wave.length ? lastKnownWave + 1
-          : lastReferencedNode >= wave.length ? wave.length : undefined;
-        const length = Math.max(wave.length, lastNode);
+        const unknownTailStart = finalState === 'x' && sourceLength ? lastKnownWave + 1
+          : lastReferencedNode >= sourceLength ? sourceLength : undefined;
+        const length = Math.max(sourceLength, lastReferencedNode);
         const period = signal.period === undefined ? 1 : Number(signal.period);
         const phase = signal.phase === undefined ? 0 : Number(signal.phase);
-        const row = { index, name: String(signal.name || '(空行)'), length, sourceLength: wave.length, period, phase, blocks: [], runs: [], gaps: [],
+        const row = { index, name: String(signal.name || '(空行)'), length, sourceLength, period, phase, blocks: [], runs: [], gaps: [],
           empty: lastWave < 0, checkUntil: Math.max(lastKnownWave, lastReferencedNode), unknownTailStart,
           known: false, supported: true, status: 'ok', reasons: [] };
         if (terminalMarkers.has(index)) row.checkUntil = Math.min(row.checkUntil, terminalMarkers.get(index) - 1);
@@ -164,13 +193,34 @@
               && previous.symbol === symbol && previous.state === state && previous.slot === slot && previous.value === value) previous.end = end;
           else row.runs.push({ col, end, block: block.id, offset: (col - block.col) * row.period, symbol, state, value, slot, gap, clockBlock, clockOffset });
         }
-        for (let col = 0; col <= length; col++) {
+        function addNode(col) {
           const id = node[col];
           if (id && /[a-zA-Z0-9]/.test(id) && referencedNodes.has(id)) {
             const entry = { row: index, col, block: block.id, offset: (col - block.col) * row.period };
             if (nodes.has(id)) { duplicates.add(id); issue('unknown', '端点 ' + id + ' 重复，无法确定连接位置', [index, nodes.get(id).row], [], [], [nodes.get(id), entry]); }
             nodes.set(id, entry);
           }
+        }
+        if (sparse) {
+          for (const match of node.matchAll(/[a-zA-Z0-9]/g)) addNode(match.index);
+          addRun(0, Math.min(length, points.indices[0] ?? length), 0);
+          if (row.runs[0].end === 0) row.runs.pop();
+          points.indices.forEach((col, i) => {
+            const end = Math.min(sourceLength, points.indices[i + 1] ?? sourceLength);
+            if (end <= col) return;
+            value = String(points.values[i] ?? 'x');
+            symbol = /^(x|z)$/i.test(value) || (!signal.scope.sparseImport.data && /^[01]$/.test(value)) ? value.toLowerCase() : '=';
+            state = symbol === '=' ? 'bus' : symbol;
+            slot = symbol === '=' ? i : -1;
+            addRun(col, end, 0);
+          });
+          if (length > sourceLength) { state = symbol = value = 'x'; slot = -1; addRun(sourceLength, length, 0); }
+          block.end = length;
+          row.known = lastKnownWave >= 0;
+          return;
+        }
+        for (let col = 0; col <= length; col++) {
+          addNode(col);
           if (col === length) break;
           const char = wave[col] || 'x';
           const omissionEnd = dataOmissions.get(index)?.get(col);

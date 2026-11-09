@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=scope-compare-fold-runs-v1';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=sparse-import-v1';
   const FormulaEngine = global.VisualWaveDromFormula || null;
   const DEFAULT_ROW_HEIGHT = 42;
   const DEFAULT_MULTI_WAVE_ROW_HEIGHT = 68;
@@ -197,6 +197,8 @@
       multiWaves,
       multiWaveHidden,
       signalNames,
+      delays: source.delays && typeof source.delays === 'object' && !Array.isArray(source.delays)
+        ? clone(source.delays) : {},
       rowOrder: uniqueRowIds(source.rowOrder),
       hiddenRows: uniqueRowIds(source.hiddenRows)
     };
@@ -253,6 +255,10 @@
         delete state.multiWaveHidden[rowId];
       }
       delete state.signalNames[rowId];
+      if (own(state.delays, rowId)) {
+        state.delays[sourceRowId] = state.delays[rowId];
+        delete state.delays[rowId];
+      }
       if (!own(state.signalNames, sourceRowId)) state.signalNames[sourceRowId] = name;
       return false;
     });
@@ -1107,6 +1113,12 @@
                 id="scope-display-popover-close" title="关闭" aria-label="关闭显示设置">×</button>
           </div>
           <div class="scope-display-popover-body">
+            <div class="scope-delay-fields">
+              <label title="当前波形图的公共偏移（cycle）">commDly
+                <input id="scope-signal-comm-dly" type="number" min="-10000000" max="10000000" step="0.5" placeholder="0"></label>
+              <label title="信号偏移（cycle）">dly
+                <input id="scope-signal-dly" type="number" min="-10000000" max="10000000" step="0.5" placeholder="0"></label>
+            </div>
             <div class="scope-display-popover-section">
             <span class="scope-display-field-label">波形展示</span>
             <div class="scope-display-mode-options" id="scope-display-mode-options"
@@ -1334,6 +1346,10 @@
       this.cursorNextButton = root.querySelector('#scope-cursor-next');
       this.displayPopover = root.querySelector('#scope-display-popover');
       this.displayPopoverTitle = root.querySelector('#scope-display-popover-title');
+      this.delayInputs = {
+        commDly: root.querySelector('#scope-signal-comm-dly'),
+        dly: root.querySelector('#scope-signal-dly')
+      };
       this.displayPopoverCloseButton = root.querySelector('#scope-display-popover-close');
       this.displayModeOptions = root.querySelector('#scope-display-mode-options');
       this.formulaToggleButton = root.querySelector('#scope-formula-toggle');
@@ -1444,6 +1460,15 @@
       });
       this.displayPopoverCloseButton.addEventListener('click', () => {
         this.closeDisplayPopover(true);
+      });
+      Object.values(this.delayInputs).forEach((input) => {
+        input.addEventListener('change', () => { void this.applySignalDelays(); });
+        input.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter') {
+            event.preventDefault();
+            input.blur();
+          }
+        });
       });
       this.displayModeOptions.addEventListener('click', (event) => {
         const button = event.target.closest('[data-scope-display-mode]');
@@ -3210,6 +3235,7 @@
           delete this.transientFormulaState.multiWaves[rowId];
           delete this.transientFormulaState.multiWaveHidden[rowId];
           delete this.transientFormulaState.signalNames[rowId];
+          delete this.transientFormulaState.delays[rowId];
           this.formulaDrafts.delete(rowId);
         } else if (this.transientFormulaState.hiddenRows.indexOf(rowId) < 0) {
           this.transientFormulaState.hiddenRows.push(rowId);
@@ -3932,10 +3958,11 @@
             <span class="scope-signal-name" ${packedArray ? '' : `data-scope-row-drag="${row.index}"`}
                 title="${escapeHtml(name)}${packedArray ? '' : '；按住鼠标左键拖动调整行顺序'}">
               ${group ? `<small>${escapeHtml(group)}</small>` : ''}
-              ${packedArray ? `<strong class="scope-array-name">${escapeHtml(name)}</strong>` : `<button type="button" class="scope-signal-name-button"
+              ${packedArray ? `<strong class="scope-array-name" data-scope-delay-name="${row.index}">${escapeHtml(this.signalDelayLabel(name, row.delays))}</strong>` : `<button type="button" class="scope-signal-name-button"
                   data-scope-name-row="${row.index}"
+                  data-scope-delay-name="${row.index}"
                   title="点击修改信号名：${escapeHtml(row.name)}"
-                  aria-label="修改信号名 ${escapeHtml(row.name)}">${escapeHtml(row.name)}</button>`}
+                  aria-label="修改信号名 ${escapeHtml(row.name)}">${escapeHtml(this.signalDelayLabel(row.name, row.delays))}</button>`}
               ${multiWave ? `
                 <span class="scope-multi-wave-legend" aria-label="多波形线条图例">
                   ${multiWaveSources.length ? multiWaveSources.map((source, sourceIndex) => {
@@ -3962,7 +3989,7 @@
                 <b data-scope-cursor-value-row="${row.index}">${escapeHtml(this.activeCursor || '游标')}：--</b>
               </em>
             </span>
-            ${packedArray ? `<span class="scope-array-mode">总线</span>` : `<button type="button" class="scope-display-mode-button"
+            <button type="button" class="scope-display-mode-button"
                 data-scope-display-row="${row.index}"
                 aria-label="${escapeHtml(row.name)} 显示设置"
                 aria-haspopup="dialog" aria-expanded="false"
@@ -3972,7 +3999,7 @@
                   ? ' · fx'
                   : ''
               }</span>
-            </button>`}
+            </button>
             ${analogMode ? `
               <span class="scope-row-resize-handle" data-scope-row-resize="${row.index}"
                   role="separator" aria-orientation="horizontal"
@@ -4071,6 +4098,10 @@
       const mode = this.modes[row.index] || 'bus';
       const multiWave = this.isMultiWaveRow(row.index);
       this.displayPopoverTitle.textContent = row.name;
+      this.displayPopover.classList.toggle('delay-only', row.arrayGroup?.index < 0);
+      Object.entries(this.delayInputs).forEach(([key, input]) => {
+        if (input !== document.activeElement) input.value = String(row.delays?.[key] || 0);
+      });
       this.displayModeOptions.querySelectorAll('[data-scope-display-mode]').forEach((button) => {
         const active = button.dataset.scopeDisplayMode === (multiWave ? 'analog' : mode);
         button.classList.toggle('active', active);
@@ -4119,6 +4150,73 @@
       this.updateFormulaControls();
       this.updateMultiWaveControls();
       this.positionDisplayPopover();
+    }
+
+    signalDelayLabel(name, delays) {
+      const offset = delays?.offset || 0;
+      return offset ? name + ' (' + (offset > 0 ? '+' : '') + offset + ')' : name;
+    }
+
+    async applySignalDelays() {
+      const row = this.meta?.rows[this.displayControlRow];
+      if (!row) return;
+      const invalid = Object.values(this.delayInputs).find((input) => !input.checkValidity());
+      if (invalid) { invalid.reportValidity(); return; }
+      const next = Object.fromEntries(Object.entries(this.delayInputs).map(([key, input]) => [key, Number(input.value) || 0]));
+      const targets = row.arrayGroup?.index < 0
+        ? this.meta.rows.filter((item) => item.arrayGroup?.anchor === row.index && item !== row) : [row];
+      const previous = this.transientFormulaState.delays;
+      const overrides = { ...previous };
+      const selectedIds = new Set(targets.map((item) => item.rowId));
+      const changeCommon = next.commDly !== (previous[targets[0]?.rowId]?.commDly ?? row.delays?.commDly ?? 0);
+      let changed = false;
+      for (const item of changeCommon ? this.meta.rows : targets) {
+        if (item.arrayGroup?.index < 0) continue;
+        const current = overrides[item.rowId] || item.delays;
+        const update = {
+          commDly: changeCommon || selectedIds.has(item.rowId) ? next.commDly : (current?.commDly || 0),
+          dly: selectedIds.has(item.rowId) ? next.dly : (current?.dly || 0)
+        };
+        if (current?.commDly === update.commDly && current?.dly === update.dly) continue;
+        overrides[item.rowId] = update;
+        changed = true;
+      }
+      if (!changed) return;
+      const snapshot = this.snapshot({ includeRowState: true });
+      this.transientFormulaState.delays = overrides;
+      try {
+        const result = await this.worker.call('set-delays', { delays: overrides });
+        if (this.destroyed || this.transientFormulaState.delays !== overrides) return;
+        this.pushHistorySnapshot(snapshot);
+        const fullView = this.viewStart === 0 && this.viewEnd === this.meta.totalColumns;
+        const span = Math.min(this.viewEnd - this.viewStart, result.totalColumns);
+        this.meta.totalColumns = result.totalColumns;
+        this.meta.rows.forEach((item) => { item.delays = result.delays[item.index]; });
+        this.viewStart = fullView ? 0 : clamp(this.viewStart, 0, result.totalColumns - span);
+        this.viewEnd = fullView ? result.totalColumns : this.viewStart + span;
+        const last = Math.max(0, result.totalColumns - 0.5);
+        for (const key of ['cursorA', 'cursorB', 'cursorC']) {
+          if (this[key] != null) this[key] = Math.min(this[key], last);
+        }
+        this.signalList.querySelectorAll('[data-scope-delay-name]').forEach((element) => {
+          const item = this.meta.rows[Number(element.dataset.scopeDelayName)];
+          element.textContent = this.signalDelayLabel(item.name, item.delays);
+        });
+        this.persistTransientFormulaState();
+        this.simplified = null;
+        this.simplifiedDisplayActive = false;
+        this.outputContent = '';
+        this.resetWindowCache();
+        this.updateCursorControls();
+        this.updateMeasurements();
+        this.scheduleWindowRequest();
+        this.scheduleOverviewDataRequest();
+        void this.updateCursorReadout();
+        this.markDraftDirty('presentation');
+      } catch (error) {
+        if (this.transientFormulaState.delays === overrides) this.transientFormulaState.delays = previous;
+        this.setStatus(error.message || String(error), true);
+      }
     }
 
     closeDisplayPopover(restoreFocus) {
@@ -7997,10 +8095,15 @@
 
     cursorHistoryDirection(event) {
       if (event.defaultPrevented || event.isComposing || event.ctrlKey || event.metaKey || event.shiftKey) return 0;
-      if (event.key === 'BrowserBack' || event.code === 'BrowserBack' || event.keyCode === 166
-          || (event.altKey && event.key === 'ArrowLeft')) return -1;
-      if (event.key === 'BrowserForward' || event.code === 'BrowserForward' || event.keyCode === 167
-          || (event.altKey && event.key === 'ArrowRight')) return 1;
+      const { key, code, location } = event;
+      if (key?.length === 1 || location === 3 || code?.startsWith('Numpad')) return 0;
+      // Legacy key codes can overlap with printable keys; use them only for unidentified keys.
+      const legacyCode = (!key || key === 'Unidentified') && (!code || code === 'Unidentified')
+        ? event.keyCode : 0;
+      if (key === 'BrowserBack' || code === 'BrowserBack' || legacyCode === 166
+          || (event.altKey && key === 'ArrowLeft')) return -1;
+      if (key === 'BrowserForward' || code === 'BrowserForward' || legacyCode === 167
+          || (event.altKey && key === 'ArrowRight')) return 1;
       return 0;
     }
 

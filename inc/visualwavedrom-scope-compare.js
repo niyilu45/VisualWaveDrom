@@ -50,6 +50,7 @@
       this.active = true;
       this.layout = 'vertical';
       this.collapsedPairs.clear();
+      this.delayOverrides = { left: new Map(), right: new Map() };
       const opening = ++this.sequence;
       const doc = popup.document;
       doc.title = this.scope.meta.title + ' - 示波器比较';
@@ -104,7 +105,19 @@
         <div class="scope-compare-pan"><div class="scope-compare-pan-thumb" role="scrollbar" tabindex="-1"
           aria-controls="scope-compare-panes" aria-orientation="horizontal" aria-label="横向滚动比较波形"
           aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-disabled="true"></div></div>
-        <footer class="scope-compare-status" role="status" aria-live="polite"></footer>`;
+        <footer class="scope-compare-status" role="status" aria-live="polite"></footer>
+        <form class="scope-compare-delay-card" role="dialog" aria-labelledby="scope-compare-delay-title" hidden>
+          <strong id="scope-compare-delay-title"></strong>
+          <label class="scope-compare-delay-side">比较图 <select aria-label="偏移作用于比较图">
+            <option value="left">A</option><option value="right">B</option>
+          </select></label>
+          <div class="scope-compare-delay-fields">
+            <label title="当前比较图的公共偏移（cycle）">commDly <input name="commDly" type="number" min="-10000000" max="10000000" step="0.5" placeholder="0"></label>
+            <label title="信号偏移（cycle）">dly <input name="dly" type="number" min="-10000000" max="10000000" step="0.5" placeholder="0"></label>
+          </div>
+          <div class="scope-compare-delay-actions"><button type="button" data-close-delay>取消</button>
+            <button type="submit">应用</button></div>
+        </form>`;
       doc.body.appendChild(this.root);
       this.activeCursor = ''; this.cursorPositions = { A: null, B: null, C: null };
       this.rangeSelection = null;
@@ -130,6 +143,17 @@
       this.condition = this.root.querySelector('.scope-compare-condition');
       this.cursorSignal = this.root.querySelector('.scope-compare-cursor-signal');
       this.measurements = this.root.querySelector('.scope-compare-measurements');
+      this.delayCard = this.root.querySelector('.scope-compare-delay-card');
+      this.delaySide = this.delayCard.querySelector('select');
+      this.delayCard.addEventListener('submit', (event) => {
+        event.preventDefault();
+        void this.applyPairDelay();
+      });
+      this.delayCard.querySelector('[data-close-delay]').addEventListener('click', () => this.closeDelayCard());
+      this.delaySide.addEventListener('change', () => this.fillDelayCard());
+      this.root.addEventListener('pointerdown', (event) => {
+        if (!this.delayCard.contains(event.target)) this.closeDelayCard();
+      }, { capture: true });
       this.root.addEventListener('click', (event) => {
         const cursor = event.target.closest('[data-cursor], [data-locate]');
         if (cursor?.dataset.cursor) { this.selectCursor(cursor.dataset.cursor); return; }
@@ -169,7 +193,11 @@
       const { signal } = this.shortcutEvents;
       doc.addEventListener('keydown', (event) => {
         if (!this.active || event.defaultPrevented || event.isComposing) return;
-        if (event.key === 'Escape') { this.close(); return; }
+        if (event.key === 'Escape') {
+          if (!this.delayCard.hidden) { event.preventDefault(); this.closeDelayCard(); }
+          else this.close();
+          return;
+        }
         if (event.ctrlKey || event.altKey || event.metaKey) return;
         if (event.target === this.condition && event.key === 'Enter') {
           event.preventDefault();
@@ -290,6 +318,7 @@
         [this.result.left, this.result.right] = [this.result.right, this.result.left];
         [this.leftRenderer, this.rightRenderer] = [this.rightRenderer, this.leftRenderer];
         [this.loadedNames.left, this.loadedNames.right] = [this.loadedNames.right, this.loadedNames.left];
+        [this.delayOverrides.left, this.delayOverrides.right] = [this.delayOverrides.right, this.delayOverrides.left];
         this.result.pairs.forEach(pair => {
           [pair.left, pair.right] = [pair.right, pair.left];
           pair.diagnostics = [pair.diagnostics[1], pair.diagnostics[0]];
@@ -326,6 +355,7 @@
 
     async load(changes) {
       if (!this.selects.left.value || this.busy) return;
+      this.closeDelayCard();
       const refresh = !!changes;
       const sequence = ++this.sequence;
       if (!refresh) {
@@ -400,6 +430,8 @@
         if (!this.active || sequence !== this.sequence) return;
         const result = await this.scope.worker.call('compare-start', { content: document?.content, transient: document?.transientState,
           single: !rightName,
+          leftDelays: this.delayOverrides.left.get(leftName),
+          rightDelays: this.delayOverrides.right.get(rightName),
           leftDocument, reuseLeft, reuseRight, currentContent,
           currentNames: leftDocument ? null : this.scope.meta.rows.map((row) => this.scope.signalDisplayName(row.index)) });
         if (!this.active || sequence !== this.sequence) return;
@@ -410,8 +442,10 @@
           leftDocument ? leftDocument.display || this.remapDisplay(leftDisplay, result.left)
             : this.scope.comparisonDisplay(),
           leftDocument ? leftDocument.transientState : this.scope.transientFormulaState);
+        else this.leftRenderer.meta = result.left;
         if (!reuseRight) this.rightRenderer = this.scope.createComparisonRenderer(result.right,
           document.display || this.remapDisplay(rightDisplay, result.right), document.transientState);
+        else this.rightRenderer.meta = result.right;
         const pairNames = new Set(result.pairs.map(pair => pair.name));
         for (const name of this.collapsedPairs) {
           if (!pairNames.has(name)) this.collapsedPairs.delete(name);
@@ -464,6 +498,65 @@
         if (this.progressTimer === timer) this.progressTimer = 0;
         this.scheduleRefresh();
       }
+    }
+
+    pairDelayLabel(pair, side) {
+      const left = this.result.left.rows[pair.left]?.delays;
+      const right = this.result.right.rows[pair.right]?.delays;
+      if (side !== 'overlay') return this.scope.signalDelayLabel(pair.name, side === 'left' ? left : right);
+      if ((left?.offset || 0) === (right?.offset || 0)) return this.scope.signalDelayLabel(pair.name, left);
+      const sides = [['A', left], ['B', right]].filter(([, delay]) => delay?.offset)
+        .map(([label, delay]) => label + ' ' + (delay.offset > 0 ? '+' : '') + delay.offset);
+      return pair.name + ' (' + sides.join(', ') + ')';
+    }
+
+    openDelayCard(pair, side, x, y) {
+      if (pair.left < 0 && pair.right < 0) return;
+      if (side !== 'overlay' && pair[side] < 0) return;
+      this.delayPair = pair;
+      const chooseSide = side === 'overlay';
+      this.delaySide.closest('label').hidden = !chooseSide || pair.left < 0 || pair.right < 0;
+      this.delaySide.value = !chooseSide ? side
+        : pair[this.cursorSide] >= 0 ? this.cursorSide : pair.left >= 0 ? 'left' : 'right';
+      this.fillDelayCard();
+      this.delayCard.hidden = false;
+      const rect = this.delayCard.getBoundingClientRect();
+      this.delayCard.style.left = Math.max(8, Math.min(x, this.popup.innerWidth - rect.width - 8)) + 'px';
+      this.delayCard.style.top = Math.max(8, Math.min(y + 10, this.popup.innerHeight - rect.height - 8)) + 'px';
+    }
+
+    fillDelayCard() {
+      const side = this.delaySide.value;
+      const row = this.result?.[side].rows[this.delayPair?.[side]];
+      if (!row) return;
+      this.delayCard.querySelector('strong').textContent = (side === 'left' ? 'A · ' : 'B · ') + this.delayPair.name;
+      for (const key of ['commDly', 'dly']) this.delayCard.elements[key].value = String(row.delays?.[key] || 0);
+    }
+
+    closeDelayCard() {
+      if (this.delayCard) this.delayCard.hidden = true;
+      this.delayPair = null;
+    }
+
+    async applyPairDelay() {
+      if (this.busy || !this.delayPair || !this.delayCard.reportValidity()) return;
+      const side = this.delaySide.value;
+      const row = this.result[side].rows[this.delayPair[side]];
+      if (!row) return;
+      const delay = Object.fromEntries(['commDly', 'dly'].map(key => [key, Number(this.delayCard.elements[key].value) || 0]));
+      this.closeDelayCard();
+      if (delay.commDly === row.delays.commDly && delay.dly === row.delays.dly) return;
+      const name = this.loadedNames[side];
+      const overrides = { ...this.delayOverrides[side].get(name), [row.rowId]: delay };
+      if (delay.commDly !== row.delays.commDly) {
+        this.result[side].rows.forEach((member) => {
+          if (member !== row && member.arrayGroup?.index !== -1) {
+            overrides[member.rowId] = { commDly: delay.commDly, dly: member.delays.dly };
+          }
+        });
+      }
+      this.delayOverrides[side].set(name, overrides);
+      await this.load(new Map());
     }
 
     captureDisplay(renderer) {
@@ -1016,7 +1109,7 @@
           if (collapsed) continue;
           ctx.fillStyle = '#25313e';
           const showStatus = this.loadedNames.right;
-          ctx.fillText(pair.name, ROW_NAME_X, y + h / 2 - (showStatus ? 6 : 0), nameWidth - ROW_NAME_X - 8);
+          ctx.fillText(this.pairDelayLabel(pair, pane.side), ROW_NAME_X, y + h / 2 - (showStatus ? 6 : 0), nameWidth - ROW_NAME_X - 8);
           if (!showStatus) continue;
           const missing = pair.left < 0 ? 'A 缺少信号' : pair.right < 0 ? 'B 缺少信号' : '';
           ctx.fillStyle = '#626b75';
@@ -1042,6 +1135,7 @@
       if (inNameColumn) {
         this.cursorSequence++;
         this.updateCursorControls();
+        this.openDelayCard(pair, pane.side, event.clientX, event.clientY);
         return;
       }
       if (!this.activeCursor) this.rangeSelection = null;
@@ -1417,6 +1511,8 @@
       this.root = this.panesRoot = null;
       this.selects = this.count = this.status = this.startInput = this.spanInput = this.pan = this.panThumb = null;
       this.condition = this.cursorSignal = this.measurements = null;
+      this.delayCard = this.delaySide = this.delayPair = null;
+      this.delayOverrides = null;
       const popup = this.popup;
       this.popup = null;
       if (!options?.fromWindow && !popup.closed) popup.close();

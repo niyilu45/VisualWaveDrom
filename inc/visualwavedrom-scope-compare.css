@@ -99,6 +99,24 @@
   border-radius: 3px;
 }
 .scope-compare-row-controls svg { width: 13px; height: 13px; }
+.scope-compare-delay-card {
+  position: fixed;
+  z-index: 2;
+  display: grid;
+  width: min(270px, calc(100% - 16px));
+  gap: 9px;
+  padding: 12px;
+  border: 1px solid #b7c0cb;
+  border-radius: 6px;
+  background: #fff;
+  box-shadow: 0 5px 16px #24364726;
+}
+.scope-compare-delay-card[hidden], .scope-compare-delay-side[hidden] { display: none; }
+.scope-compare-delay-card strong { overflow-wrap: anywhere; }
+.scope-compare-delay-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.scope-compare-delay-fields label { display: grid; min-width: 0; }
+.scope-compare-delay-fields input[type="number"] { width: 100%; min-width: 0; }
+.scope-compare-delay-actions { display: flex; justify-content: flex-end; gap: 6px; }
 .scope-compare-pan { position: relative; flex: none; height: 18px; margin: 0 12px 6px; border-radius: 4px; background: #dfe6ed; touch-action: none; user-select: none; }
 .scope-compare-pan-thumb { position: absolute; top: 2px; bottom: 2px; left: 0; width: 100%; border-radius: 3px; background: #397da9; cursor: grab; }
 .scope-compare-pan-thumb::after { content: ''; position: absolute; inset: 0 -4px; }
