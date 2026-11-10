@@ -37,6 +37,14 @@
     return 's:' + text;
   }
 
+  function equalValues(a, b) {
+    if (a === b) return true;
+    if (typeof a === 'number' && typeof b === 'number') {
+      return !Number.isFinite(a) && !Number.isFinite(b);
+    }
+    return valueKey(a) === valueKey(b);
+  }
+
   async function compare(left, right, api) {
     const rows = (session) => session.rows.map((row, index) => ({ row, index }))
       .filter(({ row }) => !(row.arrayGroup?.index < 0));
@@ -54,6 +62,14 @@
       pairs.forEach((pair) => Object.assign(pair, { diagnostics: ['', ''], intervals: [], errorCount: 0 }));
       return { pairs, errors, total };
     }
+    let sliceStarted = performance.now();
+    const yieldIfNeeded = () => {
+      if (performance.now() - sliceStarted < 8) return null;
+      return new Promise((resolve) => setTimeout(resolve, 0)).then(() => {
+        sliceStarted = performance.now();
+        api.check();
+      });
+    };
     for (let p = 0; p < pairs.length; p += 1) {
       const pair = pairs[p];
       const a = left.rows[pair.left];
@@ -69,20 +85,23 @@
       const diagnostics = [a, b].map((row) => row && row.formula && row.formula.valid === false
         ? row.formula.error || (row.formula.errors || []).join('; ') || '公式无法计算' : '');
       pair.diagnostics = diagnostics;
-      const first = a && b && !diagnostics.some(Boolean) && api.start
+      const fullReason = diagnostics.some(Boolean) ? '公式错误' : !a || !b ? '缺少信号' : '';
+      const nextBoundary = !fullReason && api.next && (!api.useBoundaries || api.useBoundaries(a, b)) ? api.next : null;
+      const first = !fullReason && api.start
         ? Math.max(0, Math.min(api.start(a, left), api.start(b, right))) : 0;
       const limit = Math.ceil(end / step);
       for (let index = Math.floor(first / step); index < limit;) {
         const start = index * step;
         const av = api.value(a, start, left);
         const bv = api.value(b, start, right);
-        const boundary = api.next ? Math.min(api.next(a, start, left), api.next(b, start, right)) : start + step;
-        const next = Math.min(limit, Math.max(index + 1, Math.ceil(boundary / step - 1e-9)));
+        let next = fullReason ? limit : index + 1;
+        if (nextBoundary) {
+          const boundary = Math.min(nextBoundary(a, start, left), nextBoundary(b, start, right));
+          next = Math.min(limit, Math.max(next, Math.ceil(boundary / step - 1e-9)));
+        }
         const stop = Math.min(end, next * step);
-        const reason = diagnostics.some(Boolean) ? '公式错误'
-          : (!a || !b) ? '缺少信号'
-          : !padded && (start >= aLength || start >= bLength) ? '数据长度不同'
-          : valueKey(av) !== valueKey(bv) ? '值不同' : '';
+        const reason = fullReason || (!padded && (start >= aLength || start >= bLength) ? '数据长度不同'
+          : equalValues(av, bv) ? '' : '值不同');
         if (reason) {
           if (current && current.reason === reason) current.end = stop;
           else {
@@ -92,17 +111,17 @@
           }
         } else current = null;
         index = next;
-        if (++checked % 4096 === 0) {
+        if (++checked % 2048 === 0) {
           api.progress({ row: p + 1, rows: pairs.length, name: pair.name, fraction: (p + start / Math.max(1, end)) / Math.max(1, pairs.length) });
-          await new Promise((resolve) => setTimeout(resolve, 0));
-          api.check();
+          const wait = yieldIfNeeded();
+          if (wait) await wait;
         }
       }
       pair.intervals = intervals;
       pair.errorCount = intervals.length;
       api.progress({ row: p + 1, rows: pairs.length, name: pair.name, fraction: (p + 1) / Math.max(1, pairs.length) });
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      api.check();
+      const wait = yieldIfNeeded();
+      if (wait) await wait;
     }
     errors.sort((a, b) => a.start - b.start || a.pair - b.pair);
     errors.forEach((error, index) => { error.index = index; });

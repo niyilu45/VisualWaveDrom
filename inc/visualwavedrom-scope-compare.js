@@ -1070,6 +1070,8 @@
           ctx.strokeStyle = '#dfe2e6'; ctx.beginPath(); ctx.moveTo(0, y + rowHeight - 0.5); ctx.lineTo(plotWidth, y + rowHeight - 0.5); ctx.stroke();
           if (this.collapsedPairs.has(pair.name)) continue;
           for (const error of errors.get(index) || []) {
+            if (error.end <= view.start) continue;
+            if (error.start >= view.end) break;
             const left = Math.max(0, renderer.xForColumn(error.start, plotWidth));
             const right = Math.min(plotWidth, renderer.xForColumn(error.end, plotWidth));
             if (right <= left) continue;

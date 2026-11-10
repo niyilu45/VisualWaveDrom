@@ -11,7 +11,7 @@ if (typeof document === 'undefined' && typeof global.importScripts === 'function
 const FormulaEngine = global.VisualWaveDromFormula || null;
 
 if (typeof document === 'undefined' && typeof global.importScripts === 'function') {
-  global.importScripts('visualwavedrom-scope-compare-core.js?v=sparse-import-v1');
+  global.importScripts('visualwavedrom-scope-compare-core.js?v=compare-perf-v1');
 }
 let comparison = null;
 let retainedComparisonSessions = null;
@@ -1897,7 +1897,7 @@ function pointEventsInWindow(events, start, end, width) {
   return result;
 }
 
-function displaySegmentForMode(row, segment, column, mode, totalColumns, busFormat) {
+function displaySegmentForMode(row, segment, column, mode, formatBus) {
   if (mode === 'bus') {
     let rawValue;
     if (row.samples && row.samples.length) {
@@ -1917,7 +1917,7 @@ function displaySegmentForMode(row, segment, column, mode, totalColumns, busForm
     return {
       kind: 'bus',
       state: 'bus',
-      value: formatMappedBusValue(rawValue, busFormat, row.valueTable)
+      value: formatBus(rawValue)
     };
   }
   if (!row.samples || !row.samples.length || mode === 'analog') return segment;
@@ -1932,14 +1932,14 @@ function displaySegmentForMode(row, segment, column, mode, totalColumns, busForm
   return segment;
 }
 
-function sampledSegmentsInWindow(row, start, end, mode, busFormat) {
+function sampledSegmentsInWindow(row, start, end, mode, formatBus) {
   const selected = [];
   const sampleCount = row.samples ? row.samples.length : 0;
   const step = rowSampleStep(row);
   const firstIndex = Math.max(0, Math.floor(start / step));
   const lastIndex = Math.min(sampleCount, Math.ceil(end / step));
   for (let index = firstIndex; index < lastIndex; index += 1) {
-    const sampleStart = sampleColumn(row, index);
+    const sampleStart = index * step;
     const visibleStart = Math.max(start, sampleStart);
     const visibleEnd = Math.min(end, sampleStart + step);
     if (!(visibleEnd > visibleStart)) continue;
@@ -1951,7 +1951,7 @@ function sampledSegmentsInWindow(row, start, end, mode, busFormat) {
       display = {
         kind: 'bus',
         state: 'bus',
-        value: formatMappedBusValue(String(sample), busFormat, row.valueTable)
+        value: formatBus(String(sample))
       };
     } else {
       const state = sample === 0 || sample === 1 ? String(sample) : 'x';
@@ -1978,7 +1978,7 @@ function sampledSegmentsInWindow(row, start, end, mode, busFormat) {
   return selected;
 }
 
-function sampledBucketsInWindow(row, start, end, width, mode, busFormat) {
+function sampledBucketsInWindow(row, start, end, width, mode, formatBus) {
   const bucketCount = Math.max(1, Math.floor(width));
   const span = end - start;
   const sampleCount = row.samples ? row.samples.length : 0;
@@ -2024,12 +2024,13 @@ function sampledBucketsInWindow(row, start, end, width, mode, busFormat) {
         if (sample === 1) high = true;
         else if (sample === 0) low = true;
         else binary = false;
-        const formatted = formatMappedBusValue(String(sample), busFormat, row.valueTable);
-        if (!valueSet) {
-          value = formatted;
-          valueSet = true;
+        if (value !== '*' || !valueSet) {
+          const formatted = formatBus(String(sample));
+          if (!valueSet) {
+            value = formatted;
+            valueSet = true;
+          } else if (value !== formatted) value = '*';
         }
-        else if (value !== formatted) value = '*';
       } else if (sample === 1) {
         high = true;
       } else if (sample === 0) {
@@ -2074,10 +2075,18 @@ function sampledBucketsInWindow(row, start, end, width, mode, busFormat) {
   return buckets;
 }
 
-function rowSegmentsInWindow(row, start, end, width, mode, totalColumns, busFormat) {
+function rowSegmentsInWindow(row, start, end, width, mode, busFormat) {
   const decorations = {
     clockEdges: pointEventsInWindow(row.clockEdges, start, end, width),
     gaps: pointEventsInWindow(row.gaps, start, end, width)
+  };
+  const labels = mode === 'bus' ? new Map() : null;
+  const formatBus = (raw) => {
+    const cached = labels.get(raw);
+    if (cached !== undefined) return cached;
+    const label = formatMappedBusValue(raw, busFormat, row.valueTable);
+    if (labels.size < 2048) labels.set(raw, label);
+    return label;
   };
   let selected;
   if (row.samples && row.samples.length && mode !== 'analog') {
@@ -2089,10 +2098,10 @@ function rowSegmentsInWindow(row, start, end, width, mode, totalColumns, busForm
     if (visibleSampleCount > windowPixelBudget(width)) {
       return Object.assign({
         kind: 'buckets',
-        items: sampledBucketsInWindow(row, start, end, width, mode, busFormat)
+        items: sampledBucketsInWindow(row, start, end, width, mode, formatBus)
       }, decorations);
     }
-    selected = sampledSegmentsInWindow(row, start, end, mode, busFormat);
+    selected = sampledSegmentsInWindow(row, start, end, mode, formatBus);
   } else {
     selected = [];
     const first = findFirstSegment(row.segments, start);
@@ -2106,8 +2115,7 @@ function rowSegmentsInWindow(row, start, end, width, mode, totalColumns, busForm
         segment,
         visibleStart + 1e-7,
         mode,
-        totalColumns,
-        busFormat
+        formatBus
       );
       pushSegment(selected, {
         start: visibleStart,
@@ -2398,7 +2406,7 @@ function delayedRowWindow(row, start, end, width, mode, total, busFormat, delay)
   const render = (from, to, pixels) => row.sparseAnalog && mode === 'analog'
     ? sparseAnalogWindow(row, from, to)
     : analog ? analogWindow(row, from, to, pixels, Math.max(1, total - delay))
-      : rowSegmentsInWindow(row, from, to, pixels, mode, Math.max(1, total - delay), busFormat);
+      : rowSegmentsInWindow(row, from, to, pixels, mode, busFormat);
   if (!delay) return render(start, end, width);
   const first = Math.max(start, delay);
   const last = Math.min(end, rawComparisonLength(row) + delay);
@@ -2467,6 +2475,7 @@ async function createWindow(payload, session = activeSession, isCancelled) {
   );
   const hiddenArrays = new Set(payload.hiddenArrayElements || []);
   const rows = [];
+  let sliceStarted = payload.comparison ? performance.now() : 0;
   for (let rowOffset = 0; rowOffset < rowIndices.length; rowOffset += 1) {
     if (isCancelled?.() || lifecycle !== sessionGeneration || !payload.comparison && generation < latestWindowGeneration) {
       return {
@@ -2535,8 +2544,10 @@ async function createWindow(payload, session = activeSession, isCancelled) {
         payload.analogFormats && payload.analogFormats[index] || row.analogFormat);
       rows.push({ index, mode, data });
     }
-    if ((rowOffset + 1) % 2 === 0 && rowOffset + 1 < rowIndices.length) {
+    if (rowOffset + 1 < rowIndices.length && (payload.comparison
+      ? performance.now() - sliceStarted >= 8 : (rowOffset + 1) % 2 === 0)) {
       await new Promise((resolve) => setTimeout(resolve, 0));
+      if (payload.comparison) sliceStarted = performance.now();
     }
   }
   return { cancelled: false, generation, start, end, width, rowStart, rowEnd, rows };
@@ -3999,6 +4010,13 @@ function comparisonSourceOffsets(row, session) {
   });
 }
 
+function comparisonStep(row, session) {
+  if (!row) return 1;
+  if (comparisonSourceOffsets(row, session).some((delay) => delay % 1)) return 0.5;
+  if (row.multiWave?.sources.some((item) => rowCursorStep(session.rows[item.rowIndex]) === 0.5)) return 0.5;
+  return rowCursorStep(row);
+}
+
 function comparisonNextBoundary(row, column, session) {
   if (!row) return Infinity;
   if (row.multiWave) return column;
@@ -4006,9 +4024,17 @@ function comparisonNextBoundary(row, column, session) {
   const length = rawComparisonLength(row);
   if (raw >= length) return Infinity;
   if (raw < 0) return delay;
-  if (!row.source.scope?.sparseImport || !row.changePoints) return column;
-  const run = row.segments[findFirstSegment(row.segments, raw)];
-  return Math.min(length, run?.end ?? length) + delay;
+  const indices = row.changePoints?.indices;
+  if (!indices || row.scopeValues) return column;
+  const step = rowSampleStep(row);
+  const sample = Math.floor((raw + 1e-9) / step);
+  let low = 0, high = indices.length;
+  while (low < high) {
+    const mid = (low + high) >>> 1;
+    if (indices[mid] <= sample) low = mid + 1;
+    else high = mid;
+  }
+  return (low < indices.length ? Math.min(length, indices[low] * step) : length) + delay;
 }
 
 async function startComparison(request) {
@@ -4040,12 +4066,9 @@ async function startComparison(request) {
     length: comparisonLength,
     value: comparisonValue,
     next: comparisonNextBoundary,
+    useBoundaries: (a, b) => !!(a.changePoints && !a.scopeValues || b.changePoints && !b.scopeValues),
     start: (row, session) => row.multiWave ? 0 : rowDelay(session, row),
-    step: (row, session) => {
-      if (comparisonSourceOffsets(row, session).some((delay) => delay % 1)) return 0.5;
-      if (row.multiWave?.sources.some((item) => rowCursorStep(session.rows[item.rowIndex]) === 0.5)) return 0.5;
-      return rowCursorStep(row);
-    },
+    step: comparisonStep,
     padded: (a, b) => !!(a && (a.source.scope?.sparseImport || comparisonSourceOffsets(a, left).some(Boolean))
       || b && (b.source.scope?.sparseImport || comparisonSourceOffsets(b, right).some(Boolean))),
     check,
@@ -4076,30 +4099,27 @@ async function comparisonWindow(request) {
     if (cancelled() || window.cancelled) return { cancelled: true };
     data.push(window);
   }
+  const width = clamp(Math.ceil(Number(request.width) || 1000), 32, 8192);
+  const span = Math.max(1e-9, request.end - request.start);
   const errors = pairs.flatMap((pair) => {
     const first = findFirstSegment(pair.intervals, request.start);
-    const width = clamp(Math.ceil(Number(request.width) || 1000), 32, 8192);
-    const span = Math.max(1e-9, request.end - request.start);
-    const pixels = pair.intervals.length - first > width * 2 ? new Uint8Array(width) : null;
-    const visible = [];
-    for (let i = first; i < pair.intervals.length && pair.intervals[i].start < request.end; i += 1) {
-      const error = pair.intervals[i];
-      if (pixels) {
-        const x1 = clamp(Math.floor((error.start - request.start) / span * width), 0, width - 1);
-        const x2 = clamp(Math.ceil((error.end - request.start) / span * width), x1 + 1, width);
-        pixels.fill(1, x1, x2);
-      } else visible.push({ pair: error.pair, start: error.start, end: error.end });
+    let limit = findFirstSegment(pair.intervals, request.end);
+    if (pair.intervals[limit]?.start < request.end) limit++;
+    if (limit - first <= width * 2) {
+      return pair.intervals.slice(first, limit).map(({ pair, start, end }) => ({ pair, start, end }));
     }
-    // Reduce only the highlight raster; inspection/navigation retain every exact interval.
-    if (pixels) {
-      let firstPixel = -1;
-      for (let x = 0; x <= width; x += 1) {
-        if (pixels[x] && firstPixel < 0) firstPixel = x;
-        if (!pixels[x] && firstPixel >= 0) {
-          visible.push({ pair: pair.intervals[first].pair, start: request.start + firstPixel / width * span,
-            end: request.start + x / width * span });
-          firstPixel = -1;
-        }
+    // Sample display pixels only; keep exact intervals for inspection and navigation.
+    const visible = [];
+    let firstPixel = -1, index = first;
+    for (let x = 0; x <= width; x += 1) {
+      const left = request.start + x / width * span;
+      const right = request.start + (x + 1) / width * span;
+      if (pair.intervals[index]?.end <= left) index = findFirstSegment(pair.intervals, left);
+      const hit = x < width && index < limit && pair.intervals[index].start < right;
+      if (hit && firstPixel < 0) firstPixel = x;
+      if (!hit && firstPixel >= 0) {
+        visible.push({ pair: pair.intervals[first].pair, start: request.start + firstPixel / width * span, end: left });
+        firstPixel = -1;
       }
     }
     return visible;
@@ -4128,7 +4148,7 @@ function inspectComparison(request) {
   if (!pair) return null;
   const left = comparison.left.rows[pair.left];
   const right = comparison.right.rows[pair.right];
-  const step = Math.min(left ? rowCursorStep(left) : 1, right ? rowCursorStep(right) : 1);
+  const step = Math.min(comparisonStep(left, comparison.left), comparisonStep(right, comparison.right), 1);
   const position = Math.max(0, Math.floor(Number(request.column) / step) * step);
   if (!Number.isFinite(position)) return null;
   const error = pair.intervals[findFirstSegment(pair.intervals, position)];
