@@ -734,7 +734,8 @@ def _complete_scalar_signal(parsed_signal, points, options):
             if target_length > points[-1]["index"] + 1 and previous != ("x", "x"):
                 indices.append(points[-1]["index"] + 1)
                 values.append("x")
-            if len(indices) * 8 <= target_length:
+            missing_columns = target_length - len(points)
+            if len(indices) * 8 <= target_length or missing_columns >= max(2000, compact_numeric_threshold):
                 return {
                     "wave": "", "data": [], "pointCount": len(points),
                     "firstIndex": points[0]["index"], "lastIndex": points[-1]["index"],

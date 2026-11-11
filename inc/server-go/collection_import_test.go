@@ -858,6 +858,26 @@ func TestCollectionSingleFilePreviewHidesQuotedCSVSequenceColumn(t *testing.T) {
 	}
 }
 
+func TestCollectionRedetectsSequenceFromStaleGeneratedSettings(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "indexed.txt")
+	if err := os.WriteFile(file, []byte("8000000 10\n8000001 11\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	withoutSequence := false
+	generated := collectionRuleConfig{ImportMode: "single", HasSeq: &withoutSequence, Parser: "parse_single_column"}
+	match := collectionFileMatch{Path: file, FileName: "indexed.txt"}
+	user := collectionRuleConfig{Name: "signal"}
+	_, entry, err := prepareCollectionEntry(effectiveCollectionPresetPath(user, generated), match, 0)
+	if err != nil || !entry.HasSeq || entry.Parser != "parse_index_data" {
+		t.Fatalf("stale autoGen blocked detection: %#v, %v", entry, err)
+	}
+	user.HasSeq = &withoutSequence
+	_, entry, err = prepareCollectionEntry(effectiveCollectionPresetPath(user, generated), match, 0)
+	if err != nil || entry.HasSeq || entry.Parser != "parse_single_column" {
+		t.Fatalf("explicit user choice was not preserved: %#v, %v", entry, err)
+	}
+}
+
 func TestCollectionSingleColumnAutoGenCanBeSearchedAgain(t *testing.T) {
 	root := t.TempDir()
 	sourcePath := filepath.Join(root, "SeqConvOutC.txt")

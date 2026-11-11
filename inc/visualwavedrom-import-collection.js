@@ -1411,6 +1411,7 @@
           folder: entry.folder,
           grepKeys: entry.grepKeys,
           name: entry.name,
+          hasSeq: entry.hasSeq,
           tbl: entry.tbl
         }, path + '.usrGen');
         autoGen = normalizeRuleConfig({
@@ -2182,7 +2183,8 @@
       } else {
         autoGen.hasSeq = !!entry.hasSeq;
         entry.parser = autoGen.parser;
-        if (path.usrGen && Object.prototype.hasOwnProperty.call(path.usrGen, 'hasSeq')) {
+        if (path.usrGen && (reason === 'single-has-seq-change'
+            || Object.prototype.hasOwnProperty.call(path.usrGen, 'hasSeq'))) {
           path.usrGen.hasSeq = !!entry.hasSeq;
         }
         delete autoGen.headerRow;

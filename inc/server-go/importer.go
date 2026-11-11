@@ -558,8 +558,8 @@ func analyzeImportSample(fileName string, suppliedLines []string, hasIndexOverri
 				hasIndex = false
 				break
 			}
-			value, _ := strconv.Atoi(strings.TrimPrefix(strings.TrimSpace(row[0]), "+"))
-			if value <= previousIndex {
+			value, err := strconv.Atoi(strings.TrimPrefix(strings.TrimSpace(row[0]), "+"))
+			if err != nil || value < previousIndex {
 				hasIndex = false
 				break
 			}
@@ -590,8 +590,8 @@ func analyzeImportSample(fileName string, suppliedLines []string, hasIndexOverri
 				indexValid = false
 				break
 			}
-			value, _ := strconv.Atoi(strings.TrimPrefix(strings.TrimSpace(row[0]), "+"))
-			if value <= previousIndex {
+			value, err := strconv.Atoi(strings.TrimPrefix(strings.TrimSpace(row[0]), "+"))
+			if err != nil || value < previousIndex {
 				indexValid = false
 				break
 			}

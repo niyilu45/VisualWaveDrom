@@ -245,6 +245,22 @@ func TestLargeNumericImportCanOmitDuplicatedDataLabels(t *testing.T) {
 	}
 }
 
+func TestImportDetectsLargeAndRepeatedSequenceNumbers(t *testing.T) {
+	for _, lines := range [][]string{
+		{"8000000 10", "8000001 11", "8000010 12"},
+		{"8000000 10", "8000000 11", "8000001 12", "8000001 13"},
+	} {
+		analysis := analyzeImportSample("signal.txt", lines)
+		if !boolValue(analysis["hasIndex"], false) || !boolValue(analysis["indexValid"], false) {
+			t.Fatalf("sequence was not detected: %#v", analysis)
+		}
+	}
+	analysis := analyzeImportSample("signal.txt", []string{"2 10", "1 20"})
+	if boolValue(analysis["hasIndex"], false) {
+		t.Fatal("descending values were detected as sequence numbers")
+	}
+}
+
 func TestIndexedImportAllowsGapsAndKeepsUnknownEnds(t *testing.T) {
 	workingDirectory, err := os.Getwd()
 	if err != nil {

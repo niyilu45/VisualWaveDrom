@@ -17612,6 +17612,7 @@ ${lines.join('\n')}`;
     }
 
     function applyImportedWaveRows(payload, importOptions) {
+      const startedAt = performance.now();
       let updates = payload && Array.isArray(payload.updates) ? payload.updates : [];
       if (!updates.length) throw new Error('导入方案没有返回任何信号行');
       const hasImportOrder = Array.isArray(payload.signalOrder);
@@ -17838,6 +17839,19 @@ ${lines.join('\n')}`;
         });
       }
       const serialized = serializeWaveDocumentSource(parsed);
+      const serializedAt = performance.now();
+      vwdDebugLog('collection-import', {
+        phase: 'document-prepared', elapsedMs: Math.round(serializedAt - startedAt),
+        sourceTextLength: editor.value.length, outputTextLength: serialized.text.length,
+        signalCount: prepared.length,
+        rows: prepared.map((item) => ({
+          name: item.update.signal, waveLength: item.wave.length,
+          samples: item.samples.length, values: item.values.length,
+          changePoints: item.changePoints?.indices.length || 0,
+          totalSamples: item.changePoints?.totalSamples || 0,
+          sparse: !!item.update.sparseImport
+        }))
+      });
       const newText = serialized.text;
       if (previewOnly) {
         return {
@@ -17870,6 +17884,10 @@ ${lines.join('\n')}`;
         skipSyncPersist: true,
         source: parsed,
         metrics: serialized.metrics
+      });
+      vwdDebugLog('collection-import', {
+        phase: 'editor-applied', elapsedMs: Math.round(performance.now() - serializedAt),
+        totalElapsedMs: Math.round(performance.now() - startedAt)
       });
       return {
         changed: true,

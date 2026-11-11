@@ -29,10 +29,17 @@
     if (!isObject(scope)) return cloneValue(scope);
     const copy = {};
     Object.keys(scope).forEach(function (key) {
-      if (key === 'samples' && Array.isArray(scope.samples)) return;
+      if (omitScopeWindowField(key, scope[key])) return;
       copy[key] = cloneValue(scope[key]);
     });
     return copy;
+  }
+
+  function omitScopeWindowField(key, value) {
+    if (key === 'samples') return Array.isArray(value);
+    if (key === 'values') return Array.isArray(value) && value.length > 2048;
+    if (key === 'changePoints') return isObject(value) && value.indices?.length > 2048;
+    return key === 'derivedCache' && isObject(value);
   }
 
   function clampInteger(value, minimum, maximum) {
@@ -200,10 +207,10 @@
   function mergeWindowScope(fullScope, windowScope) {
     if (!isObject(windowScope)) return cloneValue(windowScope);
     const result = {};
-    if (isObject(fullScope)
-        && Array.isArray(fullScope.samples)
-        && !Object.prototype.hasOwnProperty.call(windowScope, 'samples')) {
-      result.samples = fullScope.samples;
+    for (const key of Object.keys(fullScope || {})) {
+      if (omitScopeWindowField(key, fullScope[key]) && !Object.prototype.hasOwnProperty.call(windowScope, key)) {
+        result[key] = fullScope[key];
+      }
     }
     Object.keys(windowScope).forEach(function (key) {
       result[key] = cloneValue(windowScope[key]);

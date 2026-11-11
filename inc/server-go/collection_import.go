@@ -877,6 +877,7 @@ func normalizeCollectionPreset(value any) (collectionPreset, error) {
 			}
 			autoRaw["importMode"] = "single"
 			if value, supplied := entry["hasSeq"]; supplied {
+				usrRaw["hasSeq"] = value
 				autoRaw["hasSeq"] = value
 			}
 		}
@@ -2401,7 +2402,8 @@ func prepareCollectionEntry(
 				"select at least one waveform signal column besides the index column")
 		}
 	} else {
-		hasSeqConfigured := rule.UsrGen.HasSeq != nil || rule.AutoGen.HasSeq != nil
+		// Generated settings are hints; only an explicit user choice disables detection.
+		hasSeqConfigured := rule.UsrGen.HasSeq != nil
 		var analysis map[string]any
 		if hasSeqConfigured {
 			analysis = analyzeImportSample(match.FileName, lines, rule.HasSeq)
