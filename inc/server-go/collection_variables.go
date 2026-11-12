@@ -117,13 +117,22 @@ func collectionVariableCandidates(text string) ([]string, error) {
 	return values, nil
 }
 
-func expandCollectionVariables(preset collectionPreset, variables map[string]string) ([]collectionVariableCombination, error) {
-	combinations := []collectionVariableCombination{{values: map[string]string{}}}
+func collectionVariableOptions(preset collectionPreset, variables map[string]string) (map[string][]string, error) {
+	options := make(map[string][]string, len(preset.Vars))
 	for _, name := range preset.Vars {
 		candidates, err := collectionVariableCandidates(variables[name])
 		if err != nil {
 			return nil, fmt.Errorf("变量 %s：%w", name, err)
 		}
+		options[name] = candidates
+	}
+	return options, nil
+}
+
+func expandCollectionVariables(names []string, options map[string][]string) ([]collectionVariableCombination, error) {
+	combinations := []collectionVariableCombination{{values: map[string]string{}}}
+	for _, name := range names {
+		candidates := options[name]
 		if len(combinations) > collectionMaxVariableCandidates/len(candidates) {
 			return nil, fmt.Errorf("变量组合最多支持 %d 组，请缩小候选范围", collectionMaxVariableCandidates)
 		}
@@ -143,9 +152,6 @@ func expandCollectionVariables(preset collectionPreset, variables map[string]str
 			}
 		}
 		combinations = next
-	}
-	if len(preset.Paths) > 0 && len(combinations) > collectionMaxExpandedRules/len(preset.Paths) {
-		return nil, fmt.Errorf("展开后的搜索规则最多支持 %d 条，请缩小候选范围", collectionMaxExpandedRules)
 	}
 	return combinations, nil
 }

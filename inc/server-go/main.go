@@ -1620,14 +1620,6 @@ func (s *service) serveStatic(writer http.ResponseWriter, request *http.Request)
 	defer file.Close()
 	writer.Header().Set("Content-Type", contentType(realTarget))
 	writer.Header().Set("X-Content-Type-Options", "nosniff")
-	switch strings.ToLower(filepath.Ext(realTarget)) {
-	case ".html", ".htm":
-		writer.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-		writer.Header().Set("Pragma", "no-cache")
-		writer.Header().Set("Expires", "0")
-	case ".js", ".css":
-		writer.Header().Set("Cache-Control", "no-cache")
-	}
 	http.ServeContent(writer, request, info.Name(), info.ModTime(), file)
 }
 
@@ -1664,7 +1656,11 @@ func (s *service) routes() http.Handler {
 	mux.HandleFunc("/api/wave-document", s.handleWaveDocument)
 	mux.HandleFunc("/api/wave-presentation", method(http.MethodPatch, s.handlePresentation))
 	mux.HandleFunc("/", s.serveStatic)
-	return mux
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		// Local resources and waveform responses do not need duplicate HTTP cache copies.
+		writer.Header().Set("Cache-Control", "no-store")
+		mux.ServeHTTP(writer, request)
+	})
 }
 
 func method(expected string, handler http.HandlerFunc) http.HandlerFunc {

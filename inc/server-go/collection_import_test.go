@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -11,6 +13,41 @@ import (
 	"testing"
 	"time"
 )
+
+func TestCollectionPresetUsePersistsAcrossServiceInstances(t *testing.T) {
+	directory := t.TempDir()
+	call := func(action, library, wave string, state *collectionPresetUse, last bool) struct {
+		State  *collectionPresetUse `json:"state"`
+		Scoped bool                 `json:"scoped"`
+	} {
+		t.Helper()
+		body, _ := json.Marshal(map[string]any{"action": action, "libraryId": library, "waveId": wave, "state": state, "lastImport": last})
+		instance := &service{config: config{tempDir: directory}}
+		response := httptest.NewRecorder()
+		instance.handleImportCollection(response, httptest.NewRequest(http.MethodPost, "/api/import-wave-collection", strings.NewReader(string(body))))
+		var result struct {
+			State  *collectionPresetUse `json:"state"`
+			Scoped bool                 `json:"scoped"`
+		}
+		if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &result) != nil {
+			t.Fatalf("%s: %d %s", action, response.Code, response.Body.String())
+		}
+		return result
+	}
+	if result := call("read-use", "library-a", "wave-a", nil, false); result.State != nil {
+		t.Fatal("empty history returned a preset")
+	}
+	first := &collectionPresetUse{PresetPath: "a.json", PresetText: `{"paths":[]}`, Variables: map[string]string{"run": "2"}}
+	second := &collectionPresetUse{PresetPath: "b.json", PresetText: `{"paths":[]}`, Variables: map[string]string{"run": "3"}}
+	call("remember-use", "library-a", "wave-a", first, true)
+	call("remember-use", "library-a", "wave-b", second, true)
+	if result := call("read-use", "library-a", "wave-a", nil, false); !result.Scoped || result.State == nil || result.State.PresetPath != "a.json" || result.State.Variables["run"] != "2" {
+		t.Fatalf("first wave's saved config did not survive: %#v", result)
+	}
+	if result := call("read-use", "library-b", "wave-a", nil, false); result.Scoped || result.State == nil || result.State.PresetPath != "b.json" {
+		t.Fatalf("last imported preset was not used as fallback: %#v", result)
+	}
+}
 
 func runTestCollectionRegexSearch(
 	request collectionRegexSearchRequest,
@@ -266,6 +303,39 @@ func TestCollectionPresetNormalizesValueTable(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "tbl") {
 		t.Fatalf("non-string table value returned an unclear error: %v", err)
+	}
+}
+
+func TestCollectionSearchOnlyExpandsVariablesUsedByEachRegex(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"fixed.txt", "rx0.txt", "rx1.txt", "ch2.txt", "ch3.txt"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("1\n2\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	preset, err := normalizeCollectionPreset(collectionPresetValue([]any{"idx", "ch"},
+		map[string]any{"grepKeys": `^rx{idx}\.txt$`, "name": "rx"},
+		map[string]any{"grepKeys": `^fixed\.txt$`, "name": "fixed"},
+		map[string]any{"grepKeys": `^ch{ch}\.txt$`, "name": "channel"},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := searchCollectionFiles(root, root, preset, map[string]string{"idx": "0,1", "ch": "2,3"}, runTestCollectionRegexSearch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := []string{"rx_idx0", "rx_idx1", "fixed", "channel_ch2", "channel_ch3"}
+	if len(result.Entries) != len(expected) {
+		t.Fatalf("expected five search entries, got %d", len(result.Entries))
+	}
+	for i, entry := range result.Entries {
+		if entry.Name != expected[i] || len(entry.Matches) != 1 {
+			t.Errorf("entry %d: %q matches=%v; expected %q and one file", i, entry.Name, entry.Matches, expected[i])
+		}
+	}
+	if entry := result.Entries[2]; len(entry.Variables) != 0 || entry.NameSuffix != "" || collectionEntryRuleIndex(entry) != 1 {
+		t.Fatalf("fixed file must stay attached to its unexpanded rule: %#v", entry)
 	}
 }
 

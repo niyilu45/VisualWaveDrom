@@ -15,6 +15,33 @@ import (
 	"time"
 )
 
+func TestServiceResponsesDoNotUseBrowserCache(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"VisualWaveDrom.html", "scope.js", "wave.sqlite"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("sample data"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	instance := &service{config: config{rootDir: root, htmlName: "VisualWaveDrom.html", tempDir: filepath.Join(root, ".tmp")}}
+	handler := instance.routes()
+	for _, test := range []struct {
+		path, method string
+		status       int
+	}{
+		{"/", http.MethodGet, http.StatusOK},
+		{"/scope.js?v=1", http.MethodGet, http.StatusOK},
+		{"/wave.sqlite", http.MethodGet, http.StatusOK},
+		{"/api/import-wave-analyze", http.MethodPost, http.StatusBadRequest},
+	} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(test.method, test.path, strings.NewReader("{")))
+		if response.Code != test.status || response.Header().Get("Cache-Control") != "no-store" ||
+			response.Header().Get("Clear-Site-Data") != "" {
+			t.Errorf("%s: status=%d headers=%v", test.path, response.Code, response.Header())
+		}
+	}
+}
+
 func TestLinuxBrowserCommandsIncludeDesktopFallbacks(t *testing.T) {
 	commands := browserCommands("linux", "http://127.0.0.1:4173/VisualWaveDrom.html")
 	expected := []string{"xdg-open", "gio", "sensible-browser", "kde-open5", "kde-open", "gnome-open"}

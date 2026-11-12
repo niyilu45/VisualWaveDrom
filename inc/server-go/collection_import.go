@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
@@ -2471,18 +2472,42 @@ func searchCollectionFiles(
 		Entries:     []collectionSearchEntry{},
 		RegexEngine: "python-re",
 	}
-	combinations, err := expandCollectionVariables(preset, variables)
+	options, err := collectionVariableOptions(preset, variables)
 	if err != nil {
 		return collectionSearchResult{}, err
 	}
 	rules := make([]collectionCompiledRule, 0, len(preset.Paths))
+	defaults := make(map[string]string, len(options))
+	for name, candidates := range options {
+		defaults[name] = candidates[0]
+	}
 	for index, rule := range preset.Paths {
+		names := preset.Vars
+		if rule.Formula == nil {
+			used := make(map[string]bool)
+			for _, name := range extractCollectionTemplateVariables(rule.GrepKeys) {
+				used[name] = true
+			}
+			names = nil
+			for _, name := range preset.Vars {
+				if used[name] {
+					names = append(names, name)
+				}
+			}
+		}
+		combinations, err := expandCollectionVariables(names, options)
+		if err != nil {
+			return collectionSearchResult{}, fmt.Errorf("paths[%d]: %w", index, err)
+		}
+		if len(result.Entries)+len(combinations) > collectionMaxExpandedRules {
+			return collectionSearchResult{}, fmt.Errorf("展开后的搜索规则最多支持 %d 条，请缩小候选范围", collectionMaxExpandedRules)
+		}
 		for combinationIndex, combination := range combinations {
-			variables := combination.values
-			expanded := len(combinations) > 1
+			values := maps.Clone(defaults)
+			maps.Copy(values, combination.values)
 			if rule.Formula != nil {
 				signalName, expandErr := expandCollectionTemplate(
-					rule.Name, preset, variables, false)
+					rule.Name, preset, values, false)
 				if expandErr != nil {
 					return collectionSearchResult{}, fmt.Errorf("paths[%d].name: %w", index, expandErr)
 				}
@@ -2491,8 +2516,8 @@ func searchCollectionFiles(
 					return collectionSearchResult{}, fmt.Errorf("paths[%d].name: %w", index, expandErr)
 				}
 				result.Entries = append(result.Entries, collectionSearchEntry{
-					Index: len(result.Entries), SourceIndex: index, Expanded: expanded,
-					CombinationIndex: combinationIndex, Variables: variables, NameSuffix: combination.suffix,
+					Index: len(result.Entries), SourceIndex: index,
+					CombinationIndex: combinationIndex, Variables: combination.values, NameSuffix: combination.suffix,
 					Name: signalName, ImportMode: "formula",
 					Formula: rule.Formula, OutputNames: []string{signalName},
 					Status: "formula", Matches: []collectionFileMatch{},
@@ -2500,18 +2525,18 @@ func searchCollectionFiles(
 				result.ResultCount++
 				continue
 			}
-			folder, expandErr := expandCollectionTemplate(rule.Folder, preset, variables, false)
+			folder, expandErr := expandCollectionTemplate(rule.Folder, preset, values, false)
 			if expandErr != nil {
 				return collectionSearchResult{}, fmt.Errorf("paths[%d].folder: %w", index, expandErr)
 			}
 			patternText, expandErr := expandCollectionTemplate(
-				rule.GrepKeys, preset, variables, true)
+				rule.GrepKeys, preset, values, true)
 			if expandErr != nil {
 				return collectionSearchResult{}, fmt.Errorf("paths[%d].grepKeys: %w", index, expandErr)
 			}
 			signalName := ""
 			if rule.Name != "" {
-				signalName, expandErr = expandCollectionTemplate(rule.Name, preset, variables, false)
+				signalName, expandErr = expandCollectionTemplate(rule.Name, preset, values, false)
 				if expandErr != nil {
 					return collectionSearchResult{}, fmt.Errorf("paths[%d].name: %w", index, expandErr)
 				}
@@ -2531,8 +2556,8 @@ func searchCollectionFiles(
 				return collectionSearchResult{}, fmt.Errorf("paths[%d].folder leaves the selected data folder", index)
 			}
 			entry := collectionSearchEntry{
-				Index: len(result.Entries), SourceIndex: index, Expanded: expanded,
-				CombinationIndex: combinationIndex, Variables: variables, NameSuffix: combination.suffix,
+				Index: len(result.Entries), SourceIndex: index,
+				CombinationIndex: combinationIndex, Variables: combination.values, NameSuffix: combination.suffix,
 				Folder: folder, SearchPath: searchPath,
 				GrepKeys: rule.GrepKeys, ResolvedPattern: patternText,
 				HasSeq: rule.HasSeq, Name: signalName, Matches: []collectionFileMatch{},
@@ -2554,6 +2579,11 @@ func searchCollectionFiles(
 			rules = append(rules, collectionCompiledRule{
 				entryIndex: entryIndex, searchPath: searchPath, pattern: patternText,
 			})
+		}
+	}
+	if len(result.Entries) != len(preset.Paths) {
+		for i := range result.Entries {
+			result.Entries[i].Expanded = true
 		}
 	}
 	if err = scanCollectionFiles(rootPath, rules, &result, runner); err != nil {
@@ -3440,6 +3470,72 @@ func (s *service) previewCollectionSingleFile(
 	}, nil
 }
 
+const lastCollectionUseKey = "collection-preset-use:last"
+
+type collectionPresetUse struct {
+	RootPath                     string            `json:"rootPath"`
+	PresetSearchPath             string            `json:"presetSearchPath"`
+	PresetPath                   string            `json:"presetPath"`
+	OriginalPresetPath           string            `json:"originalPresetPath"`
+	DiscoveredPresetRelativePath string            `json:"discoveredPresetRelativePath"`
+	PresetText                   string            `json:"presetText"`
+	Variables                    map[string]string `json:"variables"`
+}
+
+func (s *service) handleCollectionPresetUse(writer http.ResponseWriter, action string, payload map[string]any) {
+	libraryID, waveID := stringValue(payload["libraryId"]), stringValue(payload["waveId"])
+	if libraryID == "" || waveID == "" || len(libraryID) > 512 || len(waveID) > 512 || strings.ContainsRune(libraryID+waveID, '\x00') {
+		sendJSON(writer, 400, map[string]any{"error": "缺少有效的波形库或波形图标识"})
+		return
+	}
+	key := fmt.Sprintf("collection-preset-use:%x", sha256.Sum256([]byte(libraryID+"\x00"+waveID)))
+	var state collectionPresetUse
+	if action == "read-use" {
+		err := readOperationRecord(s.config.tempDir, key, &state)
+		scoped := err == nil
+		if errors.Is(err, sql.ErrNoRows) {
+			var last string
+			err = readOperationRecord(s.config.tempDir, lastCollectionUseKey, &last)
+			if err == nil {
+				err = readOperationRecord(s.config.tempDir, last, &state)
+			}
+		}
+		if errors.Is(err, sql.ErrNoRows) {
+			sendJSON(writer, 200, map[string]any{"state": nil, "scoped": false})
+		} else if err != nil {
+			sendJSON(writer, 500, map[string]any{"error": err.Error()})
+		} else {
+			sendJSON(writer, 200, map[string]any{"state": state, "scoped": scoped})
+		}
+		return
+	}
+	data, err := json.Marshal(payload["state"])
+	if err != nil || json.Unmarshal(data, &state) != nil || len(state.PresetText) > collectionPresetMaxBytes ||
+		state.PresetText == "" || len(state.Variables) > collectionMaxVariables {
+		sendJSON(writer, 400, map[string]any{"error": "预设导入配置无效或超过大小限制"})
+		return
+	}
+	if boolValue(payload["lastImport"], false) {
+		// Save the per-wave state and last-used reference together, without a second copy of the preset.
+		db, openErr := openOperations(s.config.tempDir)
+		err = openErr
+		if openErr == nil {
+			defer db.Close()
+			stateJSON, _ := json.Marshal(state)
+			last, _ := json.Marshal(key)
+			_, err = db.Exec(`INSERT INTO operation_records(key,value) VALUES(?,?),(?,?)
+ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, string(stateJSON), lastCollectionUseKey, string(last))
+		}
+	} else {
+		err = writeOperationRecord(s.config.tempDir, key, state)
+	}
+	if err != nil {
+		sendJSON(writer, 500, map[string]any{"error": err.Error()})
+		return
+	}
+	sendJSON(writer, 200, map[string]any{"ok": true})
+}
+
 func (s *service) handleImportCollection(writer http.ResponseWriter, request *http.Request) {
 	payload := make(map[string]any)
 	if err := decodeJSONBody(writer, request, 2*1024*1024, &payload); err != nil {
@@ -3448,6 +3544,8 @@ func (s *service) handleImportCollection(writer http.ResponseWriter, request *ht
 	}
 	action := strings.ToLower(strings.TrimSpace(stringValue(payload["action"])))
 	switch action {
+	case "read-use", "remember-use":
+		s.handleCollectionPresetUse(writer, action, payload)
 	case "pick":
 		kind := strings.TrimSpace(stringValue(payload["kind"]))
 		initialPath := strings.TrimSpace(stringValue(payload["initialPath"]))

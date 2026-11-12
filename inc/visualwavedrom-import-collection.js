@@ -20,6 +20,7 @@
   const LAST_IMPORT_STORAGE_KEY = 'visualwavedrom.importCollection.lastImport.v1';
   const WAVE_STATE_STORAGE_PREFIX = 'visualwavedrom.importCollection.waveState.v1:';
   const DEFAULT_PRESET_SEARCH_PATH = 'inc/import/SchemeCollection';
+  const ARRAY_LENGTH_WARNING_THRESHOLD = 30;
   const VARIABLE_NAME_PATTERN = /^[\p{L}_][\p{L}\p{N}_.-]*$/u;
   const PYTHON_VARIABLE_NAME_PATTERN = /^[\p{L}_][\p{L}\p{N}_]*$/u;
   const LEGACY_TEMPLATE_VARIABLE_PATTERN =
@@ -886,7 +887,24 @@
       }
     }
 
-    let waveStateKey = '', hasWaveState = false;
+    let waveStateKey = '', hasWaveState = false, opening = false;
+
+    function normalizeRememberedState(value) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+      return {
+        rootPath: String(value.rootPath || ''),
+        presetSearchPath: !value.presetSearchPath
+          || /^import[\\/]SchemeCollection[\\/]?$/.test(value.presetSearchPath)
+          ? DEFAULT_PRESET_SEARCH_PATH
+          : String(value.presetSearchPath),
+        presetPath: String(value.presetPath || ''),
+        originalPresetPath: String(value.originalPresetPath || ''),
+        discoveredPresetRelativePath: String(value.discoveredPresetRelativePath || ''),
+        presetText: typeof value.presetText === 'string' ? value.presetText : '',
+        variables: value.variables && typeof value.variables === 'object'
+          && !Array.isArray(value.variables) ? value.variables : {}
+      };
+    }
 
     function readRememberedState() {
       try {
@@ -895,24 +913,33 @@
         hasWaveState = !!scoped;
         const raw = scoped || storage.getItem(LAST_IMPORT_STORAGE_KEY) || storage.getItem(LAST_STATE_STORAGE_KEY);
         if (!raw) return null;
-        const value = JSON.parse(raw);
-        if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-        return {
-          rootPath: String(value.rootPath || ''),
-          presetSearchPath: !value.presetSearchPath
-            || /^import[\\/]SchemeCollection[\\/]?$/.test(value.presetSearchPath)
-            ? DEFAULT_PRESET_SEARCH_PATH
-            : String(value.presetSearchPath),
-          presetPath: String(value.presetPath || ''),
-          originalPresetPath: String(value.originalPresetPath || ''),
-          discoveredPresetRelativePath: String(value.discoveredPresetRelativePath || ''),
-          presetText: typeof value.presetText === 'string' ? value.presetText : '',
-          variables: value.variables && typeof value.variables === 'object'
-            && !Array.isArray(value.variables) ? value.variables : {}
-        };
+        return normalizeRememberedState(JSON.parse(raw));
       } catch (error) {
         debug({ phase: 'state-read-error', message: error.message || String(error) });
         return null;
+      }
+    }
+
+    async function postRememberedUse(action, details) {
+      const [libraryId, waveId] = openedContextToken.split('\u0000');
+      if (!libraryId || !waveId) return {};
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 3000);
+      try {
+        return await post(action, { libraryId, waveId, ...details }, { signal: controller.signal });
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    async function persistRememberedUse(reason) {
+      const state = rememberState(reason);
+      try {
+        await postRememberedUse('remember-use', { state, lastImport: reason === 'import-complete' });
+        return '';
+      } catch (error) {
+        debug({ phase: 'server-state-save-error', reason, message: error.message || String(error) });
+        return '，但未能保存供重启后恢复的预设配置';
       }
     }
 
@@ -975,8 +1002,7 @@
       rememberState(reason);
     }
 
-    function restoreRememberedState() {
-      const state = readRememberedState();
+    function restoreRememberedState(state) {
       if (!state) return false;
       const defaultPresetText = JSON.stringify(EMPTY_PRESET, null, 2);
       if (!state.rootPath && !state.presetPath
@@ -1489,13 +1515,10 @@
           || ('formula_' + (index + 1));
         return {
           usrGen: {
-            folder: '.',
-            grepKeys: '(?!)',
-            name
-          },
-          autoGen: {
-            importMode: 'single',
-            hasSeq: false
+            name,
+            // A multi-wave is evaluated in the browser, but needs the same
+            // server-side combination entries as a formula for name binding.
+            formula: presetPathFormula(entry) || { cycle0: '0' }
           }
         };
       });
@@ -1663,22 +1686,30 @@
       const entries = Array.isArray(payload && payload.entries) ? payload.entries : [];
       if (!entries.some((entry) => entry.expanded)) return preset;
       const bindings = new Map();
+      const bindingKey = (keys, variables) => JSON.stringify(keys.map((key) => variables[key]));
       entries.forEach((entry) => {
-        const group = Number(entry.combinationIndex || 0);
-        if (!bindings.has(group)) bindings.set(group, new Map());
-        const names = bindings.get(group);
+        const variables = entry.variables || {};
+        const keys = Object.keys(variables).sort();
+        const shape = JSON.stringify(keys);
+        const key = bindingKey(keys, variables);
+        const bind = (base, name) => {
+          if (!bindings.has(base)) bindings.set(base, new Map());
+          const shapes = bindings.get(base);
+          if (!shapes.has(shape)) shapes.set(shape, { keys, names: new Map() });
+          shapes.get(shape).names.set(key, name);
+        };
         const suffix = String(entry.nameSuffix || '');
         const name = String(entry.name || '');
         if (suffix && name.endsWith(suffix)) {
           const base = name.slice(0, -suffix.length);
-          names.set(base, name);
+          bind(base, name);
           if (entry.importMode === 'single' && entry.complexDetected) {
-            names.set(base + '_I', name + '_I');
-            names.set(base + '_Q', name + '_Q');
+            bind(base + '_I', name + '_I');
+            bind(base + '_Q', name + '_Q');
           }
         }
         collectionEntryOutputNames(entry).forEach((output) => {
-          if (suffix && output.endsWith(suffix)) names.set(output.slice(0, -suffix.length), output);
+          if (suffix && output.endsWith(suffix)) bind(output.slice(0, -suffix.length), output);
         });
       });
       const paths = [];
@@ -1687,17 +1718,23 @@
         if (!original) return;
         const copy = JSON.parse(JSON.stringify(original));
         copy.usrGen.name = String(entry.name || copy.usrGen.name || '');
-        const names = bindings.get(Number(entry.combinationIndex || 0)) || new Map();
+        const resolve = (name) => {
+          for (const { keys, names } of bindings.get(name)?.values() || []) {
+            const match = names.get(bindingKey(keys, entry.variables || {}));
+            if (match) return match;
+          }
+          return name;
+        };
         const formula = presetPathFormula(copy);
         if (formula) {
           ['cycle0', 'cycle05'].forEach((field) => {
             if (typeof formula[field] !== 'string') return;
             formula[field] = formula[field].replace(/\{([^{}]+)\}/g, (match, name) =>
-              names.has(name) ? '{' + names.get(name) + '}' : match);
+              '{' + resolve(name) + '}');
           });
         }
         const sources = presetPathMultiWave(copy);
-        if (sources) copy.usrGen.multiWave = sources.map((name) => names.get(name) || name);
+        if (sources) copy.usrGen.multiWave = sources.map(resolve);
         paths[entry.index] = copy;
       });
       return Object.assign({}, preset, { paths });
@@ -3554,9 +3591,9 @@
         presetPathInput.value = originalPresetPath;
         setPresetEditorValue(JSON.stringify(payload.preset || preset, null, 2));
         parseEditor(false);
-        rememberState('preset-saved');
-        setHint('预设已保存：' + originalPresetPath, false);
-        status(true, '预设集合已保存');
+        const warning = await persistRememberedUse('preset-saved');
+        setHint('预设已保存：' + originalPresetPath + warning, !!warning);
+        status(true, '预设集合已保存' + warning);
         debug({
           phase: 'preset-save-complete',
           path: originalPresetPath,
@@ -3663,6 +3700,29 @@
       return importCancelRequested
         || !!(error && error.name === 'AbortError')
         || /import cancelled|导入已取消/i.test(message);
+    }
+
+    function confirmLargeImportedArrays(payload) {
+      const updates = payload.updates || [];
+      const oversized = new Map();
+      let offset = 0;
+      // The parser returns each file's updates contiguously, including I/Q components.
+      for (const file of payload.files || []) {
+        const end = Math.min(updates.length, offset + (Number(file.updateCount) || 0));
+        let length = 0;
+        for (; offset < end; offset++) {
+          length = Math.max(length, Number(updates[offset].arrayGroup?.length) || 0);
+        }
+        if (length <= ARRAY_LENGTH_WARNING_THRESHOLD) continue;
+        const name = file.relativePath || file.path || file.signal;
+        oversized.set(name, Math.max(length, oversized.get(name) || 0));
+      }
+      if (!oversized.size) return true;
+      const threshold = ARRAY_LENGTH_WARNING_THRESHOLD;
+      const files = Array.from(oversized, ([name, length]) => name + '：数组长度 ' + length);
+      debug({ phase: 'array-length-warning', threshold, files: Array.from(oversized) });
+      return window.confirm('检测到以下文件的数组长度超过正常阈值 ' + threshold + '：\n\n'
+        + files.join('\n') + '\n\n是否继续导入？');
     }
 
     async function cancelImport() {
@@ -3810,6 +3870,9 @@
         if (typeof settings.applyImport !== 'function') {
           throw new Error('批量导入处理函数未初始化');
         }
+        if (!confirmLargeImportedArrays(payload)) {
+          throw new DOMException('导入已取消', 'AbortError');
+        }
         if (importProgressState) {
           importProgressState.phase = formulas.length ? 'formula' : 'applying';
           importProgressState.done = false;
@@ -3835,6 +3898,7 @@
           : (Array.isArray(payload.files) ? payload.files.length : fileCount);
         const elapsedSeconds = Math.max(0,
           (progressNow() - startedAt) / 1000).toFixed(1);
+        const warning = await persistRememberedUse('import-complete');
         setHint('', false);
         status(
           true,
@@ -3843,7 +3907,7 @@
             + (formulas.length ? '（含 ' + formulas.length + ' 个公式）' : '')
             + (multiWaves.length ? '（含 ' + multiWaves.length + ' 个多波形）' : '')
             + (result.createdCount ? '，新增 ' + result.createdCount + ' 行' : '')
-            + '，耗时 ' + elapsedSeconds + ' 秒'
+            + '，耗时 ' + elapsedSeconds + ' 秒' + warning
         );
         debug({
           phase: 'import-complete',
@@ -3856,7 +3920,6 @@
           serverDurationMs: payload.durationMs,
           clientDurationMs: Math.round(progressNow() - startedAt)
         });
-        rememberState('import-complete');
         busy = false;
         close();
       } catch (error) {
@@ -3907,8 +3970,8 @@
       }
     }
 
-    function open() {
-      if (!modal.hidden) {
+    async function open() {
+      if (!modal.hidden || opening) {
         debug({ phase: 'modal-open-ignored', reason: 'already-open', busy, busyAction });
         return;
       }
@@ -3937,7 +4000,24 @@
       title.textContent = defaultTitle + ' → ' + (targetTitle || '未选中波形图');
       waveStateKey = openedContextToken && openedContextToken.split('\u0000').every(Boolean)
         ? WAVE_STATE_STORAGE_PREFIX + encodeURIComponent(openedContextToken) : '';
-      const restored = restoreRememberedState();
+      let state = readRememberedState();
+      if ((!hasWaveState || !state) && waveStateKey) {
+        opening = true;
+        try {
+          const remembered = await postRememberedUse('read-use');
+          const serverState = normalizeRememberedState(remembered.state);
+          if (serverState) {
+            state = serverState;
+            hasWaveState = !!remembered.scoped;
+          }
+        } catch (error) {
+          debug({ phase: 'server-state-read-error', message: error.message || String(error) });
+        } finally {
+          opening = false;
+        }
+      }
+      if (typeof settings.getContextToken === 'function' && settings.getContextToken() !== openedContextToken) return;
+      const restored = restoreRememberedState(state);
       if (!restored) {
         originalPresetPath = '';
         selectedBrowserPresetFile = null;
