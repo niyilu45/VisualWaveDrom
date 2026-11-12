@@ -93,7 +93,7 @@
           <span>选择游标</span>
           ${CURSORS.map(name => `<button type="button" data-cursor="${name}" title="选择游标 ${name}（${name.toLowerCase()}）" aria-keyshortcuts="${name}" aria-pressed="false">${name}</button>`).join('')}
           <span>跳转到游标</span>
-          ${CURSORS.map(name => `<button type="button" data-locate="${name}" aria-keyshortcuts="Shift+${name}"></button>`).join('')}
+          ${CURSORS.map(name => `<button type="button" data-locate="${name}" aria-keyshortcuts="Shift+${name}"><span></span></button>`).join('')}
           <span class="scope-compare-cursor-signal"></span>
           <label>跳转 <input type="text" class="scope-compare-condition" aria-label="游标跳转值或条件" placeholder="1,2 或 &gt;=1"></label>
           ${button('edge-prev', '跳到上一个匹配边沿（左方向键 / 鼠标上侧键）', 'prev')}
@@ -1324,7 +1324,7 @@
         select.disabled = !ready;
         select.setAttribute('aria-pressed', String(name === this.activeCursor || (name === 'C' && !this.activeCursor && value != null)));
         locate.disabled = !ready || value == null;
-        locate.textContent = name + ' · ' + format(value);
+        this.scope.renderCursorLocationText(locate.firstElementChild, name + ' · ' + format(value));
         locate.title = '跳转到游标 ' + name + '（Shift+' + name + '）';
       }
       const { A, B, C } = this.cursorPositions;

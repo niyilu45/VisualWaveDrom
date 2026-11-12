@@ -20,6 +20,7 @@
 }
 .scope-compare-toolbar strong { font-size: 15px; }
 .scope-compare-cursors button[aria-pressed="true"] { background: #deedff; border-color: #176ca5; }
+.scope-cursor-decimal { font-size: 1.45em; font-weight: 900; line-height: 0; }
 .scope-compare-condition { width: min(140px, 36vw); }
 .scope-compare-cursor-signal { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .scope-compare-cursor-signal:empty { display: none; }

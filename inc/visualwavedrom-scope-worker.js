@@ -61,6 +61,46 @@ function normalizeMultiWaveDefinition(value) {
     });
 }
 
+function normalizeMultiWaveScales(scales) {
+  if (!scales || typeof scales !== 'object' || Array.isArray(scales)) return {};
+  return Object.fromEntries(Object.entries(scales).filter(
+    ([name, scale]) => name && Number.isFinite(scale) && scale !== 1
+  ));
+}
+
+function scaledMultiWaveValue(value, scale) {
+  if (!Number.isFinite(value)) return null;
+  const scaled = value * scale;
+  return Number.isFinite(scaled) ? scaled : null;
+}
+
+function visibleMultiWaveSources(session, row, hidden = session.transient?.multiWaveHidden) {
+  const excluded = new Set(own(hidden, row.rowId) ? hidden[row.rowId] : []);
+  return row.multiWave.sources.filter(source => source.rowIndex >= 0 && !excluded.has(source.name));
+}
+
+function multiWaveAnalogSeries(session, row, formats = {}, hidden) {
+  return visibleMultiWaveSources(session, row, hidden).map(source => {
+    const sourceRow = session.rows[source.rowIndex];
+    return { source, sourceRow, analog: analogRowForFormat(
+      sourceRow, formats[source.rowIndex], session.rawTotalColumns
+    ) };
+  });
+}
+
+function multiWaveRange(series) {
+  let min = Infinity, max = -Infinity;
+  for (const { source, analog } of series) {
+    const range = analog.range || { min: -1, max: 1 };
+    const first = scaledMultiWaveValue(range.min, source.scale);
+    const last = scaledMultiWaveValue(range.max, source.scale);
+    if (first == null || last == null) continue;
+    min = Math.min(min, first, last);
+    max = Math.max(max, first, last);
+  }
+  return analogRange([min, max]);
+}
+
 function flattenSignals(signals, rows, path, groups) {
   const result = rows || [];
   const basePath = path || [];
@@ -1101,7 +1141,11 @@ function configureMultiWaveRows(rows, transient, totalColumns) {
       ? transient.multiWaves[row.rowId]
       : (sourceScope && sourceScope.multiWave);
     if (raw == null) return;
-    definitions.set(String(row.rowId), normalizeMultiWaveDefinition(raw));
+    const rawScales = own(transient.multiWaveScales, row.rowId)
+      ? transient.multiWaveScales[row.rowId] : sourceScope?.multiWaveScales;
+    definitions.set(String(row.rowId), {
+      signals: normalizeMultiWaveDefinition(raw), scales: normalizeMultiWaveScales(rawScales)
+    });
   });
   if (!definitions.size) return;
 
@@ -1112,45 +1156,39 @@ function configureMultiWaveRows(rows, transient, totalColumns) {
   });
 
   rows.forEach((row) => {
-    const signals = definitions.get(String(row.rowId));
-    if (!signals) return;
+    const definition = definitions.get(String(row.rowId));
+    if (!definition) return;
+    const { signals, scales } = definition;
     const sources = [];
-    let min = Number.POSITIVE_INFINITY;
-    let max = Number.NEGATIVE_INFINITY;
     let sampleStep = 1;
     let sampleCount = 0;
     const units = new Set();
     signals.forEach((name) => {
       const sourceRow = sourceRowsByName.get(name);
+      const scale = own(scales, name) ? scales[name] : 1;
       if (!sourceRow) {
-        sources.push({ name, rowId: '', rowIndex: -1 });
+        sources.push({ name, rowId: '', rowIndex: -1, scale });
         return;
       }
-      const analogRow = analogRowForFormat(
-        sourceRow,
-        sourceRow.analogFormat,
-        totalColumns
-      );
-      const range = analogRow.range || { min: -1, max: 1 };
-      min = Math.min(min, finiteNumber(range.min) == null ? min : range.min);
-      max = Math.max(max, finiteNumber(range.max) == null ? max : range.max);
-      sampleStep = Math.min(sampleStep, rowSampleStep(analogRow));
-      sampleCount = Math.max(sampleCount, analogRow.samples ? analogRow.samples.length : 0);
-      if (sourceRow.unit) units.add(String(sourceRow.unit));
       sources.push({
         name: sourceRow.name,
         rowId: String(sourceRow.rowId),
-        rowIndex: sourceRow.index
+        rowIndex: sourceRow.index,
+        scale
       });
     });
-    row.multiWave = { signals: signals.slice(), sources };
+    row.multiWave = { signals: signals.slice(), sources, scales };
+    const series = multiWaveAnalogSeries({ rows, transient, rawTotalColumns: totalColumns }, row);
+    for (const { sourceRow, analog } of series) {
+      sampleStep = Math.min(sampleStep, rowSampleStep(analog));
+      sampleCount = Math.max(sampleCount, analog.samples?.length || 0);
+      if (sourceRow.unit) units.add(String(sourceRow.unit));
+    }
     row.mode = 'analog';
     row.detectedMode = 'analog';
     row.sampleStep = sampleStep;
     row.multiWaveSampleCount = sampleCount;
-    row.range = Number.isFinite(min) && Number.isFinite(max)
-      ? analogRange(new Float64Array([min, max]))
-      : { min: -1, max: 1 };
+    row.range = multiWaveRange(series);
     row.analogFormat = normalizeAnalogFormat(row.analogFormat, 'float');
     row.rowHeight = Math.max(
       DEFAULT_MULTI_WAVE_ROW_HEIGHT,
@@ -2506,17 +2544,14 @@ async function createWindow(payload, session = activeSession, isCancelled) {
       ? 'analog'
       : (payload.modes && payload.modes[index] || row.mode);
     if (row.multiWave) {
-      const range = resolveAnalogDisplayRange(row.range, payload.analogFormats && payload.analogFormats[index] || row.analogFormat);
-      const series = row.multiWave.sources.map((source) => {
-        const sourceRow = session.rows[source.rowIndex];
-        if (!sourceRow) return null;
-        const analogRow = analogRowForFormat(
-          sourceRow,
-          payload.analogFormats && payload.analogFormats[source.rowIndex],
-          session.rawTotalColumns
-        );
-        const data = delayedRowWindow(analogRow, start, end, width, 'analog', total, null,
+      const entries = multiWaveAnalogSeries(session, row, payload.analogFormats, payload.multiWaveHidden);
+      const range = resolveAnalogDisplayRange(multiWaveRange(entries), payload.analogFormats?.[index] || row.analogFormat);
+      const series = entries.map(({ source, sourceRow, analog }) => {
+        const data = delayedRowWindow(analog, start, end, width, 'analog', total, null,
           multiWaveDelay(session, row, sourceRow));
+        if (source.scale !== 1 && data.kind === 'points') {
+          for (const point of data.items) point[1] = scaledMultiWaveValue(point[1], source.scale);
+        }
         data.range = range;
         return {
           name: source.name,
@@ -2524,7 +2559,7 @@ async function createWindow(payload, session = activeSession, isCancelled) {
           sourceRowIndex: source.rowIndex,
           data
         };
-      }).filter(Boolean);
+      });
       rows.push({
         index,
         mode: 'analog',
@@ -2653,13 +2688,15 @@ function labelPoints(payload) {
   (payload.queries || []).forEach(query => {
     const row = activeSession.rows[query.rowIndex], column = finiteNumber(query.column);
     if (!row || column == null || column < 0 || column >= activeSession.totalColumns) return;
-    const sources = row.multiWave ? row.multiWave.sources.filter(source => !Array.isArray(query.sources)
-      || query.sources.includes(source.rowId)).map(source => ({ source, row: activeSession.rows[source.rowIndex] }))
-      : [{ row, source: null }];
+    const series = row.multiWave
+      ? multiWaveAnalogSeries(activeSession, row, formats, payload.multiWaveHidden) : null;
+    const range = series ? multiWaveRange(series) : null;
+    const sources = series
+      ? series.filter(({ source }) => !Array.isArray(query.sources) || query.sources.includes(source.rowId))
+      : [{ sourceRow: row, source: null, analog: analogRowForFormat(row, formats[row.index], activeSession.totalColumns) }];
     sources.forEach(entry => {
-      if (!entry.row) return;
-      const analog = analogRowForFormat(entry.row, formats[entry.row.index], activeSession.totalColumns);
-      const delay = entry.source ? multiWaveDelay(activeSession, row, entry.row) : rowDelay(activeSession, row);
+      const { analog, sourceRow, source } = entry;
+      const delay = source ? multiWaveDelay(activeSession, row, sourceRow) : rowDelay(activeSession, row);
       const step = rowSampleStep(analog), position = (column - delay) / step, index = Math.floor(position);
       if (index < 0 || (!analog.sparseAnalog && (!analog.samples || index >= analog.samples.length))) return;
       const left = analog.sparseAnalog ? sparseAnalogValueAt(analog, index * step) : analog.samples[index];
@@ -2667,11 +2704,12 @@ function labelPoints(payload) {
       const fraction = position - index;
       if (!Number.isFinite(left)) return;
       if (!analog.sparseAnalog && !analog.stepInterpolation && index === analog.samples.length - 1 && fraction > 1e-9) return;
-      const value = analog.stepInterpolation || !Number.isFinite(right) ? left : left * (1 - fraction) + right * fraction;
-      if (!Number.isFinite(value)) return;
+      const rawValue = analog.stepInterpolation || !Number.isFinite(right) ? left : left * (1 - fraction) + right * fraction;
+      const value = scaledMultiWaveValue(rawValue, source?.scale ?? 1);
+      if (value == null) return;
       points.push({ id: query.id || '', rowIndex: row.index, rowId: row.rowId, column, value,
-        sourceRowId: entry.source ? entry.source.rowId : '', name: entry.source ? entry.source.name : row.name,
-        range: resolveAnalogDisplayRange(row.multiWave ? row.range : analog.range, formats[row.index] || row.analogFormat) });
+        sourceRowId: source ? source.rowId : '', name: source ? source.name : row.name,
+        range: resolveAnalogDisplayRange(range || analog.range, formats[row.index] || row.analogFormat) });
     });
   });
   return points;
@@ -2927,13 +2965,14 @@ function chooseColumns(
   return selected.slice(0, target);
 }
 
-function displayStateAtColumn(row, column, mode, analogFormat, session = activeSession, delay = rowDelay(session, row)) {
+function displayStateAtColumn(row, column, mode, analogFormat, session = activeSession, delay = rowDelay(session, row), hidden, formats) {
   if (row.multiWave) {
-    return row.multiWave.sources.map((source) => {
+    return visibleMultiWaveSources(session, row, hidden).map((source) => {
       const sourceRow = session.rows[source.rowIndex];
-      if (!sourceRow) return source.name + '=x';
-      const value = displayStateAtColumn(sourceRow, column, 'analog', sourceRow.analogFormat,
-        session, multiWaveDelay(session, row, sourceRow));
+      const value = scaledMultiWaveValue(displayStateAtColumn(
+        sourceRow, column, 'analog', formats?.[source.rowIndex] || sourceRow.analogFormat,
+        session, multiWaveDelay(session, row, sourceRow)
+      ), source.scale);
       return source.name + '=' + (value == null ? 'x' : String(value));
     }).join(' · ');
   }
@@ -3007,7 +3046,8 @@ function inspectCursor(payload) {
         };
       }
       const mode = modes[row.index] || row.mode;
-      const value = displayStateAtColumn(row, column, mode, analogFormats[row.index]);
+      const value = displayStateAtColumn(row, column, mode, analogFormats[row.index],
+        activeSession, undefined, payload.multiWaveHidden, analogFormats);
       return {
         index: row.index,
         mode,
@@ -3422,10 +3462,20 @@ function navigateCursor(payload, session = activeSession) {
   let targetColumn = null;
   if (kind === 'edge') {
     const array = row.arrayGroup?.index < 0 ? session.arrays.get(rowIndex) : null;
-    targetColumn = array
-      ? directionalSortedColumn(scopeArrayBoundaries(array, session.totalColumns, session), column, direction)
-      : edgeColumn(row, rawColumn, direction, mode);
-    if (!array && targetColumn != null) targetColumn += delay;
+    if (row.multiWave) {
+      for (const source of visibleMultiWaveSources(session, row, payload.multiWaveHidden)) {
+        const member = session.rows[source.rowIndex], offset = multiWaveDelay(session, row, member);
+        const edge = edgeColumn(member, column - offset, direction, 'analog');
+        if (edge == null) continue;
+        const candidate = edge + offset;
+        if (targetColumn == null || direction * candidate < direction * targetColumn) targetColumn = candidate;
+      }
+    } else {
+      targetColumn = array
+        ? directionalSortedColumn(scopeArrayBoundaries(array, session.totalColumns, session), column, direction)
+        : edgeColumn(row, rawColumn, direction, mode);
+      if (!array && targetColumn != null) targetColumn += delay;
+    }
     if (array && targetColumn >= session.totalColumns) targetColumn = null;
   } else if (kind === 'value') {
     if (mode === 'analog') {
@@ -3455,7 +3505,7 @@ function navigateCursor(payload, session = activeSession) {
     found: true,
     rowIndex,
     column: targetColumn,
-    value: displayStateAtColumn(row, targetColumn, mode, analogFormat, session),
+    value: displayStateAtColumn(row, targetColumn, mode, analogFormat, session, undefined, payload.multiWaveHidden),
     source: row.samples && row.samples.length ? 'samples' : 'wave',
     lookupMs: Date.now() - startedAt
   };
@@ -3876,7 +3926,8 @@ function createSimplifiedModel(payload) {
       row,
       column,
       mode,
-      analogFormat
+      analogFormat,
+      activeSession, undefined, payload.multiWaveHidden, analogFormats
     ));
     return {
       index: row.index,
@@ -4268,6 +4319,7 @@ if (typeof document === 'undefined' && global && typeof global.postMessage === '
 } else if (global) {
   global.VisualWaveDromScopeWorkerCore = {
     handleRequest,
+    normalizeMultiWaveScales,
     resolveAnalogDisplayRange
   };
 }

@@ -1483,7 +1483,16 @@
         if (!usrGen.name) {
           throw validationError(path + '.usrGen.name 必须是非空信号名', path + '.usrGen.name');
         }
-        return { usrGen: { name: usrGen.name, multiWave, dly: usrGen.dly }, autoGen };
+        const rawScales = rawUsrGen?.multiWaveScales;
+        const field = path + '.usrGen.multiWaveScales';
+        if (rawScales !== undefined && (!rawScales || typeof rawScales !== 'object'
+            || Array.isArray(rawScales) || Object.values(rawScales).some(scale => !Number.isFinite(scale)))) {
+          throw validationError(field + ' 必须是以信号名为键、有限数字为值的字典', field);
+        }
+        const scales = Object.fromEntries(multiWave.filter(name => Object.prototype.hasOwnProperty.call(rawScales || {}, name))
+          .filter(name => rawScales[name] !== 1).map(name => [name, rawScales[name]]));
+        return { usrGen: { name: usrGen.name, multiWave, dly: usrGen.dly,
+          ...(Object.keys(scales).length ? { multiWaveScales: scales } : {}) }, autoGen };
       }
       if (!usrGen.folder) usrGen.folder = '.';
       if (!usrGen.grepKeys) {
@@ -1643,6 +1652,16 @@
       return entry.complexDetected ? [name + '_I', name + '_Q'] : [name];
     }
 
+    function isCollectionFileEntry(entry) {
+      return entry && entry.importMode !== 'formula' && entry.importMode !== 'multi-wave';
+    }
+
+    function hasCollectionFileMatch(entry) {
+      return isCollectionFileEntry(entry)
+        && ['matched', 'multiple', 'duplicate-name'].includes(entry.status)
+        && Array.isArray(entry.matches) && entry.matches.length > 0;
+    }
+
     function formulaSignalNames(preset, payload) {
       const names = new Set();
       if (typeof settings.getFormulaSignalNames === 'function') {
@@ -1655,28 +1674,42 @@
           debug({ phase: 'formula-signal-names-error', message: error.message || String(error) });
         }
       }
-      const entries = Array.isArray(payload && payload.entries) ? payload.entries : [];
-      entries.forEach((entry) => {
-        if (entry && (entry.importMode === 'formula' || entry.importMode === 'multi-wave')) return;
-        collectionEntryOutputNames(entry).forEach((name) => {
-          const normalized = String(name || '').trim();
-          if (normalized) names.add(normalized);
+      const paths = preset && Array.isArray(preset.paths) ? preset.paths : [];
+      const declaredColumns = (path) => path?.usrGen?.columns?.length
+        ? path.usrGen.columns : path?.autoGen?.columns || [];
+      if (Array.isArray(payload && payload.entries)) {
+        const matched = new Set();
+        payload.entries.forEach((entry) => {
+          if (!isCollectionFileEntry(entry)) return;
+          if (hasCollectionFileMatch(entry)) {
+            collectionEntryOutputNames(entry).forEach((name) => matched.add(name));
+            return;
+          }
+          // A missing file must not silently fall back to an older row with the same name.
+          const remove = (name, suffix = '') => {
+            if (!name) return;
+            names.delete(name + suffix);
+            names.delete(name + '_I' + suffix);
+            names.delete(name + '_Q' + suffix);
+          };
+          remove(String(entry.name || '').trim());
+          declaredColumns(paths[entry.index]).forEach((column) => {
+            remove(String(column?.name || column?.source || '').trim(), entry.nameSuffix || '');
+          });
         });
-      });
-      (preset && Array.isArray(preset.paths) ? preset.paths : []).forEach((entry) => {
-        if (!entry || presetPathFormula(entry) || presetPathMultiWave(entry)) return;
-        const config = entry.usrGen || {};
-        const name = String(config.name || '').trim();
-        if (name) names.add(name);
-        const columns = Array.isArray(config.columns) && config.columns.length
-          ? config.columns
-          : (entry.autoGen && Array.isArray(entry.autoGen.columns) ? entry.autoGen.columns : []);
-        columns.forEach((column) => {
-          if (column && column.enabled === false) return;
-          const columnName = String(column && (column.name || column.source) || '').trim();
-          if (columnName) names.add(columnName);
+        matched.forEach((name) => names.add(name));
+      } else {
+        paths.forEach((entry) => {
+          if (!entry || presetPathFormula(entry) || presetPathMultiWave(entry)) return;
+          const name = String(entry.usrGen?.name || '').trim();
+          if (name) names.add(name);
+          declaredColumns(entry).forEach((column) => {
+            if (column && column.enabled === false) return;
+            const columnName = String(column?.name || column?.source || '').trim();
+            if (columnName) names.add(columnName);
+          });
         });
-      });
+      }
       const result = Array.from(names);
       debug({ phase: 'formula-signal-names', count: result.length, names: result });
       return result;
@@ -1703,7 +1736,8 @@
         if (suffix && name.endsWith(suffix)) {
           const base = name.slice(0, -suffix.length);
           bind(base, name);
-          if (entry.importMode === 'single' && entry.complexDetected) {
+          if ((entry.importMode === 'single' && entry.complexDetected)
+              || (isCollectionFileEntry(entry) && !hasCollectionFileMatch(entry))) {
             bind(base + '_I', name + '_I');
             bind(base + '_Q', name + '_Q');
           }
@@ -1734,7 +1768,13 @@
           });
         }
         const sources = presetPathMultiWave(copy);
-        if (sources) copy.usrGen.multiWave = sources.map(resolve);
+        if (sources) {
+          copy.usrGen.multiWave = sources.map(resolve);
+          if (copy.usrGen.multiWaveScales) {
+            copy.usrGen.multiWaveScales = Object.fromEntries(Object.entries(copy.usrGen.multiWaveScales)
+              .map(([name, scale]) => [resolve(name), scale]));
+          }
+        }
         paths[entry.index] = copy;
       });
       return Object.assign({}, preset, { paths });
@@ -1820,6 +1860,7 @@
           index,
           name,
           sources: sources.slice(),
+          scales: entry.usrGen.multiWaveScales || {},
           valid: errors.length === 0,
           error: errors.join('；')
         });
@@ -1874,6 +1915,8 @@
     }
 
     function parseEditor(showError) {
+      clearTimeout(editorParseTimer);
+      editorParseTimer = 0;
       const editorText = getPresetEditorValue();
       try {
         const nextPreset = validatePresetShape(JSON.parse(editorText));
@@ -2267,6 +2310,8 @@
         entry.status === 'formula-ready'
           || entry.status === 'multi-wave-ready'
           || (Array.isArray(entry.matches) && entry.matches.length > 0));
+      const fileCount = entries.filter(hasCollectionFileMatch).length;
+      const noMatchingFiles = fileCount === 0 && entries.some(isCollectionFileEntry);
       const errors = [];
       const owners = new Map();
       active.forEach((entry) => {
@@ -2300,8 +2345,9 @@
         });
       });
       return {
-        valid: active.length > 0 && errors.length === 0,
-        count: active.length,
+        valid: active.length > 0 && !noMatchingFiles && errors.length === 0,
+        fileCount,
+        noMatchingFiles,
         errors
       };
     }
@@ -2324,7 +2370,8 @@
         .map((item) => ({
           id: String(item.index),
           name: item.name,
-          multiWave: item.sources.slice()
+          multiWave: item.sources.slice(),
+          multiWaveScales: item.scales
         }));
     }
 
@@ -2354,10 +2401,9 @@
 
     function scheduleEditorParse() {
       clearTimeout(editorParseTimer);
+      if (searchResult) invalidateSearch('preset-editor-change');
       scheduleRememberState('preset-editor-change');
       editorParseTimer = setTimeout(() => {
-        editorParseTimer = 0;
-        invalidateSearch('preset-editor-change');
         parseEditor(false);
       }, 220);
     }
@@ -3138,19 +3184,16 @@
           || entry.status === 'formula-error' || entry.status === 'multi-wave-error').length;
       const formulaCount = entries.filter((entry) => entry.status === 'formula-ready').length;
       const multiWaveCount = entries.filter((entry) => entry.status === 'multi-wave-ready').length;
-      const fileCount = entries.filter((entry) =>
-        entry.importMode !== 'formula' && entry.importMode !== 'multi-wave'
-          && Array.isArray(entry.matches) && entry.matches.length > 0).length;
       const selection = collectionSelectionStatus();
       payload.ready = selection.valid;
       resultSummary.textContent = selection.valid
-        ? ('已选择 ' + fileCount + ' 个文件、' + formulaCount + ' 个公式、'
+        ? ('已选择 ' + selection.fileCount + ' 个文件、' + formulaCount + ' 个公式、'
           + multiWaveCount + ' 个多波形，可以导入'
           + (skippedCount ? '；跳过 ' + skippedCount + ' 条无效或未匹配规则' : '')
           + (multipleCount ? '；' + multipleCount + ' 条规则默认取第一个' : ''))
-        : (selection.count > 0
-          ? (selection.errors[0] || '请检查导入配置')
-          : '没有找到可导入的文件、有效公式或多波形');
+        : (selection.errors[0] || (selection.noMatchingFiles
+          ? '没有匹配到文件，不会导入或覆盖波形'
+          : '没有找到可导入的文件、有效公式或多波形'));
       updateButtons();
     }
 
@@ -3667,10 +3710,10 @@
             + (multipleCount ? '；多匹配规则已默认选择第一个文件' : '')
             + (validFormulaCount ? '；' + validFormulaCount + ' 个公式有效' : '')
             + (validMultiWaveCount ? '；' + validMultiWaveCount + ' 个多波形有效' : ''))
-          : ('搜索完成：' + searchDetails
-            + (selection.count > 0
-              ? '。请修改重复信号名'
-              : '。没有找到可导入文件、有效公式或多波形')), !selection.valid);
+          : ('搜索完成：' + searchDetails + '。' + (selection.errors[0]
+            || (selection.noMatchingFiles
+              ? '没有匹配到文件，不会写入波形'
+              : '没有找到可导入文件、有效公式或多波形'))), !selection.valid);
         debug({
           phase: 'search-complete',
           ready: !!payload.ready,
@@ -3757,13 +3800,14 @@
         setHint('目标波形图或波形库已切换，请关闭后重新打开导入窗口', true);
         return;
       }
-      const selection = collectionSelectionStatus();
-      if (!selection.valid) {
-        setHint(selection.errors[0] || '请先完成表格列选择', true);
-        return;
-      }
       const preset = parseEditor(true);
       if (!preset) return;
+      const selection = collectionSelectionStatus();
+      if (!selection.valid) {
+        setHint(selection.errors[0] || (selection.noMatchingFiles
+          ? '没有匹配到文件，不会写入波形' : '请先完成表格列选择'), true);
+        return;
+      }
       let variables;
       try {
         variables = collectVariableValues().values;
@@ -3772,9 +3816,7 @@
         return;
       }
       const rootPath = String(rootPathInput.value || '').trim();
-      const fileCount = (searchResult.entries || []).filter((entry) =>
-        entry.importMode !== 'formula' && entry.importMode !== 'multi-wave'
-          && Array.isArray(entry.matches) && entry.matches.length > 0).length;
+      const fileCount = selection.fileCount;
       const expandedPreset = collectionAnalysisPreset(preset, searchResult);
       const withDelay = (item) => Object.assign(item, {
         commDly: preset.commDly || 0,
@@ -3858,7 +3900,8 @@
             data: [],
             sampleKind: 'analog',
             createIfMissing: true,
-            multiWave: definition.multiWave.slice()
+            multiWave: definition.multiWave.slice(),
+            multiWaveScales: definition.multiWaveScales
           }))
         );
         stopImportProgressPolling();

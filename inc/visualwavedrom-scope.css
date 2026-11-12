@@ -270,6 +270,7 @@ body.scope-wave-view > #vim-help-modal {
   font-variant-numeric: tabular-nums;
 }
 .scope-cursor-locate span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.scope-cursor-decimal { font-size: 1.45em; font-weight: 900; line-height: 0; }
 
 .scope-cursor-signal {
   max-width: 120px;
@@ -1266,25 +1267,48 @@ body.scope-multi-wave-legend-dragging * {
   min-width: 0;
   min-height: 30px;
   display: grid;
-  grid-template-columns: 18px 15px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 7px;
   padding: 2px 6px;
   border-radius: 4px;
   color: #30353b;
   font-size: 12px;
-  cursor: pointer;
 }
 
 .scope-multi-wave-source:hover {
   background: #f2f7fc;
 }
 
-.scope-multi-wave-source input {
+.scope-multi-wave-source-toggle {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 18px 15px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+}
+
+.scope-multi-wave-source-toggle input {
   width: 15px;
   height: 15px;
   margin: 0;
   accent-color: #2f73bf;
+}
+
+.scope-multi-wave-source-scale {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.scope-multi-wave-source-scale input {
+  box-sizing: border-box;
+  width: 70px;
+  min-height: 24px;
+  padding: 2px 4px;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
 }
 
 .scope-multi-wave-source span {

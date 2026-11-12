@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=compare-perf-v1';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=multi-wave-scale-v1';
   const FormulaEngine = global.VisualWaveDromFormula || null;
   const DEFAULT_ROW_HEIGHT = 42;
   const DEFAULT_MULTI_WAVE_ROW_HEIGHT = 68;
@@ -196,6 +196,9 @@
       formulas,
       multiWaves,
       multiWaveHidden,
+      multiWaveScales: Object.fromEntries(Object.entries(source.multiWaveScales || {}).map(
+        ([rowId, scales]) => [rowId, global.VisualWaveDromScopeWorkerCore.normalizeMultiWaveScales(scales)]
+      )),
       signalNames,
       delays: source.delays && typeof source.delays === 'object' && !Array.isArray(source.delays)
         ? clone(source.delays) : {},
@@ -253,6 +256,10 @@
       if (own(state.multiWaveHidden, rowId)) {
         state.multiWaveHidden[sourceRowId] = state.multiWaveHidden[rowId].slice();
         delete state.multiWaveHidden[rowId];
+      }
+      if (own(state.multiWaveScales, rowId)) {
+        state.multiWaveScales[sourceRowId] = state.multiWaveScales[rowId];
+        delete state.multiWaveScales[rowId];
       }
       delete state.signalNames[rowId];
       if (own(state.delays, rowId)) {
@@ -724,6 +731,7 @@
         formulas: {},
         multiWaves: {},
         multiWaveHidden: {},
+        multiWaveScales: {},
         signalNames: {},
         rowOrder: [],
         hiddenRows: []
@@ -1486,6 +1494,9 @@
       });
       this.multiWaveSourceList.addEventListener('change', () => {
         this.updateMultiWaveDraftPreview();
+      });
+      this.multiWaveSourceList.addEventListener('input', (event) => {
+        if (event.target.matches('[data-scope-multi-wave-scale]')) this.updateMultiWaveDraftPreview();
       });
       const handleFormulaInput = () => {
         this.updateFormulaDraftFromInputs();
@@ -2347,6 +2358,14 @@
           multiWaveReferencesChanged = true;
         }
       });
+      Object.values(this.transientFormulaState.multiWaveScales).forEach((scales) => {
+        if (!own(scales, previousName)) return;
+        Object.defineProperty(scales, nextName, {
+          value: scales[previousName], enumerable: true, configurable: true, writable: true
+        });
+        delete scales[previousName];
+        multiWaveReferencesChanged = true;
+      });
       if (this.simplified && this.simplified.model.rows[index]) {
         this.simplified.model.rows[index].name = nextName;
       }
@@ -2411,10 +2430,12 @@
       });
     }
 
-    persistTransientFormulaState() {
+    persistTransientFormulaState({ comparison = true } = {}) {
       if (this.destroyed) return;
-      this.overviewBaseCache = null;
-      this.notifyComparisonChanged();
+      if (comparison) {
+        this.overviewBaseCache = null;
+        this.notifyComparisonChanged();
+      }
       if (typeof this.adapter.setTransientState !== 'function') return;
       try {
         this.adapter.setTransientState(clone(this.transientFormulaState));
@@ -2450,11 +2471,16 @@
       let changed = false;
       this.meta.rows.forEach((row) => {
         const rowId = String(row.rowId || ('source:' + row.index));
-        if (!row.multiWave || own(this.transientFormulaState.multiWaves, rowId)) return;
-        this.transientFormulaState.multiWaves[rowId] = normalizeMultiWaveDefinition(
-          row.multiWave.signals
-        );
-        changed = true;
+        if (!row.multiWave) return;
+        if (!own(this.transientFormulaState.multiWaves, rowId)) {
+          this.transientFormulaState.multiWaves[rowId] = normalizeMultiWaveDefinition(row.multiWave.signals);
+          changed = true;
+        }
+        if (!own(this.transientFormulaState.multiWaveScales, rowId)
+            && Object.keys(row.multiWave.scales || {}).length) {
+          this.transientFormulaState.multiWaveScales[rowId] = row.multiWave.scales;
+          changed = true;
+        }
       });
       if (changed) this.persistTransientFormulaState();
       return changed;
@@ -2475,6 +2501,26 @@
       if (!row) return [];
       const rowId = String(row.rowId || ('source:' + row.index));
       return normalizeMultiWaveDefinition(this.transientFormulaState.multiWaveHidden[rowId]);
+    }
+
+    multiWaveScaleDraft() {
+      const scales = [];
+      let invalid = false;
+      this.multiWaveSourceList.querySelectorAll('[data-scope-multi-wave-scale]').forEach((input) => {
+        const bad = input.validity.badInput || (input.value !== '' && !Number.isFinite(input.valueAsNumber));
+        input.setAttribute('aria-invalid', String(bad));
+        invalid ||= bad;
+        if (!bad && input.value !== '' && input.valueAsNumber !== 1) {
+          scales.push([input.dataset.scopeMultiWaveScale, input.valueAsNumber]);
+        }
+      });
+      return { scales: Object.fromEntries(scales), invalid };
+    }
+
+    multiWaveScales(row) {
+      const rowId = this.rowId(row.index);
+      const scales = this.transientFormulaState.multiWaveScales;
+      return own(scales, rowId) ? scales[rowId] : (row.multiWave?.scales || {});
     }
 
     orderedMultiWaveEntries(rowIndex, entries) {
@@ -2706,14 +2752,17 @@
       return ordered;
     }
 
-    multiWaveJsonPayload(row, sources) {
+    multiWaveJsonPayload(row, sources, scales) {
       const name = String(this.signalNames[row.index] == null
         ? row.name || ''
         : this.signalNames[row.index]);
+      const selectedScales = Object.fromEntries(sources.filter(name => own(scales, name))
+        .map(name => [name, scales[name]]));
       return {
         usrGen: {
           name,
-          multiWave: normalizeMultiWaveDefinition(sources)
+          multiWave: normalizeMultiWaveDefinition(sources),
+          ...(Object.keys(selectedScales).length ? { multiWaveScales: selectedScales } : {})
         },
         autoGen: {}
       };
@@ -2724,20 +2773,29 @@
       const row = this.meta.rows[this.displayControlRow];
       if (!row) return;
       const sources = this.selectedMultiWaveSources();
-      this.multiWaveFeedback.textContent = sources.length >= 2
+      const { scales, invalid } = this.multiWaveScaleDraft();
+      this.multiWaveFeedback.textContent = invalid ? 'scale 必须是有限数字，留空时使用 1.0' : sources.length >= 2
         ? ('已选择 ' + sources.length + ' 个信号；应用后将在同一纵轴内叠加显示')
         : (sources.length === 1
           ? '当前只选择了 1 个信号；仍可显示，但不能形成多波形对比'
           : '尚未选择源信号');
-      this.multiWaveFeedback.classList.toggle('is-warning', sources.length < 2);
+      this.multiWaveFeedback.classList.toggle('is-warning', invalid || sources.length < 2);
       this.multiWaveJsonPreview.textContent = JSON.stringify(
-        this.multiWaveJsonPayload(row, sources),
+        this.multiWaveJsonPayload(row, sources, scales),
         null,
         2
       );
       const current = this.multiWaveDefinition(row.index);
-      this.multiWaveApplyButton.disabled = current.length === sources.length
-        && current.every((name, index) => name === sources[index]);
+      this.multiWaveApplyButton.disabled = invalid || (current.length === sources.length
+        && current.every((name, index) => name === sources[index])
+        && this.sameMultiWaveScales(scales, this.multiWaveScales(row)));
+      this.multiWaveCopyButton.disabled = invalid;
+    }
+
+    sameMultiWaveScales(left, right) {
+      const keys = Object.keys(left);
+      return keys.length === Object.keys(right).length
+        && keys.every(name => own(right, name) && left[name] === right[name]);
     }
 
     updateMultiWaveControls() {
@@ -2748,18 +2806,25 @@
         return;
       }
       const selected = new Set(this.multiWaveDefinition(row.index));
+      const scales = this.multiWaveScales(row);
       const sourceRows = this.availableMultiWaveSourceRows(row.index);
       this.multiWaveSourceList.innerHTML = sourceRows.length
         ? sourceRows.map((sourceRow) => {
           const name = this.signalDisplayName(sourceRow.index);
           const color = this.rowWaveColor(sourceRow.index);
           return `
-            <label class="scope-multi-wave-source">
-              <input type="checkbox" data-scope-multi-wave-source="${sourceRow.index}"
-                  value="${escapeHtml(name)}"${selected.has(name) ? ' checked' : ''}>
-              <i style="--scope-multi-wave-color:${color}" aria-hidden="true"></i>
-              <span>${escapeHtml(name)}</span>
-            </label>
+            <div class="scope-multi-wave-source">
+              <label class="scope-multi-wave-source-toggle">
+                <input type="checkbox" data-scope-multi-wave-source="${sourceRow.index}"
+                    value="${escapeHtml(name)}"${selected.has(name) ? ' checked' : ''}>
+                <i style="--scope-multi-wave-color:${color}" aria-hidden="true"></i>
+                <span title="${escapeHtml(name)}">${escapeHtml(name)}</span>
+              </label>
+              <label class="scope-multi-wave-source-scale">scale
+                <input type="number" step="any" placeholder="1.0" aria-label="${escapeHtml(name)} scale"
+                    data-scope-multi-wave-scale="${escapeHtml(name)}" value="${own(scales, name) ? scales[name] : '1.0'}">
+              </label>
+            </div>
           `;
         }).join('')
         : '<span class="scope-multi-wave-empty">当前没有可叠加的普通信号</span>';
@@ -2774,10 +2839,24 @@
       const rowId = this.rowId(row.index);
       const sources = this.selectedMultiWaveSources();
       const current = this.multiWaveDefinition(row.index);
-      if (current.length === sources.length
-          && current.every((name, index) => name === sources[index])) return;
+      const { scales, invalid } = this.multiWaveScaleDraft();
+      const currentScales = this.multiWaveScales(row);
+      const sameSources = current.length === sources.length
+        && current.every((name, index) => name === sources[index]);
+      if (invalid || (sameSources && this.sameMultiWaveScales(scales, currentScales))) return;
+      if (sameSources && sources.every(name => (
+        (own(scales, name) ? scales[name] : 1) === (own(currentScales, name) ? currentScales[name] : 1)
+      ))) {
+        const history = this.snapshot({ includeRowState: true });
+        this.transientFormulaState.multiWaveScales[rowId] = scales;
+        this.persistTransientFormulaState({ comparison: false });
+        this.pushHistorySnapshot(history);
+        this.updateMultiWaveDraftPreview();
+        return;
+      }
       const applied = await this.commitRowOperation(() => {
         this.transientFormulaState.multiWaves[rowId] = sources;
+        this.transientFormulaState.multiWaveScales[rowId] = scales;
         const hidden = this.multiWaveHiddenDefinition(row.index).filter(
           (sourceName) => sources.indexOf(sourceName) >= 0
         );
@@ -2804,8 +2883,10 @@
       if (!this.meta || this.displayControlRow == null) return;
       const row = this.meta.rows[this.displayControlRow];
       if (!row || !this.isMultiWaveRow(row.index)) return;
+      const { scales, invalid } = this.multiWaveScaleDraft();
+      if (invalid) return;
       const text = JSON.stringify(
-        this.multiWaveJsonPayload(row, this.selectedMultiWaveSources()),
+        this.multiWaveJsonPayload(row, this.selectedMultiWaveSources(), scales),
         null,
         2
       );
@@ -3234,6 +3315,7 @@
           delete this.transientFormulaState.formulas[rowId];
           delete this.transientFormulaState.multiWaves[rowId];
           delete this.transientFormulaState.multiWaveHidden[rowId];
+          delete this.transientFormulaState.multiWaveScales[rowId];
           delete this.transientFormulaState.signalNames[rowId];
           delete this.transientFormulaState.delays[rowId];
           this.formulaDrafts.delete(rowId);
@@ -3309,6 +3391,11 @@
       this.pushHistorySnapshot(historySnapshot);
       this.setActiveCursorRow(rowIndex);
       this.updateMultiWaveLegendItemState(item, nextVisible);
+      this.pointLabels.invalidate();
+      this.cursorReadoutSignature = '';
+      this.scheduleCursorReadout();
+      this.scheduleWindowRequest();
+      this.scheduleOverviewDataRequest();
       this.draw();
       this.setStatus(sourceName + (nextVisible ? ' 已显示' : ' 已隐藏'));
       this.log('scope-multi-wave-legend', {
@@ -5049,6 +5136,7 @@
         width,
         rowCount: this.meta.rows.length,
         hiddenArrayElements: this.hiddenArrayElements(),
+        multiWaveHidden: { ...this.transientFormulaState.multiWaveHidden },
         modes: Object.assign({}, this.modes),
         busFormats: clone(this.busFormats),
         analogFormats: clone(this.analogFormats)
@@ -5073,6 +5161,7 @@
         )),
         rowIndices,
         hiddenArrayElements: this.hiddenArrayElements(),
+        multiWaveHidden: { ...this.transientFormulaState.multiWaveHidden },
         modes: Object.assign({}, this.modes),
         busFormats: clone(this.busFormats),
         analogFormats: clone(this.analogFormats)
@@ -5086,6 +5175,7 @@
         config.width,
         config.rowIndices,
         config.hiddenArrayElements,
+        config.multiWaveHidden,
         config.modes,
         config.busFormats,
         config.analogFormats
@@ -5141,6 +5231,7 @@
         config.width,
         config.rowCount,
         config.hiddenArrayElements,
+        config.multiWaveHidden,
         config.modes,
         config.busFormats,
         config.analogFormats
@@ -5155,6 +5246,7 @@
         rowStart,
         rowEnd,
         hiddenArrayElements: config.hiddenArrayElements,
+        multiWaveHidden: config.multiWaveHidden,
         modes: config.modes,
         busFormats: config.busFormats,
         analogFormats: config.analogFormats
@@ -6733,7 +6825,8 @@
         context.lineWidth = 1;
         const multiWave = this.meta.rows[rowIndex] && this.meta.rows[rowIndex].multiWave;
         if (multiWave && Array.isArray(multiWave.sources)) {
-          const range = this.analogDisplayRange(rowIndex, this.meta.rows[rowIndex].range);
+          const range = this.overviewData?.rows.find(row => row.index === rowIndex)?.data.range
+            || this.analogDisplayRange(rowIndex, this.meta.rows[rowIndex].range);
           const scale = Math.max(1e-12, Number(range.max) - Number(range.min));
           let highlighted = this.highlightedMultiWaveSource(rowIndex);
           const layered = this.visibleMultiWaveEntries(rowIndex, multiWave.sources).map(
@@ -6768,7 +6861,7 @@
               const column = this.simplified.model.columns[pointIndex];
               const x = column / Math.max(1, this.meta.totalColumns) * width;
               const y = yBottom - clamp(
-                (number - Number(range.min)) / scale,
+                (number * source.scale - Number(range.min)) / scale,
                 0,
                 1
               ) * (yBottom - yTop);
@@ -7922,6 +8015,19 @@
       this.cursorPrevButton.disabled = this.cursorNextButton.disabled = this.cursorJumpInput.disabled = disabled;
     }
 
+    renderCursorLocationText(node, text) {
+      if (node.textContent === text) return;
+      const index = text.indexOf('.');
+      if (index < 0) {
+        node.textContent = text;
+        return;
+      }
+      const decimal = node.ownerDocument.createElement('b');
+      decimal.className = 'scope-cursor-decimal';
+      decimal.textContent = '.';
+      node.replaceChildren(text.slice(0, index), decimal, text.slice(index + 1));
+    }
+
     updateCursorLocationControls() {
       if (!this.cursorLocateButtons || !this.meta) return;
       const column = this.currentMeasurementColumn();
@@ -7934,7 +8040,7 @@
         const name = button.dataset.scopeLocateCursor, position = this.cursorLocation(name);
         const text = position == null ? '未设置' : String(Number(position.toFixed(6))) + ' cycle';
         const value = button.querySelector('span');
-        if (value.textContent !== text) value.textContent = text;
+        this.renderCursorLocationText(value, text);
         button.disabled = position == null || !this.meta.rows.length;
         const title = '跳转到游标 ' + name + '（Shift+' + name + '）：' + text;
         if (button.title !== title) {
@@ -8022,7 +8128,8 @@
       const sequence = ++this.cursorInspectSequence;
       const reference = this.readoutReference();
       const signature = reference ? JSON.stringify([
-        this.windowSessionRevision, reference, this.modes, this.busFormats, this.analogFormats
+        this.windowSessionRevision, reference, this.modes, this.busFormats, this.analogFormats,
+        this.transientFormulaState.multiWaveHidden
       ]) : 'none';
       if (signature === this.cursorReadoutSignature) return;
       if (!reference) {
@@ -8038,7 +8145,8 @@
           column: reference.column,
           modes: this.modes,
           busFormats: this.busFormats,
-          analogFormats: this.analogFormats
+          analogFormats: this.analogFormats,
+          multiWaveHidden: this.transientFormulaState.multiWaveHidden
         });
         if (sequence !== this.cursorInspectSequence) return;
         result.rows.forEach((row) => {
@@ -8218,7 +8326,8 @@
           kind,
           condition: expression,
           mode,
-          analogFormat: this.analogFormats[this.activeCursorRow]
+          analogFormat: this.analogFormats[this.activeCursorRow],
+          multiWaveHidden: this.transientFormulaState.multiWaveHidden
         });
         global.clearTimeout(waitingStatus);
         if (sequence !== this.cursorNavigationSequence) return;
@@ -8370,6 +8479,7 @@
         modes: this.modes,
         busFormats: this.busFormats,
         analogFormats: this.analogFormats,
+        multiWaveHidden: this.transientFormulaState.multiWaveHidden,
         rowStyles: this.rowStyles,
         rowHeights: this.rowHeights,
         signalNames: this.signalNames.slice(),

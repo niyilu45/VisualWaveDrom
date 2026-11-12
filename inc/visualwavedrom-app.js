@@ -17811,6 +17811,9 @@ ${lines.join('\n')}`;
           if (item.multiWave) {
             signalScope.mode = 'analog';
             signalScope.multiWave = item.multiWave.slice();
+            const scales = item.update.multiWaveScales;
+            if (scales && Object.keys(scales).length) signalScope.multiWaveScales = scales;
+            else delete signalScope.multiWaveScales;
             delete signalScope.values;
             delete signalScope.samples;
             delete signalScope.changePoints;
@@ -17819,6 +17822,7 @@ ${lines.join('\n')}`;
             delete signalScope.derivedCache;
           } else {
             delete signalScope.multiWave;
+            delete signalScope.multiWaveScales;
           }
         }
         if (Object.keys(signalScope).length) item.target.signal.scope = signalScope;
@@ -18264,6 +18268,7 @@ ${lines.join('\n')}`;
         createIfMissing: true,
         commDly: definition.commDly,
         dly: definition.dly,
+        multiWaveScales: definition.multiWaveScales,
         multiWave: normalizeImportedMultiWaveDefinition(
           definition && (definition.multiWave || definition.signals)
         )
@@ -18312,7 +18317,7 @@ ${lines.join('\n')}`;
         const key = String(id);
         return sourceRowReplacements && sourceRowReplacements.get(key) || key;
       };
-      ['formulas', 'multiWaves', 'multiWaveHidden', 'signalNames', 'delays'].forEach((field) => {
+      ['formulas', 'multiWaves', 'multiWaveHidden', 'multiWaveScales', 'signalNames', 'delays'].forEach((field) => {
         state[field] = Object.fromEntries(Object.entries(state[field] || {})
           .map(([id, value]) => [remapSourceRow(id), value]));
       });
@@ -18346,6 +18351,7 @@ ${lines.join('\n')}`;
         delete state.formulas[rowId];
         delete state.multiWaves[rowId];
         delete state.multiWaveHidden[rowId];
+        delete state.multiWaveScales[rowId];
         delete state.signalNames[rowId];
         delete state.delays[rowId];
         return false;
@@ -18386,6 +18392,7 @@ ${lines.join('\n')}`;
         } else {
           delete state.formulas[sourceRowId];
         }
+        delete state.multiWaveScales[sourceRowId];
         if (Object.prototype.hasOwnProperty.call(update, 'multiWave') && update.multiWave != null) {
           state.multiWaves[sourceRowId] = normalizeImportedMultiWaveDefinition(update.multiWave);
           delete state.formulas[sourceRowId];

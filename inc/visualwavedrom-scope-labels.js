@@ -90,7 +90,10 @@
         local.push({ id: query.id, rowIndex: row.index, rowId: row.rowId, sourceRowId: '', name: row.name,
           column: query.column, value, range: s.analogDisplayRange(row.index, null, values) });
       });
-      return local.concat(raw.length ? await s.worker.call('label-points', { queries: raw, analogFormats: s.analogFormats }) : []);
+      return local.concat(raw.length ? await s.worker.call('label-points', {
+        queries: raw, analogFormats: s.analogFormats,
+        multiWaveHidden: s.transientFormulaState.multiWaveHidden
+      }) : []);
     }
     async refresh() {
       if (!this.items.length || !this.scope.meta) return;
@@ -148,7 +151,7 @@
         const point = this.geometry(item, width, height);
         nodes.card.hidden = !point; nodes.line.style.display = nodes.mark.style.display = point ? '' : 'none';
         if (!point) return;
-        nodes.xText.textContent = 'X: ' + numberText(item.column); nodes.yText.textContent = 'Y: ' + numberText(item.value);
+        nodes.xText.textContent = 'X: ' + item.column; nodes.yText.textContent = 'Y: ' + numberText(item.value);
         nodes.card.title = item.name + ' · 拖动卡片调整位置，按 Del 删除';
         const selected = item.id === this.selectedId; nodes.card.classList.toggle('selected', selected);
         nodes.card.setAttribute('aria-pressed', String(selected)); nodes.card.style.zIndex = selected ? '2' : '1';
@@ -176,7 +179,11 @@
     enqueue(event) {
       const s = this.scope, rect = s.plotCanvas.getBoundingClientRect(), x = event.clientX - rect.left, y = event.clientY - rect.top;
       if (x < 0 || x > rect.width || y < 0 || y > rect.height) return;
-      this.pending = { column: s.columnForX(x, rect.width), y, gesture: this.gesture };
+      const firstTick = Math.ceil(s.viewStart * 2);
+      const lastTick = Math.min(Math.floor(s.viewEnd * 2), Math.ceil(s.meta.totalColumns * 2) - 1);
+      if (firstTick > lastTick) return;
+      const tick = clamp(Math.round(s.columnForX(x, rect.width) * 2), firstTick, lastTick);
+      this.pending = { column: tick / 2, y, gesture: this.gesture };
       void this.flush();
     }
     async flush() {
