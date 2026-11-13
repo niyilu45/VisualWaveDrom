@@ -59,7 +59,7 @@
     }
     visible(item) {
       const s = this.scope, row = this.row(item);
-      if (!row || s.modes[row.index] !== 'analog' || s.isRowCollapsed(row.index)) return false;
+      if (!row || !s.rowHeight(row.index) || s.modes[row.index] !== 'analog' || s.isRowCollapsed(row.index)) return false;
       return !item.sourceRowId || s.visibleMultiWaveEntries(row.index, row.multiWave?.sources || [])
         .some(source => String(source.rowId) === String(item.sourceRowId));
     }
@@ -97,7 +97,8 @@
     }
     async refresh() {
       if (!this.items.length || !this.scope.meta) return;
-      const valueKey = this.valueSignature(), pending = this.items.filter(item => item.valueKey !== valueKey);
+      const valueKey = this.valueSignature(), pending = this.items.filter(item =>
+        item.valueKey !== valueKey && this.visible(item));
       if (!pending.length) return;
       const signature = JSON.stringify([valueKey, pending.map(item => [item.id, item.rowId, item.sourceRowId, item.column])]);
       if (signature === this.signature) return;

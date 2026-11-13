@@ -2512,6 +2512,7 @@ async function createWindow(payload, session = activeSession, isCancelled) {
     (_value, index) => rowStart + index
   );
   const hiddenArrays = new Set(payload.hiddenArrayElements || []);
+  const filteredRows = new Set(payload.filteredRows || []);
   const rows = [];
   let sliceStarted = payload.comparison ? performance.now() : 0;
   for (let rowOffset = 0; rowOffset < rowIndices.length; rowOffset += 1) {
@@ -2529,6 +2530,7 @@ async function createWindow(payload, session = activeSession, isCancelled) {
       };
     }
     const index = rowIndices[rowOffset];
+    if (filteredRows.has(index)) continue;
     const row = session.rows[index];
     const array = row.arrayGroup;
     if (array && (array.index < 0 || hiddenArrays.has(array.anchor))) {
@@ -3035,9 +3037,10 @@ function inspectCursor(payload) {
   const modes = payload.modes || {};
   const busFormats = payload.busFormats || {};
   const analogFormats = payload.analogFormats || {};
+  const filteredRows = new Set(payload.filteredRows || []);
   return {
     column,
-    rows: activeSession.rows.map((row) => {
+    rows: activeSession.rows.filter(row => !filteredRows.has(row.index)).map((row) => {
       if (row.arrayGroup?.index < 0) {
         const group = activeSession.arrays.get(row.arrayGroup.anchor);
         return {
@@ -4139,7 +4142,7 @@ async function comparisonWindow(request) {
   const cancelled = () => !snapshot || comparison !== snapshot || request.generation !== snapshot.generation;
   if (cancelled()) return { cancelled: true };
   const pairs = snapshot.pairs.slice(request.rowStart, request.rowEnd)
-    .filter((pair) => !request.collapsedPairs?.has(pair.name));
+    .filter((pair) => !request.collapsedPairs?.has(pair.name) && !request.filteredPairs?.has(pair.name));
   const data = [];
   for (const side of ['left', 'right']) {
     const session = snapshot[side];
@@ -4193,6 +4196,25 @@ function swapComparison(generation) {
   return { generation: comparison.generation };
 }
 
+function nextComparisonDifference(request) {
+  if (!comparison || request.generation !== comparison.generation) return null;
+  if (!comparison.differenceRuns) {
+    const runs = [];
+    for (const error of comparison.errors) {
+      const last = runs[runs.length - 1];
+      if (last && error.start <= last.end) last.end = Math.max(last.end, error.end);
+      else runs.push({ start: error.start, end: error.end, error });
+    }
+    comparison.differenceRuns = runs;
+  }
+  const runs = comparison.differenceRuns;
+  const column = Number(request.column);
+  let index = findFirstSegment(runs, column);
+  if (request.skipCurrent && runs[index]?.start <= column) index++;
+  const run = runs[index];
+  return run ? { ...run.error, runStart: run.start, runEnd: run.end } : null;
+}
+
 function inspectComparison(request) {
   if (!comparison || request.generation !== comparison.generation) return null;
   const pair = comparison.pairs[request.pair];
@@ -4244,6 +4266,8 @@ async function handleRequest(message) {
     } else if (request.type === 'compare-error') {
       result = comparison && comparison.generation === request.generation
         ? comparison.errors[request.index] || null : null;
+    } else if (request.type === 'compare-next-difference') {
+      result = nextComparisonDifference(request);
     } else if (request.type === 'cancel-window') {
       latestWindowGeneration = Math.max(
         latestWindowGeneration,

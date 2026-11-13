@@ -37,6 +37,8 @@
       this.pendingChanges = new Map();
       this.cursorSequence = 0;
       this.collapsedPairs = new Set();
+      this.filteredPairs = new Set();
+      this.namesHidden = { left: false, right: true };
     }
 
     async open() {
@@ -50,16 +52,17 @@
       this.active = true;
       this.layout = 'vertical';
       this.collapsedPairs.clear();
+      this.filteredPairs.clear();
+      this.namesHidden = { left: false, right: true };
       this.delayOverrides = { left: new Map(), right: new Map() };
       const opening = ++this.sequence;
       const doc = popup.document;
       doc.title = this.scope.meta.title + ' - 示波器比较';
       doc.documentElement.lang = 'zh-CN';
-      const css = document.querySelector('link[href*="visualwavedrom-scope-compare.css"]');
-      if (css) {
+      document.querySelectorAll('link[href*="visualwavedrom-scope-compare.css"], link[href*="visualwavedrom-scope.css"]').forEach(css => {
         const link = doc.createElement('link');
         link.rel = 'stylesheet'; link.href = css.href; doc.head.appendChild(link);
-      }
+      });
       const viewport = doc.createElement('meta');
       viewport.name = 'viewport'; viewport.content = 'width=device-width,initial-scale=1';
       doc.head.appendChild(viewport);
@@ -77,10 +80,12 @@
           </select></label>
           <button type="button" data-action="swap" title="交换比较图 A 和 B">${icon('swap')}交换</button>
           ${button('expand-all', '全部展开')}
+          <button type="button" data-action="filter-signals" aria-haspopup="dialog">信号筛选</button>
           ${button('close', '退出比较', 'close')}
         </header>
         <div class="scope-compare-controls">
           ${button('prev', '上一个错误', 'prev')}${button('next', '下一个错误', 'next')}
+          <button type="button" data-action="next-difference">下一个差异</button>
           <span class="scope-compare-count"></span>
           ${button('tag', '添加错误标签')}
           <label>起始 cycle <input class="scope-compare-start" type="number" min="0" step="0.5" value="0"></label>
@@ -263,6 +268,12 @@
       if (action === 'close') return this.close();
       if (this.busy) return;
       if (!this.result) return;
+      if (action === 'filter-signals') {
+        return global.VisualWaveDromScopeSignalFilter.open(this.root.querySelector('[data-action="filter-signals"]'),
+          this.result.pairs.map(pair => ({ id: pair.name, name: pair.name })), this.filteredPairs,
+          ids => this.applySignalFilter(ids));
+      }
+      if (action === 'next-difference') return this.navigateDifference();
       if (action === 'swap') return this.swap();
       if (action === 'expand-all') {
         this.collapsedPairs.clear();
@@ -590,6 +601,11 @@
       this.collapsedRuns = new Map();
       let runStart = -1;
       this.result.pairs.forEach((pair, index) => {
+        if (this.filteredPairs.has(pair.name)) {
+          runStart = -1;
+          this.rowOffsets.push(this.rowOffsets.at(-1));
+          return;
+        }
         const collapsed = this.collapsedPairs.has(pair.name);
         let height;
         if (collapsed) {
@@ -611,13 +627,27 @@
         this.busy || !this.result || !this.collapsedPairs.size;
     }
 
+    applySignalFilter(ids) {
+      if (!this.result || this.busy) return;
+      if (ids.size === this.filteredPairs.size && [...ids].every(id => this.filteredPairs.has(id))) return;
+      this.filteredPairs = ids;
+      this.root.querySelector('[data-action="filter-signals"]').classList.toggle('is-filtered', ids.size > 0);
+      this.cache = null;
+      this.drawnView = null;
+      if (ids.has(this.rangeSelection?.signal)) this.rangeSelection = null;
+      if (ids.has(this.result.pairs[this.cursorPair]?.name)) {
+        this.cursorPair = this.result.pairs.findIndex(pair => !ids.has(pair.name));
+      }
+      this.cursorSequence++;
+      this.refreshCollapsedLayout();
+    }
+
     refreshCollapsedLayout() {
       const top = this.pairAtOffset(this.scrollTop);
       const offset = this.scrollTop - this.rowOffsets[top];
       this.rebuildRowOffsets();
       if (top < this.result.pairs.length) {
-        const visibleTop = this.pairHeight(top) ? top : this.pairAtOffset(this.rowOffsets[top] - 1);
-        this.scrollTop = this.rowOffsets[visibleTop] + Math.min(offset, this.pairHeight(visibleTop) - 1);
+        this.scrollTop = this.rowOffsets[top] + (this.pairHeight(top) ? Math.min(offset, this.pairHeight(top) - 1) : 0);
       }
       this.syncPaneGeometry();
       this.updateExpandAllControl();
@@ -627,7 +657,7 @@
 
     togglePairCollapsed(index, pane) {
       const pair = this.result?.pairs[index];
-      if (!pair || this.busy) return;
+      if (!pair || this.busy || this.filteredPairs.has(pair.name)) return;
       if (!this.collapsedPairs.delete(pair.name)) {
         this.collapsedPairs.add(pair.name);
         if (this.rangeSelection?.pair === index) this.rangeSelection = null;
@@ -844,6 +874,33 @@
         pane.append(heading, body);
         this.panesRoot.appendChild(pane);
         const item = { side, viewport, spacer, canvas, cursorCanvas, rowControls, rowButtons: new Map() };
+        if (!single && this.layout === 'horizontal') {
+          const names = this.root.ownerDocument.createElement('div');
+          names.className = 'scope-compare-name-header';
+          const label = this.root.ownerDocument.createElement('span');
+          label.textContent = '信号 / cycle';
+          const toggle = this.root.ownerDocument.createElement('button');
+          toggle.type = 'button';
+          const update = () => {
+            const hidden = this.namesHidden[side];
+            const title = (hidden ? '显示' : '隐藏') + (side === 'left' ? ' A ' : ' B ') + '信号名';
+            toggle.title = title;
+            toggle.setAttribute('aria-label', title);
+            toggle.setAttribute('aria-expanded', String(!hidden));
+            toggle.innerHTML = icon(hidden ? 'next' : 'prev');
+            names.classList.toggle('is-hidden', hidden);
+            rowControls.hidden = hidden;
+          };
+          toggle.addEventListener('click', () => {
+            this.namesHidden[side] = !this.namesHidden[side];
+            update();
+            this.schedule();
+          });
+          names.append(label, toggle);
+          body.append(names);
+          item.namesHeader = names;
+          update();
+        }
         this.panes.push(item);
         viewport.scrollTop = this.scrollTop;
         viewport.addEventListener('scroll', () => {
@@ -859,7 +916,8 @@
           event.preventDefault();
           if (event.ctrlKey || event.metaKey) {
             const rect = canvas.getBoundingClientRect();
-            const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left - this.nameWidth()) / Math.max(1, rect.width - this.nameWidth())));
+            const names = this.nameWidth(item);
+            const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left - names) / Math.max(1, rect.width - names)));
             const old = this.end - this.start;
             const span = old * Math.exp(Math.max(-1, Math.min(1, event.deltaY / 400)));
             this.setView(this.start + ratio * (old - span), span);
@@ -897,7 +955,7 @@
           if (Math.abs(dx) + Math.abs(dy) > 5) item.drag.moved = true;
           if (!item.drag.moved) return;
           if (item.drag.touch && Math.abs(dy) >= Math.abs(dx)) viewport.scrollTop = item.drag.scrollTop - dy;
-          else this.setView(item.drag.start - dx * (this.end - this.start) / Math.max(1, canvas.clientWidth - this.nameWidth()), this.end - this.start);
+          else this.setView(item.drag.start - dx * (this.end - this.start) / Math.max(1, canvas.clientWidth - this.nameWidth(item)), this.end - this.start);
         });
         canvas.addEventListener('pointerup', (event) => {
           if (item.cursorDrag) { this.finishCursorDrag(event, item); return; }
@@ -919,7 +977,10 @@
       this.schedule();
     }
 
-    nameWidth() { return Math.min(NAME_WIDTH, Math.max(85, (this.panes[0] && this.panes[0].canvas.clientWidth || 600) * 0.26)); }
+    nameWidth(pane = this.panes[0]) {
+      if (pane?.namesHeader && this.namesHidden[pane.side]) return 0;
+      return Math.min(NAME_WIDTH, Math.max(pane?.namesHeader ? 105 : 85, (pane?.canvas.clientWidth || 600) * 0.26));
+    }
 
     setView(start, span) {
       if (!this.result) return;
@@ -945,7 +1006,7 @@
     }
 
     viewport() {
-      const width = Math.max(32, Math.max(...this.panes.map(pane => pane.canvas.clientWidth)) - this.nameWidth());
+      const width = Math.max(32, ...this.panes.map(pane => pane.canvas.clientWidth - this.nameWidth(pane)));
       const height = Math.max(...this.panes.map((pane) => pane.canvas.clientHeight));
       const rowStart = this.pairAtOffset(this.scrollTop);
       const rowEnd = Math.min(this.result.pairs.length, this.pairAtOffset(this.scrollTop + Math.max(0, height - AXIS_HEIGHT)) + 1);
@@ -955,6 +1016,7 @@
     covers(coverage, view, precise = true) {
       if (!coverage || coverage.generation !== view.generation || coverage.start > view.start + 1e-9
           || coverage.end < view.end - 1e-9 || coverage.rowStart > view.rowStart || coverage.rowEnd < view.rowEnd) return false;
+      if (coverage.filteredPairs !== this.filteredPairs) return false;
       if (!precise) return true;
       if (coverage.collapsedPairs?.size) {
         for (let index = view.rowStart; index < view.rowEnd; index += 1) {
@@ -990,13 +1052,15 @@
         rowEnd: Math.min(this.result.pairs.length, viewport.rowEnd + margin),
         generation, density, width: Math.min(8192, Math.ceil((end - start) * density)),
         collapsedPairs: new Set(this.collapsedPairs),
+        filteredPairs: this.filteredPairs,
         leftModes: left.modes, leftBusFormats: left.busFormats, leftAnalogFormats: left.analogFormats,
         rightModes: right.modes, rightBusFormats: right.busFormats, rightAnalogFormats: right.analogFormats };
       const request = this.windowRequest = this.scope.worker.call('compare-window', view);
       let paintedCurrent = false;
       try {
         const data = await request;
-        if (!data.cancelled && this.active && this.result && generation === this.generation) {
+        if (!data.cancelled && this.active && this.result && generation === this.generation
+            && view.filteredPairs === this.filteredPairs) {
           const current = this.viewport();
           const exact = this.covers(view, current);
           if (!exact && (!this.canPreview(view, current) || this.covers(this.cache?.view, current))) return;
@@ -1028,13 +1092,13 @@
       this.drawnView = view;
       const { errors } = this.cache;
       const scrollTop = view.scrollTop;
-      const nameWidth = this.nameWidth();
       const renderers = { left: this.leftRenderer, right: this.rightRenderer };
       SIDES.forEach(side => {
         renderers[side].viewStart = view.start;
         renderers[side].viewEnd = view.end;
       });
       for (const pane of this.panes) {
+        const nameWidth = this.nameWidth(pane);
         const width = pane.canvas.clientWidth;
         const height = pane.canvas.clientHeight;
         const dpr = Math.min(2, this.popup.devicePixelRatio || 1);
@@ -1057,7 +1121,7 @@
         ctx.beginPath(); ctx.rect(0, 0, plotWidth, plotHeight); ctx.clip();
         if (!overlay) for (let index = view.rowStart; index < view.rowEnd; index += 1) {
           const pair = this.result.pairs[index];
-          if (this.collapsedPairs.has(pair.name)) continue;
+          if (!this.pairHeight(index) || this.collapsedPairs.has(pair.name)) continue;
           const row = pair[pane.side];
           if (row >= 0) renderer.drawRowBackground(ctx, row, this.rowOffsets[index] - scrollTop, this.pairHeight(index), plotWidth);
         }
@@ -1084,25 +1148,32 @@
             ctx.strokeRect(left + 0.5, y + 1, Math.max(0.5, right - left - 1), rowHeight - 3);
           }
           ctx.lineWidth = 1;
-          const twoBusLabels = overlay && SIDES.every(side => this.cache[side].get(pair[side])?.mode === 'bus');
+          if (overlay) {
+            ctx.strokeStyle = '#dfe2e6';
+            ctx.beginPath(); ctx.moveTo(0, y + rowHeight / 2); ctx.lineTo(plotWidth, y + rowHeight / 2); ctx.stroke();
+          }
           sides.forEach((side, layer) => {
             const row = this.cache[side].get(pair[side]);
             if (!row) return;
             const source = renderers[side];
-            const naturalHeight = source.rowHeight(row.index);
-            const top = y + (rowHeight - naturalHeight) / 2;
-            ctx.save(); ctx.beginPath(); ctx.rect(0, y, plotWidth, rowHeight - 1); ctx.clip();
-            source.drawSegments(ctx, row, row.index, top + 3, top + naturalHeight - 3, plotWidth,
-              overlay ? COLORS[layer] : source.rowWaveColor(row.index), twoBusLabels ? (layer ? 7 : -7) : 0);
+            const naturalHeight = overlay ? rowHeight / 2 : source.rowHeight(row.index);
+            const top = y + (overlay ? layer * naturalHeight : (rowHeight - naturalHeight) / 2);
+            const padding = overlay ? 2 : 3;
+            ctx.save(); ctx.beginPath();
+            ctx.rect(0, overlay ? top : y, plotWidth, (overlay ? naturalHeight : rowHeight) - 1); ctx.clip();
+            source.drawSegments(ctx, row, row.index, top + padding, top + naturalHeight - padding, plotWidth,
+              overlay ? COLORS[layer] : source.rowWaveColor(row.index));
             ctx.restore();
           });
         }
         ctx.restore();
         ctx.fillStyle = '#f0f2f5'; ctx.fillRect(0, 0, nameWidth, AXIS_HEIGHT);
         ctx.font = '12px "Segoe UI", "Microsoft YaHei", sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-        ctx.fillStyle = '#42505d'; ctx.fillText('信号 / cycle', 8, AXIS_HEIGHT / 2);
+        if (!pane.namesHeader) {
+          ctx.fillStyle = '#42505d'; ctx.fillText('信号 / cycle', 8, AXIS_HEIGHT / 2);
+        }
         ctx.save(); ctx.beginPath(); ctx.rect(0, AXIS_HEIGHT, nameWidth, plotHeight); ctx.clip();
-        for (let index = view.rowStart; index < view.rowEnd; index += 1) {
+        for (let index = view.rowStart; nameWidth && index < view.rowEnd; index += 1) {
           const pair = this.result.pairs[index], y = AXIS_HEIGHT + this.rowOffsets[index] - scrollTop;
           const h = this.pairHeight(index);
           if (!h) continue;
@@ -1118,7 +1189,7 @@
           ctx.fillText(missing || (pair.errorCount ? pair.errorCount + ' 处差异' : '一致'), ROW_NAME_X, y + h / 2 + 8);
         }
         ctx.restore();
-        this.drawRowControls(pane, view, plotHeight, nameWidth);
+        if (nameWidth) this.drawRowControls(pane, view, plotHeight, nameWidth);
       }
       this.drawCursorOverlays();
     }
@@ -1129,11 +1200,12 @@
       if (event.clientY - rect.top < AXIS_HEIGHT) return;
       const row = this.pairAtOffset(event.clientY - rect.top - AXIS_HEIGHT + this.drawnView.scrollTop);
       const pair = this.result.pairs[row];
-      const inNameColumn = event.clientX - rect.left < this.nameWidth();
+      const inNameColumn = event.clientX - rect.left < this.nameWidth(pane);
       if (!pair || (!inNameColumn && this.collapsedPairs.has(pair.name))) return;
       const column = this.columnAt(event, pane);
       this.cursorPair = row;
       if (pane.side !== 'overlay') this.cursorSide = pane.side;
+      else if (!inNameColumn) this.cursorSide = this.overlaySideAt(event, pane, row);
       if (inNameColumn) {
         this.cursorSequence++;
         this.updateCursorControls();
@@ -1150,8 +1222,9 @@
     columnAt(event, pane) {
       const rect = pane.canvas.getBoundingClientRect();
       const { start, end } = this.drawnView;
-      return start + (event.clientX - rect.left - this.nameWidth())
-        / Math.max(1, rect.width - this.nameWidth()) * (end - start);
+      const names = this.nameWidth(pane);
+      return start + (event.clientX - rect.left - names)
+        / Math.max(1, rect.width - names) * (end - start);
     }
 
     snapColumn(column) {
@@ -1175,13 +1248,17 @@
 
     moveCursor(name, column) {
       this.cursorSequence++;
+      if (name === 'C') {
+        this.selectedError = null;
+        this.updateErrorControls();
+      }
       this.cursorPositions[name] = this.snapColumn(column);
       this.updateCursorControls();
       this.drawCursorOverlays();
     }
 
     cursorTrack(pane) {
-      const offset = this.nameWidth(), width = Math.max(1, pane.canvas.clientWidth - offset);
+      const offset = this.nameWidth(pane), width = Math.max(1, pane.canvas.clientWidth - offset);
       const view = this.drawnView || { start: this.start, end: this.end };
       return CURSORS.filter(name => this.cursorPositions[name] != null).map(name => {
         const column = this.cursorPositions[name];
@@ -1202,11 +1279,12 @@
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         const width = canvas.clientWidth, height = canvas.clientHeight;
         ctx.clearRect(0, 0, width, height);
-        ctx.save(); ctx.beginPath(); ctx.rect(this.nameWidth(), 0, width - this.nameWidth(), height); ctx.clip();
+        const names = this.nameWidth(pane);
+        ctx.save(); ctx.beginPath(); ctx.rect(names, 0, width - names, height); ctx.clip();
         if (this.rangeSelection && this.result.pairs[this.rangeSelection.pair]) {
           const view = this.drawnView;
           const { start, end, pair } = this.rangeSelection;
-          const left = this.nameWidth();
+          const left = names;
           const scale = (width - left) / (view.end - view.start);
           const x = left + (Math.max(start, view.start) - view.start) * scale;
           const right = left + (Math.min(end, view.end) - view.start) * scale;
@@ -1238,7 +1316,7 @@
     startRangeDrag(event, pane) {
       if (!this.drawnView || this.drawnView.generation !== this.generation || this.busy) return false;
       const rect = pane.canvas.getBoundingClientRect();
-      if (event.clientX - rect.left < this.nameWidth() || event.clientY - rect.top < AXIS_HEIGHT) return false;
+      if (event.clientX - rect.left < this.nameWidth(pane) || event.clientY - rect.top < AXIS_HEIGHT) return false;
       const pair = this.pairAtOffset(event.clientY - rect.top - AXIS_HEIGHT + this.drawnView.scrollTop);
       const signal = this.result.pairs[pair]?.name;
       if (signal == null || this.collapsedPairs.has(signal)) return false;
@@ -1254,6 +1332,11 @@
       return Math.max(0, Math.min(Math.ceil(this.result.total) - 1, Math.floor(this.columnAt(event, pane))));
     }
 
+    overlaySideAt(event, pane, index) {
+      const y = event.clientY - pane.canvas.getBoundingClientRect().top - AXIS_HEIGHT + this.drawnView.scrollTop;
+      return y - this.rowOffsets[index] < this.pairHeight(index) / 2 ? 'left' : 'right';
+    }
+
     moveRangeDrag(event, pane) {
       const drag = pane.rangeDrag;
       if (drag.id !== event.pointerId || !this.drawnView || !this.result || this.busy) return;
@@ -1264,7 +1347,7 @@
       if (this.rangeSelection?.start === start && this.rangeSelection?.end === end && this.rangeSelection?.pair === drag.pair) return;
       this.rangeSelection = { start, end, pair: drag.pair, signal: drag.signal };
       this.cursorPair = drag.pair;
-      if (pane.side !== 'overlay') this.cursorSide = pane.side;
+      this.cursorSide = pane.side === 'overlay' ? this.overlaySideAt(event, pane, drag.pair) : pane.side;
       this.moveCursor('C', start);
     }
 
@@ -1285,7 +1368,7 @@
       if (!this.result || !this.drawnView || this.drawnView.generation !== this.generation || this.busy) return false;
       const rect = pane.canvas.getBoundingClientRect();
       const x = event.clientX - rect.left, y = event.clientY - rect.top;
-      if (x < this.nameWidth()) return false;
+      if (x < this.nameWidth(pane)) return false;
       const marker = this.cursorTrack(pane).reverse().find(cursor => y < 20
         ? Math.abs(x - cursor.marker) <= 10
         : y >= AXIS_HEIGHT && cursor.name !== 'C' && cursor.inView && Math.abs(x - cursor.x) <= 4);
@@ -1330,7 +1413,8 @@
       const { A, B, C } = this.cursorPositions;
       const delta = (x, y) => x == null || y == null ? '--' : (x - y > 0 ? '+' : '') + (x - y) + ' cycle';
       this.measurements.textContent = 'B-A：' + delta(B, A) + '  Cur-A：' + delta(C, A) + '  Cur-B：' + delta(C, B);
-      const pair = this.result?.pairs[this.cursorPair];
+      const candidate = this.result?.pairs[this.cursorPair];
+      const pair = this.filteredPairs.has(candidate?.name) ? null : candidate;
       const side = pair?.[this.cursorSide] >= 0 ? this.cursorSide : this.cursorSide === 'left' ? 'right' : 'left';
       this.cursorSignal.textContent = pair ? (side === 'left' ? 'A · ' : 'B · ') + pair.name : '';
       this.cursorSignal.title = this.cursorSignal.textContent;
@@ -1370,6 +1454,26 @@
       if (this.active && !this.busy && generation === this.generation && error) this.chooseError(error, true);
     }
 
+    async navigateDifference() {
+      if (this.differencePending || !this.result?.errorCount) return;
+      const generation = this.generation;
+      const column = this.selectedError ? this.selectedError.runStart ?? this.selectedError.start
+        : this.cursorPositions.C ?? this.start;
+      this.differencePending = true;
+      try {
+        const error = await this.scope.worker.call('compare-next-difference', {
+          generation, column, skipCurrent: !!this.selectedError
+        });
+        if (!this.active || this.busy || generation !== this.generation) return;
+        if (!error) { this.status.textContent = '后方没有更多差异'; return; }
+        this.chooseError(error, true);
+        this.status.textContent += ' · 连续差异 cycle ' + error.runStart + '–' + error.runEnd
+          + (this.filteredPairs.has(this.result.pairs[error.pair].name) ? ' · 该信号已被筛选隐藏' : '');
+      } finally {
+        this.differencePending = false;
+      }
+    }
+
     chooseError(error, jump) {
       this.selectedError = error;
       const pair = this.result.pairs[error.pair];
@@ -1377,24 +1481,27 @@
       this.status.textContent = pair.name + ' · cycle ' + error.start + '–' + error.end + ' · ' + error.reason
         + ' · cycle ' + (error.position == null ? error.start : error.position)
         + ' 的值 A: ' + display(error.leftValue) + ' · B: ' + display(error.rightValue);
-      if (jump) this.jump(error.pair, error.start, error.end);
+      if (jump) this.jump(error.pair, error.runStart ?? error.start, error.runEnd ?? error.end);
       else this.draw();
       this.updateErrorControls();
     }
 
     updateErrorControls() {
       if (!this.root) return;
-      for (const action of ['prev', 'next']) this.root.querySelector('[data-action="' + action + '"]').disabled = this.busy || !this.result || !this.result.errorCount;
+      for (const action of ['prev', 'next', 'next-difference']) this.root.querySelector('[data-action="' + action + '"]').disabled = this.busy || !this.result || !this.result.errorCount;
       this.root.querySelector('[data-action="tag"]').disabled = this.busy || !this.selectedError;
     }
 
     jump(pair, start, end) {
-      if (this.collapsedPairs.delete(this.result.pairs[pair]?.name)) {
-        this.rebuildRowOffsets();
-        this.updateExpandAllControl();
+      const name = this.result.pairs[pair]?.name;
+      if (!this.filteredPairs.has(name)) {
+        if (this.collapsedPairs.delete(name)) {
+          this.rebuildRowOffsets();
+          this.updateExpandAllControl();
+        }
+        this.scrollTop = this.rowOffsets[Math.max(0, pair - 1)];
+        this.syncPaneGeometry();
       }
-      this.scrollTop = this.rowOffsets[Math.max(0, pair - 1)];
-      this.syncPaneGeometry();
       const span = Math.max(8, Math.min(this.end - this.start, Math.max(16, (end - start) * 3)));
       this.setView(start - span / 4, span);
       this.schedule();

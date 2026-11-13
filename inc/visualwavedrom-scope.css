@@ -1733,3 +1733,44 @@ body.scope-multi-wave-legend-dragging * {
     align-items: flex-start;
   }
 }
+.scope-signal-filter-card {
+  box-sizing: border-box;
+  width: min(390px, calc(100% - 24px));
+  max-height: calc(100% - 24px);
+  padding: 14px;
+  border: 1px solid #b7c0cb;
+  border-radius: 6px;
+  background: #fff;
+  color: #25313e;
+  font: 13px "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+
+.scope-signal-filter-card::backdrop { background: rgba(25, 36, 48, 0.22); }
+.scope-signal-filter-card form, .scope-filter-search { display: grid; gap: 8px; }
+.scope-filter-search input, .scope-signal-filter-card button {
+  box-sizing: border-box;
+  min-height: 30px;
+  border: 1px solid #a9b6c3;
+  border-radius: 4px;
+  padding: 4px 8px;
+  color: inherit;
+  background: #fff;
+  font: inherit;
+}
+.scope-filter-search input[aria-invalid="true"] { border-color: #ae2737; }
+.scope-filter-all, .scope-filter-list label {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 4px 3px;
+  overflow-wrap: anywhere;
+}
+.scope-signal-filter-card input[type="checkbox"] { flex: none; margin: 2px 0 0; accent-color: #2264a7; }
+.scope-filter-all { font-weight: 600; border-bottom: 1px solid #d6dee6; }
+.scope-filter-list { max-height: min(280px, 44vh); overflow: auto; }
+.scope-filter-list:empty { display: none; }
+.scope-filter-list label:hover { background: #edf4fa; }
+.scope-filter-status { color: #465568; }
+.scope-signal-filter-card footer { display: flex; justify-content: flex-end; gap: 8px; }
+.scope-signal-filter-card button[type="submit"]:enabled { background: #2264a7; color: #fff; }
+.scope-signal-filter-card button:disabled { opacity: 0.55; }

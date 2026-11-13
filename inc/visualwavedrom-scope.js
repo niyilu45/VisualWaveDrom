@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=multi-wave-scale-v1';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=signal-filter-v1';
   const FormulaEngine = global.VisualWaveDromFormula || null;
   const DEFAULT_ROW_HEIGHT = 42;
   const DEFAULT_MULTI_WAVE_ROW_HEIGHT = 68;
@@ -643,6 +643,7 @@
       this.rowStyles = {};
       this.rowHeights = [];
       this.collapsedRows = new Set();
+      this.filteredSignalIds = new Set();
       this.expandedArrayGroups = new Set();
       this.signalNames = [];
       this.signalRowTargets = new Map();
@@ -961,6 +962,7 @@
           </div>
           <div class="scope-toolbar-group" aria-label="视图控制">
             <button type="button" class="scope-command-btn" id="scope-compare">比较示波器</button>
+            <button type="button" class="scope-command-btn" id="scope-signal-filter" aria-haspopup="dialog">信号筛选</button>
             <button type="button" class="scope-command-btn" id="scope-add-signal"
                 title="新增一个仅在当前网页会话保留的空波形" disabled>新增波形</button>
             <button type="button" class="scope-command-btn" id="scope-add-multi-wave"
@@ -1611,6 +1613,13 @@
       this.root.querySelector('#scope-save-instance').addEventListener('click', () => this.saveInstance());
       this.saveSourceButton.addEventListener('click', () => this.saveChanges());
       this.root.querySelector('#scope-open-normal').addEventListener('click', () => this.adapter.openNormalView());
+      const filterButton = this.root.querySelector('#scope-signal-filter');
+      filterButton.addEventListener('click', () => {
+        if (!this.meta) return;
+        global.VisualWaveDromScopeSignalFilter.open(filterButton, this.meta.rows.map(row => ({
+          id: row.rowId, name: this.signalDisplayName(row.index)
+        })), this.filteredSignalIds, ids => this.applySignalFilter(ids));
+      });
       this.root.querySelector('#scope-compare').addEventListener('click', () => {
         if (!this.meta || this.formulaRefreshInFlight || this.formulaApplyInFlight) {
           this.setStatus('请等待当前公式计算完成后再比较');
@@ -2010,14 +2019,49 @@
       return this.collapsedRows.has(Math.floor(Number(rowIndex)));
     }
 
+    isSignalFiltered(rowIndex) {
+      return !!this.filteredSignalIds?.has(this.meta?.rows[rowIndex]?.rowId);
+    }
+
+    applySignalFilter(ids) {
+      if (ids.size === this.filteredSignalIds.size
+          && [...ids].every(id => this.filteredSignalIds.has(id))) return;
+      if (this.signalNameEditor) this.finishSignalNameEdit(true);
+      const anchor = this.captureVerticalScrollAnchor();
+      this.filteredSignalIds = ids;
+      this.root.querySelector('#scope-signal-filter').classList.toggle('active', ids.size > 0);
+      if (this.columnSelection && this.isSignalFiltered(this.columnSelection.rowIndex)) this.columnSelection = null;
+      if (this.selectedPoint && this.isSignalFiltered(this.selectedPoint.rowIndex)) this.selectedPoint = null;
+      const connection = this.connections.find(item => item.id === this.selectedConnectionId);
+      if (connection && (this.isSignalFiltered(connection.start.rowIndex)
+          || this.isSignalFiltered(connection.end.rowIndex))) this.selectedConnectionId = '';
+      this.connectionDraftStart = this.connectionHover = null;
+      this.renderSignalRows();
+      if (!this.rowHeight(this.activeCursorRow)) {
+        const row = this.meta.rows.find(row => this.rowHeight(row.index) && !this.isRowCollapsed(row.index));
+        if (row) this.setActiveCursorRow(row.index);
+        else this.cursorNavigationSequence++;
+      }
+      this.updatePointEditor();
+      this.updateCursorControls();
+      this.restoreVerticalScrollAnchor(anchor);
+      this.positionPlotCanvas();
+      this.resetWindowCache();
+      this.scheduleWindowRequest();
+      this.scheduleOverviewDataRequest();
+      this.scheduleCursorReadout();
+      this.draw();
+    }
+
     isArrayElementHidden(rowIndex) {
       const group = this.meta?.rows[rowIndex]?.arrayGroup;
-      return group?.index >= 0 && (this.isRowCollapsed(group.anchor)
+      return group?.index >= 0 && !this.isSignalFiltered(group.anchor) && (this.isRowCollapsed(group.anchor)
         || !this.expandedArrayGroups.has(group.name));
     }
 
     hiddenArrayElements() {
       return this.meta.rows.filter((row) => row.arrayGroup?.index < 0
+        && !this.isSignalFiltered(row.index)
         && (this.isRowCollapsed(row.index) || !this.expandedArrayGroups.has(row.arrayGroup.name)))
         .map((row) => row.index);
     }
@@ -2052,15 +2096,15 @@
     isCollapsedRunStart(rowIndex) {
       const index = Math.floor(Number(rowIndex));
       let previous = index - 1;
-      while (this.isArrayElementHidden(previous)) previous -= 1;
+      while (this.isArrayElementHidden(previous) || this.isSignalFiltered(previous)) previous -= 1;
       return this.isRowCollapsed(index) && !this.isRowCollapsed(previous);
     }
 
     collapsedRunStart(rowIndex) {
       let index = Math.floor(Number(rowIndex));
       let previous = index - 1;
-      while (previous >= 0 && (this.isRowCollapsed(previous) || this.isArrayElementHidden(previous))) {
-        if (!this.isArrayElementHidden(previous)) index = previous;
+      while (previous >= 0 && (this.isRowCollapsed(previous) || this.isArrayElementHidden(previous) || this.isSignalFiltered(previous))) {
+        if (!this.isArrayElementHidden(previous) && !this.isSignalFiltered(previous)) index = previous;
         previous -= 1;
       }
       return index;
@@ -2180,7 +2224,8 @@
     }
 
     rowHeight(rowIndex) {
-      if (this.isArrayElementHidden(rowIndex)) return 0;
+      if (!this.meta?.rows[rowIndex]) return 0;
+      if (this.isSignalFiltered(rowIndex) || this.isArrayElementHidden(rowIndex)) return 0;
       if (this.isRowCollapsed(rowIndex)) {
         return this.isCollapsedRunStart(rowIndex) ? COLLAPSED_ROW_HEIGHT : 0;
       }
@@ -3300,7 +3345,7 @@
 
     async deleteActiveSignal() {
       const row = this.meta && this.meta.rows[this.activeCursorRow];
-      if (!row || row.arrayGroup?.index < 0) return;
+      if (!row || this.isSignalFiltered(row.index) || row.arrayGroup?.index < 0) return;
       const rowId = String(row.rowId || ('source:' + row.index));
       const name = this.signalDisplayName(row.index);
       const order = this.visibleRowIds().filter((candidate) => candidate !== rowId);
@@ -4002,7 +4047,7 @@
           if (!this.isCollapsedRunStart(row.index)) return '';
           const runRows = [];
           for (let index = row.index; index < this.meta.rows.length; index += 1) {
-            if (this.isArrayElementHidden(index)) continue;
+            if (this.isArrayElementHidden(index) || this.isSignalFiltered(index)) continue;
             if (!this.isRowCollapsed(index)) break;
             runRows.push(this.meta.rows[index]);
           }
@@ -5135,6 +5180,8 @@
         end,
         width,
         rowCount: this.meta.rows.length,
+        filteredRows: this.filteredSignalIds.size
+          ? this.meta.rows.filter(row => this.isSignalFiltered(row.index)).map(row => row.index) : [],
         hiddenArrayElements: this.hiddenArrayElements(),
         multiWaveHidden: { ...this.transientFormulaState.multiWaveHidden },
         modes: Object.assign({}, this.modes),
@@ -5230,6 +5277,7 @@
         Math.round(config.end * 10000000) / 10000000,
         config.width,
         config.rowCount,
+        config.filteredRows,
         config.hiddenArrayElements,
         config.multiWaveHidden,
         config.modes,
@@ -5245,6 +5293,7 @@
         width: config.width,
         rowStart,
         rowEnd,
+        filteredRows: config.filteredRows,
         hiddenArrayElements: config.hiddenArrayElements,
         multiWaveHidden: config.multiWaveHidden,
         modes: config.modes,
@@ -5328,11 +5377,13 @@
         rowStart: 0,
         rowEnd: config.rowCount,
         rows: new Array(config.rowCount),
-        computedRowCount: 0,
-        complete: config.rowCount === 0,
+        computedRowCount: config.filteredRows.length,
+        complete: config.rowCount === config.filteredRows.length,
         viewportKey: key
       };
-      if (!config.rowCount) {
+      // Mark hidden slots complete so background filling never requests them again.
+      config.filteredRows.forEach(index => { cache.rows[index] = { index }; });
+      if (cache.complete) {
         this.windowData = cache;
         this.rowStart = 0;
         this.rowEnd = 0;
@@ -6363,7 +6414,8 @@
     connectionAtPoint(x, y, width) {
       for (let index = this.connections.length - 1; index >= 0; index -= 1) {
         const connection = this.connections[index];
-        if (this.isRowCollapsed(connection.start.rowIndex)
+        if (!this.rowHeight(connection.start.rowIndex) || !this.rowHeight(connection.end.rowIndex)
+            || this.isRowCollapsed(connection.start.rowIndex)
             || this.isRowCollapsed(connection.end.rowIndex)) continue;
         const geometry = this.connectionGeometry(connection, width);
         if (this.pointToSegmentDistance(
@@ -6441,7 +6493,8 @@
 
     drawConnections(context, width, height) {
       this.connections.forEach((connection) => {
-        if (this.isRowCollapsed(connection.start.rowIndex)
+        if (!this.rowHeight(connection.start.rowIndex) || !this.rowHeight(connection.end.rowIndex)
+            || this.isRowCollapsed(connection.start.rowIndex)
             || this.isRowCollapsed(connection.end.rowIndex)) return;
         this.drawConnection(
           context,
@@ -6813,7 +6866,7 @@
         }
       }
       const rows = this.simplified
-        ? this.simplified.model.rows.filter((row) => !this.isRowCollapsed(row.index)).slice(0, 8)
+        ? this.simplified.model.rows.filter((row) => this.rowHeight(row.index) && !this.isRowCollapsed(row.index)).slice(0, 8)
         : [];
       rows.forEach((row, visibleRowIndex) => {
         const rowIndex = row.index;
@@ -8003,15 +8056,15 @@
       this.updateCursorLocationControls();
       this.updateCursorJumpAvailability();
       const row = this.meta && this.meta.rows[this.activeCursorRow];
-      this.cursorSignalEl.textContent = row ? row.name : '';
-      this.cursorSignalEl.title = row ? row.name : '';
+      this.cursorSignalEl.textContent = row && this.rowHeight(row.index) ? row.name : '';
+      this.cursorSignalEl.title = this.cursorSignalEl.textContent;
       this.updateStyleControls();
       this.updateRowOperationControls();
     }
 
     updateCursorJumpAvailability() {
       if (!this.cursorPrevButton || !this.cursorNextButton || !this.cursorJumpInput) return;
-      const disabled = !this.meta?.rows.length;
+      const disabled = !this.meta?.rows[this.activeCursorRow] || !this.rowHeight(this.activeCursorRow);
       this.cursorPrevButton.disabled = this.cursorNextButton.disabled = this.cursorJumpInput.disabled = disabled;
     }
 
@@ -8060,6 +8113,7 @@
       this.addSignalButton.disabled = busy || !ready;
       this.addMultiWaveButton.disabled = busy || !ready;
       this.deleteSignalButton.disabled = busy || !ready || rowCount === 0
+        || !this.rowHeight(this.activeCursorRow)
         || this.meta.rows[this.activeCursorRow]?.arrayGroup?.index < 0;
       this.deleteSignalButton.title = rowCount
         ? '删除当前选中的波形，可通过撤销恢复'
@@ -8143,6 +8197,8 @@
       try {
         const result = await this.worker.call('inspect', {
           column: reference.column,
+          filteredRows: this.filteredSignalIds.size
+            ? this.meta.rows.filter(row => this.isSignalFiltered(row.index)).map(row => row.index) : [],
           modes: this.modes,
           busFormats: this.busFormats,
           analogFormats: this.analogFormats,
@@ -8303,7 +8359,7 @@
     }
 
     async navigateActiveCursor(direction) {
-      if (!this.meta?.rows.length || this.destroyed) return;
+      if (!this.meta?.rows.length || this.destroyed || !this.rowHeight(this.activeCursorRow)) return;
       const navigationCursor = this.activeCursor || 'C';
       const navigationColumn = this.cursorLocation(navigationCursor) ?? this.viewStart;
       const row = this.meta.rows[this.activeCursorRow];

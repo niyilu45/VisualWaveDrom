@@ -61,6 +61,25 @@
 .scope-compare-scroll { position: absolute; inset: 38px 0 0; overflow-y: scroll; overflow-x: hidden; }
 .scope-compare-canvas-wrap canvas { position: absolute; inset: 0 18px 0 0; width: calc(100% - 18px); height: 100%; touch-action: none; }
 .scope-compare-canvas-wrap .scope-compare-cursor-layer { pointer-events: none; }
+.scope-compare-name-header {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 38px;
+  padding: 0 5px 0 8px;
+  color: #42505d;
+  background: #f0f2f5;
+  font-size: 12px;
+}
+.scope-compare-name-header button { width: 23px; min-height: 23px; padding: 2px; }
+.scope-compare-name-header svg { width: 13px; height: 13px; }
+.scope-compare-name-header.is-hidden { top: 20px; height: 18px; }
+.scope-compare-name-header.is-hidden button { min-height: 18px; height: 18px; padding: 0; }
+.scope-compare-row-controls[hidden] { display: none; }
+.scope-comparison [data-action="filter-signals"].is-filtered { border-color: #176ca5; background: #deedff; }
 .scope-compare-row-controls {
   position: absolute;
   inset: 38px auto 0 0;
