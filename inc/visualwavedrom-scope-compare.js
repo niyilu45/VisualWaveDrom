@@ -3,6 +3,7 @@
   const AXIS_HEIGHT = 38;
   const NAME_WIDTH = 160;
   const COLLAPSED_ROW_HEIGHT = 24;
+  const OVERLAY_PAIR_GAP = 6;
   const ROW_TOGGLE_SIZE = 20;
   const ROW_NAME_X = 32;
   const COLORS = ['#176ca5', '#b45c0c'];
@@ -85,7 +86,6 @@
         </header>
         <div class="scope-compare-controls">
           ${button('prev', '上一个错误', 'prev')}${button('next', '下一个错误', 'next')}
-          <button type="button" data-action="next-difference">下一个差异</button>
           <span class="scope-compare-count"></span>
           ${button('tag', '添加错误标签')}
           <label>起始 cycle <input class="scope-compare-start" type="number" min="0" step="0.5" value="0"></label>
@@ -170,7 +170,16 @@
       });
       this.bindShortcuts(doc);
       this.root.querySelector('.scope-compare-layout').addEventListener('change', (event) => {
+        const top = this.result ? this.pairAtOffset(this.scrollTop) : -1;
+        const fraction = this.pairHeight(top) > 0
+          ? (this.scrollTop - this.rowOffsets[top]) / this.pairHeight(top) : 0;
         this.layout = event.target.value;
+        if (this.result) {
+          this.rebuildRowOffsets();
+          if (top >= 0 && top < this.result.pairs.length) {
+            this.scrollTop = this.rowOffsets[top] + fraction * this.pairHeight(top);
+          }
+        }
         this.buildPanes();
       });
       this.startInput.addEventListener('change', () => this.setView(Number(this.startInput.value), this.end - this.start));
@@ -273,7 +282,6 @@
           this.result.pairs.map(pair => ({ id: pair.name, name: pair.name })), this.filteredPairs,
           ids => this.applySignalFilter(ids));
       }
-      if (action === 'next-difference') return this.navigateDifference();
       if (action === 'swap') return this.swap();
       if (action === 'expand-all') {
         this.collapsedPairs.clear();
@@ -599,6 +607,10 @@
     rebuildRowOffsets() {
       this.rowOffsets = [0];
       this.collapsedRuns = new Map();
+      this.overlayLastPair = -1;
+      if (this.layout === 'overlay' && this.loadedNames.right) {
+        this.overlayLastPair = this.result.pairs.findLastIndex(pair => !this.filteredPairs.has(pair.name));
+      }
       let runStart = -1;
       this.result.pairs.forEach((pair, index) => {
         if (this.filteredPairs.has(pair.name)) {
@@ -617,6 +629,8 @@
           height = Math.max(
             pair.left < 0 ? 0 : this.leftRenderer.rowHeight(pair.left),
             pair.right < 0 ? 0 : this.rightRenderer.rowHeight(pair.right));
+          if (this.layout === 'overlay' && this.loadedNames.right) height *= 2;
+          if (height) height += this.pairGap(index);
         }
         this.rowOffsets.push(this.rowOffsets.at(-1) + height);
       });
@@ -683,7 +697,7 @@
       if (pane.rowControls.style.width !== width) pane.rowControls.style.width = width;
       for (let index = view.rowStart; index < view.rowEnd; index += 1) {
         const y = this.rowOffsets[index] - view.scrollTop;
-        const rowHeight = this.pairHeight(index);
+        const rowHeight = this.pairContentHeight(index);
         if (!rowHeight || y + rowHeight <= 0 || y >= height) continue;
         visible.add(index);
         const runEnd = this.collapsedRuns.get(index);
@@ -729,6 +743,14 @@
     }
 
     pairHeight(index) { return this.rowOffsets[index + 1] - this.rowOffsets[index]; }
+
+    pairGap(index) {
+      const pair = this.result?.pairs[index];
+      return pair && index < this.overlayLastPair && !this.filteredPairs.has(pair.name)
+        && !this.collapsedPairs.has(pair.name) ? OVERLAY_PAIR_GAP : 0;
+    }
+
+    pairContentHeight(index) { return Math.max(0, this.pairHeight(index) - this.pairGap(index)); }
 
     pairAtOffset(offset) {
       let lo = 0, hi = this.result.pairs.length;
@@ -889,6 +911,7 @@
             toggle.setAttribute('aria-expanded', String(!hidden));
             toggle.innerHTML = icon(hidden ? 'next' : 'prev');
             names.classList.toggle('is-hidden', hidden);
+            label.hidden = hidden;
             rowControls.hidden = hidden;
           };
           toggle.addEventListener('click', () => {
@@ -1129,7 +1152,7 @@
         for (let index = view.rowStart; index < view.rowEnd; index += 1) {
           const pair = this.result.pairs[index];
           const y = this.rowOffsets[index] - scrollTop;
-          const rowHeight = this.pairHeight(index);
+          const rowHeight = this.pairContentHeight(index);
           if (!rowHeight) continue;
           ctx.strokeStyle = '#dfe2e6'; ctx.beginPath(); ctx.moveTo(0, y + rowHeight - 0.5); ctx.lineTo(plotWidth, y + rowHeight - 0.5); ctx.stroke();
           if (this.collapsedPairs.has(pair.name)) continue;
@@ -1148,21 +1171,17 @@
             ctx.strokeRect(left + 0.5, y + 1, Math.max(0.5, right - left - 1), rowHeight - 3);
           }
           ctx.lineWidth = 1;
-          if (overlay) {
-            ctx.strokeStyle = '#dfe2e6';
-            ctx.beginPath(); ctx.moveTo(0, y + rowHeight / 2); ctx.lineTo(plotWidth, y + rowHeight / 2); ctx.stroke();
-          }
           sides.forEach((side, layer) => {
             const row = this.cache[side].get(pair[side]);
             if (!row) return;
             const source = renderers[side];
             const naturalHeight = overlay ? rowHeight / 2 : source.rowHeight(row.index);
             const top = y + (overlay ? layer * naturalHeight : (rowHeight - naturalHeight) / 2);
-            const padding = overlay ? 2 : 3;
+            const padding = overlay ? 0 : 3;
             ctx.save(); ctx.beginPath();
-            ctx.rect(0, overlay ? top : y, plotWidth, (overlay ? naturalHeight : rowHeight) - 1); ctx.clip();
+            ctx.rect(0, overlay ? top : y, plotWidth, overlay ? naturalHeight : rowHeight - 1); ctx.clip();
             source.drawSegments(ctx, row, row.index, top + padding, top + naturalHeight - padding, plotWidth,
-              overlay ? COLORS[layer] : source.rowWaveColor(row.index));
+              overlay ? COLORS[layer] : source.rowWaveColor(row.index), overlay);
             ctx.restore();
           });
         }
@@ -1175,7 +1194,7 @@
         ctx.save(); ctx.beginPath(); ctx.rect(0, AXIS_HEIGHT, nameWidth, plotHeight); ctx.clip();
         for (let index = view.rowStart; nameWidth && index < view.rowEnd; index += 1) {
           const pair = this.result.pairs[index], y = AXIS_HEIGHT + this.rowOffsets[index] - scrollTop;
-          const h = this.pairHeight(index);
+          const h = this.pairContentHeight(index);
           if (!h) continue;
           const collapsed = this.collapsedPairs.has(pair.name);
           ctx.fillStyle = collapsed ? '#edf0f3' : '#f7f8fa'; ctx.fillRect(0, y, nameWidth, h - 1);
@@ -1198,10 +1217,12 @@
       if (!this.drawnView || this.drawnView.generation !== this.generation || this.busy) return;
       const rect = pane.canvas.getBoundingClientRect();
       if (event.clientY - rect.top < AXIS_HEIGHT) return;
-      const row = this.pairAtOffset(event.clientY - rect.top - AXIS_HEIGHT + this.drawnView.scrollTop);
+      const y = event.clientY - rect.top - AXIS_HEIGHT + this.drawnView.scrollTop;
+      const row = this.pairAtOffset(y);
       const pair = this.result.pairs[row];
       const inNameColumn = event.clientX - rect.left < this.nameWidth(pane);
-      if (!pair || (!inNameColumn && this.collapsedPairs.has(pair.name))) return;
+      if (!pair || y - this.rowOffsets[row] >= this.pairContentHeight(row)
+          || (!inNameColumn && this.collapsedPairs.has(pair.name))) return;
       const column = this.columnAt(event, pane);
       this.cursorPair = row;
       if (pane.side !== 'overlay') this.cursorSide = pane.side;
@@ -1289,7 +1310,7 @@
           const x = left + (Math.max(start, view.start) - view.start) * scale;
           const right = left + (Math.min(end, view.end) - view.start) * scale;
           const y = AXIS_HEIGHT + this.rowOffsets[pair] - view.scrollTop;
-          const top = Math.max(y, AXIS_HEIGHT), bottom = Math.min(y + this.pairHeight(pair), height);
+          const top = Math.max(y, AXIS_HEIGHT), bottom = Math.min(y + this.pairContentHeight(pair), height);
           if (right > x && bottom > top) {
             ctx.fillStyle = 'rgba(31, 104, 213, 0.13)'; ctx.fillRect(x, top, right - x, bottom - top);
             ctx.strokeStyle = '#1f68d5'; ctx.lineWidth = 1;
@@ -1317,9 +1338,11 @@
       if (!this.drawnView || this.drawnView.generation !== this.generation || this.busy) return false;
       const rect = pane.canvas.getBoundingClientRect();
       if (event.clientX - rect.left < this.nameWidth(pane) || event.clientY - rect.top < AXIS_HEIGHT) return false;
-      const pair = this.pairAtOffset(event.clientY - rect.top - AXIS_HEIGHT + this.drawnView.scrollTop);
+      const y = event.clientY - rect.top - AXIS_HEIGHT + this.drawnView.scrollTop;
+      const pair = this.pairAtOffset(y);
       const signal = this.result.pairs[pair]?.name;
-      if (signal == null || this.collapsedPairs.has(signal)) return false;
+      if (signal == null || this.collapsedPairs.has(signal)
+          || y - this.rowOffsets[pair] >= this.pairContentHeight(pair)) return false;
       const column = this.rangeColumn(event, pane);
       pane.rangeDrag = { id: event.pointerId, x: event.clientX, column, pair, signal,
         previous: this.rangeSelection, cursor: this.cursorPositions.C, moved: false };
@@ -1334,7 +1357,7 @@
 
     overlaySideAt(event, pane, index) {
       const y = event.clientY - pane.canvas.getBoundingClientRect().top - AXIS_HEIGHT + this.drawnView.scrollTop;
-      return y - this.rowOffsets[index] < this.pairHeight(index) / 2 ? 'left' : 'right';
+      return y - this.rowOffsets[index] < this.pairContentHeight(index) / 2 ? 'left' : 'right';
     }
 
     moveRangeDrag(event, pane) {
@@ -1446,29 +1469,28 @@
     }
 
     async navigate(direction) {
-      if (!this.result || !this.result.errorCount) return;
-      const count = this.result.errorCount;
-      const index = this.selectedError ? (this.selectedError.index + direction + count) % count : (direction > 0 ? 0 : count - 1);
-      const generation = this.generation;
-      const error = await this.scope.worker.call('compare-error', { generation, index });
-      if (this.active && !this.busy && generation === this.generation && error) this.chooseError(error, true);
-    }
-
-    async navigateDifference() {
       if (this.differencePending || !this.result?.errorCount) return;
-      const generation = this.generation;
-      const column = this.selectedError ? this.selectedError.runStart ?? this.selectedError.start
-        : this.cursorPositions.C ?? this.start;
+      const generation = this.generation, sequence = this.cursorSequence;
+      const name = this.activeCursor || 'C';
+      const position = this.cursorPositions[name];
+      const column = position ?? (direction > 0 ? this.start : this.end);
       this.differencePending = true;
       try {
-        const error = await this.scope.worker.call('compare-next-difference', {
-          generation, column, skipCurrent: !!this.selectedError
+        const error = await this.scope.worker.call('compare-difference', {
+          generation, column, direction, hasCursor: position != null
         });
-        if (!this.active || this.busy || generation !== this.generation) return;
-        if (!error) { this.status.textContent = '后方没有更多差异'; return; }
+        if (!this.active || this.busy || generation !== this.generation || sequence !== this.cursorSequence) return;
+        if (!error || this.snapColumn(error.runStart) === position) {
+          this.status.textContent = (direction > 0 ? '后方' : '前方') + '没有更多差异';
+          return;
+        }
+        this.rangeSelection = null;
+        const hidden = this.filteredPairs.has(this.result.pairs[error.pair].name);
+        if (!hidden) this.cursorPair = error.pair;
+        this.moveCursor(name, error.runStart);
         this.chooseError(error, true);
         this.status.textContent += ' · 连续差异 cycle ' + error.runStart + '–' + error.runEnd
-          + (this.filteredPairs.has(this.result.pairs[error.pair].name) ? ' · 该信号已被筛选隐藏' : '');
+          + (hidden ? ' · 该信号已被筛选隐藏' : '');
       } finally {
         this.differencePending = false;
       }
@@ -1488,7 +1510,7 @@
 
     updateErrorControls() {
       if (!this.root) return;
-      for (const action of ['prev', 'next', 'next-difference']) this.root.querySelector('[data-action="' + action + '"]').disabled = this.busy || !this.result || !this.result.errorCount;
+      for (const action of ['prev', 'next']) this.root.querySelector('[data-action="' + action + '"]').disabled = this.busy || !this.result || !this.result.errorCount;
       this.root.querySelector('[data-action="tag"]').disabled = this.busy || !this.selectedError;
     }
 

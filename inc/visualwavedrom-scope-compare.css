@@ -76,7 +76,7 @@
 }
 .scope-compare-name-header button { width: 23px; min-height: 23px; padding: 2px; }
 .scope-compare-name-header svg { width: 13px; height: 13px; }
-.scope-compare-name-header.is-hidden { top: 20px; height: 18px; }
+.scope-compare-name-header.is-hidden { top: 20px; height: 18px; padding: 0 2px; }
 .scope-compare-name-header.is-hidden button { min-height: 18px; height: 18px; padding: 0; }
 .scope-compare-row-controls[hidden] { display: none; }
 .scope-comparison [data-action="filter-signals"].is-filtered { border-color: #176ca5; background: #deedff; }

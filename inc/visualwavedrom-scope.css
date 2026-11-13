@@ -148,22 +148,6 @@ body.scope-wave-view > #vim-help-modal {
   flex-wrap: wrap;
 }
 
-.scope-style-controls {
-  flex: 1 1 100%;
-  flex-wrap: wrap;
-  padding-right: 0;
-  border-right: 0;
-}
-
-.scope-style-signal {
-  width: 82px;
-  overflow: hidden;
-  color: #2c5d94;
-  font-size: 11px;
-  font-weight: 700;
-  text-overflow: ellipsis;
-}
-
 .scope-color-presets {
   display: inline-flex;
   align-items: center;
@@ -204,17 +188,6 @@ body.scope-wave-view > #vim-help-modal {
 
 .scope-background-presets .scope-color-preset {
   border-color: #9299a2;
-}
-
-.scope-style-controls .scope-color-preset {
-  width: 20px;
-  height: 20px;
-  flex-basis: 20px;
-}
-
-.scope-style-controls #scope-style-columns {
-  width: 92px;
-  font-family: Consolas, "Courier New", monospace;
 }
 
 .scope-toolbar-label {

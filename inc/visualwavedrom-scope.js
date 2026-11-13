@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=signal-filter-v1';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=difference-cursor-v1';
   const FormulaEngine = global.VisualWaveDromFormula || null;
   const DEFAULT_ROW_HEIGHT = 42;
   const DEFAULT_MULTI_WAVE_ROW_HEIGHT = 68;
@@ -479,37 +479,6 @@
     return segments;
   }
 
-  function parseColumnSelection(value, totalColumns) {
-    const text = String(value == null ? '' : value).trim();
-    if (!text) throw new Error('请输入列号，例如 1,3-5');
-    const maximum = Math.max(1, Math.floor(Number(totalColumns) || 1));
-    const ranges = [];
-    text.replace(/[，；;]/g, ',').split(',').forEach((part) => {
-      const token = part.trim();
-      const match = token.match(/^(\d+)(?:\s*-\s*(\d+))?$/);
-      if (!match) throw new Error('列号格式错误：' + token);
-      const first = Number(match[1]);
-      const last = Number(match[2] || match[1]);
-      if (first < 1 || last < 1 || first > maximum || last > maximum) {
-        throw new Error('列号必须在 1-' + maximum + ' 范围内');
-      }
-      ranges.push({
-        start: Math.min(first, last) - 1,
-        end: Math.max(first, last)
-      });
-    });
-    ranges.sort((left, right) => left.start - right.start || left.end - right.end);
-    return ranges.reduce((merged, range) => {
-      const previous = merged[merged.length - 1];
-      if (previous && range.start <= previous.end) {
-        previous.end = Math.max(previous.end, range.end);
-      } else {
-        merged.push(range);
-      }
-      return merged;
-    }, []);
-  }
-
   class ScopeWorkerClient {
     constructor(log) {
       this.log = typeof log === 'function' ? log : function () {};
@@ -745,7 +714,6 @@
       this.formulaApplyInFlight = false;
       this.formulaSelectionState = { field: 'cycle0', start: 0, end: 0 };
       this.formulaVariablePickerNames = [];
-      this.styleControlRow = null;
       this.stylePopoverAnchor = null;
       this.columnBackgroundColor = BACKGROUND_COLOR_PRESETS[0].value;
       this.rowStart = 0;
@@ -998,16 +966,6 @@
                 aria-keyshortcuts="Shift+B" title="跳转到游标 B（Shift+B）" disabled><b>B</b><span>未设置</span></button>
             <button type="button" class="scope-command-btn scope-cursor-locate" data-scope-locate-cursor="C"
                 aria-keyshortcuts="Shift+C" title="跳转到游标 C（Shift+C）" disabled><b>C</b><span>未设置</span></button>
-          </div>
-          <div class="scope-toolbar-group scope-style-controls" aria-label="波形显示样式">
-            <span class="scope-toolbar-label">行样式</span>
-            <span class="scope-style-signal" id="scope-style-signal"></span>
-            <label>指定列
-              <input type="text" id="scope-style-columns" placeholder="1,3-5"
-                  aria-label="需要设置背景色的列">
-            </label>
-            <button type="button" class="scope-command-btn" id="scope-style-use-cursors"
-                title="使用 A、B 游标之间的列">使用 A-B</button>
           </div>
           <div class="scope-toolbar-group scope-simplify-controls">
             <label>方法
@@ -1399,7 +1357,6 @@
       this.multiWaveJsonPreview = root.querySelector('#scope-multi-wave-json-preview');
       this.multiWaveApplyButton = root.querySelector('#scope-multi-wave-apply');
       this.multiWaveCopyButton = root.querySelector('#scope-multi-wave-copy-json');
-      this.styleSignalEl = root.querySelector('#scope-style-signal');
       this.stylePopover = root.querySelector('#scope-style-popover');
       this.stylePopoverTitle = root.querySelector('#scope-style-popover-title');
       this.stylePopoverCloseButton = root.querySelector('#scope-style-popover-close');
@@ -1407,8 +1364,6 @@
       this.waveColorResetButton = root.querySelector('#scope-wave-color-reset');
       this.rowBackgroundPresets = root.querySelector('#scope-row-background-presets');
       this.rowBackgroundClearButton = root.querySelector('#scope-row-background-clear');
-      this.styleColumnsInput = root.querySelector('#scope-style-columns');
-      this.styleUseCursorsButton = root.querySelector('#scope-style-use-cursors');
       this.columnBackgroundPresets = root.querySelector('#scope-column-background-presets');
       this.columnBackgroundClearButton = root.querySelector('#scope-column-background-clear');
       this.columnBackgroundSummary = root.querySelector('#scope-column-background-summary');
@@ -1588,25 +1543,8 @@
         this.updateStyleControls();
         this.applyColumnBackground(false);
       });
-      this.styleUseCursorsButton.addEventListener('click', () => this.useCursorColumnSelection());
       this.columnBackgroundClearButton.addEventListener('click', () => {
         this.applyColumnBackground(true);
-      });
-      this.styleColumnsInput.addEventListener('input', () => {
-        this.updateColumnBackgroundAvailability();
-      });
-      this.styleColumnsInput.addEventListener('keydown', (event) => {
-        if (event.key !== 'Enter') return;
-        event.preventDefault();
-        const row = this.meta && this.meta.rows[this.activeCursorRow];
-        const anchor = row && this.signalList.querySelector(
-          '[data-scope-swatch-row="' + row.index + '"]'
-        );
-        if (anchor && this.updateColumnBackgroundAvailability()) {
-          this.openStylePopover(row.index, anchor);
-        } else {
-          this.setStatus('请先在波形区域选择需要设置背景的列', true);
-        }
       });
       this.root.querySelector('#scope-use-view').addEventListener('click', () => this.useCurrentViewRange());
       this.root.querySelector('#scope-simplify').addEventListener('click', () => this.runSimplify(true));
@@ -4536,7 +4474,7 @@
     }
 
     updateStyleControls() {
-      if (!this.styleSignalEl) return;
+      if (!this.stylePopover) return;
       const row = this.meta && this.meta.rows[this.activeCursorRow];
       const waveColorButtons = Array.from(
         this.waveColorPresets.querySelectorAll('[data-scope-wave-color]')
@@ -4553,13 +4491,10 @@
         ...columnBackgroundButtons,
         this.waveColorResetButton,
         this.rowBackgroundClearButton,
-        this.styleColumnsInput,
-        this.styleUseCursorsButton,
         this.columnBackgroundClearButton
       ];
       controls.forEach((control) => { control.disabled = !row; });
       if (!row) {
-        this.styleSignalEl.textContent = '';
         this.stylePopoverTitle.textContent = '';
         waveColorButtons.concat(rowBackgroundButtons, columnBackgroundButtons).forEach((button) => {
           button.classList.remove('active');
@@ -4569,12 +4504,6 @@
         return;
       }
       const style = this.rowStyle(row.index);
-      if (this.styleControlRow !== row.index) {
-        this.styleColumnsInput.value = '';
-        this.styleControlRow = row.index;
-      }
-      this.styleSignalEl.textContent = row.name;
-      this.styleSignalEl.title = row.name;
       this.stylePopoverTitle.textContent = row.name;
       const effectiveWaveColor = this.rowWaveColor(row.index);
       waveColorButtons.forEach((button) => {
@@ -4594,22 +4523,19 @@
         button.classList.toggle('active', active);
         button.setAttribute('aria-pressed', String(active));
       });
-      const count = style.backgroundRanges.length;
-      this.styleSignalEl.dataset.rangeCount = String(count);
-      this.styleSignalEl.setAttribute(
-        'aria-label',
-        row.name + (count ? '，已设置 ' + count + ' 个列背景区间' : '')
-      );
       this.updateColumnBackgroundAvailability();
+    }
+
+    columnBackgroundSelection() {
+      const selection = this.columnSelection;
+      return selection && selection.rowIndex === this.activeCursorRow ? selection : null;
     }
 
     updateColumnBackgroundAvailability() {
       if (!this.columnBackgroundPresets) return false;
       const row = this.meta && this.meta.rows[this.activeCursorRow];
-      const columnText = this.styleColumnsInput
-        ? String(this.styleColumnsInput.value || '').trim()
-        : '';
-      const available = !!row && !!columnText;
+      const selection = this.columnBackgroundSelection();
+      const available = !!row && !!selection;
       this.columnBackgroundClearButton.disabled = !available;
       Array.from(
         this.columnBackgroundPresets.querySelectorAll('[data-scope-column-background]')
@@ -4618,7 +4544,8 @@
       });
       if (this.columnBackgroundSummary) {
         this.columnBackgroundSummary.textContent = available
-          ? row.name + '：第 ' + columnText + ' 列'
+          ? row.name + '：第 ' + (selection.start + 1)
+            + (selection.end - selection.start > 1 ? '-' + selection.end : '') + ' 列'
           : '请先在波形区域选择需要设置背景的列';
       }
       return available;
@@ -4734,44 +4661,17 @@
       );
     }
 
-    useCursorColumnSelection() {
-      if (this.cursorA == null || this.cursorB == null) return;
-      const maximum = Math.max(1, this.meta.totalColumns);
-      const left = clamp(Math.min(this.cursorA, this.cursorB), 0, maximum - 1);
-      const right = clamp(Math.max(this.cursorA, this.cursorB), 0, maximum);
-      const start = clamp(Math.floor(left) + 1, 1, maximum);
-      const end = Math.abs(right - left) < 1e-7
-        ? start
-        : clamp(Math.ceil(right), start, maximum);
-      this.styleColumnsInput.value = start === end ? String(start) : start + '-' + end;
-      this.updateColumnBackgroundAvailability();
-      this.styleColumnsInput.focus();
-      this.styleColumnsInput.select();
-    }
-
     applyColumnBackground(clear) {
       const row = this.meta && this.meta.rows[this.activeCursorRow];
-      if (!row) return;
-      let selection;
-      try {
-        selection = parseColumnSelection(this.styleColumnsInput.value, this.meta.totalColumns);
-      } catch (error) {
-        this.setStatus(error.message || String(error), true);
-        this.styleColumnsInput.focus();
-        return;
-      }
+      const selection = this.columnBackgroundSelection();
+      if (!row || !selection) return;
       const color = clear ? '' : normalizeScopeColor(this.columnBackgroundColor);
       if (!clear && !color) return;
       this.changeRowStyle((style) => {
-        selection.forEach((range) => {
-          style.backgroundRanges = overlayBackgroundRange(
-            style.backgroundRanges,
-            range.start,
-            range.end,
-            color
-          );
-        });
-      }, (clear ? '已清除 ' : '已设置 ') + row.name + ' 指定列的背景色');
+        style.backgroundRanges = overlayBackgroundRange(
+          style.backgroundRanges, selection.start, selection.end, color
+        );
+      }, (clear ? '已清除 ' : '已设置 ') + row.name + ' 选区的背景色');
     }
 
     resizeCanvas(canvas, width, height, pixelRatio) {
@@ -5628,12 +5528,12 @@
       context.restore();
     }
 
-    drawUnknownDigitalSegment(context, x1, x2, yTop, yBottom, lineWidth, compact, width) {
+    drawUnknownDigitalSegment(context, x1, x2, yTop, yBottom, lineWidth, compact, width, flush = false) {
       const origin = Math.min(x1, x2);
       const left = Math.max(0, origin);
       const right = Math.min(width, Math.max(x1, x2));
       const segmentWidth = Math.max(1, right - left);
-      const inset = Math.min(5, Math.max(1, (yBottom - yTop) * 0.2));
+      const inset = flush ? 0.75 : Math.min(5, Math.max(1, (yBottom - yTop) * 0.2));
       const highY = Math.min(yBottom, yTop + inset);
       const lowY = Math.max(yTop, yBottom - inset);
       const centerY = (highY + lowY) / 2;
@@ -5672,9 +5572,10 @@
       return centerY;
     }
 
-    drawDigitalDecorations(context, data, yTop, yBottom, width, color) {
-      const highY = yTop + 5;
-      const lowY = yBottom - 5;
+    drawDigitalDecorations(context, data, yTop, yBottom, width, color, flush) {
+      const inset = flush ? 0.75 : 5;
+      const highY = yTop + inset;
+      const lowY = yBottom - inset;
       context.save();
       (data.clockEdges || []).forEach((clockEdge) => {
         const x = this.xForColumn(clockEdge.column, width);
@@ -5697,9 +5598,10 @@
       context.restore();
     }
 
-    drawSegments(context, rowResult, rowIndex, yTop, yBottom, width, color, labelOffset = 0) {
+    drawSegments(context, rowResult, rowIndex, yTop, yBottom, width, color, flush = false) {
       const data = rowResult.data;
       const mode = rowResult.mode;
+      const inset = flush ? 0.75 : 5;
       if (data.kind === 'multi-analog') {
         let highlighted = this.highlightedMultiWaveSource(rowIndex);
         const layered = this.visibleMultiWaveEntries(rowIndex, data.series).map(
@@ -5731,7 +5633,8 @@
             {
               drawGuide: drawIndex === 0,
               drawUnknowns: false,
-              lineWidth: isHighlighted ? 2.75 : 1.25
+              lineWidth: isHighlighted ? 2.75 : 1.25,
+              flush
             }
           );
           context.restore();
@@ -5739,7 +5642,7 @@
         return;
       }
       if (data.kind === 'points' || data.kind === 'envelope') {
-        this.drawAnalog(context, data, yTop, yBottom, width, color);
+        this.drawAnalog(context, data, yTop, yBottom, width, color, flush ? { flush } : undefined);
         return;
       }
       if (data.kind === 'buckets') {
@@ -5752,13 +5655,14 @@
             ? this.visibleBusLabelGeometry(bucket.start, bucket.end, width)
             : null;
           if (bucket.bus) {
+            const boxInset = flush ? inset : 3;
             context.fillStyle = 'rgba(0, 151, 167, 0.12)';
-            context.fillRect(x1, yTop + 3, Math.max(1, bucketWidth), yBottom - yTop - 6);
+            context.fillRect(x1, yTop + boxInset, Math.max(1, bucketWidth), yBottom - yTop - 2 * boxInset);
             context.strokeStyle = color;
-            context.strokeRect(x1, yTop + 3, Math.max(1, bucketWidth), yBottom - yTop - 6);
+            context.strokeRect(x1, yTop + boxInset, Math.max(1, bucketWidth), yBottom - yTop - 2 * boxInset);
             if (bucket.binary) {
-              const highY = yTop + 5;
-              const lowY = yBottom - 5;
+              const highY = yTop + inset;
+              const lowY = yBottom - inset;
               context.lineWidth = 1.5;
               context.beginPath();
               if (bucket.high) {
@@ -5792,7 +5696,7 @@
             }
           }
           if (bucket.unknown) {
-            this.drawUnknownDigitalSegment(context, x1, x2, yTop, yBottom, 1, true, width);
+            this.drawUnknownDigitalSegment(context, x1, x2, yTop, yBottom, 1, true, width, flush);
           }
           const busLabel = String(bucket.value == null ? '' : bucket.value);
           if (bucket.bus && !bucket.unknown && busLabel && busLabel !== '*'
@@ -5804,12 +5708,12 @@
             context.fillText(
               compactBusLabel(data.packedArray ? 'arr' : busLabel, busLabelGeometry.width),
               busLabelGeometry.center,
-              (yTop + yBottom) / 2 + labelOffset
+              (yTop + yBottom) / 2
             );
           }
           if (!bucket.bus) {
-            const highY = yTop + 5;
-            const lowY = yBottom - 5;
+            const highY = yTop + inset;
+            const lowY = yBottom - inset;
             context.strokeStyle = color;
             context.beginPath();
             if (bucket.high) {
@@ -5828,7 +5732,7 @@
           }
         });
         if (mode === 'digital') {
-          this.drawDigitalDecorations(context, data, yTop, yBottom, width, color);
+          this.drawDigitalDecorations(context, data, yTop, yBottom, width, color, flush);
         }
         return;
       }
@@ -5849,13 +5753,14 @@
             yBottom,
             1.5,
             false,
-            width
+            width,
+            flush
           );
           return;
         }
         if (segment.kind === 'bus' || mode === 'bus') {
-          const top = yTop + 5;
-          const bottom = yBottom - 5;
+          const top = yTop + inset;
+          const bottom = yBottom - inset;
           const segmentWidth = Math.max(0, x2 - x1);
           const busLabelGeometry = this.visibleBusLabelGeometry(
             segment.start,
@@ -5884,7 +5789,7 @@
             context.fillText(
               compactBusLabel(label, busLabelGeometry.width),
               busLabelGeometry.center,
-              (top + bottom) / 2 + labelOffset
+              (top + bottom) / 2
             );
           }
           previousY = null;
@@ -5899,13 +5804,14 @@
             yBottom,
             1.5,
             false,
-            width
+            width,
+            flush
           );
           return;
         }
         const y = state === '1'
-          ? yTop + 5
-          : (state === '0' ? yBottom - 5 : (yTop + yBottom) / 2);
+          ? yTop + inset
+          : (state === '0' ? yBottom - inset : (yTop + yBottom) / 2);
         context.strokeStyle = state === 'z' ? '#6f7680' : color;
         context.lineWidth = 1.5;
         context.setLineDash(state === 'z' ? [5, 3] : []);
@@ -5921,17 +5827,20 @@
         previousY = y;
       });
       if (mode === 'digital') {
-        this.drawDigitalDecorations(context, data, yTop, yBottom, width, color);
+        this.drawDigitalDecorations(context, data, yTop, yBottom, width, color, flush);
       }
     }
 
     drawAnalog(context, data, yTop, yBottom, width, color, options) {
       const settings = options || {};
-      context.save(); context.beginPath(); context.rect(0, yTop + 4, width, Math.max(0, yBottom - yTop - 8)); context.clip();
+      const inset = settings.flush ? 0.75 : 4;
+      const clipInset = settings.flush ? 0 : inset;
+      context.save(); context.beginPath();
+      context.rect(0, yTop + clipInset, width, Math.max(0, yBottom - yTop - 2 * clipInset)); context.clip();
       const range = data.range || { min: -1, max: 1 };
       const scale = Math.max(1e-12, range.max - range.min);
-      const yFor = (value) => yBottom - 4
-        - (value - range.min) / scale * Math.max(1, yBottom - yTop - 8);
+      const yFor = (value) => yBottom - inset
+        - (value - range.min) / scale * Math.max(1, yBottom - yTop - 2 * inset);
       context.strokeStyle = color;
       context.lineWidth = Math.max(0.5, Number(settings.lineWidth) || 1.25);
       if (data.kind === 'envelope') {
@@ -5999,7 +5908,8 @@
             yBottom,
             1,
             true,
-            width
+            width,
+            settings.flush
           );
         });
       }
@@ -7261,11 +7171,6 @@
         cursorColumn: end - start === 1 ? (Number.isFinite(cursorColumn) ? cursorColumn : start + 0.5) : null
       };
       this.cursorC = this.currentMeasurementColumn();
-      if (this.styleColumnsInput) {
-        const first = start + 1;
-        const last = end;
-        this.styleColumnsInput.value = first === last ? String(first) : first + '-' + last;
-      }
       this.updateColumnBackgroundAvailability();
       this.updateCursorJumpAvailability();
       this.scheduleMeasurementUpdate();
@@ -7843,7 +7748,6 @@
         this.selectedPoint = null;
         this.updatePointEditor();
       }
-      if (this.styleColumnsInput) this.styleColumnsInput.value = String(start + 1);
       this.updateColumnBackgroundAvailability();
       this.updateCursorJumpAvailability();
       this.scheduleMeasurementUpdate();

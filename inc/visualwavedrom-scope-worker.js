@@ -4196,7 +4196,7 @@ function swapComparison(generation) {
   return { generation: comparison.generation };
 }
 
-function nextComparisonDifference(request) {
+function findComparisonDifference(request) {
   if (!comparison || request.generation !== comparison.generation) return null;
   if (!comparison.differenceRuns) {
     const runs = [];
@@ -4210,7 +4210,8 @@ function nextComparisonDifference(request) {
   const runs = comparison.differenceRuns;
   const column = Number(request.column);
   let index = findFirstSegment(runs, column);
-  if (request.skipCurrent && runs[index]?.start <= column) index++;
+  if (request.direction < 0) index--;
+  else if (runs[index]?.start < column || (request.hasCursor && runs[index]?.start === column)) index++;
   const run = runs[index];
   return run ? { ...run.error, runStart: run.start, runEnd: run.end } : null;
 }
@@ -4266,8 +4267,8 @@ async function handleRequest(message) {
     } else if (request.type === 'compare-error') {
       result = comparison && comparison.generation === request.generation
         ? comparison.errors[request.index] || null : null;
-    } else if (request.type === 'compare-next-difference') {
-      result = nextComparisonDifference(request);
+    } else if (request.type === 'compare-difference') {
+      result = findComparisonDifference(request);
     } else if (request.type === 'cancel-window') {
       latestWindowGeneration = Math.max(
         latestWindowGeneration,
