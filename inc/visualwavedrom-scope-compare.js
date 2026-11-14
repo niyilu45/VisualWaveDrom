@@ -39,6 +39,8 @@
       this.pendingChanges = new Map();
       this.cursorSequence = 0;
       this.collapsedPairs = new Set();
+      this.manuallyHiddenPairs = new Set();
+      this.currentDifferenceFilter = null;
       this.filteredPairs = new Set();
       this.namesHidden = { left: false, right: true };
     }
@@ -54,6 +56,8 @@
       this.active = true;
       this.layout = 'vertical';
       this.collapsedPairs.clear();
+      this.manuallyHiddenPairs.clear();
+      this.currentDifferenceFilter = this.differenceFilterRequest = null;
       this.filteredPairs.clear();
       this.signalRowHeight = null;
       this.namesHidden = { left: false, right: true };
@@ -83,7 +87,10 @@
           </select></label>
           <button type="button" data-action="swap" title="交换比较图 A 和 B">${icon('swap')}交换</button>
           ${button('expand-all', '全部展开')}
-          <button type="button" data-action="filter-signals" aria-haspopup="dialog">信号筛选</button>
+          <div class="scope-compare-signal-filters">
+            <button type="button" data-action="filter-signals" aria-haspopup="dialog">信号筛选</button>
+            <button type="button" data-action="filter-current-differences" title="按当前选中的游标筛选">隐藏当前无差异信号</button>
+          </div>
           ${button('close', '退出比较', 'close')}
         </header>
         <div class="scope-compare-controls">
@@ -273,6 +280,7 @@
       this.updateErrorControls();
       this.updateCursorControls();
       this.updateExpandAllControl();
+      this.updateSignalFilterControls();
     }
 
     async action(action) {
@@ -281,9 +289,10 @@
       if (!this.result) return;
       if (action === 'filter-signals') {
         return global.VisualWaveDromScopeSignalFilter.open(this.root.querySelector('[data-action="filter-signals"]'),
-          this.result.pairs.map(pair => ({ id: pair.name, name: pair.name })), this.filteredPairs,
-          ids => this.applySignalFilter(ids));
+          this.result.pairs.map(pair => ({ id: pair.name, name: pair.name })), this.manuallyHiddenPairs,
+          ids => this.applySignalFilter(ids), { currentDifferences: () => this.currentDifferenceSignals() });
       }
+      if (action === 'filter-current-differences') return this.toggleCurrentDifferenceFilter();
       if (action === 'swap') return this.swap();
       if (action === 'expand-all') {
         this.collapsedPairs.clear();
@@ -300,6 +309,47 @@
         const span = (this.end - this.start) * (action === 'zoom-in' ? 0.5 : 2);
         const center = this.selectedError ? this.selectedError.start : (this.start + this.end) / 2;
         this.setView(center - span / 2, span);
+      }
+    }
+
+    async currentDifferenceSignals(cursor = 'C') {
+      if (!this.loadedNames.right) throw new Error('请先加载两张波形图');
+      const column = this.cursorPositions[cursor];
+      if (column == null) throw new Error('请先定位游标 ' + cursor);
+      const generation = this.generation;
+      const names = await this.scope.worker.call('compare-current-differences', { generation, column });
+      if (!this.active || this.busy || generation !== this.generation || !Array.isArray(names)) {
+        throw new Error('比较数据已更新，请重开信号筛选');
+      }
+      return names;
+    }
+
+    async toggleCurrentDifferenceFilter() {
+      if (this.differenceFilterRequest) return;
+      if (this.currentDifferenceFilter) {
+        this.currentDifferenceFilter = null;
+        this.syncSignalVisibility();
+        this.status.textContent = '已恢复原信号筛选';
+        return;
+      }
+      const cursor = this.activeCursor || 'C';
+      const column = this.cursorPositions[cursor];
+      const request = this.differenceFilterRequest = this.currentDifferenceSignals(cursor);
+      this.updateSignalFilterControls();
+      try {
+        const names = await request;
+        if (this.differenceFilterRequest !== request) return;
+        this.currentDifferenceFilter = { column, names: new Set(names) };
+        this.syncSignalVisibility();
+        const shown = this.result.pairs.length - this.filteredPairs.size;
+        this.status.textContent = `游标 ${cursor} · ${column} cycle · ${shown} 个差异信号`;
+      } catch (error) {
+        if (this.differenceFilterRequest === request) throw error;
+      } finally {
+        if (this.differenceFilterRequest === request) {
+          this.differenceFilterRequest = null;
+          this.updateSignalFilterControls();
+        }
       }
     }
 
@@ -387,6 +437,8 @@
         this.pendingChanges.clear();
       }
       const { left: leftName, right: rightName } = this.loadedNames;
+      this.differenceFilterRequest = null;
+      if (!refresh || !rightName) this.currentDifferenceFilter = null;
       const reuseLeft = refresh && !!this.leftRenderer && !changes.has(leftName);
       const reuseRight = refresh && !!this.rightRenderer && !changes.has(rightName);
       const leftDisplay = refresh && !reuseLeft ? this.captureDisplay(this.leftRenderer) : null;
@@ -456,6 +508,13 @@
           leftDocument, reuseLeft, reuseRight, currentContent,
           currentNames: leftDocument ? null : this.scope.meta.rows.map((row) => this.scope.signalDisplayName(row.index)) });
         if (!this.active || sequence !== this.sequence) return;
+        if (this.currentDifferenceFilter) {
+          const names = await this.scope.worker.call('compare-current-differences', {
+            generation: result.generation, column: this.currentDifferenceFilter.column
+          });
+          if (!this.active || sequence !== this.sequence) return;
+          this.currentDifferenceFilter.names = new Set(names);
+        }
         this.result = result;
         this.generation = result.generation;
         this.updatePaneTitles();
@@ -471,6 +530,7 @@
         for (const name of this.collapsedPairs) {
           if (!pairNames.has(name)) this.collapsedPairs.delete(name);
         }
+        this.filteredPairs = this.hiddenSignalPairs();
         this.rebuildRowOffsets();
         this.selectedError = null;
         if (anchor) {
@@ -648,13 +708,33 @@
 
     applySignalFilter(ids) {
       if (!this.result || this.busy) return;
+      this.manuallyHiddenPairs = ids;
+      this.syncSignalVisibility();
+    }
+
+    hiddenSignalPairs() {
+      const matches = this.currentDifferenceFilter?.names;
+      return new Set(this.result.pairs.map(pair => pair.name).filter(name => this.manuallyHiddenPairs.has(name)
+        || (matches && !matches.has(name))));
+    }
+
+    updateSignalFilterControls() {
+      this.root.querySelector('[data-action="filter-signals"]').classList.toggle('is-filtered', this.manuallyHiddenPairs.size > 0);
+      const button = this.root.querySelector('[data-action="filter-current-differences"]');
+      button.disabled = this.busy || !this.result || !this.loadedNames?.right || !!this.differenceFilterRequest;
+      button.classList.toggle('is-filtered', !!this.currentDifferenceFilter);
+      button.textContent = this.currentDifferenceFilter ? '展开当前无差异信号' : '隐藏当前无差异信号';
+    }
+
+    syncSignalVisibility() {
+      this.updateSignalFilterControls();
+      const ids = this.hiddenSignalPairs();
       if (ids.size === this.filteredPairs.size && [...ids].every(id => this.filteredPairs.has(id))) return;
       this.filteredPairs = ids;
-      this.root.querySelector('[data-action="filter-signals"]').classList.toggle('is-filtered', ids.size > 0);
       this.cache = null;
       this.drawnView = null;
       if (ids.has(this.rangeSelection?.signal)) this.rangeSelection = null;
-      if (ids.has(this.result.pairs[this.cursorPair]?.name)) {
+      if (this.cursorPair < 0 || ids.has(this.result.pairs[this.cursorPair]?.name)) {
         this.cursorPair = this.result.pairs.findIndex(pair => !ids.has(pair.name));
       }
       this.cursorSequence++;
@@ -1722,6 +1802,7 @@
     close(options) {
       if (!this.active) return;
       this.active = false;
+      this.currentDifferenceFilter = this.differenceFilterRequest = null;
       this.shortcutEvents?.abort();
       this.shortcutEvents = null;
       this.sequence += 1;

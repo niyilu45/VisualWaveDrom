@@ -19,6 +19,7 @@
   background: #fff;
 }
 .scope-compare-toolbar strong { font-size: 15px; }
+.scope-compare-signal-filters { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
 .scope-compare-cursors button[aria-pressed="true"] { background: #deedff; border-color: #176ca5; }
 .scope-cursor-decimal { font-size: 1.45em; font-weight: 900; line-height: 0; }
 .scope-compare-condition { width: min(140px, 36vw); }
@@ -80,7 +81,7 @@
 .scope-compare-name-header.is-hidden { top: 20px; height: 18px; padding: 0 2px; }
 .scope-compare-name-header.is-hidden button { min-height: 18px; height: 18px; padding: 0; }
 .scope-compare-row-controls[hidden] { display: none; }
-.scope-comparison [data-action="filter-signals"].is-filtered { border-color: #176ca5; background: #deedff; }
+.scope-compare-signal-filters .is-filtered { border-color: #176ca5; background: #deedff; }
 .scope-compare-row-controls {
   position: absolute;
   inset: 38px auto 0 0;

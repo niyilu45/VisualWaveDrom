@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  function open(button, signals, hidden, apply) {
+  function open(button, signals, hidden, apply, options = {}) {
     const doc = button.ownerDocument;
     if (doc.querySelector('.scope-signal-filter-card')) return;
     const draft = new Set(signals.filter(signal => hidden.has(signal.id)).map(signal => signal.id));
@@ -14,26 +14,32 @@
         <label class="scope-filter-search">信号名（正则）
           <input type="search" autocomplete="off" spellcheck="false">
         </label>
+        ${options.currentDifferences ? '<label class="scope-filter-current"><input type="checkbox">当前差异</label>' : ''}
         <label class="scope-filter-all"><input type="checkbox">全选匹配信号</label>
         <div class="scope-filter-list" role="group" aria-label="匹配信号"></div>
         <output class="scope-filter-status" aria-live="polite"></output>
         <footer><button type="button">取消</button><button type="submit">确定</button></footer>
       </form>`;
     const search = card.querySelector('input[type="search"]');
+    const current = card.querySelector('.scope-filter-current input');
     const all = card.querySelector('.scope-filter-all input');
     const list = card.querySelector('.scope-filter-list');
     const status = card.querySelector('output');
     let matches = [], invalid = false;
+    let differences = null, loadingDifferences = false, differenceError = '';
 
     function updateSelection() {
       const checked = matches.reduce((count, signal) => count + Number(!draft.has(signal.id)), 0);
       all.disabled = !matches.length;
       all.checked = matches.length > 0 && checked === matches.length;
       all.indeterminate = checked > 0 && checked < matches.length;
-      status.textContent = invalid ? '正则表达式无效' : matches.length
+      status.textContent = invalid ? '正则表达式无效' : current?.checked && loadingDifferences ? '正在查询游标 C 处的差异…'
+        : current?.checked && differenceError ? differenceError : matches.length
         ? '匹配 ' + matches.length + ' 项 · 共勾选 ' + (signals.length - draft.size) + ' 项'
         : '无匹配信号 · 共勾选 ' + (signals.length - draft.size) + ' 项';
     }
+
+    const canApply = () => !invalid && !(current?.checked && (loadingDifferences || differenceError));
 
     function render() {
       const pattern = search.value;
@@ -41,7 +47,9 @@
       try { regex = new RegExp(pattern, /\p{Lu}/u.test(pattern) ? '' : 'i'); } catch (_) { regex = null; }
       invalid = !regex;
       search.setAttribute('aria-invalid', String(invalid));
-      matches = regex ? signals.filter(signal => regex.test(signal.name)) : [];
+      const onlyDifferences = !!current?.checked;
+      matches = regex ? signals.filter(signal => regex.test(signal.name)
+        && (!onlyDifferences || differences?.has(signal.id))) : [];
       const fragment = doc.createDocumentFragment();
       matches.forEach(signal => {
         const label = doc.createElement('label');
@@ -58,11 +66,23 @@
       });
       list.replaceChildren(fragment);
       list.scrollTop = 0;
-      card.querySelector('[type="submit"]').disabled = invalid;
+      card.querySelector('[type="submit"]').disabled = !canApply();
       updateSelection();
     }
 
     search.addEventListener('input', render);
+    current?.addEventListener('change', async () => {
+      if (!current.checked || differences || loadingDifferences) { render(); return; }
+      differenceError = '';
+      loadingDifferences = true;
+      render();
+      try { differences = new Set(await options.currentDifferences()); }
+      catch (error) { differenceError = error.message || '无法查询当前差异'; }
+      finally {
+        loadingDifferences = false;
+        if (card.open) render();
+      }
+    });
     all.addEventListener('change', () => {
       matches.forEach((signal, index) => {
         if (all.checked) draft.delete(signal.id);
@@ -82,7 +102,7 @@
     card.querySelector('[type="button"]').addEventListener('click', () => card.close());
     card.querySelector('form').addEventListener('submit', event => {
       event.preventDefault();
-      if (!invalid) { card.close(); apply(draft); }
+      if (canApply()) { card.close(); apply(draft); }
     });
     card.addEventListener('close', () => {
       card.remove();

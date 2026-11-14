@@ -1731,7 +1731,7 @@ body.scope-multi-wave-legend-dragging * {
   font: inherit;
 }
 .scope-filter-search input[aria-invalid="true"] { border-color: #ae2737; }
-.scope-filter-all, .scope-filter-list label {
+.scope-filter-all, .scope-filter-current, .scope-filter-list label {
   display: flex;
   align-items: flex-start;
   gap: 7px;

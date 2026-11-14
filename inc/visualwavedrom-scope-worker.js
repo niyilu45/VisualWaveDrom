@@ -4287,6 +4287,18 @@ function inspectComparison(request) {
     rightValue: comparisonValue(right, position, comparison.right) });
 }
 
+function comparisonSignalsAtColumn(request) {
+  if (!comparison || request.generation !== comparison.generation) return null;
+  const column = request.column;
+  if (!Number.isFinite(column) || column < 0 || column >= comparison.total) return [];
+  const names = [];
+  for (const pair of comparison.pairs) {
+    const interval = pair.intervals[findFirstSegment(pair.intervals, column)];
+    if (interval && interval.start <= column) names.push(pair.name);
+  }
+  return names;
+}
+
 async function handleRequest(message) {
   const request = message || {};
   const requestId = request.requestId;
@@ -4320,6 +4332,8 @@ async function handleRequest(message) {
       result = { cancelled: true };
     } else if (request.type === 'compare-inspect') {
       result = inspectComparison(request);
+    } else if (request.type === 'compare-current-differences') {
+      result = comparisonSignalsAtColumn(request);
     } else if (request.type === 'compare-navigate') {
       result = comparison && comparison.generation === request.generation
         ? navigateCursor(request, comparison[request.side === 'right' ? 'right' : 'left'])
