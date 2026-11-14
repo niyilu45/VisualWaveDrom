@@ -4071,6 +4071,19 @@ function comparisonStep(row, session) {
   return rowCursorStep(row);
 }
 
+function canSkipComparisonSamples(row) {
+  return !row.multiWave && !row.scopeValues && (!row.samples || !!row.changePoints);
+}
+
+function useComparisonBoundaries(a, b, left, right) {
+  if (a.changePoints && !a.scopeValues || b.changePoints && !b.scopeValues) return true;
+  if (!canSkipComparisonSamples(a) || !canSkipComparisonSamples(b)) return false;
+  const step = Math.min(comparisonStep(a, left), comparisonStep(b, right), 1);
+  const savings = row => rawComparisonLength(row) >= 4 * step
+    * Math.max(1, row.changePoints?.indices.length ?? row.segments.length);
+  return savings(a) && savings(b);
+}
+
 function comparisonNextBoundary(row, column, session) {
   if (!row) return Infinity;
   if (row.multiWave) return column;
@@ -4078,8 +4091,13 @@ function comparisonNextBoundary(row, column, session) {
   const length = rawComparisonLength(row);
   if (raw >= length) return Infinity;
   if (raw < 0) return delay;
+  if (!canSkipComparisonSamples(row)) return column;
   const indices = row.changePoints?.indices;
-  if (!indices || row.scopeValues) return column;
+  if (!indices) {
+    // Ordinary WaveDrom data (including the half-cycles of clocks) already has runs.
+    const segment = row.segments[findFirstSegment(row.segments, raw + 1e-7)];
+    return Math.min(length, segment?.end ?? length) + delay;
+  }
   const step = rowSampleStep(row);
   const sample = Math.floor((raw + 1e-9) / step);
   let low = 0, high = indices.length;
@@ -4120,7 +4138,7 @@ async function startComparison(request) {
     length: comparisonLength,
     value: comparisonValue,
     next: comparisonNextBoundary,
-    useBoundaries: (a, b) => !!(a.changePoints && !a.scopeValues || b.changePoints && !b.scopeValues),
+    useBoundaries: (a, b) => useComparisonBoundaries(a, b, left, right),
     start: (row, session) => row.multiWave ? 0 : rowDelay(session, row),
     step: comparisonStep,
     padded: (a, b) => !!(a && (a.source.scope?.sparseImport || comparisonSourceOffsets(a, left).some(Boolean))
@@ -4139,7 +4157,8 @@ async function startComparison(request) {
 
 async function comparisonWindow(request) {
   const snapshot = comparison;
-  const cancelled = () => !snapshot || comparison !== snapshot || request.generation !== snapshot.generation;
+  const cancelled = () => !snapshot || comparison !== snapshot || request.generation !== snapshot.generation
+    || request.windowToken != null && request.windowToken <= (snapshot.cancelledWindowToken || 0);
   if (cancelled()) return { cancelled: true };
   const pairs = snapshot.pairs.slice(request.rowStart, request.rowEnd)
     .filter((pair) => !request.collapsedPairs?.has(pair.name) && !request.filteredPairs?.has(pair.name));
@@ -4155,29 +4174,39 @@ async function comparisonWindow(request) {
   }
   const width = clamp(Math.ceil(Number(request.width) || 1000), 32, 8192);
   const span = Math.max(1e-9, request.end - request.start);
-  const errors = pairs.flatMap((pair) => {
+  const errors = [];
+  let sliceStarted = performance.now();
+  for (const pair of pairs) {
+    if (cancelled()) return { cancelled: true };
     const first = findFirstSegment(pair.intervals, request.start);
     let limit = findFirstSegment(pair.intervals, request.end);
     if (pair.intervals[limit]?.start < request.end) limit++;
     if (limit - first <= width * 2) {
-      return pair.intervals.slice(first, limit).map(({ pair, start, end }) => ({ pair, start, end }));
-    }
-    // Sample display pixels only; keep exact intervals for inspection and navigation.
-    const visible = [];
-    let firstPixel = -1, index = first;
-    for (let x = 0; x <= width; x += 1) {
-      const left = request.start + x / width * span;
-      const right = request.start + (x + 1) / width * span;
-      if (pair.intervals[index]?.end <= left) index = findFirstSegment(pair.intervals, left);
-      const hit = x < width && index < limit && pair.intervals[index].start < right;
-      if (hit && firstPixel < 0) firstPixel = x;
-      if (!hit && firstPixel >= 0) {
-        visible.push({ pair: pair.intervals[first].pair, start: request.start + firstPixel / width * span, end: left });
-        firstPixel = -1;
+      for (let index = first; index < limit; index++) {
+        const error = pair.intervals[index];
+        errors.push({ pair: error.pair, start: error.start, end: error.end });
+      }
+    } else {
+      // Sample display pixels only; keep exact intervals for inspection and navigation.
+      let firstPixel = -1, index = first;
+      for (let x = 0; x <= width; x += 1) {
+        const left = request.start + x / width * span;
+        const right = request.start + (x + 1) / width * span;
+        if (pair.intervals[index]?.end <= left) index = findFirstSegment(pair.intervals, left);
+        const hit = x < width && index < limit && pair.intervals[index].start < right;
+        if (hit && firstPixel < 0) firstPixel = x;
+        if (!hit && firstPixel >= 0) {
+          errors.push({ pair: pair.intervals[first].pair, start: request.start + firstPixel / width * span, end: left });
+          firstPixel = -1;
+        }
       }
     }
-    return visible;
-  });
+    if (performance.now() - sliceStarted >= 8) {
+      await new Promise(resolve => setTimeout(resolve, 0));
+      sliceStarted = performance.now();
+    }
+  }
+  if (cancelled()) return { cancelled: true };
   return { left: data[0], right: data[1], errors };
 }
 
@@ -4258,6 +4287,11 @@ async function handleRequest(message) {
       result = comparisonProgress;
     } else if (request.type === 'compare-window') {
       result = await comparisonWindow(request);
+    } else if (request.type === 'compare-cancel-window') {
+      if (comparison && comparison.generation === request.generation) {
+        comparison.cancelledWindowToken = Math.max(comparison.cancelledWindowToken || 0, request.token);
+      }
+      result = { cancelled: true };
     } else if (request.type === 'compare-inspect') {
       result = inspectComparison(request);
     } else if (request.type === 'compare-navigate') {

@@ -36,8 +36,9 @@
     }
 
     function render() {
+      const pattern = search.value;
       let regex;
-      try { regex = new RegExp(search.value); } catch (_) { regex = null; }
+      try { regex = new RegExp(pattern, /\p{Lu}/u.test(pattern) ? '' : 'i'); } catch (_) { regex = null; }
       invalid = !regex;
       search.setAttribute('aria-invalid', String(invalid));
       matches = regex ? signals.filter(signal => regex.test(signal.name)) : [];

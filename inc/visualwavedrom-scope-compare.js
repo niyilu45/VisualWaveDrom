@@ -609,7 +609,11 @@
       this.collapsedRuns = new Map();
       this.overlayLastPair = -1;
       if (this.layout === 'overlay' && this.loadedNames.right) {
-        this.overlayLastPair = this.result.pairs.findLastIndex(pair => !this.filteredPairs.has(pair.name));
+        for (let index = this.result.pairs.length - 1; index >= 0; index--) {
+          if (this.filteredPairs.has(this.result.pairs[index].name)) continue;
+          this.overlayLastPair = index;
+          break;
+        }
       }
       let runStart = -1;
       this.result.pairs.forEach((pair, index) => {
@@ -855,10 +859,10 @@
     }
 
     buildPanes() {
+      const document = this.panesRoot.ownerDocument;
       this.releaseCanvasBuffers();
       this.panesRoot.replaceChildren();
       this.panes = [];
-      this.cache = null;
       const single = !this.selects.right.value;
       this.panesRoot.dataset.layout = single ? 'single' : this.layout;
       (single ? ['left'] : this.layout === 'overlay' ? ['overlay'] : ['left', 'right']).forEach((side) => {
@@ -996,7 +1000,11 @@
           item.drag = item.cursorDrag = null;
         });
       });
-      if (this.result) this.syncPaneGeometry();
+      if (this.result) {
+        this.syncPaneGeometry();
+        const view = this.viewport();
+        if (this.covers(this.cache?.view, view, false)) this.draw(view);
+      }
       this.schedule();
     }
 
@@ -1062,7 +1070,18 @@
       const viewport = this.viewport();
       if (this.covers(this.cache?.view, viewport)) { this.draw(viewport); return; }
       if (this.canPreview(this.cache?.view, viewport)) this.draw(viewport);
-      if (this.rendering) { this.renderQueued = true; return; }
+      if (this.rendering) {
+        this.renderQueued = true;
+        const loading = this.loadingView;
+        if (loading?.generation === viewport.generation && !loading.cancelled
+            && !this.canPreview(loading, viewport)) {
+          loading.cancelled = true;
+          void this.scope.worker.call('compare-cancel-window', {
+            generation: loading.generation, token: loading.windowToken
+          }).catch(() => {});
+        }
+        return;
+      }
       this.rendering = true;
       const { generation } = viewport;
       const span = viewport.end - viewport.start;
@@ -1074,15 +1093,17 @@
       const view = { start, end, rowStart: Math.max(0, viewport.rowStart - margin),
         rowEnd: Math.min(this.result.pairs.length, viewport.rowEnd + margin),
         generation, density, width: Math.min(8192, Math.ceil((end - start) * density)),
+        windowToken: (this.windowToken = (this.windowToken || 0) + 1),
         collapsedPairs: new Set(this.collapsedPairs),
         filteredPairs: this.filteredPairs,
         leftModes: left.modes, leftBusFormats: left.busFormats, leftAnalogFormats: left.analogFormats,
         rightModes: right.modes, rightBusFormats: right.busFormats, rightAnalogFormats: right.analogFormats };
+      this.loadingView = view;
       const request = this.windowRequest = this.scope.worker.call('compare-window', view);
       let paintedCurrent = false;
       try {
         const data = await request;
-        if (!data.cancelled && this.active && this.result && generation === this.generation
+        if (!view.cancelled && !data.cancelled && this.active && this.result && generation === this.generation
             && view.filteredPairs === this.filteredPairs) {
           const current = this.viewport();
           const exact = this.covers(view, current);
@@ -1101,6 +1122,7 @@
       } catch (error) { if (this.active && !this.busy && generation === this.generation) this.status.textContent = error.message; }
       finally {
         this.windowRequest = null;
+        this.loadingView = null;
         this.rendering = false;
         if (this.renderQueued) {
           this.renderQueued = false;
