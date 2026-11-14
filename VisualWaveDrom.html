@@ -29,7 +29,7 @@
   <script src="inc/visualwavedrom-settings.js?v=20260926-sidebar-docking-v1"></script>
   <script src="inc/visualwavedrom-sidebar.js?v=20260926-sidebar-docking-v1"></script>
   <link rel="stylesheet" href="inc/codemirror.css?v=5.65.21">
-  <link rel="stylesheet" href="inc/visualwavedrom.css?v=collection-target-title-v1">
+  <link rel="stylesheet" href="inc/visualwavedrom.css?v=rtl-v1">
   <link rel="stylesheet" href="inc/visualwavedrom-scope.css?v=compact-toolbar-v1">
   <link rel="stylesheet" href="inc/visualwavedrom-scope-compare.css?v=compare-row-resize-v1">
   <link rel="stylesheet" href="inc/visualwavedrom-presenter.css?v=20260901-presenter-settings-nav-v1">
@@ -185,6 +185,10 @@
           </svg>
           <span>导入波形数据预设集合</span>
         </button>
+        <button class="menu-btn" id="btn-import-rtl-wave-shortcut" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 3v10m-4-4 4 4 4-4M4 14v5h16v-5"/></svg>
+          <span>导入 RTL 波形</span>
+        </button>
         <button class="menu-btn column-number-btn" id="btn-column-number" type="button"
           aria-pressed="false" data-mode="off"
           title="添加列号：点击使用 tick，再次点击切换为 tock">
@@ -296,6 +300,12 @@
               <polyline points="9 14 12 17 15 14"/>
             </svg>
             导入波形数据预设集合
+          </button>
+        </div>
+        <div class="wave-collection-import-row">
+          <button class="menu-btn wave-collection-import-btn" id="btn-import-rtl-wave" type="button">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 3v10m-4-4 4 4 4-4M4 14v5h16v-5"/></svg>
+            导入 RTL 波形
           </button>
         </div>
         <div class="wave-selection-clipboard-row">
@@ -1036,6 +1046,7 @@
     <script src="inc/visualwavedrom-parameters.js?v=array-layout-v2"></script>
     <script src="inc/visualwavedrom-timing-core.js?v=sparse-import-v1"></script>
     <script src="inc/visualwavedrom-timing.js?v=timing-compact-wheel-v1"></script>
-    <script src="inc/visualwavedrom-app.js?v=multi-wave-scale-v1"></script>
+    <script src="inc/visualwavedrom-import-rtl.js?v=rtl-v1"></script>
+    <script src="inc/visualwavedrom-app.js?v=rtl-v1"></script>
 </body>
 </html>

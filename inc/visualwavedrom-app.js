@@ -4537,7 +4537,8 @@ ${lines.join('\n')}`;
       }
       const metrics = suppliedMetrics || api.measureSource(fullSource);
       const totalColumns = Math.max(0, Number(metrics && metrics.maxWaveLength) || 0);
-      if ((totalColumns < BIG_WAVE_COLUMN_THRESHOLD
+      const sparseNeedsWindow = metrics.sparseCount && totalColumns > BIG_WAVE_MAX_WINDOW_COLUMNS;
+      if ((!sparseNeedsWindow && totalColumns < BIG_WAVE_COLUMN_THRESHOLD
           && Number(metrics.cellCount || 0) < BIG_WAVE_CELL_THRESHOLD)
           || totalColumns <= BIG_WAVE_MIN_WINDOW_COLUMNS) {
         resetBigWaveViewport('below-threshold');
@@ -14595,6 +14596,11 @@ ${lines.join('\n')}`;
       return changed ? prepared : signals;
     }
 
+    function projectShortSparseWave(source, metrics) {
+      if (!metrics?.sparseCount || metrics.maxWaveLength > BIG_WAVE_MAX_WINDOW_COLUMNS) return source;
+      return getBigWaveApi().createRenderWindow(source, { size: metrics.maxWaveLength, metrics }).source;
+    }
+
     function getWaveRenderSource(source, parametersResolved, arrayLabels) {
       if (!source || typeof source !== 'object') return source;
       if (!parametersResolved) source = window.VisualWaveDromParameters.resolve(source);
@@ -17742,6 +17748,8 @@ ${lines.join('\n')}`;
         const signalScope = Object.assign({}, item.target.signal.scope || {});
         if (sparse) signalScope.sparseImport = { data: sparse.data === true, numeric: sparse.numeric === true };
         else delete signalScope.sparseImport;
+        if (item.update.rtlImport) signalScope.rtlImport = item.update.rtlImport;
+        else delete signalScope.rtlImport;
         for (const key of ['commDly', 'dly']) {
           if (!Object.prototype.hasOwnProperty.call(item.update, key)) continue;
           const delay = Number(item.update[key]);
@@ -20148,7 +20156,8 @@ ${lines.join('\n')}`;
             clearHistory: false
           });
         }
-        const renderSource = getWaveRenderSource(bigWaveWindow ? bigWaveWindow.source : fullSource, true, true);
+        const renderSource = getWaveRenderSource(bigWaveWindow ? bigWaveWindow.source
+          : projectShortSparseWave(fullSource, preparedWave.metrics), true, true);
 
         const displayDiv = document.createElement('div');
         displayDiv.id = 'wave-display-0';
@@ -22763,11 +22772,12 @@ ${lines.join('\n')}`;
         const useCanvas = !opts.forceSvg && metrics && (
           metrics.cellCount >= WAVE_PREVIEW_CANVAS_CELL_THRESHOLD
           || metrics.maxWaveLength >= WAVE_PREVIEW_CANVAS_COLUMN_THRESHOLD
+          || (metrics.sparseCount && metrics.maxWaveLength > BIG_WAVE_MAX_WINDOW_COLUMNS)
         );
         if (useCanvas) {
           if (!renderLargeWaveCanvasPreview(entry, meta.renderSource, metrics)) throw new Error('未生成 Canvas');
         } else {
-          const renderSource = getWaveRenderSource(meta.renderSource, true, true);
+          const renderSource = getWaveRenderSource(projectShortSparseWave(meta.renderSource, metrics), true, true);
           WaveDrom.RenderWaveForm(0, renderSource, entry.prefix, false);
           if (!display.querySelector('svg')) throw new Error('未生成 SVG');
           alignWaveDataToCycleGrid(display, renderSource);
@@ -25377,6 +25387,26 @@ ${lines.join('\n')}`;
           return;
         }
         waveCollectionImporter.open();
+      });
+    });
+    const rtlImporter = window.VisualWaveDromRTLImport?.create({
+      title: getCurrentWaveTitle,
+      context: () => [currentWaveLibraryId, editingWaveDocumentName],
+      async apply(payload, [libraryId, documentName]) {
+        if (currentWaveLibraryId !== libraryId || editingWaveDocumentName !== documentName) {
+          throw new Error('波形图或波形库已切换，请重新打开 RTL 导入');
+        }
+        const result = applyImportedWaveRows(payload, {
+          createMissing: true, replaceScopeFormulas: true, replaceScopeMultiWaves: true
+        });
+        await persistImportedWaveRows(result, payload);
+        setStatus(true, '已导入 ' + payload.updates.length + ' 条 RTL 信号');
+      }
+    });
+    ['btn-import-rtl-wave', 'btn-import-rtl-wave-shortcut'].forEach((id) => {
+      document.getElementById(id)?.addEventListener('click', () => {
+        if (rtlImporter) rtlImporter.open();
+        else setStatus(false, 'RTL 导入模块未加载');
       });
     });
     [importWaveDataBtn, document.getElementById('btn-import-wave-row')].forEach((button) => {

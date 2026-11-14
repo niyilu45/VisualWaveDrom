@@ -2015,6 +2015,16 @@
       border-bottom: 1px solid var(--border);
     }
 
+    .rtl-import-dialog { width: min(520px, calc(100% - 24px)); max-height: calc(100% - 24px); color: var(--text); overflow: auto; }
+    .rtl-import-dialog::backdrop { background: rgba(0, 0, 0, .55); }
+    .rtl-import-body > label:not([hidden]) { display: grid; gap: 5px; margin-bottom: 12px; }
+    .rtl-import-body input[type="text"] { width: 100%; padding: 6px 8px; background: var(--surface); color: inherit; border: 1px solid var(--border); border-radius: 4px; }
+    .rtl-import-body input[type="file"] { max-width: 100%; }
+    .rtl-import-body [data-status] { min-height: 1.35em; overflow-wrap: anywhere; }
+    .rtl-import-body [data-preview] { margin-top: 8px; }
+    .rtl-import-body [data-rows] { max-height: 32vh; overflow: auto; padding-top: 4px; }
+    .rtl-import-body [data-rows] label { display: flex; align-items: baseline; gap: 6px; padding: 3px 0; overflow-wrap: anywhere; }
+
     .modal-body {
       padding: 14px 16px;
       display: flex;
