@@ -4229,20 +4229,46 @@ function findComparisonDifference(request) {
   if (!comparison || request.generation !== comparison.generation) return null;
   if (!comparison.differenceRuns) {
     const runs = [];
+    const lastByPair = new Map();
     for (const error of comparison.errors) {
-      const last = runs[runs.length - 1];
+      const last = lastByPair.get(error.pair);
       if (last && error.start <= last.end) last.end = Math.max(last.end, error.end);
-      else runs.push({ start: error.start, end: error.end, error });
+      else {
+        const run = { start: error.start, end: error.end, error };
+        lastByPair.set(error.pair, run);
+        runs.push(run);
+      }
     }
     comparison.differenceRuns = runs;
   }
   const runs = comparison.differenceRuns;
   const column = Number(request.column);
-  let index = findFirstSegment(runs, column);
-  if (request.direction < 0) index--;
-  else if (runs[index]?.start < column || (request.hasCursor && runs[index]?.start === column)) index++;
-  const run = runs[index];
-  return run ? { ...run.error, runStart: run.start, runEnd: run.end } : null;
+  // Runs from different rows can overlap, so search by start, never by end.
+  const lowerBound = (start, inclusive) => {
+    let low = 0, high = runs.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (runs[middle].start < start || (!inclusive && runs[middle].start === start)) low = middle + 1;
+      else high = middle;
+    }
+    return low;
+  };
+  const previous = request.direction < 0;
+  let index = lowerBound(column, previous || !request.hasCursor);
+  if (previous) index--;
+  if (!runs[index]) return null;
+  const start = runs[index].start;
+  if (previous) index = lowerBound(start, true);
+  const hidden = request.filteredPairs;
+  let run = runs[index];
+  for (; runs[index]?.start === start; index++) {
+    const candidate = runs[index];
+    if (!hidden?.has(comparison.pairs[candidate.error.pair].name)) {
+      run = candidate;
+      break;
+    }
+  }
+  return { ...run.error, runStart: run.start, runEnd: run.end };
 }
 
 function inspectComparison(request) {

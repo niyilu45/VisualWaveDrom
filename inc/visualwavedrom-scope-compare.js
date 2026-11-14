@@ -4,7 +4,8 @@
   const NAME_WIDTH = 160;
   const COLLAPSED_ROW_HEIGHT = 24;
   const OVERLAY_PAIR_GAP = 6;
-  const ROW_TOGGLE_SIZE = 20;
+  const MIN_ROW_HEIGHT = 28;
+  const MAX_ROW_HEIGHT = 480;
   const ROW_NAME_X = 32;
   const COLORS = ['#176ca5', '#b45c0c'];
   const CURSOR_COLORS = { A: '#1f68d5', B: '#d93025', C: '#565e68' };
@@ -54,6 +55,7 @@
       this.layout = 'vertical';
       this.collapsedPairs.clear();
       this.filteredPairs.clear();
+      this.signalRowHeight = null;
       this.namesHidden = { left: false, right: true };
       this.delayOverrides = { left: new Map(), right: new Map() };
       const opening = ++this.sequence;
@@ -630,10 +632,9 @@
           this.collapsedRuns.set(runStart, index + 1);
         } else {
           runStart = -1;
-          height = Math.max(
+          height = this.signalRowHeight ?? Math.max(
             pair.left < 0 ? 0 : this.leftRenderer.rowHeight(pair.left),
             pair.right < 0 ? 0 : this.rightRenderer.rowHeight(pair.right));
-          if (this.layout === 'overlay' && this.loadedNames.right) height *= 2;
           if (height) height += this.pairGap(index);
         }
         this.rowOffsets.push(this.rowOffsets.at(-1) + height);
@@ -718,15 +719,34 @@
               element.appendChild(this.createPairToggle(doc, row, true));
             }
           } else {
-            element = this.createPairToggle(doc, index, false);
+            element = doc.createElement('div');
+            element.className = 'scope-compare-expanded-row';
+            const handle = doc.createElement('span');
+            handle.className = 'scope-compare-row-resize';
+            handle.dataset.resizePair = String(index);
+            handle.tabIndex = 0;
+            handle.title = '拖动调整所有信号行高';
+            handle.setAttribute('role', 'separator');
+            handle.setAttribute('aria-label', handle.title);
+            handle.setAttribute('aria-orientation', 'horizontal');
+            handle.setAttribute('aria-valuemin', String(MIN_ROW_HEIGHT));
+            handle.setAttribute('aria-valuemax', String(MAX_ROW_HEIGHT));
+            element.append(this.createPairToggle(doc, index, false), handle);
           }
           if (entry) entry.element.replaceWith(element);
           else pane.rowControls.appendChild(element);
           entry = { element, runEnd };
           pane.rowButtons.set(index, entry);
         }
-        const top = (runEnd == null ? y + (rowHeight - ROW_TOGGLE_SIZE) / 2 : y) + 'px';
+        const top = y + 'px';
         if (entry.element.style.top !== top) entry.element.style.top = top;
+        if (runEnd == null) {
+          const height = rowHeight + 'px';
+          if (entry.element.style.height !== height) {
+            entry.element.style.height = height;
+            entry.element.lastElementChild.setAttribute('aria-valuenow', String(rowHeight));
+          }
+        }
       }
       for (const [index, entry] of pane.rowButtons) {
         if (visible.has(index)) continue;
@@ -755,6 +775,56 @@
     }
 
     pairContentHeight(index) { return Math.max(0, this.pairHeight(index) - this.pairGap(index)); }
+
+    resizeSignalRows(height) {
+      height = Math.max(MIN_ROW_HEIGHT, Math.min(MAX_ROW_HEIGHT, Math.round(height)));
+      if (!this.result || this.busy || height === this.signalRowHeight) return;
+      const top = this.pairAtOffset(this.scrollTop);
+      const offset = this.scrollTop - (this.rowOffsets[top] ?? 0);
+      this.signalRowHeight = height;
+      this.rebuildRowOffsets();
+      if (top < this.result.pairs.length) {
+        this.scrollTop = this.rowOffsets[top] + Math.min(offset, Math.max(0, this.pairHeight(top) - 1));
+      }
+      this.syncPaneGeometry();
+      this.schedule();
+    }
+
+    bindRowResize(controls) {
+      controls.addEventListener('pointerdown', event => {
+        const handle = event.target.closest('[data-resize-pair]');
+        if (!handle || event.button !== 0 || this.busy || !this.result || this.rowResize) return;
+        event.preventDefault();
+        controls.setPointerCapture(event.pointerId);
+        this.rowResize = {
+          controls, id: event.pointerId, y: event.clientY,
+          height: this.pairContentHeight(Number(handle.dataset.resizePair))
+        };
+        controls.classList.add('is-resizing');
+      });
+      controls.addEventListener('pointermove', event => {
+        const drag = this.rowResize;
+        if (!drag || drag.controls !== controls || drag.id !== event.pointerId) return;
+        this.pendingRowHeight = drag.height + event.clientY - drag.y;
+        this.schedule();
+      });
+      const finish = event => {
+        const drag = this.rowResize;
+        if (!drag || drag.controls !== controls || drag.id !== event.pointerId) return;
+        this.rowResize = null;
+        controls.classList.remove('is-resizing');
+        if (controls.hasPointerCapture(event.pointerId)) controls.releasePointerCapture(event.pointerId);
+      };
+      controls.addEventListener('pointerup', finish);
+      controls.addEventListener('pointercancel', finish);
+      controls.addEventListener('lostpointercapture', finish);
+      controls.addEventListener('keydown', event => {
+        const handle = event.target.closest('[data-resize-pair]');
+        if (!handle || !['ArrowUp', 'ArrowDown'].includes(event.key)) return;
+        event.preventDefault();
+        this.resizeSignalRows(this.pairContentHeight(Number(handle.dataset.resizePair)) + (event.key === 'ArrowDown' ? 4 : -4));
+      });
+    }
 
     pairAtOffset(offset) {
       let lo = 0, hi = this.result.pairs.length;
@@ -850,10 +920,13 @@
 
     releaseCanvasBuffers() {
       this.drawnView = null;
+      this.rowResize = null;
+      this.pendingRowHeight = null;
       this.panes?.forEach(pane => {
         pane.canvas.width = pane.canvas.height = pane.cursorCanvas.width = pane.cursorCanvas.height = 0;
         pane.drag = pane.rangeDrag = pane.cursorDrag = null;
         pane.rowControls.replaceChildren();
+        pane.rowControls.classList.remove('is-resizing');
         pane.rowButtons.clear();
       });
     }
@@ -892,6 +965,7 @@
         canvas.setAttribute('role', 'img');
         const rowControls = document.createElement('div');
         rowControls.className = 'scope-compare-row-controls';
+        this.bindRowResize(rowControls);
         rowControls.addEventListener('click', (event) => {
           const control = event.target.closest('button[data-pair]');
           if (control) this.togglePairCollapsed(Number(control.dataset.pair), item);
@@ -1033,7 +1107,15 @@
     schedule() {
       if (!this.active || !this.result) return;
       if (this.frame) return;
-      this.frame = this.popup.requestAnimationFrame(() => { this.frame = 0; void this.render(); });
+      this.frame = this.popup.requestAnimationFrame(() => {
+        if (this.pendingRowHeight != null) {
+          const height = this.pendingRowHeight;
+          this.pendingRowHeight = null;
+          this.resizeSignalRows(height);
+        }
+        this.frame = 0;
+        void this.render();
+      });
     }
 
     viewport() {
@@ -1197,7 +1279,7 @@
             const row = this.cache[side].get(pair[side]);
             if (!row) return;
             const source = renderers[side];
-            const naturalHeight = overlay ? rowHeight / 2 : source.rowHeight(row.index);
+            const naturalHeight = overlay ? rowHeight / 2 : this.signalRowHeight ?? source.rowHeight(row.index);
             const top = y + (overlay ? layer * naturalHeight : (rowHeight - naturalHeight) / 2);
             const padding = overlay ? 0 : 3;
             ctx.save(); ctx.beginPath();
@@ -1499,7 +1581,7 @@
       this.differencePending = true;
       try {
         const error = await this.scope.worker.call('compare-difference', {
-          generation, column, direction, hasCursor: position != null
+          generation, column, direction, hasCursor: position != null, filteredPairs: this.filteredPairs
         });
         if (!this.active || this.busy || generation !== this.generation || sequence !== this.cursorSequence) return;
         if (!error || this.snapColumn(error.runStart) === position) {
@@ -1543,7 +1625,7 @@
           this.rebuildRowOffsets();
           this.updateExpandAllControl();
         }
-        this.scrollTop = this.rowOffsets[Math.max(0, pair - 1)];
+        this.scrollTop = Math.max(0, this.rowOffsets[pair] - 12);
         this.syncPaneGeometry();
       }
       const span = Math.max(8, Math.min(this.end - this.start, Math.max(16, (end - start) * 3)));

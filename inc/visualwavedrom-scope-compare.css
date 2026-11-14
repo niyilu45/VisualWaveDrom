@@ -88,15 +88,39 @@
   overflow: clip;
   pointer-events: none;
 }
-.scope-compare-row-controls > button {
+.scope-compare-expanded-row { position: absolute; inset-inline: 0; }
+.scope-compare-expanded-row > button {
   position: absolute;
   left: 4px;
+  top: 50%;
+  transform: translateY(-50%);
   width: 20px;
   height: 20px;
   min-height: 0;
   padding: 0;
   border-radius: 3px;
   pointer-events: auto;
+}
+.scope-compare-row-resize {
+  position: absolute;
+  inset: auto 0 0;
+  height: 8px;
+  cursor: ns-resize;
+  pointer-events: auto;
+  touch-action: none;
+  user-select: none;
+}
+.scope-compare-row-resize::after {
+  position: absolute;
+  inset: auto 0 0;
+  height: 1px;
+  background: #c8d0d9;
+  content: "";
+}
+.scope-compare-row-resize:is(:hover, :focus-visible)::after,
+.scope-compare-row-controls.is-resizing .scope-compare-row-resize::after {
+  background: #176ca5;
+  height: 2px;
 }
 .scope-compare-collapsed-run {
   position: absolute;
