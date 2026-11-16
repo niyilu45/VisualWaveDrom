@@ -17748,8 +17748,11 @@ ${lines.join('\n')}`;
         const signalScope = Object.assign({}, item.target.signal.scope || {});
         if (sparse) signalScope.sparseImport = { data: sparse.data === true, numeric: sparse.numeric === true };
         else delete signalScope.sparseImport;
-        if (item.update.rtlImport) signalScope.rtlImport = item.update.rtlImport;
-        else delete signalScope.rtlImport;
+        if (item.update.rtlImport) {
+          signalScope.rtlImport = item.update.rtlImport;
+          if (item.update.rtlImport.bitWidth) signalScope.busBitWidth = item.update.rtlImport.bitWidth;
+          if (item.update.rtlImport.radix) signalScope.busRadix = item.update.rtlImport.radix;
+        } else delete signalScope.rtlImport;
         for (const key of ['commDly', 'dly']) {
           if (!Object.prototype.hasOwnProperty.call(item.update, key)) continue;
           const delay = Number(item.update[key]);
@@ -25391,6 +25394,10 @@ ${lines.join('\n')}`;
     });
     const rtlImporter = window.VisualWaveDromRTLImport?.create({
       title: getCurrentWaveTitle,
+      reportConfigError(message) {
+        setStatus(false, message);
+        window.alert(message);
+      },
       context: () => [currentWaveLibraryId, editingWaveDocumentName],
       async apply(payload, [libraryId, documentName]) {
         if (currentWaveLibraryId !== libraryId || editingWaveDocumentName !== documentName) {
