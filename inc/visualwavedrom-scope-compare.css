@@ -164,10 +164,15 @@
 .scope-compare-delay-fields input[type="number"] { width: 100%; min-width: 0; }
 .scope-compare-delay-actions { display: flex; justify-content: flex-end; gap: 6px; }
 .scope-compare-pan { position: relative; flex: none; height: 18px; margin: 0 12px 6px; border-radius: 4px; background: #dfe6ed; touch-action: none; user-select: none; }
-.scope-compare-pan-thumb { position: absolute; top: 2px; bottom: 2px; left: 0; width: 100%; border-radius: 3px; background: #397da9; cursor: grab; }
+.scope-compare-pan-thumb { position: absolute; top: 2px; bottom: 2px; left: 0; width: 100%; min-width: min(28px, 100%); border-radius: 3px; background: #397da9; cursor: grab; }
 .scope-compare-pan-thumb::after { content: ''; position: absolute; inset: 0 -4px; }
 .scope-compare-pan.dragging .scope-compare-pan-thumb { cursor: grabbing; }
 .scope-compare-pan-thumb[aria-disabled="true"] { background: #8296a8; cursor: default; }
+@media (forced-colors: active) {
+  .scope-compare-pan { outline: 1px solid CanvasText; }
+  .scope-compare-pan-thumb { border: 2px solid ButtonText; }
+  .scope-compare-pan-thumb[aria-disabled="true"] { border-color: GrayText; }
+}
 .scope-compare-status { padding: 6px 12px; min-height: 30px; max-height: 90px; overflow: auto; border-top: 1px solid #ced5dd; overflow-wrap: anywhere; }
 @media (max-width: 640px) {
   .scope-compare-toolbar, .scope-compare-controls, .scope-compare-cursors { gap: 5px; padding: 6px; }

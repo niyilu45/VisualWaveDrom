@@ -954,8 +954,11 @@
       const span = this.result ? this.end - this.start : total;
       const max = Math.max(0, total - span);
       const enabled = !this.busy && max > 1e-9;
+      const progress = max > 0 ? Math.min(max, this.start) / max * 100 : 0;
       this.panThumb.style.width = Math.min(100, span / total * 100) + '%';
-      this.panThumb.style.left = Math.min(max, this.start) / total * 100 + '%';
+      // The offset uses the actual thumb width, including the CSS minimum.
+      this.panThumb.style.left = progress + '%';
+      this.panThumb.style.transform = 'translateX(' + -progress + '%)';
       this.panThumb.tabIndex = enabled ? 0 : -1;
       this.panThumb.setAttribute('aria-disabled', String(!enabled));
       this.panThumb.setAttribute('aria-valuemax', String(Number(max.toFixed(6))));
@@ -967,22 +970,24 @@
       let drag = null;
       const move = (event) => {
         if (drag?.id !== event.pointerId || drag.generation !== this.generation || this.busy || !this.result) return;
-        const start = (event.clientX - drag.left) * drag.scale - drag.offset;
+        const start = (event.clientX - drag.left - drag.offset) * drag.scale;
         this.setView(start, this.end - this.start);
       };
       pan.addEventListener('pointerdown', event => {
         if (event.button !== 0 || thumb.tabIndex < 0) return;
-        event.preventDefault();
         const rect = pan.getBoundingClientRect();
+        const handle = thumb.getBoundingClientRect();
+        const travel = rect.width - handle.width;
+        if (travel <= 0) return;
+        event.preventDefault();
         const span = this.end - this.start;
-        const scale = this.result.total / Math.max(1, rect.width);
-        const column = (event.clientX - rect.left) * scale;
-        const offset = event.target === thumb ? Math.max(0, Math.min(span, column - this.start)) : span / 2;
+        const scale = (this.result.total - span) / travel;
+        const offset = event.target === thumb ? event.clientX - handle.left : handle.width / 2;
         drag = { id: event.pointerId, offset, left: rect.left, scale, generation: this.generation };
         thumb.focus({ preventScroll: true });
         pan.setPointerCapture(event.pointerId);
         pan.classList.add('dragging');
-        move(event);
+        if (event.target !== thumb) move(event);
       });
       pan.addEventListener('pointermove', move);
       pan.addEventListener('lostpointercapture', () => { drag = null; pan.classList.remove('dragging'); });

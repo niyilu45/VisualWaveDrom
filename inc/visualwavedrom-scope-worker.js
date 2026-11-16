@@ -2554,8 +2554,9 @@ async function createWindow(payload, session = activeSession, isCancelled) {
       const entries = multiWaveAnalogSeries(session, row, payload.analogFormats, payload.multiWaveHidden);
       const range = resolveAnalogDisplayRange(multiWaveRange(entries), payload.analogFormats?.[index] || row.analogFormat);
       const series = entries.map(({ source, sourceRow, analog }) => {
+        const delay = multiWaveDelay(session, row, sourceRow);
         const data = delayedRowWindow(analog, start, end, width, 'analog', total, null,
-          multiWaveDelay(session, row, sourceRow), rawComparisonLength(sourceRow));
+          delay, sourceLengthForDelay(sourceRow, session, delay));
         if (source.scale !== 1 && data.kind === 'points') {
           for (const point of data.items) point[1] = scaledMultiWaveValue(point[1], source.scale);
         }
@@ -2580,8 +2581,9 @@ async function createWindow(payload, session = activeSession, isCancelled) {
           session.rawTotalColumns
         )
         : row;
+      const delay = rowDelay(session, row);
       const data = delayedRowWindow(analogRow, start, end, width, mode, total,
-        payload.busFormats && payload.busFormats[index] || row.busFormat, rowDelay(session, row), rawComparisonLength(row));
+        payload.busFormats && payload.busFormats[index] || row.busFormat, delay, sourceLengthForDelay(row, session, delay));
       if (mode === 'analog') data.range = resolveAnalogDisplayRange(data.range,
         payload.analogFormats && payload.analogFormats[index] || row.analogFormat);
       rows.push({ index, mode, data });
@@ -2984,7 +2986,7 @@ function displayStateAtColumn(row, column, mode, analogFormat, session = activeS
     }).join(' · ');
   }
   const raw = column - delay;
-  if (raw < 0 || raw >= rawComparisonLength(row)) return mode === 'digital' ? 'x' : null;
+  if (raw < 0 || raw >= sourceLengthForDelay(row, session, delay)) return mode === 'digital' ? 'x' : null;
   return stateAtColumn(row, raw, mode, analogFormat, session);
 }
 
@@ -3465,7 +3467,9 @@ function navigateCursor(payload, session = activeSession) {
   );
   const direction = Number(payload.direction) < 0 ? -1 : 1;
   const delay = rowDelay(session, row);
-  const rawColumn = column - delay;
+  const trimTail = session.leftShiftSourceEnds && delay < 0;
+  const sourceEnd = trimTail ? sourceLengthForDelay(row, session, delay) : Infinity;
+  const rawColumn = Math.min(column - delay, sourceEnd);
   const mode = payload.mode || row.mode;
   const analogFormat = payload.analogFormat;
   const kind = String(payload.kind || 'edge');
@@ -3475,8 +3479,9 @@ function navigateCursor(payload, session = activeSession) {
     if (row.multiWave) {
       for (const source of visibleMultiWaveSources(session, row, payload.multiWaveHidden)) {
         const member = session.rows[source.rowIndex], offset = multiWaveDelay(session, row, member);
-        const edge = edgeColumn(member, column - offset, direction, 'analog');
-        if (edge == null) continue;
+        const memberEnd = session.leftShiftSourceEnds && offset < 0 ? sourceLengthForDelay(member, session, offset) : Infinity;
+        const edge = edgeColumn(member, Math.min(column - offset, memberEnd), direction, 'analog');
+        if (edge == null || edge >= memberEnd) continue;
         const candidate = edge + offset;
         if (targetColumn == null || direction * candidate < direction * targetColumn) targetColumn = candidate;
       }
@@ -3509,7 +3514,8 @@ function navigateCursor(payload, session = activeSession) {
     );
     if (targetColumn != null) targetColumn += delay;
   }
-  if (targetColumn == null || targetColumn < 0 || targetColumn >= session.totalColumns) {
+  if (targetColumn == null || targetColumn < 0 || targetColumn >= session.totalColumns
+      || (!row.multiWave && targetColumn >= sourceEnd + delay)) {
     return { found: false, rowIndex, column, lookupMs: Date.now() - startedAt };
   }
   return {
@@ -4040,13 +4046,43 @@ function rawComparisonLength(row) {
   return row.wave.length;
 }
 
+function knownSourceEnd(row, length) {
+  if (!row.scopeValues && !row.changePoints && row.samples?.length) {
+    // Skip large padded sample runs using the existing min/max levels.
+    const levels = row.analogLevels || [];
+    const samples = levels.at(-1)?.maxs || row.samples;
+    let index = samples.length - 1;
+    while (index >= 0 && !Number.isFinite(samples[index])) index -= 1;
+    if (index < 0) return 0;
+    for (let level = levels.length - 2; level >= 0; level -= 1) {
+      const next = index * 2;
+      index = Number.isFinite(levels[level].maxs[next + 1]) ? next + 1 : next;
+    }
+    return Math.min(length, (index + 1) * rowSampleStep(row));
+  }
+  for (let index = row.segments.length - 1; index >= 0; index -= 1) {
+    const segment = row.segments[index];
+    if (segment.kind !== 'digital' || segment.state !== 'x') return Math.min(length, segment.end);
+  }
+  return 0;
+}
+
+function sourceLengthForDelay(row, session, delay) {
+  const ends = session.leftShiftSourceEnds;
+  if (ends && delay < 0) return ends[row.index] ?? (ends[row.index] = knownSourceEnd(row, rawComparisonLength(row)));
+  return rawComparisonLength(row);
+}
+
 function comparisonLength(row, session) {
   if (!row) return 0;
   if (row.multiWave) return Math.max(0, ...row.multiWave.sources.map((item) => {
     const member = session.rows[item.rowIndex];
-    return member ? rawComparisonLength(member) + multiWaveDelay(session, row, member) : 0;
+    if (!member) return 0;
+    const delay = multiWaveDelay(session, row, member);
+    return sourceLengthForDelay(member, session, delay) + delay;
   }));
-  return Math.max(0, rawComparisonLength(row) + rowDelay(session, row));
+  const delay = rowDelay(session, row);
+  return Math.max(0, sourceLengthForDelay(row, session, delay) + delay);
 }
 
 function comparisonValue(row, column, session, delay = rowDelay(session, row)) {
@@ -4056,12 +4092,13 @@ function comparisonValue(row, column, session, delay = rowDelay(session, row)) {
     return member ? comparisonValue(member, column, session, multiWaveDelay(session, row, member)) : null;
   });
   const raw = column - delay;
-  return raw < 0 || raw >= rawComparisonLength(row) ? null : sourceValueAtHalfIndex(row, raw * 2);
+  return raw < 0 || raw >= sourceLengthForDelay(row, session, delay) ? null : sourceValueAtHalfIndex(row, raw * 2);
 }
 
 function comparisonWithDelays(session, overrides) {
   const base = session.comparisonBaseDelays || session.delays;
-  return applySessionDelays({ ...session, comparisonBaseDelays: base }, overrides, base);
+  return applySessionDelays({ ...session, comparisonBaseDelays: base,
+    leftShiftSourceEnds: session.leftShiftSourceEnds || [] }, overrides, base);
 }
 
 function comparisonSourceOffsets(row, session) {
@@ -4096,7 +4133,7 @@ function comparisonNextBoundary(row, column, session) {
   if (!row) return Infinity;
   if (row.multiWave) return column;
   const delay = rowDelay(session, row), raw = column - delay;
-  const length = rawComparisonLength(row);
+  const length = sourceLengthForDelay(row, session, delay);
   if (raw >= length) return Infinity;
   if (raw < 0) return delay;
   if (!canSkipComparisonSamples(row)) return column;
