@@ -424,7 +424,7 @@
       });
     }
 
-    async load(changes) {
+    async load(changes, { followFullExtent = false } = {}) {
       if (!this.selects.left.value || this.busy) return;
       this.closeDelayCard();
       const refresh = !!changes;
@@ -560,7 +560,7 @@
           : rightName ? '比较完成 · ' + result.pairs.length + ' 对信号 · ' + result.errorCount + ' 处差异'
             : result.pairs.length + ' 个信号 · 可选择比较图 B');
         this.count.textContent = rightName ? (result.errorCount ? result.errorCount + ' 处差异' : '无差异') : '';
-        this.setView(anchor?.start ?? 0, anchor?.span ?? result.total);
+        this.setView(anchor?.start ?? 0, followFullExtent ? result.total : anchor?.span ?? result.total);
         if (!refresh) this.panes[0]?.canvas.focus({ preventScroll: true });
         this.refreshAnchor = null;
         this.scope.log('scope-compare', { phase: 'ready', target: rightName, pairs: result.pairs.length,
@@ -637,7 +637,8 @@
         });
       }
       this.delayOverrides[side].set(name, overrides);
-      await this.load(new Map());
+      const followFullExtent = this.start === 0 && this.end === this.result.total;
+      await this.load(new Map(), { followFullExtent });
     }
 
     captureDisplay(renderer) {
@@ -1116,12 +1117,14 @@
           void this.selectAt(event, item);
         });
         canvas.addEventListener('pointerdown', (event) => {
+          // Suppress the click from the previous gesture, not a new press.
+          item.suppressClickUntil = 0;
           const touch = event.pointerType === 'touch';
           if (this.result && !this.busy && (event.button === 0 || event.button === 1)) {
             canvas.focus({ preventScroll: true });
           }
           if (event.button === 0 && this.startCursorDrag(event, item)) return;
-          if (event.button === 0 && !touch && !this.activeCursor && this.startRangeDrag(event, item)) return;
+          if (event.button === 0 && !touch && this.startRangeDrag(event, item)) return;
           if (event.button !== 1 && !touch) return;
           event.preventDefault();
           canvas.setPointerCapture(event.pointerId);

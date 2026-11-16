@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
 
-  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=compare-current-differences-v1';
+  const WORKER_URL = 'inc/visualwavedrom-scope-worker.js?v=scope-delay-extent-v1';
   const FormulaEngine = global.VisualWaveDromFormula || null;
   const DEFAULT_ROW_HEIGHT = 42;
   const DEFAULT_MULTI_WAVE_ROW_HEIGHT = 68;
@@ -7277,22 +7277,13 @@
         });
         return;
       }
-      if (this.activeCursor) {
-        if (this.selectedConnectionId) this.selectedConnectionId = '';
-        this.columnSelection = null;
-        this.selectedPoint = null;
-        this.updatePointEditor();
-        this.updateMeasurements();
-        this.setActiveCursorRow(rowIndex);
-        this.setActiveCursorPosition(this.cursorColumnForRow(column, rowIndex), true);
-        void this.snapActiveCursorPosition(column, rowIndex);
-        this.setStatus(this.activeCursor + ' 游标正在移动到点击位置');
-        return;
-      }
       if (this.selectedConnectionId) this.selectedConnectionId = '';
+      const clickCursor = this.activeCursor;
       const columnIndex = this.columnIndexForX(x, rect.width);
       this.setActiveCursorRow(rowIndex);
-      this.updateColumnSelection(rowIndex, columnIndex, columnIndex, this.cursorColumnForRow(column, rowIndex));
+      if (!clickCursor) {
+        this.updateColumnSelection(rowIndex, columnIndex, columnIndex, this.cursorColumnForRow(column, rowIndex));
+      }
       this.selectedPoint = null;
       this.updatePointEditor();
       const rowHeight = this.rowHeight(rowIndex);
@@ -7308,6 +7299,7 @@
         canvasRect: { left: rect.left, top: rect.top, width: rect.width },
         rowIndex,
         anchorColumn: columnIndex,
+        clickCursor,
         moved: false,
         selectPoint
       };
@@ -7400,6 +7392,7 @@
         this.drag.moved = this.drag.moved
           || columnIndex !== this.drag.anchorColumn
           || Math.abs(event.clientX - this.drag.startX) > 3;
+        if (this.drag.clickCursor && !this.drag.moved) return;
         this.updateColumnSelection(
           this.drag.rowIndex,
           this.drag.anchorColumn,
@@ -7443,6 +7436,17 @@
         return;
       }
       if (drag.kind !== 'columns') return;
+      if (drag.clickCursor && !drag.moved) {
+        if (this.activeCursor !== drag.clickCursor) return;
+        const { left, width } = drag.canvasRect;
+        const column = this.columnForX(event.clientX - left, width);
+        this.columnSelection = null;
+        this.updateColumnBackgroundAvailability();
+        this.setActiveCursorPosition(this.cursorColumnForRow(column, drag.rowIndex), true);
+        this.setStatus(drag.clickCursor + ' 游标正在移动到点击位置');
+        void this.snapActiveCursorPosition(column, drag.rowIndex);
+        return;
+      }
       const selection = this.columnSelection;
       if (!drag.moved && drag.selectPoint) {
         this.selectNearestPoint(drag.selectPoint.rowIndex, drag.selectPoint.column);

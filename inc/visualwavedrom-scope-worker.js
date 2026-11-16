@@ -1689,8 +1689,9 @@ function applySessionDelays(session, overrides, base) {
       ? first : scopeDelayPair(null);
   });
   session.arrayBoundaries = new Map();
+  // The raw extent is still needed for formula/sample lookup, not as a floor for the viewport.
   session.totalColumns = Math.ceil(session.rows.reduce(
-    (total, row) => Math.max(total, comparisonLength(row, session)), session.rawTotalColumns
+    (total, row) => Math.max(total, comparisonLength(row, session)), 1
   ));
   return session;
 }
@@ -1797,6 +1798,10 @@ function scopeArrayBoundaries(group, total, session) {
 }
 
 function packedArrayWindow(group, start, end, width, total, session) {
+  if (group.members.some(row => rowDelay(session, row) < 0)) {
+    end = Math.min(end, group.members.reduce((last, row) => Math.max(last, comparisonLength(row, session)), 0));
+    if (end <= start) return { kind: 'segments', items: [], packedArray: true };
+  }
   const boundaries = scopeArrayBoundaries(group, total, session);
   const after = (position, inclusive = true) => {
     let lo = 0;
@@ -2439,7 +2444,7 @@ function sparseAnalogWindow(row, start, end) {
   return { kind: 'points', interpolation: 'linear', items, unknowns, range: row.range, sampleEnd: covered };
 }
 
-function delayedRowWindow(row, start, end, width, mode, total, busFormat, delay) {
+function delayedRowWindow(row, start, end, width, mode, total, busFormat, delay, sourceLength) {
   const analog = mode === 'analog' && (row.samples || row.sparseAnalog);
   const render = (from, to, pixels) => row.sparseAnalog && mode === 'analog'
     ? sparseAnalogWindow(row, from, to)
@@ -2447,20 +2452,20 @@ function delayedRowWindow(row, start, end, width, mode, total, busFormat, delay)
       : rowSegmentsInWindow(row, from, to, pixels, mode, busFormat);
   if (!delay) return render(start, end, width);
   const first = Math.max(start, delay);
-  const last = Math.min(end, rawComparisonLength(row) + delay);
+  const last = Math.min(end, sourceLength + delay);
   const valid = last > first;
   const data = valid ? render(first - delay, last - delay, width * (last - first) / (end - start))
     : { kind: analog ? 'points' : 'segments', items: [], interpolation: row.stepInterpolation ? 'step' : 'linear' };
   if (analog) {
     const unknowns = [];
-    if (!valid) appendAnalogUnknownRange(unknowns, start, end);
-    else {
+    if (!valid && delay > 0) appendAnalogUnknownRange(unknowns, start, end);
+    else if (valid) {
       appendAnalogUnknownRange(unknowns, start, first);
       for (const item of data.items) item[0] += delay;
       for (const [left, right] of data.unknowns || []) {
         appendAnalogUnknownRange(unknowns, Math.max(first, left + delay), Math.min(last, right + delay));
       }
-      appendAnalogUnknownRange(unknowns, last, end);
+      if (delay > 0) appendAnalogUnknownRange(unknowns, last, end);
       data.sampleEnd += delay;
     }
     data.unknowns = unknowns;
@@ -2475,10 +2480,10 @@ function delayedRowWindow(row, start, end, width, mode, total, busFormat, delay)
   const unknown = (start, end) => data.kind === 'buckets'
     ? { start, end, unknown: true }
     : { start, end, kind: 'digital', state: 'x', value: 'x' };
-  if (!valid) data.items.push(unknown(start, end));
-  else {
+  if (!valid && delay > 0) data.items.push(unknown(start, end));
+  else if (valid) {
     if (first > start) data.items.unshift(unknown(start, first));
-    if (last < end) data.items.push(unknown(last, end));
+    if (delay > 0 && last < end) data.items.push(unknown(last, end));
   }
   data.gaps = data.gaps?.map((column) => column + delay);
   if (data.clockEdges) data.clockEdges = data.clockEdges.map((edge) => ({ ...edge, column: edge.column + delay }));
@@ -2550,7 +2555,7 @@ async function createWindow(payload, session = activeSession, isCancelled) {
       const range = resolveAnalogDisplayRange(multiWaveRange(entries), payload.analogFormats?.[index] || row.analogFormat);
       const series = entries.map(({ source, sourceRow, analog }) => {
         const data = delayedRowWindow(analog, start, end, width, 'analog', total, null,
-          multiWaveDelay(session, row, sourceRow));
+          multiWaveDelay(session, row, sourceRow), rawComparisonLength(sourceRow));
         if (source.scale !== 1 && data.kind === 'points') {
           for (const point of data.items) point[1] = scaledMultiWaveValue(point[1], source.scale);
         }
@@ -2576,7 +2581,7 @@ async function createWindow(payload, session = activeSession, isCancelled) {
         )
         : row;
       const data = delayedRowWindow(analogRow, start, end, width, mode, total,
-        payload.busFormats && payload.busFormats[index] || row.busFormat, rowDelay(session, row));
+        payload.busFormats && payload.busFormats[index] || row.busFormat, rowDelay(session, row), rawComparisonLength(row));
       if (mode === 'analog') data.range = resolveAnalogDisplayRange(data.range,
         payload.analogFormats && payload.analogFormats[index] || row.analogFormat);
       rows.push({ index, mode, data });
@@ -2695,7 +2700,7 @@ function labelPoints(payload) {
     const range = series ? multiWaveRange(series) : null;
     const sources = series
       ? series.filter(({ source }) => !Array.isArray(query.sources) || query.sources.includes(source.rowId))
-      : [{ sourceRow: row, source: null, analog: analogRowForFormat(row, formats[row.index], activeSession.totalColumns) }];
+      : [{ sourceRow: row, source: null, analog: analogRowForFormat(row, formats[row.index], activeSession.rawTotalColumns) }];
     sources.forEach(entry => {
       const { analog, sourceRow, source } = entry;
       const delay = source ? multiWaveDelay(activeSession, row, sourceRow) : rowDelay(activeSession, row);
@@ -3176,10 +3181,10 @@ function segmentValueColumn(row, column, direction, mode, target) {
   return null;
 }
 
-function analogValueColumn(row, column, direction, target, analogFormat) {
+function analogValueColumn(row, column, direction, target, analogFormat, session) {
   const targetNumber = finiteNumber(target);
   if (targetNumber == null) return null;
-  const analogRow = analogRowForFormat(row, analogFormat, activeSession.totalColumns);
+  const analogRow = analogRowForFormat(row, analogFormat, session.rawTotalColumns);
   if (analogRow.sparseAnalog) {
     const tolerance = Math.max(1e-9, Math.abs(targetNumber) * 1e-9);
     return conditionSegmentColumn(row, column, direction, 'bus',
@@ -3289,8 +3294,8 @@ function snapCursor(payload) {
   };
 }
 
-function conditionAnalogColumn(row, column, direction, testCondition, analogFormat) {
-  const analogRow = analogRowForFormat(row, analogFormat, activeSession.totalColumns);
+function conditionAnalogColumn(row, column, direction, testCondition, analogFormat, session) {
+  const analogRow = analogRowForFormat(row, analogFormat, session.rawTotalColumns);
   const samples = analogRow.samples;
   if (!samples || samples.length < 2) return null;
   const step = rowSampleStep(analogRow);
@@ -3298,7 +3303,7 @@ function conditionAnalogColumn(row, column, direction, testCondition, analogForm
     let index = Math.max(1, Math.floor((column + 1e-7) / step) + 1);
     for (; index < samples.length; index += 1) {
       if (!testCondition(samples[index - 1]) && testCondition(samples[index])) {
-        return analogSampleColumn(analogRow, index, samples.length, activeSession.totalColumns);
+        return analogSampleColumn(analogRow, index, samples.length, session.rawTotalColumns);
       }
     }
     return null;
@@ -3309,13 +3314,13 @@ function conditionAnalogColumn(row, column, direction, testCondition, analogForm
   );
   for (; index >= 1; index -= 1) {
     if (!testCondition(samples[index - 1]) && testCondition(samples[index])) {
-      return analogSampleColumn(analogRow, index, samples.length, activeSession.totalColumns);
+      return analogSampleColumn(analogRow, index, samples.length, session.rawTotalColumns);
     }
   }
   return null;
 }
 
-function conditionTransitionColumns(row, mode, expression, testCondition, analogFormat) {
+function conditionTransitionColumns(row, mode, expression, testCondition, analogFormat, session) {
   const format = mode === 'analog'
     ? normalizeAnalogFormat(analogFormat || row.analogFormat, 'unsigned')
     : null;
@@ -3328,7 +3333,7 @@ function conditionTransitionColumns(row, mode, expression, testCondition, analog
   const transitions = [];
 
   if (mode === 'analog') {
-    const analogRow = analogRowForFormat(row, format, activeSession.totalColumns);
+    const analogRow = analogRowForFormat(row, format, session.rawTotalColumns);
     const samples = analogRow.sparseAnalog || analogRow.samples || [];
     let previousMatches = samples.length ? testCondition(samples[0]) : false;
     for (let index = 1; index < samples.length; index += 1) {
@@ -3362,7 +3367,8 @@ function conditionSequenceColumn(
   mode,
   expression,
   testCondition,
-  analogFormat
+  analogFormat,
+  session
 ) {
   const sequence = Array.isArray(testCondition.sequence) ? testCondition.sequence : [];
   if (sequence.length < 2) return null;
@@ -3375,7 +3381,7 @@ function conditionSequenceColumn(
   if (maxStart < 0) return null;
 
   const matchesAt = (startColumn) => sequence.every((test, offset) => (
-    test(stateAtColumn(row, startColumn + offset, mode, analogFormat))
+    test(stateAtColumn(row, startColumn + offset, mode, analogFormat, session))
   ));
   if (maxStart <= 1000000) {
     const format = mode === 'analog'
@@ -3414,7 +3420,7 @@ function conditionSequenceColumn(
   return null;
 }
 
-function conditionRisingColumn(row, column, direction, mode, expression, analogFormat) {
+function conditionRisingColumn(row, column, direction, mode, expression, analogFormat, session) {
   const testCondition = compileCondition(expression, mode);
   if (Array.isArray(testCondition.sequence) && testCondition.sequence.length > 1) {
     return conditionSequenceColumn(
@@ -3424,7 +3430,8 @@ function conditionRisingColumn(row, column, direction, mode, expression, analogF
       mode,
       expression,
       testCondition,
-      analogFormat
+      analogFormat,
+      session
     );
   }
   const candidateCount = Array.isArray(row.scopeValues)
@@ -3432,13 +3439,13 @@ function conditionRisingColumn(row, column, direction, mode, expression, analogF
     : (row.samples && row.samples.length ? row.samples.length : (row.segments || []).length);
   if (candidateCount <= 1000000) {
     return directionalSortedColumn(
-      conditionTransitionColumns(row, mode, expression, testCondition, analogFormat),
+      conditionTransitionColumns(row, mode, expression, testCondition, analogFormat, session),
       column,
       direction
     );
   }
   return mode === 'analog'
-    ? conditionAnalogColumn(row, column, direction, testCondition, analogFormat)
+    ? conditionAnalogColumn(row, column, direction, testCondition, analogFormat, session)
     : conditionSegmentColumn(row, column, direction, mode, testCondition);
 }
 
@@ -3482,7 +3489,7 @@ function navigateCursor(payload, session = activeSession) {
     if (array && targetColumn >= session.totalColumns) targetColumn = null;
   } else if (kind === 'value') {
     if (mode === 'analog') {
-      targetColumn = analogValueColumn(row, rawColumn, direction, payload.value, analogFormat);
+      targetColumn = analogValueColumn(row, rawColumn, direction, payload.value, analogFormat, session);
     } else {
       const target = mode === 'bus'
         ? String(payload.value == null ? '' : payload.value)
@@ -3497,7 +3504,8 @@ function navigateCursor(payload, session = activeSession) {
       direction,
       mode,
       payload.condition,
-      analogFormat
+      analogFormat,
+      session
     );
     if (targetColumn != null) targetColumn += delay;
   }

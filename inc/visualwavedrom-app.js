@@ -465,6 +465,7 @@ if (!window.VWDCodeEditorPairs) {
     let lastRenderedWaveText = null;
     let lastRenderedParameterRevision = -1;
     let lastRenderedWaveSource = null;
+    let lastRenderedWaveShape = null;
     let bigWaveViewportState = {
       enabled: false,
       documentKey: '',
@@ -20066,8 +20067,14 @@ ${lines.join('\n')}`;
         return false;
       }
       const parameterRevision = window.VisualWaveDromParameters.getRevision();
+      const activeDocument = editingWaveDocumentName;
+      const activeLibrary = currentWaveLibraryId;
       if (lastRenderedWaveText === jsonText && lastRenderedParameterRevision === parameterRevision
           && waveContainer.querySelector('svg')) {
+        if (lastRenderedWaveShape) {
+          lastRenderedWaveShape.document = activeDocument;
+          lastRenderedWaveShape.library = activeLibrary;
+        }
         syncHscaleInputFromJson(jsonText, lastRenderedWaveSource);
         applyNavVisibilityToWave();
         renderConnectionEdgeList(lastRenderedWaveSource);
@@ -20087,6 +20094,7 @@ ${lines.join('\n')}`;
         return true;
       }
       const waveScrollState = captureActiveWaveScrollState();
+      let revealEmptiedWave = false;
       const measuredHost = getBigWaveHost();
       bigWaveViewportState.measuredHost = measuredHost;
       bigWaveViewportState.measuredHostWidth = measuredHost ? measuredHost.clientWidth : 0;
@@ -20192,6 +20200,17 @@ ${lines.join('\n')}`;
           lastRenderedWaveText = jsonText;
           lastRenderedParameterRevision = parameterRevision;
           lastRenderedWaveSource = fullSource;
+          const metrics = preparedWave.metrics;
+          const previous = lastRenderedWaveShape;
+          revealEmptiedWave = !!(activeDocument && metrics && previous?.document === activeDocument
+            && previous.library === activeLibrary && (
+              (previous.signalCount > 0 && metrics.signalCount === 0)
+              || (previous.maxWaveLength > 0 && metrics.maxWaveLength === 0)
+            ));
+          lastRenderedWaveShape = metrics && {
+            document: activeDocument, library: activeLibrary,
+            signalCount: metrics.signalCount, maxWaveLength: metrics.maxWaveLength
+          };
           if (editingWaveDocumentName) {
             refreshWaveDocumentCard(editingWaveDocumentName);
             schedulePresenterDocumentSync(editingWaveDocumentName);
@@ -20211,6 +20230,9 @@ ${lines.join('\n')}`;
         if (previousMinHeight) waveContainer.style.setProperty('min-height', previousMinHeight, previousMinHeightPriority);
         else waveContainer.style.removeProperty('min-height');
         restoreActiveWaveScrollState(waveScrollState);
+        if (revealEmptiedWave && editingWaveDocumentName === activeDocument && currentWaveLibraryId === activeLibrary) {
+          revealEmptiedWaveDocument(activeDocument);
+        }
         isRenderingWaveform = false;
         if (pendingRenderText !== null) {
           const nextText = pendingRenderText;
@@ -20870,6 +20892,20 @@ ${lines.join('\n')}`;
         afterTop: entry.card.getBoundingClientRect().top - wavePanel.getBoundingClientRect().top,
         previewScrollLeft: entry.previewScroller.scrollLeft
       });
+    }
+
+    function revealEmptiedWaveDocument(documentName) {
+      const card = waveLibraryCardCache.get(documentName)?.card;
+      if (!wavePanel || !card?.isConnected || !wavePanel.contains(card)) return;
+      const panelTop = wavePanel.getBoundingClientRect().top + wavePanel.clientTop;
+      const bounds = card.getBoundingClientRect();
+      const top = bounds.top - panelTop;
+      const visibleHeight = Math.min(bounds.height, wavePanel.clientHeight);
+      const adjustment = top < 0 ? top : Math.max(0, top + visibleHeight - wavePanel.clientHeight);
+      if (Math.abs(adjustment) <= 0.5) return;
+      cancelWavePanelWheelScroll();
+      wavePanel.scrollTop += adjustment;
+      vwdDebugLog('wave-scroll', { phase: 'reveal-emptied-wave', documentName, adjustment });
     }
 
     function focusWaveDocument(documentName, options) {

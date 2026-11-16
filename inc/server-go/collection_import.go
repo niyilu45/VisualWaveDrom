@@ -339,6 +339,18 @@ type collectionImportEntryResult struct {
 	err     error
 }
 
+type collectionFileImportFailure struct {
+	Index        int    `json:"index"`
+	RelativePath string `json:"relativePath"`
+	Message      string `json:"message"`
+}
+
+type collectionFileImportErrors []collectionFileImportFailure
+
+func (failures collectionFileImportErrors) Error() string {
+	return fmt.Sprintf("%d 项文件解析失败，波形未写入", len(failures))
+}
+
 type collectionImportProgress struct {
 	ProgressToken   string `json:"progressToken"`
 	Phase           string `json:"phase"`
@@ -3259,15 +3271,24 @@ enqueueJobs:
 		return nil, err
 	}
 	parseDurationMS := time.Since(parseStartedAt).Milliseconds()
+	var failures collectionFileImportErrors
+	for index, result := range entryResults {
+		if result.err != nil {
+			entry := importEntries[index]
+			path := entry.Matches[0].RelativePath
+			message := strings.TrimPrefix(result.err.Error(), path+": ")
+			failures = append(failures, collectionFileImportFailure{entry.Index, path, message})
+		}
+	}
+	if len(failures) > 0 {
+		return nil, failures
+	}
 
 	updates := make([]map[string]any, 0, len(importEntries))
 	files := make([]map[string]any, 0, len(importEntries))
 	updateNames := make(map[string]bool)
 	totalColumns := 0
 	for _, entryResult := range entryResults {
-		if entryResult.err != nil {
-			return nil, entryResult.err
-		}
 		for _, update := range entryResult.updates {
 			name := stringValue(update["signal"])
 			if updateNames[name] {
@@ -3749,7 +3770,12 @@ func (s *service) handleImportCollection(writer http.ResponseWriter, request *ht
 				})
 				return
 			}
-			sendJSON(writer, 400, map[string]any{"error": importErr.Error()})
+			response := map[string]any{"error": importErr.Error()}
+			var failures collectionFileImportErrors
+			if errors.As(importErr, &failures) {
+				response["fileErrors"] = failures
+			}
+			sendJSON(writer, 400, response)
 			return
 		}
 		if progressToken != "" {

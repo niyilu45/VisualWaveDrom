@@ -1127,9 +1127,11 @@
         // The status text below is more useful than a JSON parsing error.
       }
       if (!response.ok) {
-        throw new Error(result && result.error
+        const error = new Error(result && result.error
           ? String(result.error).replace(/^fileProc:\s*/i, '')
           : ('服务返回错误 ' + response.status));
+        if (Array.isArray(result?.fileErrors)) error.fileErrors = result.fileErrors;
+        throw error;
       }
       return result || {};
     }
@@ -2172,6 +2174,17 @@
       });
     }
 
+    function showFileImportErrors(entries) {
+      const failed = entries.filter(entry => entry.importError);
+      if (!failed.length) return false;
+      const message = failed.length + ' 项文件检查失败，未写入波形。请查看标红的结果。';
+      renderSearchResults(searchResult);
+      revealEntryImportError(failed[0].index);
+      setHint(message, true);
+      status(false, message);
+      return true;
+    }
+
     async function validateSingleFileSelections(preset, variables, rootPath, signal) {
       const entries = Array.isArray(searchResult && searchResult.entries)
         ? searchResult.entries
@@ -2179,7 +2192,6 @@
       const targets = entries.filter((entry) => entry.importMode === 'single'
         && Array.isArray(entry.matches)
         && entry.matches.length > 0);
-      entries.forEach((entry) => { delete entry.importError; });
       if (!targets.length) return true;
 
       debug({
@@ -2187,23 +2199,30 @@
         entryIndexes: targets.map((entry) => entry.index)
       });
       for (const entry of targets) {
-        const payload = await post('single-preview', {
-          rootPath,
-          preset: presetForCollectionService(
-            presetForRawSequencePreview(preset, entrySourceIndex(entry))
-          ),
-          variables,
-          searchToken: searchResult.searchToken || '',
-          index: entry.index,
-          startLine: 1,
-          lineCount: 64,
-          quick: true
-        }, { signal });
+        let payload;
+        try {
+          payload = await post('single-preview', {
+            rootPath,
+            preset: presetForCollectionService(
+              presetForRawSequencePreview(preset, entrySourceIndex(entry))
+            ),
+            variables,
+            searchToken: searchResult.searchToken || '',
+            index: entry.index,
+            startLine: 1,
+            lineCount: 64,
+            quick: true
+          }, { signal });
+        } catch (error) {
+          if (importWasCancelled(error)) throw error;
+          // The full parser reports file errors with their entry IDs.
+          continue;
+        }
         const validationError = entry.hasSeq
           ? sequencePreviewError(payload.lines, entry.delimiter)
           : unsequencedPreviewError(payload.lines, entry.delimiter);
         if (!validationError) continue;
-        entry.importError = String(entry.name || '未命名信号')
+        entry.importError = String(payload.relativePath || entry.matches[0].relativePath || entry.name || '未命名信号')
           + (entry.hasSeq ? ' 的“第一列为序号”设置有误：' : '：')
           + validationError;
         debug({
@@ -2213,20 +2232,13 @@
           message: entry.importError
         });
       }
-      const invalid = targets.filter((entry) => entry.importError);
-      if (!invalid.length) {
-        debug({ phase: 'single-parser-preflight-complete', valid: true });
-        return true;
-      }
-      renderSearchResults(searchResult);
-      setHint('导入前检查失败：' + invalid[0].importError, true);
-      revealEntryImportError(invalid[0].index);
+      const invalidCount = targets.filter((entry) => entry.importError).length;
       debug({
         phase: 'single-parser-preflight-complete',
-        valid: false,
-        invalidCount: invalid.length
+        valid: invalidCount === 0,
+        invalidCount
       });
-      return false;
+      return invalidCount === 0;
     }
 
     function syncEntryAutoGen(entry, reason) {
@@ -2316,10 +2328,6 @@
       const owners = new Map();
       active.forEach((entry) => {
         if (entry.status === 'formula-ready' || entry.status === 'multi-wave-ready') return;
-        if (entry.importError) {
-          errors.push(String(entry.importError));
-          return;
-        }
         if (entry.status === 'config-error') {
           errors.push(entry.message || ('第 ' + (entry.index + 1) + ' 条规则配置有误'));
           return;
@@ -2590,7 +2598,8 @@
         const multiWaveError = entry.status === 'multi-wave-error'
           ? String(entry.message || '多波形配置有误')
           : '';
-        const displayedError = importError || formulaError || multiWaveError;
+        const configError = entry.status === 'config-error' ? String(entry.message || '文件配置有误') : '';
+        const displayedError = importError || configError || formulaError || multiWaveError;
         const row = document.createElement('div');
         row.dataset.entryIndex = String(entry.index);
         row.className = 'wave-collection-result '
@@ -2661,7 +2670,7 @@
         }
         const state = document.createElement('span');
         state.className = 'wave-collection-result-state';
-        if (importError) state.textContent = '序号设置错误';
+        if (importError) state.textContent = '文件解析错误';
         else if (entry.status === 'formula-ready') state.textContent = '公式有效';
         else if (entry.status === 'formula-error') state.textContent = '公式错误，跳过';
         else if (entry.status === 'multi-wave-ready') state.textContent = '多波形有效';
@@ -3185,13 +3194,14 @@
       const formulaCount = entries.filter((entry) => entry.status === 'formula-ready').length;
       const multiWaveCount = entries.filter((entry) => entry.status === 'multi-wave-ready').length;
       const selection = collectionSelectionStatus();
+      const importErrorCount = entries.filter(entry => entry.importError).length;
       payload.ready = selection.valid;
-      resultSummary.textContent = selection.valid
+      resultSummary.textContent = importErrorCount ? (importErrorCount + ' 项文件有错误，修正后可重试') : selection.valid
         ? ('已选择 ' + selection.fileCount + ' 个文件、' + formulaCount + ' 个公式、'
           + multiWaveCount + ' 个多波形，可以导入'
           + (skippedCount ? '；跳过 ' + skippedCount + ' 条无效或未匹配规则' : '')
           + (multipleCount ? '；' + multipleCount + ' 条规则默认取第一个' : ''))
-        : (selection.errors[0] || (selection.noMatchingFiles
+        : ((selection.errors.length > 1 ? selection.errors.length + ' 项设置有错误，请查看搜索结果。' : selection.errors[0]) || (selection.noMatchingFiles
           ? '没有匹配到文件，不会导入或覆盖波形'
           : '没有找到可导入的文件、有效公式或多波形'));
       updateButtons();
@@ -3816,6 +3826,11 @@
         return;
       }
       const rootPath = String(rootPathInput.value || '').trim();
+      const entries = Array.isArray(searchResult.entries) ? searchResult.entries : [];
+      if (entries.some(entry => entry.importError)) {
+        entries.forEach(entry => { delete entry.importError; });
+        renderSearchResults(searchResult);
+      }
       const fileCount = selection.fileCount;
       const expandedPreset = collectionAnalysisPreset(preset, searchResult);
       const withDelay = (item) => Object.assign(item, {
@@ -3852,7 +3867,6 @@
           rootPath,
           importController ? importController.signal : undefined
         );
-        if (!preflightValid) return;
         if (importCancelRequested) {
           const cancelled = new Error('导入已取消');
           cancelled.name = 'AbortError';
@@ -3889,6 +3903,10 @@
           const cancelled = new Error('导入已取消');
           cancelled.name = 'AbortError';
           throw cancelled;
+        }
+        if (!preflightValid) {
+          showFileImportErrors(entries);
+          return;
         }
         payload.formulas = formulas;
         payload.multiWaves = multiWaves;
@@ -3977,26 +3995,28 @@
           });
           return;
         }
-        const entries = Array.isArray(searchResult && searchResult.entries)
-          ? searchResult.entries
-          : [];
-        const failedEntry = entries.find((entry) => (entry.matches || []).some((match) => {
-          const candidates = [match.relativePath, match.fileName, match.path]
-            .map((value) => String(value || ''))
-            .filter(Boolean);
-          return candidates.some((value) => message.includes(value));
-        }));
-        if (failedEntry) {
-          failedEntry.importError = message;
-          renderSearchResults(searchResult);
-          revealEntryImportError(failedEntry.index);
+        if (Array.isArray(error.fileErrors)) {
+          const byIndex = new Map(entries.map(entry => [entry.index, entry]));
+          error.fileErrors.forEach(failure => {
+            const entry = byIndex.get(failure?.index);
+            if (entry && !entry.importError) {
+              const reason = String(failure.message || '无法解析').replace(/^fileProc:\s*/i, '');
+              entry.importError = failure.relativePath ? failure.relativePath + '：' + reason : reason;
+            }
+          });
+        } else {
+          const failedEntry = entries.find(entry => (entry.matches || []).some(match =>
+            [match.relativePath, match.fileName, match.path].some(value => value && message.includes(value))));
+          if (failedEntry && !failedEntry.importError) failedEntry.importError = message;
         }
-        setHint('导入失败：' + message, true);
-        status(false, '导入预设集合失败：' + message);
+        if (!showFileImportErrors(entries)) {
+          setHint('导入失败：' + message, true);
+          status(false, '导入预设集合失败：' + message);
+        }
         debug({
           phase: 'import-error',
           message,
-          failedEntryIndex: failedEntry ? failedEntry.index : -1,
+          failedEntryIndexes: entries.filter(entry => entry.importError).map(entry => entry.index),
           progress: importProgressState,
           sequenceSelections: entries
             .filter((entry) => entry.importMode === 'single')
