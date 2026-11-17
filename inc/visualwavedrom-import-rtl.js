@@ -3,8 +3,10 @@
 
   const scriptURL = typeof document !== 'undefined' && document.currentScript.src;
   const maxBytes = 128 * 1024 * 1024;
-  const minimumServiceApi = 32;
+  const txtServiceApi = 28;
+  const configServiceApi = 32;
   const restartMessage = '当前运行的是旧版服务，无法导入 RTL。请保存其他编辑，关闭旧 BAT / SH 服务后重新启动，并打开新启动的页面。';
+  const limitedServiceMessage = '当前服务可以导入 RTL TXT，但不支持 TOML 映射或记住配置。更新工具后可使用这些功能。';
   const timeUnits = { fs: 1n, ps: 1000n, ns: 1000000n, us: 1000000000n, ms: 1000000000000n, s: 1000000000000000n };
   const rateUnits = { Hz: 1n, kHz: 1000n, MHz: 1000000n, GHz: 1000000000n };
   const timePrecision = 10n ** 18n;
@@ -199,22 +201,26 @@
     const status = find('[data-status]'), preview = find('[data-preview]'), rows = find('[data-rows]'), all = find('[data-all]');
     const analyze = find('[data-parse]'), confirm = find('[data-import]'), cancel = find('[data-cancel]');
     const search = find('[data-search]');
-    const fields = [pathField, rate, unit, folder];
+    const fields = [pathField, rate, unit];
     const savingConfigurations = new Map();
-    let task, payload, context, searchPath = '', summary = '', committing = false, serviceReady = false;
+    let task, payload, context, searchPath = '', summary = '', committing = false, serviceApi = 0;
     const server = /^https?:$/.test(location.protocol);
     function setControls(busy = false) {
-      const disabled = !serviceReady || busy;
+      const disabled = serviceApi < txtServiceApi || busy;
+      const mappingUnavailable = disabled || serviceApi < configServiceApi;
       fields.forEach(field => { field.disabled = disabled; });
+      folder.disabled = mappingUnavailable;
       analyze.disabled = disabled || !pathField.value.trim();
-      search.disabled = disabled || !folder.value.trim();
-      mapping.disabled = disabled || mapping.options.length < 2;
+      search.disabled = mappingUnavailable || !folder.value.trim();
+      mapping.disabled = mappingUnavailable || mapping.options.length < 2;
     }
     async function checkService(signal) {
       const response = await fetch('/api/server-info', { cache: 'no-store', signal });
       if (!response.ok) fail('无法连接 VisualWaveDrom 服务，请重新启动 BAT / SH。');
       const info = await response.json();
-      if (info.app !== 'VisualWaveDrom' || !(Number(info.serviceAPIVersion) >= minimumServiceApi)) fail(restartMessage);
+      const version = Number(info.serviceAPIVersion);
+      if (info.app !== 'VisualWaveDrom' || !(version >= txtServiceApi)) fail(restartMessage);
+      return version;
     }
     async function request(query, signal, state) {
       const response = await fetch('/api/import-rtl-wave?' + new URLSearchParams(query), {
@@ -223,7 +229,7 @@
       });
       if (!response.ok) {
         const details = await response.json().catch(() => null);
-        if (query.action && details?.error === '请输入 RTL TXT 文件的绝对路径') fail(restartMessage);
+        if (query.action && details?.error === '请输入 RTL TXT 文件的绝对路径') fail('当前服务不支持此 RTL 配置操作，请更新并重新启动服务');
         fail(details?.error || '无法读取 RTL 配置或文件，请重启 BAT / SH');
       }
       return response;
@@ -237,7 +243,7 @@
       all.indeterminate = false;
       confirm.disabled = true;
       setControls();
-      status.textContent = '';
+      status.textContent = serviceApi >= txtServiceApi && serviceApi < configServiceApi ? limitedServiceMessage : '';
     }
     function selectedRows() {
       return Array.from(rows.querySelectorAll(':checked'), box => payload.updates[Number(box.value)]);
@@ -347,7 +353,7 @@
       status.textContent = '正在写入波形…';
       let problem;
       try {
-        await checkService(AbortSignal.timeout(10000));
+        const version = await checkService(AbortSignal.timeout(10000));
         await options.apply({ updates }, context);
         const [libraryId, waveId] = context;
         const state = {
@@ -355,7 +361,7 @@
           rate: rate.value.trim(), unit: unit.value
         };
         dialog.close();
-        if (libraryId && waveId) {
+        if (version >= configServiceApi && libraryId && waveId) {
           const key = JSON.stringify([libraryId, waveId]);
           const saving = request({ action: 'save-use', libraryId, waveId }, AbortSignal.timeout(10000), state)
             .catch(error => options.reportConfigError('RTL 波形已导入，但未记住配置：' + error.message))
@@ -375,7 +381,7 @@
     return { async open() {
       if (dialog.open) return;
       context = options.context();
-      serviceReady = false;
+      serviceApi = 0;
       find('#rtl-import-title').textContent = '导入 RTL 波形：' + options.title();
       pathField.value = folder.value = rate.value = '';
       unit.value = 'MHz';
@@ -389,7 +395,8 @@
       status.textContent = '正在连接本地服务…';
       try {
         const timer = setTimeout(() => controller.abort(), 10000);
-        try { await checkService(controller.signal); }
+        let version;
+        try { version = await checkService(controller.signal); }
         catch (error) {
           if (controller.signal.aborted && task === controller) {
             status.textContent = '无法连接 VisualWaveDrom 服务，请重新启动 BAT / SH。';
@@ -397,9 +404,9 @@
           throw error;
         } finally { clearTimeout(timer); }
         if (controller.signal.aborted) return;
-        serviceReady = true;
-        status.textContent = '';
-        if (!libraryId || !waveId) return;
+        serviceApi = version;
+        status.textContent = version < configServiceApi ? limitedServiceMessage : '';
+        if (version < configServiceApi || !libraryId || !waveId) return;
         await savingConfigurations.get(JSON.stringify([libraryId, waveId]));
         if (controller.signal.aborted) return;
         const state = await (await request({ action: 'read-use', libraryId, waveId }, controller.signal)).json();
