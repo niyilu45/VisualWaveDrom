@@ -215,6 +215,48 @@
     return lines;
   }
 
+  function layoutRowDraw(draw, texts, height) {
+    const added = height - 20;
+    Array.from(draw.children).forEach(function (child) {
+      if (child.localName !== 'text') {
+        child.setAttribute('transform', 'scale(1 ' + height / 20 + ') ' + (child.getAttribute('transform') || ''));
+      }
+    });
+    texts.forEach(function (text) {
+      const lines = splitTextLines(text);
+      const x = text.getAttribute('x');
+      const baseline = 15 + added / 2 - (lines.length - 1) * 7;
+      text.setAttribute('y', String(baseline));
+      if (lines.length === 1) return;
+      text.replaceChildren();
+      lines.forEach(function (line, lineIndex) {
+        if (lineIndex) text.appendChild(document.createTextNode('\n'));
+        const span = document.createElementNS(SVG_NS, 'tspan');
+        span.setAttribute('x', x);
+        span.setAttribute('y', String(baseline + lineIndex * 14));
+        span.append(...Array.from(line.childNodes));
+        text.appendChild(span);
+      });
+    });
+  }
+
+  function alignRow(draw, signal) {
+    const svg = draw.ownerSVGElement;
+    draw.removeAttribute(ALIGNED_ATTRIBUTE);
+    alignLane(draw, function () {
+      return svg.__vwdRowTailClip || (svg.__vwdRowTailClip = createTailClip(svg));
+    });
+    const texts = Array.from(draw.children).filter(function (child) { return child.localName === 'text'; });
+    texts.forEach(function (text, index) {
+      const value = Array.isArray(signal.data) && signal.data[index];
+      if (typeof value === 'string' && /[\r\n]/.test(value)) {
+        text.replaceChildren(document.createTextNode(value.replace(/\r\n|\r/g, '\n')));
+      }
+    });
+    const height = Math.max(20, Number(draw.getAttribute('data-vwd-data-height')) || 20);
+    if (height > 20) layoutRowDraw(draw, texts, height);
+  }
+
   function layoutMultilineData(svg, source, edgeLabels) {
     if (svg.getAttribute('data-vwd-multiline-layout') === '1') return;
     svg.setAttribute('data-vwd-multiline-layout', '1');
@@ -268,32 +310,12 @@
       appendTransform(row.lane, 'translate(0 ' + row.offset + ')');
       if (!row.added) return;
       row.draw.setAttribute('data-vwd-data-height', String(row.height));
-      Array.from(row.draw.children).forEach(function (child) {
-        if (child.localName !== 'text') {
-          child.setAttribute('transform', 'scale(1 ' + row.height / 20 + ') ' + (child.getAttribute('transform') || ''));
-        }
-      });
+      layoutRowDraw(row.draw, row.texts, row.height);
       const name = row.lane.querySelector('text.info');
       if (name) {
         name.setAttribute('y', String(Number(name.getAttribute('y')) + row.added / 2));
         delete name.__vwdNameBounds;
       }
-      row.texts.forEach(function (text) {
-        const lines = splitTextLines(text);
-        const x = text.getAttribute('x');
-        const baseline = 15 + row.added / 2 - (lines.length - 1) * 7;
-        text.setAttribute('y', String(baseline));
-        if (lines.length === 1) return;
-        text.replaceChildren();
-        lines.forEach(function (line, lineIndex) {
-          if (lineIndex) text.appendChild(document.createTextNode('\n'));
-          const span = document.createElementNS(SVG_NS, 'tspan');
-          span.setAttribute('x', x);
-          span.setAttribute('y', String(baseline + lineIndex * 14));
-          span.append(...Array.from(line.childNodes));
-          text.appendChild(span);
-        });
-      });
     });
     const mapY = function (y) {
       let low = 0, high = rows.length;
@@ -391,6 +413,7 @@
   }
 
   return {
+    alignRow: alignRow,
     alignDataTransitions: alignDataTransitions,
     isDataTransition: function (href) {
       return DATA_TRANSITION_RE.test(String(href || '').replace(/^#/, ''));
