@@ -1647,6 +1647,7 @@ func (s *service) routes() http.Handler {
 	mux.HandleFunc("/api/import-wave-row", method(http.MethodPost, s.handleImportRow))
 	mux.HandleFunc("/api/import-wave-collection", method(http.MethodPost, s.handleImportCollection))
 	mux.HandleFunc("/api/import-rtl-wave", method(http.MethodPost, s.handleRTLImport))
+	mux.HandleFunc("/api/undo-history", method(http.MethodPost, s.handleUndoHistory))
 	mux.HandleFunc("/api/wave-libraries", method(http.MethodGet, s.handleLibraries))
 	mux.HandleFunc("/api/wave-library-search", method(http.MethodPost, s.handleLibrarySearch))
 	mux.HandleFunc("/api/wave-library-path-picker", method(http.MethodPost, s.handleLibraryPathPicker))

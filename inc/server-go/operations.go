@@ -25,6 +25,10 @@ func openOperations(tempDir string) (*libraryDB, error) {
 	_, err = db.Exec(`PRAGMA journal_mode=DELETE;
 CREATE TABLE IF NOT EXISTS operation_records (
  key TEXT PRIMARY KEY, value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS undo_snapshots (
+ session TEXT NOT NULL, owner TEXT NOT NULL, id INTEGER NOT NULL, payload BLOB NOT NULL,
+ PRIMARY KEY(session, owner, id)
 );`)
 	if err != nil {
 		db.Close()
@@ -83,6 +87,9 @@ func (s *service) deleteOperationSession() error {
 		}
 	}
 	if _, err = tx.Exec("DELETE FROM operation_records WHERE key=?", "session:"+filepath.Base(s.workingDir)); err != nil {
+		return err
+	}
+	if _, err = tx.Exec("DELETE FROM undo_snapshots WHERE session=?", filepath.Base(s.workingDir)); err != nil {
 		return err
 	}
 	// Freed SQLite pages are reused by subsequent sessions; no expensive VACUUM

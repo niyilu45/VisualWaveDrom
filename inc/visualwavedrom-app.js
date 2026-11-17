@@ -138,6 +138,20 @@ if (!window.VWDCodeEditorPairs) {
     const BIG_WAVE_SCROLL_THROTTLE_MS = 32;
     const JSON_WRAP_DISABLE_COLUMN_THRESHOLD = 200;
     const JSON_LARGE_TEXT_THRESHOLD = 250000;
+    const EDITOR_HISTORY_MEMORY_BYTES = 16 * 1024 * 1024;
+    const EDITOR_HISTORY_MIB = 1024 * 1024;
+    const EDITOR_HISTORY_LIMIT_KEY = 'visualwavedrom.undo-cache-limit-mib';
+    const EDITOR_HISTORY_SMALL_SLICE = 8192;
+    const editorHistoryPatchWeights = new WeakMap();
+    const editorUndoArchive = window.VisualWaveDromUndoArchive.create();
+    let editorHistoryLimit = 1024 * EDITOR_HISTORY_MIB;
+    try {
+      const saved = Number(localStorage.getItem(EDITOR_HISTORY_LIMIT_KEY));
+      if (Number.isInteger(saved) && saved >= 1 && saved <= 65536) editorHistoryLimit = saved * EDITOR_HISTORY_MIB;
+    } catch (_error) { /* The default still applies when storage is unavailable. */ }
+    let editorHistorySync = false;
+    let editorHistorySyncAgain = false;
+    let lastEditorHistoryWarning = '';
     const EDITOR_LOCAL_STORAGE_MAX_LENGTH = 500000;
     const JSON_EDITOR_SYNC_DEBOUNCE_MS = 360;
     const JSON_EDITOR_RENDER_DEBOUNCE_MS = 700;
@@ -5071,6 +5085,12 @@ ${lines.join('\n')}`;
       return entry && Number.isFinite(entry.sequence) ? entry.sequence : 0;
     }
 
+    function copySmallHistorySlice(text, from, to) {
+      const slice = text.slice(from, to);
+      return text.length > EDITOR_HISTORY_SMALL_SLICE && slice.length <= EDITOR_HISTORY_SMALL_SLICE
+        ? slice.split('').join('') : slice;
+    }
+
     function createTextHistoryPatch(sourceContent, targetContent) {
       const source = String(sourceContent == null ? '' : sourceContent);
       const target = String(targetContent == null ? '' : targetContent);
@@ -5086,12 +5106,12 @@ ${lines.join('\n')}`;
       }
       return {
         start,
-        deleteText: source.slice(start, sourceEnd),
-        insertText: target.slice(start, targetEnd),
+        deleteText: copySmallHistorySlice(source, start, sourceEnd),
+        insertText: copySmallHistorySlice(target, start, targetEnd),
         sourceLength: source.length,
         targetLength: target.length,
-        beforeContext: source.slice(Math.max(0, start - 32), start),
-        afterContext: source.slice(sourceEnd, Math.min(source.length, sourceEnd + 32))
+        beforeContext: copySmallHistorySlice(source, Math.max(0, start - 32), start),
+        afterContext: copySmallHistorySlice(source, sourceEnd, Math.min(source.length, sourceEnd + 32))
       };
     }
 
@@ -5102,13 +5122,156 @@ ${lines.join('\n')}`;
         sequence: Number.isFinite(sequence) ? sequence : nextHistorySequence(),
         reason: reason || 'editor-change'
       };
-      if (sourceContent == null) return entry;
+      if (sourceContent == null || (reason === 'wave-import'
+          && Math.max(target.length, sourceContent.length) >= JSON_LARGE_TEXT_THRESHOLD)) return entry;
       const patch = createTextHistoryPatch(sourceContent, target);
       const patchSize = patch.deleteText.length + patch.insertText.length + 96;
       if (patchSize >= target.length) return entry;
       delete entry.content;
       entry.patch = patch;
       return entry;
+    }
+
+    function editorHistoryBytes(entry) {
+      if (entry.archive) return entry.archive.bytes + 96;
+      if (entry.operationPatch) {
+        const patch = entry.operationPatch;
+        let bytes = editorHistoryPatchWeights.get(patch);
+        if (bytes === undefined) {
+          bytes = patch.steps.reduce((size, step) => size + 48
+            + 2 * (step.deleteText.length + step.insertText.length), 96);
+          editorHistoryPatchWeights.set(patch, bytes);
+        }
+        return bytes;
+      }
+      if (entry.patch) {
+        const patch = entry.patch;
+        // A substring can keep its backing string alive even when the patch is small.
+        const retained = (text, length) => text.length > EDITOR_HISTORY_SMALL_SLICE ? length : text.length;
+        return 96 + 2 * (retained(patch.deleteText, patch.sourceLength)
+          + retained(patch.insertText, patch.targetLength) + patch.beforeContext.length + patch.afterContext.length);
+      }
+      return 96 + 2 * (entry.content || '').length;
+    }
+
+    function editorHistoryUsage() {
+      return undoStack.concat(redoStack).reduce((bytes, entry) => bytes + editorHistoryBytes(entry), 0);
+    }
+
+    function discardEditorHistory(entries) {
+      entries.forEach((entry) => {
+        entry.historyDiscarded = true;
+        if (entry.archive) void editorUndoArchive.remove(entry.archive).catch(() => {});
+      });
+    }
+
+    function clearEditorRedoHistory() {
+      discardEditorHistory(redoStack);
+      redoStack = [];
+    }
+
+    function resetEditorHistory() {
+      discardEditorHistory(undoStack);
+      undoStack = [];
+      clearEditorRedoHistory();
+      lastEditorHistoryWarning = '';
+    }
+
+    function openEditorHistorySettings() {
+      const dialog = document.getElementById('undo-cache-dialog');
+      if (!dialog.open) {
+        document.getElementById('undo-cache-limit').value = String(editorHistoryLimit / EDITOR_HISTORY_MIB);
+        dialog.showModal();
+      }
+      updateEditorHistoryUsage(dialog, editorHistoryUsage());
+    }
+
+    function updateEditorHistoryUsage(dialog, bytes) {
+      const mib = value => (value / EDITOR_HISTORY_MIB).toLocaleString(undefined, { maximumFractionDigits: 1 });
+      const excess = bytes - editorHistoryLimit;
+      dialog.querySelector('#undo-cache-usage').textContent = '已用 ' + mib(bytes) + ' / ' + mib(editorHistoryLimit) + ' MiB'
+        + (excess > 0 ? '。已超上限，请提高上限或删除最旧的记录。' : '');
+      dialog.querySelector('#undo-cache-trim').hidden = excess <= 0;
+    }
+
+    function trimEditorHistory() {
+      if (editorHistorySync) { editorHistorySyncAgain = true; return; }
+      editorHistorySync = true;
+      setTimeout(async () => {
+        try {
+          const dialog = document.getElementById('undo-cache-dialog');
+          const bytes = editorHistoryUsage();
+          if (dialog.open) updateEditorHistoryUsage(dialog, bytes);
+          if (bytes > editorHistoryLimit) {
+            const warning = bytes + ':' + editorHistoryLimit;
+            if (warning !== lastEditorHistoryWarning) {
+              lastEditorHistoryWarning = warning;
+              openEditorHistorySettings();
+            }
+            return;
+          }
+          lastEditorHistoryWarning = '';
+          const entries = undoStack.concat(redoStack);
+          let memory = entries.reduce((total, entry) => total + (entry.archive ? 0 : editorHistoryBytes(entry)), 0);
+          for (const entry of entries) {
+            if (entry.historyDiscarded || entry.archive || typeof entry.content !== 'string'
+                || entry === pendingEditorHistoryEntry) continue;
+            const weight = editorHistoryBytes(entry);
+            if (weight < JSON_LARGE_TEXT_THRESHOLD && memory <= EDITOR_HISTORY_MEMORY_BYTES) continue;
+            const content = entry.content;
+            const archive = await editorUndoArchive.write(content, editorHistoryLimit,
+              () => editorHistoryLimit - editorHistoryUsage() + weight - 96);
+            if (!archive) continue;
+            if (entry.historyDiscarded || entry.content !== content || editorHistoryUsage() - weight + archive.bytes + 96 > editorHistoryLimit) {
+              void editorUndoArchive.remove(archive).catch(() => {});
+              continue;
+            }
+            entry.archive = archive;
+            delete entry.content;
+            memory -= weight;
+          }
+          if (dialog.open) updateEditorHistoryUsage(dialog, editorHistoryUsage());
+        } catch (error) {
+          setStatus(false, '撤销记录暂留内存：无法写入本地缓存');
+          vwdDebugLog('history', { phase: 'archive-write-error', message: error.message });
+        } finally {
+          editorHistorySync = false;
+          if (editorHistorySyncAgain) {
+            editorHistorySyncAgain = false;
+            trimEditorHistory();
+          }
+        }
+      }, 0);
+    }
+
+    function bindEditorHistorySettings() {
+      const dialog = document.getElementById('undo-cache-dialog');
+      const limit = document.getElementById('undo-cache-limit');
+      document.getElementById('ui-settings-undo-cache').addEventListener('click', openEditorHistorySettings);
+      document.getElementById('undo-cache-cancel').addEventListener('click', () => dialog.close());
+      document.getElementById('undo-cache-form').addEventListener('submit', (event) => {
+        event.preventDefault();
+        editorHistoryLimit = limit.valueAsNumber * EDITOR_HISTORY_MIB;
+        try { localStorage.setItem(EDITOR_HISTORY_LIMIT_KEY, String(limit.valueAsNumber)); }
+        catch (_error) { /* The current window still uses the new limit. */ }
+        const bytes = editorHistoryUsage();
+        lastEditorHistoryWarning = bytes + ':' + editorHistoryLimit;
+        if (bytes <= editorHistoryLimit) dialog.close();
+        else updateEditorHistoryUsage(dialog, bytes);
+        trimEditorHistory();
+      });
+      document.getElementById('undo-cache-trim').addEventListener('click', () => {
+        let bytes = editorHistoryUsage();
+        while (bytes > editorHistoryLimit && (undoStack.length || redoStack.length)) {
+          const entry = (undoStack.length ? undoStack : redoStack).shift();
+          if (entry === pendingEditorHistoryEntry) pendingEditorHistoryEntry = null;
+          bytes -= editorHistoryBytes(entry);
+          discardEditorHistory([entry]);
+        }
+        updateUndoRedoButtons();
+        dialog.close();
+        trimEditorHistory();
+      });
     }
 
     function createOperationHistoryEntry(operations, finalLength, initialLength, sequence, reason) {
@@ -5179,6 +5342,7 @@ ${lines.join('\n')}`;
     function rebaseLatestEditorUndoSource(sourceContent, nextSourceContent, reason) {
       const entry = undoStack[undoStack.length - 1];
       if (!entry) return false;
+      if (entry.archive) return true; // An archived snapshot has no source offsets to rebase.
       const targetContent = getEditorHistoryContent(entry, sourceContent);
       if (targetContent === null) {
         vwdDebugLog('history', {
@@ -5192,7 +5356,7 @@ ${lines.join('\n')}`;
       }
       const nextSource = String(nextSourceContent == null ? '' : nextSourceContent);
       if (targetContent === nextSource) {
-        undoStack.pop();
+        discardEditorHistory([undoStack.pop()]);
         if (pendingEditorHistoryEntry === entry) pendingEditorHistoryEntry = null;
         updateUndoRedoButtons();
         return true;
@@ -5204,6 +5368,7 @@ ${lines.join('\n')}`;
         entry.reason
       );
       replaceEditorHistoryEntryContent(entry, replacement);
+      trimEditorHistory();
       vwdDebugLog('history', {
         phase: 'undo-source-rebased',
         reason: reason || 'content-transform',
@@ -5221,7 +5386,7 @@ ${lines.join('\n')}`;
       pendingEditorHistoryEntry = null;
       if (!entry || undoStack[undoStack.length - 1] !== entry || typeof entry.content !== 'string') return;
       if (entry.content === String(sourceContent == null ? '' : sourceContent)) {
-        undoStack.pop();
+        discardEditorHistory([undoStack.pop()]);
         updateUndoRedoButtons();
         return;
       }
@@ -5229,6 +5394,7 @@ ${lines.join('\n')}`;
       if (!compact.patch) return;
       delete entry.content;
       entry.patch = compact.patch;
+      trimEditorHistory();
     }
 
     function setEditorHistoryBaseline(text) {
@@ -5251,9 +5417,14 @@ ${lines.join('\n')}`;
       compactPendingEditorHistory(sourceContent == null ? editor.value : sourceContent);
       const entry = createEditorHistoryEntry(content, sourceContent, nextHistorySequence(), reason);
       undoStack.push(entry);
-      if (undoStack.length > 100) undoStack.shift();
+      const retainedBytes = editorHistoryUsage();
+      if (reason === 'wave-import') {
+        vwdDebugLog('history', { phase: 'import-undo', storage: entry.patch ? 'text-patch' : 'previous-content',
+          undoDepth: undoStack.length, retainedBytes });
+      }
       pendingEditorHistoryEntry = sourceContent == null ? entry : null;
-      redoStack = [];
+      clearEditorRedoHistory();
+      trimEditorHistory();
       waveLibraryRedoStack = [];
     }
 
@@ -5280,8 +5451,8 @@ ${lines.join('\n')}`;
       if (operationEntry) {
         compactPendingEditorHistory(current);
         undoStack.push(operationEntry);
-        if (undoStack.length > 100) undoStack.shift();
-        redoStack = [];
+        clearEditorRedoHistory();
+        trimEditorHistory();
         waveLibraryRedoStack = [];
       } else {
         pushEditorUndoSnapshot(previous, reason || 'direct-json-interval', current);
@@ -5315,14 +5486,14 @@ ${lines.join('\n')}`;
       markDirectJsonEdit();
     }
 
-    function pushUndoBeforeChange(nextContent) {
+    function pushUndoBeforeChange(nextContent, reason) {
       if (isApplyingHistory) return;
       flushCodeMirrorToTextarea('before-toolbar-change');
       flushUndoDebounce();
       checkpointDirectJsonEdit('before-toolbar-change');
       pushEditorUndoSnapshot(
         editor.value,
-        'toolbar-change',
+        reason || 'toolbar-change',
         typeof nextContent === 'string' ? nextContent : undefined
       );
       setEditorHistoryBaseline(editor.value);
@@ -17618,6 +17789,14 @@ ${lines.join('\n')}`;
       });
     }
 
+    function copyImportSignalTree(entry) {
+      if (Array.isArray(entry)) return entry.map(copyImportSignalTree);
+      if (!entry || typeof entry !== 'object') return entry;
+      return Array.isArray(entry.children)
+        ? { ...entry, children: entry.children.map(copyImportSignalTree) }
+        : { ...entry };
+    }
+
     function applyImportedWaveRows(payload, importOptions) {
       const startedAt = performance.now();
       let updates = payload && Array.isArray(payload.updates) ? payload.updates : [];
@@ -17636,7 +17815,10 @@ ${lines.join('\n')}`;
 
       let parsed;
       try {
-        parsed = JSON.parse(editor.value);
+        const source = jsonDocumentSourceText === editor.value && jsonDocumentSource;
+        parsed = source && Array.isArray(source.signal)
+          ? { ...source, signal: copyImportSignalTree(source.signal) }
+          : JSON.parse(editor.value);
       } catch (error) {
         throw new Error('当前 WaveDrom JSON 有错误，无法导入');
       }
@@ -17894,7 +18076,7 @@ ${lines.join('\n')}`;
       const selectionStart = editor.selectionStart;
       const selectionEnd = editor.selectionEnd;
       exitWavePaintMode('row-import');
-      pushUndoBeforeChange(newText);
+      pushUndoBeforeChange(newText, 'wave-import');
       applyEditorChange(newText, selectionStart, selectionEnd, {
         skipFocus: true,
         skipSyncPersist: true,
@@ -19440,7 +19622,7 @@ ${lines.join('\n')}`;
       waveLibraryUndoStack.push({ before, after, sequence: nextHistorySequence() });
       if (waveLibraryUndoStack.length > 20) waveLibraryUndoStack.shift();
       waveLibraryRedoStack = [];
-      redoStack = [];
+      clearEditorRedoHistory();
       updateUndoRedoButtons();
     }
 
@@ -19730,8 +19912,7 @@ ${lines.join('\n')}`;
       const tag = getSavedTagByName(name);
       if (!tag) return;
 
-      undoStack = [];
-      redoStack = [];
+      resetEditorHistory();
       pendingEditorHistoryEntry = null;
       undoBurstCaptured = false;
       flushUndoDebounce();
@@ -20341,7 +20522,7 @@ ${lines.join('\n')}`;
       return true;
     }
 
-    function undo() {
+    async function undo() {
       if (window.VisualWaveDromParameters.page() === 'parameters') { window.VisualWaveDromParameters.undo(); return; }
       commitOpenTextEditors('before-undo');
       checkpointDirectJsonEdit('before-undo');
@@ -20364,18 +20545,23 @@ ${lines.join('\n')}`;
       if (undoStack.length === 0) return;
       flushUndoDebounce();
       undoBurstCaptured = false;
-      const entry = undoStack.pop();
-      pendingEditorHistoryEntry = null;
-      const targetContent = getEditorHistoryContent(entry, editor.value);
+      const entry = undoStack.at(-1);
+      const sourceContent = editor.value;
+      let targetContent;
+      try { targetContent = entry.archive ? await editorUndoArchive.read(entry.archive) : getEditorHistoryContent(entry, sourceContent); }
+      catch (_error) { setStatus(false, '无法读取撤销缓存，当前波形未改变'); return; }
+      if (editor.value !== sourceContent || undoStack.at(-1) !== entry) return;
       if (targetContent === null) {
-        undoStack.push(entry);
         setStatus(false, '撤销记录与当前 JSON 不匹配，已保留当前内容');
         updateUndoRedoButtons();
         return;
       }
+      discardEditorHistory([undoStack.pop()]);
+      pendingEditorHistoryEntry = null;
       isApplyingHistory = true;
       try {
         redoStack.push(createInverseEditorHistoryEntry(entry, editor.value, targetContent));
+        trimEditorHistory();
         setEditorValue(targetContent, { clearCodeMirrorHistory: true });
         setEditorHistoryBaseline(editor.value);
         updateLineNumbers();
@@ -20390,7 +20576,7 @@ ${lines.join('\n')}`;
       updateUndoRedoButtons();
     }
 
-    function redo() {
+    async function redo() {
       if (window.VisualWaveDromParameters.page() === 'parameters') { window.VisualWaveDromParameters.redo(); return; }
       commitOpenTextEditors('before-redo');
       checkpointDirectJsonEdit('before-redo');
@@ -20413,18 +20599,23 @@ ${lines.join('\n')}`;
       if (redoStack.length === 0) return;
       flushUndoDebounce();
       undoBurstCaptured = false;
-      const entry = redoStack.pop();
-      pendingEditorHistoryEntry = null;
-      const targetContent = getEditorHistoryContent(entry, editor.value);
+      const entry = redoStack.at(-1);
+      const sourceContent = editor.value;
+      let targetContent;
+      try { targetContent = entry.archive ? await editorUndoArchive.read(entry.archive) : getEditorHistoryContent(entry, sourceContent); }
+      catch (_error) { setStatus(false, '无法读取重做缓存，当前波形未改变'); return; }
+      if (editor.value !== sourceContent || redoStack.at(-1) !== entry) return;
       if (targetContent === null) {
-        redoStack.push(entry);
         setStatus(false, '重做记录与当前 JSON 不匹配，已保留当前内容');
         updateUndoRedoButtons();
         return;
       }
+      discardEditorHistory([redoStack.pop()]);
+      pendingEditorHistoryEntry = null;
       isApplyingHistory = true;
       try {
         undoStack.push(createInverseEditorHistoryEntry(entry, editor.value, targetContent));
+        trimEditorHistory();
         setEditorValue(targetContent, { clearCodeMirrorHistory: true });
         setEditorHistoryBaseline(editor.value);
         updateLineNumbers();
@@ -20442,8 +20633,7 @@ ${lines.join('\n')}`;
     function initEditor() {
       const initialJson = formatJsonForDisplay(loadEditorJsonFromStorage());
       setEditorValue(initialJson, { clearCodeMirrorHistory: true });
-      undoStack = [];
-      redoStack = [];
+      resetEditorHistory();
       pendingEditorHistoryEntry = null;
       setEditorHistoryBaseline(initialJson);
       flushUndoDebounce();
@@ -25307,6 +25497,7 @@ ${lines.join('\n')}`;
     }, true);
     document.getElementById('btn-undo').addEventListener('click', undo);
     document.getElementById('btn-redo').addEventListener('click', redo);
+    bindEditorHistorySettings();
     const debugModeBtn = document.getElementById('btn-debug-mode');
     if (debugModeBtn) {
       debugModeBtn.addEventListener('click', toggleDebugMode);
@@ -25332,7 +25523,7 @@ ${lines.join('\n')}`;
         },
         getFormulaSignalNames: () => {
           try {
-            const source = JSON.parse(editor.value);
+            const source = (jsonDocumentSourceText === editor.value && jsonDocumentSource) || JSON.parse(editor.value);
             return flattenSignals(source && source.signal)
               .map((signal) => String(signal && signal.name || '').trim())
               .filter(Boolean);
@@ -25395,6 +25586,8 @@ ${lines.join('\n')}`;
             replaceScopeMultiWaves: true
           });
           await reportApplyStage('reconciling', true);
+          const documentName = editingWaveDocumentName;
+          const previousScopeState = scopeTransientStates.get(scopeTransientStateKey(currentWaveLibraryId, documentName));
           const scopeTransientState = reconcileScopeTransientStateAfterCollectionImport(
             resolvedPayload,
             result.documentValue,
@@ -25402,13 +25595,16 @@ ${lines.join('\n')}`;
           );
           delete result.documentValue;
           delete result.sourceRowReplacements;
-          await reportApplyStage('saving', true);
-          await persistImportedWaveRows(result);
-          await reportApplyStage('notifying', true);
-          notifyOpenScopeWindowsAfterCollectionImport(
-            editingWaveDocumentName,
-            scopeTransientState
-          );
+          const pendingChanges = waveLibraryStructureDirty || dirtyWaveDocumentNames.size || deletedWaveDocumentNames.size
+            || getSavedTagByName(documentName)?.content !== editor.value;
+          if (result.changed || pendingChanges) {
+            await reportApplyStage('saving', true);
+            await persistImportedWaveRows(result);
+          }
+          if (result.changed || JSON.stringify(previousScopeState ?? null) !== JSON.stringify(scopeTransientState)) {
+            await reportApplyStage('notifying', true);
+            notifyOpenScopeWindowsAfterCollectionImport(documentName, scopeTransientState);
+          }
           await reportApplyStage('finalizing', false);
           result.formulaResult = resolvedPayload.formulaResult || null;
           return result;
