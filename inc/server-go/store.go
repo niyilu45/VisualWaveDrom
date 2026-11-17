@@ -350,29 +350,37 @@ func integerValue(value any) (int, bool) {
 }
 
 func documentMetadata(content, fallbackName string) (string, string, any, error) {
-	var source map[string]any
+	// Ignore sample arrays while decoding metadata; validate them without allocating them.
+	var source *struct {
+		Title           json.RawMessage `json:"title"`
+		Head            json.RawMessage `json:"head"`
+		Description     json.RawMessage `json:"description"`
+		ParameterTables any             `json:"parameterTables"`
+	}
 	if err := json.Unmarshal([]byte(content), &source); err != nil {
 		return "", "", nil, err
 	}
 	if source == nil {
 		return "", "", nil, errors.New("wave document root must be an object")
 	}
-	title, _ := source["title"].(string)
+	var title, description string
+	_ = json.Unmarshal(source.Title, &title)
 	title = strings.TrimSpace(title)
 	head := ""
-	if headObject, ok := source["head"].(map[string]any); ok {
+	var headObject map[string]any
+	if json.Unmarshal(source.Head, &headObject) == nil {
 		if headText, ok := headObject["text"].(string); ok {
 			head = strings.TrimSpace(headText)
 		}
 	}
-	description, _ := source["description"].(string)
+	_ = json.Unmarshal(source.Description, &description)
 	if title == "" {
 		title = head
 	}
 	if title == "" {
 		title = fallbackName
 	}
-	return title, description, source["parameterTables"], nil
+	return title, description, source.ParameterTables, nil
 }
 
 func prepareDocument(document map[string]any, sortOrder int) (preparedDocument, error) {

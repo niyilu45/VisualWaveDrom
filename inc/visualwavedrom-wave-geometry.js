@@ -246,8 +246,13 @@
           text.replaceChildren(document.createTextNode(value.replace(/\r\n|\r/g, '\n')));
         }
       });
-      const count = Math.max(1, Number(signals[index] && signals[index]._vwdDataLineCount) || 1,
-        ...texts.map(function (text) { return text.textContent.split(/\r\n|\r|\n/).length; }));
+      let count = Math.max(1, Number(signals[index] && signals[index]._vwdDataLineCount) || 1);
+      texts.forEach(function (text) { count = Math.max(count, text.textContent.split(/\r\n|\r|\n/).length); });
+      if (Array.isArray(data)) data.forEach(function (value) {
+        if (typeof value === 'string' && /[\r\n]/.test(value)) {
+          count = Math.max(count, value.split(/\r\n|\r|\n/).length);
+        }
+      });
       const top = lane.transform.baseVal.consolidate().matrix.f;
       const added = count > 1 ? count * 14 + 6 - 20 : 0;
       const row = { lane: lane, draw: draw, texts: texts, top: top, offset: extra, added: added, height: 20 + added };
@@ -269,7 +274,10 @@
         }
       });
       const name = row.lane.querySelector('text.info');
-      if (name) name.setAttribute('y', String(Number(name.getAttribute('y')) + row.added / 2));
+      if (name) {
+        name.setAttribute('y', String(Number(name.getAttribute('y')) + row.added / 2));
+        delete name.__vwdNameBounds;
+      }
       row.texts.forEach(function (text) {
         const lines = splitTextLines(text);
         const x = text.getAttribute('x');
@@ -356,6 +364,14 @@
       return { lanes: 0, transitions: 0, labels: 0, arcGroups: 0 };
     }
     const totals = { lanes: 0, transitions: 0, labels: 0, arcGroups: 0 };
+    // Read stable label geometry together before changing any wave paths.
+    svg.querySelectorAll('text.info').forEach(function (name) {
+      try { name.__vwdNameBounds = { text: name.textContent, box: name.getBBox() }; }
+      catch (_) { delete name.__vwdNameBounds; }
+    });
+    svg.querySelectorAll('[id^="groups_"] text').forEach(function (text) {
+      try { text.__vwdGroupBounds = text.getBBox(); } catch (_) { /* No visible group text. */ }
+    });
     const edgeLabels = fitEdgeLabelBackgrounds(svg, source);
     let clipId = '';
     const getClipId = function () {

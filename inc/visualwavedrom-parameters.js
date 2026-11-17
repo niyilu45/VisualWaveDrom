@@ -655,6 +655,19 @@
       if (!value || typeof value !== 'object') return value;
       if (indices.has(value)) row = indices.get(value);
       let next = value;
+      if (Array.isArray(value)) {
+        // Numeric sample arrays need no property-name list or recursive calls.
+        for (let index = 0; index < value.length; index += 1) {
+          const raw = value[index];
+          if (raw == null || typeof raw !== 'string' && typeof raw !== 'object') continue;
+          const result = visit(raw, calculate ? path.concat(index) : path, row);
+          if (result !== raw) {
+            if (next === value) next = value.slice();
+            next[index] = result;
+          }
+        }
+        return next;
+      }
       Object.keys(value).forEach((key) => {
         if (key === 'parameterTables') return;
         const raw = value[key];

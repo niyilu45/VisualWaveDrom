@@ -11119,8 +11119,10 @@ ${lines.join('\n')}`;
 
       let edgeCenter = null;
       try {
-        const rect = edgeElement.getBoundingClientRect();
-        edgeCenter = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+        if (candidates.length > 1) {
+          const rect = edgeElement.getBoundingClientRect();
+          edgeCenter = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+        }
       } catch (_e) { /* use source order fallback */ }
       const labelText = edgeCenter
         ? candidates.map((candidate) => {
@@ -11228,6 +11230,92 @@ ${lines.join('\n')}`;
       svg.__vwdLaneGroupCache = lanes;
       return lanes;
     }
+
+    function waveLocalMatrix(element, svg) {
+      let matrix = svg.createSVGMatrix();
+      for (let node = element; node && node !== svg; node = node.parentNode) {
+        const transform = node.transform?.baseVal.consolidate();
+        if (transform) matrix = transform.matrix.multiply(matrix);
+      }
+      return matrix;
+    }
+
+    const activeWaveRowWindow = { documentKey: '', start: 0, end: 60 };
+
+    function projectActiveWaveRows(source) {
+      const key = getBigWaveDocumentKey();
+      if (key !== activeWaveRowWindow.documentKey) Object.assign(activeWaveRowWindow, { documentKey: key, start: 0, end: 60 });
+      let index = 0;
+      const flat = flattenSignals(source.signal);
+      const widest = flat.reduce((best, row, position) => String(row.wave || '').length * (Number(row.period) || 1)
+        > String(flat[best]?.wave || '').length * (Number(flat[best]?.period) || 1) ? position : best, 0);
+      function project(items) {
+        return items.map(item => {
+          if (Array.isArray(item)) return [item[0], ...project(item.slice(1))];
+          if (!item || typeof item !== 'object') return item;
+          const children = Array.isArray(item.children);
+          const row = !children || ['name', 'wave', 'node', 'data'].some(key => Object.hasOwn(item, key));
+          const visible = !row || index === widest || index >= activeWaveRowWindow.start && index < activeWaveRowWindow.end;
+          if (row) index++;
+          if (!visible && !/[a-zA-Z0-9]/.test(String(item.node || ''))) {
+            const copy = { ...item, wave: 'x' };
+            delete copy.data; delete copy.scope;
+            if (children) copy.children = project(item.children);
+            return copy;
+          }
+          return children ? { ...item, children: project(item.children) } : item;
+        });
+      }
+      return { ...source, signal: project(source.signal || []) };
+    }
+
+    function updateActiveWaveRowCulling(svg, initialViewport) {
+      const lanes = getWaveLaneGroups(svg);
+      if (lanes.length < 120) return;
+      const rows = svg.__vwdCullingRows || (svg.__vwdCullingRows = lanes.map((lane, index) => {
+        const draw = lane.querySelector('[id^="wavelane_draw_"]');
+        if (!draw) return null;
+        draw.setAttribute('data-vwd-culled', '');
+        draw.style.display = 'none';
+        return { draw, index, top: waveLocalMatrix(draw, svg).f,
+          height: Math.max(20, Number(draw.getAttribute('data-vwd-data-height')) || 20) };
+      }).filter(Boolean));
+      const box = initialViewport ? { top: initialViewport.top, height: svg.height.baseVal.value } : svg.getBoundingClientRect();
+      if (!(box.height > 0) || !svg.viewBox.baseVal.height) return;
+      const panel = initialViewport?.panel || wavePanel.getBoundingClientRect();
+      const scale = box.height / svg.viewBox.baseVal.height;
+      const start = (Math.max(0, panel.top) - box.top - 320) / scale;
+      const end = (Math.min(window.innerHeight, panel.bottom) - box.top + 320) / scale;
+      let first = -1, last = -1;
+      rows.forEach(({ draw, index, top, height }) => {
+        const hidden = top + height < start || top > end;
+        if (!hidden) { if (first < 0) first = index; last = index; }
+        if (hidden === draw.hasAttribute('data-vwd-culled')) return;
+        if (hidden) { draw.setAttribute('data-vwd-culled', ''); draw.style.display = 'none'; }
+        else { draw.removeAttribute('data-vwd-culled'); draw.style.removeProperty('display'); }
+      });
+      if (!initialViewport && first >= 0 && (first < activeWaveRowWindow.start || last >= activeWaveRowWindow.end)
+          && !inlineEditActive && !isRenderingWaveform) {
+        activeWaveRowWindow.start = Math.max(0, first - 8);
+        activeWaveRowWindow.end = Math.min(lanes.length, last + 9);
+        let source = jsonDocumentSourceText === editor.value ? jsonDocumentSource : null;
+        if (!source) { try { source = JSON.parse(editor.value); } catch (_) { return; } }
+        scheduleRenderWaveform(editor.value, null, { text: editor.value, ok: true,
+          source, metrics: jsonDocumentMetrics, verticalRefresh: true });
+      }
+    }
+
+    let waveRowCullingFrame = 0;
+    function scheduleActiveWaveRowCulling() {
+      if (waveRowCullingFrame) return;
+      waveRowCullingFrame = requestAnimationFrame(() => {
+        waveRowCullingFrame = 0;
+        const svg = waveContainer.querySelector('svg');
+        if (svg) updateActiveWaveRowCulling(svg);
+      });
+    }
+    window.addEventListener('scroll', scheduleActiveWaveRowCulling, { capture: true, passive: true });
+    window.addEventListener('resize', scheduleActiveWaveRowCulling, { passive: true });
 
     function getWaveLaneDrawFrame(lane, local) {
       const draw = lane && lane.querySelector('[id^="wavelane_draw_"]');
@@ -12789,7 +12877,7 @@ ${lines.join('\n')}`;
       labelEls.forEach((labelEl) => labelEl.classList.add('wave-group-label-selected'));
     }
 
-    function attachGroupInteractivity(jsonText) {
+    function attachGroupInteractivity(jsonText, suppliedSource) {
       const svg = waveContainer.querySelector('svg');
       if (!svg) return;
       vwdDebugLog('group-label', {
@@ -12799,8 +12887,10 @@ ${lines.join('\n')}`;
       });
 
       const groupMap = buildGroupSourceMap(jsonText);
-      let parameterGroupSource = null;
-      try { parameterGroupSource = JSON.parse(jsonText); } catch (_) { /* Source mapping handles invalid JSON. */ }
+      let parameterGroupSource = suppliedSource;
+      if (!parameterGroupSource) {
+        try { parameterGroupSource = JSON.parse(jsonText); } catch (_) { /* Source mapping handles invalid JSON. */ }
+      }
       const lanes = getWaveLaneGroups(svg);
       if (!groupMap.length) {
         refreshGroupSelection(svg, groupMap);
@@ -12824,10 +12914,13 @@ ${lines.join('\n')}`;
         delete el.dataset.vwdGroupBound;
       });
 
-      const laneBoxes = lanes.map((lane) => {
+      const laneBoxes = lanes.map((lane, index) => {
+        if (!groupMap.some(group => index >= group.rowStart && index <= group.rowEnd)) return null;
         try {
-          const rect = lane.getBBox();
-          return { y0: rect.y, y1: rect.y + rect.height };
+          const rect = lane.querySelector('rect.lane-hover-bg');
+          const band = getWaveLaneDrawFrame(lane, true);
+          return rect ? { y0: Number(rect.getAttribute('y')), y1: Number(rect.getAttribute('y')) + Number(rect.getAttribute('height')) }
+            : band ? { y0: band.y, y1: band.bottom } : null;
         } catch (e) {
           return null;
         }
@@ -13111,7 +13204,7 @@ ${lines.join('\n')}`;
           popupAnchor = labelCandidate.textEl;
           labelTargets.push(labelCandidate.textEl);
           try {
-            const box = labelCandidate.textEl.getBBox();
+            const box = labelCandidate.textEl.__vwdGroupBounds || labelCandidate.textEl.getBBox();
             const hitRect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
             hitRect.setAttribute('x', box.x - 2);
             hitRect.setAttribute('y', box.y - 2);
@@ -13748,7 +13841,11 @@ ${lines.join('\n')}`;
       lanes.forEach((lane) => {
         const name = lane.querySelector('text.info');
         if (!name) return;
-        try { name.__vwdNameBounds = { text: name.textContent, box: name.getBBox() }; }
+        try {
+          if (!name.__vwdNameBounds || name.__vwdNameBounds.text !== name.textContent) {
+            name.__vwdNameBounds = { text: name.textContent, box: name.getBBox() };
+          }
+        }
         catch (_error) { delete name.__vwdNameBounds; }
       });
 
@@ -14181,7 +14278,7 @@ ${lines.join('\n')}`;
 
       reserveEmptySignalNameSpace(svg);
       restoreWaveSelection(lanes, sourceMap);
-      attachGroupInteractivity(jsonText);
+      attachGroupInteractivity(jsonText, documentSource || parsedSource);
       attachEdgeInteractivity(jsonText, parsedSource);
       let parameterEdgeSource = documentSource;
       if (!parameterEdgeSource) {
@@ -16192,6 +16289,12 @@ ${lines.join('\n')}`;
       ]);
     }
 
+    function sameWaveDocumentContent(left, right) {
+      return !!left && !!right && String(left.content || '') === String(right.content || '')
+        && (left.hscale ?? null) === (right.hscale ?? null)
+        && (left.waveEditMode || '') === (right.waveEditMode || '');
+    }
+
     function notifyWaveDocumentSync(document) {
       if (!waveLibrarySyncChannel || !document) return;
       try {
@@ -16282,14 +16385,13 @@ ${lines.join('\n')}`;
       const stored = getSavedTagByName(documentName);
       if (!stored || stored.deferred || !currentWaveLibraryId) return false;
       const documentSnapshot = getWaveDocumentServerSnapshot(stored, false);
-      const snapshotSignature = singleWaveSyncSignature(documentSnapshot);
       try {
-        JSON.parse(documentSnapshot.content);
+        if (jsonDocumentSourceText !== documentSnapshot.content || !jsonDocumentSource) JSON.parse(documentSnapshot.content);
       } catch (_e) {
         setStatus(false, 'JSON 解析错误，当前波形尚未同步');
         return false;
       }
-      const response = await fetch('/api/wave-document', {
+      const response = await fetch('/api/wave-document?ack=1', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -16301,7 +16403,7 @@ ${lines.join('\n')}`;
       });
       const result = await response.json().catch(() => ({}));
       const alreadySaved = response.status === 409 && result.document
-        && singleWaveSyncSignature(result.document) === snapshotSignature;
+        && sameWaveDocumentContent(result.document, documentSnapshot);
       if (response.status === 409 && !alreadySaved) {
         setStatus(false, '同步冲突：波形库中的这张图已被其他页面修改');
         vwdDebugLog('wave-library', { phase: 'incremental-save-conflict', documentName });
@@ -16311,7 +16413,7 @@ ${lines.join('\n')}`;
       const current = getSavedTagByName(documentName);
       if (current) {
         current.revision = result.document.revision;
-        if (singleWaveSyncSignature(current) === snapshotSignature) {
+        if (sameWaveDocumentContent(current, documentSnapshot)) {
           current.savedAt = result.document.savedAt;
           dirtyWaveDocumentNames.delete(documentName);
         }
@@ -20241,7 +20343,8 @@ ${lines.join('\n')}`;
         if (waveClassGesture) waveClassGesture.cancel();
         closeWaveClassMenu(false, false);
       }
-      syncColumnNumberButtonFromJson(jsonText);
+      syncColumnNumberButtonFromJson(jsonText,
+        preparedAnalysis?.source || (jsonDocumentSourceText === jsonText ? jsonDocumentSource : null));
       if (isRenderingWaveform) {
         pendingRenderText = jsonText;
         pendingRenderAnalysis = preparedAnalysis && preparedAnalysis.text === jsonText ? preparedAnalysis : null;
@@ -20250,7 +20353,7 @@ ${lines.join('\n')}`;
       const parameterRevision = window.VisualWaveDromParameters.getRevision();
       const activeDocument = editingWaveDocumentName;
       const activeLibrary = currentWaveLibraryId;
-      if (lastRenderedWaveText === jsonText && lastRenderedParameterRevision === parameterRevision
+      if (!preparedAnalysis?.verticalRefresh && lastRenderedWaveText === jsonText && lastRenderedParameterRevision === parameterRevision
           && waveContainer.querySelector('svg')) {
         if (lastRenderedWaveShape) {
           lastRenderedWaveShape.document = activeDocument;
@@ -20362,13 +20465,18 @@ ${lines.join('\n')}`;
           if (!displayDiv.isConnected) {
             throw new Error('波形渲染容器未挂载到页面');
           }
-          WaveDrom.RenderWaveForm(0, renderSource, 'wave-display-', false);
+          const rowViewport = preparedWave.metrics?.signalCount >= 120
+            ? { top: displayDiv.getBoundingClientRect().top, panel: wavePanel.getBoundingClientRect() } : null;
+          WaveDrom.RenderWaveForm(0, rowViewport ? projectActiveWaveRows(renderSource) : renderSource, 'wave-display-', false);
           if (!displayDiv.querySelector('svg')) {
             showWaveError(waveContainer, '波形渲染失败: 未生成 SVG');
             setStatus(false, '渲染错误');
             return false;
           }
+          updateActiveWaveRowCulling(displayDiv.querySelector('svg'), rowViewport);
           alignWaveDataToCycleGrid(displayDiv, renderSource);
+          delete displayDiv.querySelector('svg').__vwdCullingRows;
+          updateActiveWaveRowCulling(displayDiv.querySelector('svg'), rowViewport);
           syncHscaleInputFromJson(jsonText, fullSource);
           attachWaveInteractivity(jsonText, fullSource, documentSource);
           applyNavVisibilityToWave();
@@ -21874,6 +21982,10 @@ ${lines.join('\n')}`;
 
     function cloneWaveSvgForScreenshot(svg, metrics) {
       const clone = svg.cloneNode(true);
+      clone.querySelectorAll('[data-vwd-culled]').forEach(draw => {
+        draw.removeAttribute('data-vwd-culled');
+        draw.style.removeProperty('display');
+      });
       clone.querySelectorAll('.parameter-reference-highlight').forEach((element) => element.classList.remove('parameter-reference-highlight'));
       clone.querySelectorAll([
         '.vwd-frozen-label-layer',
@@ -22341,7 +22453,7 @@ ${lines.join('\n')}`;
       });
       try {
         let svg;
-        if (screenshotMetrics.maxWaveLength >= 200) {
+        if (screenshotMetrics.maxWaveLength >= 200 || screenshotMetrics.signalCount >= 120) {
           temporaryScreenshot = renderWaveScreenshotRange(
             screenshotSource,
             screenshotMetrics,

@@ -781,6 +781,9 @@ func TestWaveDocumentHTTPRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	libraryPath := filepath.Join(root, "Wave", "test-library", "library.sqlite")
+	if err := newSQLiteStore().writeLibrary(libraryPath, testLibrary(defaultWaveDocument)); err != nil {
+		t.Fatal(err)
+	}
 	tempDir := filepath.Join(root, ".tmp")
 	configuration := config{
 		rootDir: root, htmlName: htmlName, htmlPath: filepath.Join(root, htmlName),
@@ -854,6 +857,17 @@ func TestWaveDocumentHTTPRoundTrip(t *testing.T) {
 	}
 	if _, err = os.Stat(filepath.Join(root, "Wave", ".visualwavedrom-state.json")); !os.IsNotExist(err) {
 		t.Fatalf("runtime state leaked into Wave: %v", err)
+	}
+	payload["expectedRevision"] = 1
+	ack := requestJSON(t, http.MethodPatch, server.URL+"/api/wave-document?ack=1", payload)
+	metadata := ack["document"].(map[string]any)
+	if _, exists := metadata["content"]; exists || intValue(metadata["revision"], -1) != 2 || metadata["name"] != waveID {
+		t.Fatalf("expected compact acknowledgement, got %#v", metadata)
+	}
+	stillLoaded := requestJSON(t, http.MethodGet, server.URL+"/api/wave-document?libraryId="+
+		urlQueryEscape(libraryID)+"&waveId="+urlQueryEscape(waveID), nil)
+	if stillLoaded["document"].(map[string]any)["content"] != document["content"] {
+		t.Fatal("compact acknowledgement changed stored content")
 	}
 }
 

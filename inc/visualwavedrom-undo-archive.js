@@ -35,7 +35,7 @@
     }
 
     async function pack(content) {
-      const raw = new Blob([JSON.stringify(content)]);
+      const raw = new Blob([typeof content === 'string' ? content : JSON.stringify(content)]);
       if (typeof CompressionStream !== 'function' || typeof DecompressionStream !== 'function') return { blob: raw, gzip: false };
       const gzip = await new Response(raw.stream().pipeThrough(new CompressionStream('gzip'))).blob();
       return gzip.size < raw.size ? { blob: gzip, gzip: true } : { blob: raw, gzip: false };
@@ -47,13 +47,13 @@
       if (blob.size > remaining()) return null;
       if (server) {
         const response = await request('write', id, limit, blob);
-        if (response.ok) return { id, gzip, bytes: blob.size, server: true };
+        if (response.ok) return { id, gzip, text: typeof content === 'string', bytes: blob.size, server: true };
         if (response.status === 507 || response.status === 413) return null;
         if (response.status !== 404) throw new Error('SQLite undo archive: ' + response.status);
         server = false;
       }
       await queryBrowser('readwrite', store => store.put(blob, key(id)));
-      return { id, gzip, bytes: blob.size, server: false };
+      return { id, gzip, text: typeof content === 'string', bytes: blob.size, server: false };
     }
 
     async function read(record) {
@@ -67,7 +67,7 @@
       const text = record.gzip
         ? await new Response(blob.stream().pipeThrough(new DecompressionStream('gzip'))).text()
         : await blob.text();
-      return JSON.parse(text);
+      return record.text ? text : JSON.parse(text);
     }
 
     function remove(record) {

@@ -1556,6 +1556,11 @@ func (s *service) handleWaveDocument(writer http.ResponseWriter, request *http.R
 			})
 			return
 		}
+		if request.URL.Query().Get("ack") == "1" {
+			result.Document = map[string]any{
+				"name": waveID, "revision": result.Document["revision"], "savedAt": result.Document["savedAt"],
+			}
+		}
 		sendJSON(writer, 200, map[string]any{
 			"ok": true, "libraryId": libraryID,
 			"file":     s.libraryNameFromPath(s.sourceLibraryPathByID(libraryID)),
