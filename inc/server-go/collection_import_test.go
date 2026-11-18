@@ -529,6 +529,9 @@ func TestCollectionPresetDiscoveryRecognizesHandwrittenPresets(t *testing.T) {
 	if discovered.ResultCount != 4 || len(discovered.Entries) != 4 {
 		t.Fatalf("unexpected discovered presets: %#v", discovered)
 	}
+	if !samePath(discovered.SearchPath, root) {
+		t.Fatalf("discovery must report its resolved search root: %q", discovered.SearchPath)
+	}
 	wantRelative := filepath.ToSlash(filepath.Join("nested", "group", "valid.json"))
 	for index, want := range []string{"bom.JSON", "handwritten.json", "manual.json", wantRelative} {
 		relative := discovered.Entries[index].RelativePath

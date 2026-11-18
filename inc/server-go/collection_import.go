@@ -145,6 +145,7 @@ type collectionPresetDiscoveryEntry struct {
 }
 
 type collectionPresetDiscoveryResult struct {
+	SearchPath   string                           `json:"searchPath"`
 	Entries      []collectionPresetDiscoveryEntry `json:"entries"`
 	ResultCount  int                              `json:"resultCount"`
 	VisitedFiles int                              `json:"visitedFiles"`
@@ -1334,6 +1335,7 @@ func discoverCollectionPresets(
 	if err != nil {
 		return result, err
 	}
+	result.SearchPath = rootPath
 	scanLimitReached := errors.New("collection preset scan limit reached")
 	err = filepath.WalkDir(rootPath, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -3622,6 +3624,14 @@ func (s *service) handleImportCollection(writer http.ResponseWriter, request *ht
 			response["errorColumn"] = document.ErrorColumn
 		}
 		sendJSON(writer, 200, response)
+	case "system-preset-config":
+		settings, err := readSystemPresetSettings(s.config.rootDir)
+		if err != nil {
+			settings.Error = err.Error()
+			sendJSON(writer, http.StatusBadRequest, settings)
+			return
+		}
+		sendJSON(writer, http.StatusOK, settings)
 	case "scan-presets":
 		result, err := discoverCollectionPresets(
 			stringValue(payload["searchPath"]), s.config.rootDir)

@@ -1322,7 +1322,21 @@ Time(1fs)   valid   data[13:0]
 <a id="batch-discovery"></a>
 ### 9.2 搜索预设文件
 
-设置预设搜索目录，点击 **搜索预设**。程序递归查找批量导入预设，按相对于搜索目录的路径列出，选择一项即可载入。工具保存的预设带有以下类型标记：
+点击 **系统预设**，程序读取工具目录下的 `bin/config.json`，递归搜索 `sysWaveJsonPath` 指定目录中的批量导入预设。默认配置：
+
+```json
+{
+  "sysWaveJsonPath": "inc/import/SchemeCollection"
+}
+```
+
+相对路径以 `VisualWaveDrom.sh`（Windows 下为 BAT）所在的工具目录为基准，**不是执行脚本时的当前目录**。例如从 `/tmp` 运行 `/opt/VisualWaveDrom/VisualWaveDrom.sh`，上述配置会搜索 `/opt/VisualWaveDrom/inc/import/SchemeCollection`。也可填写绝对路径；Windows JSON 路径建议使用 `/`，或将 `\` 写成 `\\`。
+
+搜索结果上方显示实际搜索目录，以及要修改的 `bin/config.json` 完整路径和配置项；每个结果同时显示文件名及其相对目录（`.` 表示搜索根目录）。点击一项即可载入。修改配置后再次点击 **系统预设** 即可，无需重启服务。此按钮需要新版服务，更新后请先重新运行 BAT / SH。
+
+仍可手动填写预设搜索目录，点击 **搜索预设** 递归查找，不修改系统配置。`bin/config.json` 是本机配置，版本同步不覆盖；缺少此文件时暂用上述默认目录，界面会提示创建位置。
+
+工具保存的预设带有以下类型标记：
 
 ```json
 {
@@ -2231,6 +2245,7 @@ inc/                                页面逻辑、样式、依赖和内部模�
 inc/sqlite/                         纯 HTML 使用的 SQLite 资源
 inc/import/Scheme/                  单文件解析预设 JSON
 inc/import/SchemeCollection/        批量导入预设 JSON
+bin/config.json                    系统预设目录配置（sysWaveJsonPath）
 inc/import/Data/                    示例原始数据
 inc/import/inc/fileProc.py          Python 文件解析与统一补全
 inc/server-go/                      本地服务源码

@@ -103,8 +103,9 @@
     const presetPathInput = document.getElementById('wave-collection-preset-path');
     const pathInputs = { rootPath: rootPathInput, presetSearchPath: presetSearchPathInput, presetPath: presetPathInput };
     const pickRootButton = document.getElementById('wave-collection-pick-root');
-    const pickPresetRootButton = document.getElementById('wave-collection-pick-preset-root');
+    const systemPresetsButton = document.getElementById('wave-collection-system-presets');
     const scanPresetsButton = document.getElementById('wave-collection-scan-presets');
+    const presetSearchInfoHost = document.getElementById('wave-collection-preset-search-info');
     const presetDiscoveryHost = document.getElementById('wave-collection-preset-discovery');
     const pickPresetButton = document.getElementById('wave-collection-pick-preset');
     const loadPresetButton = document.getElementById('wave-collection-load-preset');
@@ -1131,6 +1132,7 @@
           ? String(result.error).replace(/^fileProc:\s*/i, '')
           : ('服务返回错误 ' + response.status));
         if (Array.isArray(result?.fileErrors)) error.fileErrors = result.fileErrors;
+        if (result?.configPath || result?.searchPath) error.discoveryInfo = result;
         throw error;
       }
       return result || {};
@@ -1164,6 +1166,30 @@
       discoveredPresets = [];
       presetDiscoveryHost.innerHTML = '';
       presetDiscoveryHost.hidden = true;
+      presetSearchInfoHost.replaceChildren();
+      presetSearchInfoHost.hidden = true;
+    }
+
+    function renderPresetSearchInfo(info) {
+      presetSearchInfoHost.replaceChildren();
+      presetSearchInfoHost.hidden = !info.searchPath && !info.configPath;
+      if (info.searchPath) {
+        const row = document.createElement('div');
+        const path = document.createElement('code');
+        path.textContent = info.searchPath;
+        row.append('搜索目录：', path);
+        presetSearchInfoHost.appendChild(row);
+      }
+      if (info.configPath) {
+        const row = document.createElement('div');
+        const path = document.createElement('code');
+        path.textContent = info.configPath;
+        const key = document.createElement('code');
+        key.textContent = 'sysWaveJsonPath';
+        row.append(info.usingDefault ? '配置文件不存在，使用默认目录。修改目录请创建 ' : '修改目录：编辑 ',
+          path, ' 中的 ', key);
+        presetSearchInfoHost.appendChild(row);
+      }
     }
 
     function renderPresetDiscovery(payload) {
@@ -1186,11 +1212,18 @@
         option.dataset.presetRelativePath = relativePath;
         option.setAttribute('aria-pressed', 'false');
         option.setAttribute('aria-label', '载入预设 ' + relativePath);
+        const label = document.createElement('span');
+        label.className = 'wave-collection-preset-option-label';
         const path = document.createElement('code');
-        path.textContent = relativePath;
+        const separator = relativePath.lastIndexOf('/');
+        path.textContent = relativePath.slice(separator + 1);
+        const directory = document.createElement('small');
+        directory.className = 'wave-collection-preset-option-directory';
+        directory.textContent = '相对目录：' + (separator >= 0 ? relativePath.slice(0, separator) : '.');
+        label.append(path, directory);
         const meta = document.createElement('small');
         meta.textContent = formatPresetSize(entry.size);
-        option.append(path, meta);
+        option.append(label, meta);
         option.addEventListener('click', () => {
           debug({ phase: 'preset-discovered-option-click', relativePath, busy });
           void loadDiscoveredPreset(entry);
@@ -2433,7 +2466,7 @@
         presetCodeEditor.getWrapperElement().setAttribute('aria-disabled', String(busy));
       }
       pickRootButton.disabled = busy;
-      pickPresetRootButton.disabled = busy;
+      systemPresetsButton.disabled = busy;
       scanPresetsButton.disabled = busy || !hasPresetSearchPath;
       pickPresetButton.disabled = busy;
       loadPresetButton.disabled = busy || !hasPresetPath;
@@ -2462,6 +2495,9 @@
       scanPresetsButton.textContent = nextBusy && action === 'scan-presets'
         ? '正在搜索…'
         : '搜索预设';
+      systemPresetsButton.textContent = nextBusy && action === 'system-presets'
+        ? '正在搜索…'
+        : '系统预设';
       confirmButton.textContent = nextBusy
         ? (action === 'import' ? '正在导入…' : (action === 'validate' ? '正在检查…' : '确定导入'))
         : '确定导入';
@@ -3464,40 +3500,18 @@
       }
     }
 
-    async function choosePresetRoot() {
+    async function scanPresets(useSystemPreset = false) {
       if (busy) return;
-      let focusManualPath = false;
-      setBusy(true, 'pick');
-      try {
-        const result = await pickPath('folder', presetSearchPathInput.value);
-        if (result.manual) {
-          if (result.path) presetSearchPathInput.value = result.path;
-          setHint(result.message || '请直接输入预设搜索目录', false);
-          status(true, '请在页面中输入预设搜索目录');
-          focusManualPath = true;
-        } else if (!result.cancelled && result.path) {
-          presetSearchPathInput.value = result.path;
-          selectedDiscoveredPreset = null;
-          clearPresetDiscovery();
-          rememberState('preset-search-root-selected');
-        }
-      } catch (error) {
-        setHint((error.message || String(error)) + '；也可以直接粘贴搜索目录', true);
-      } finally {
-        setBusy(false, '');
-        refreshEditorsAfterPathPicker('preset-folder-picker');
-        if (focusManualPath) focusAndSelectPath(presetSearchPathInput);
-      }
-    }
-
-    async function scanPresets() {
       const paths = capturePaths();
-      const searchPath = String(paths.presetSearchPath || '').trim();
-      if (!searchPath || busy) {
-        if (!searchPath) setHint('请先设置预设搜索目录', true);
+      let searchPath = String(paths.presetSearchPath || '').trim();
+      if (!useSystemPreset && !searchPath) {
+        setHint('请先设置预设搜索目录', true);
         return;
       }
-      setBusy(true, 'scan-presets');
+      let searchInfo = {};
+      clearPresetDiscovery();
+      selectedDiscoveredPreset = null;
+      setBusy(true, useSystemPreset ? 'system-presets' : 'scan-presets');
       startProgress('正在递归搜索批量导入预设…');
       const startedAt = progressStartedAt;
       presetDiscoveryHost.hidden = false;
@@ -3506,9 +3520,17 @@
       loading.className = 'wave-collection-preset-discovery-empty';
       loading.textContent = '正在搜索预设…';
       presetDiscoveryHost.appendChild(loading);
-      debug({ phase: 'preset-scan-start', searchPath });
       try {
+        if (useSystemPreset) {
+          searchInfo = await post('system-preset-config');
+          searchPath = searchInfo.searchPath;
+          paths.presetSearchPath = searchPath;
+          presetSearchPathInput.value = searchPath;
+        }
+        renderPresetSearchInfo(Object.assign({}, searchInfo, { searchPath }));
+        debug({ phase: 'preset-scan-start', systemPreset: useSystemPreset, ...searchInfo, searchPath });
         const payload = await post('scan-presets', { searchPath });
+        renderPresetSearchInfo(Object.assign({}, searchInfo, { searchPath: payload.searchPath || searchPath }));
         selectedDiscoveredPreset = null;
         renderPresetDiscovery(payload);
         rememberState('preset-scan-complete');
@@ -3527,9 +3549,13 @@
         });
       } catch (error) {
         clearPresetDiscovery();
-        setHint(error.message || String(error), true);
-        status(false, '搜索预设失败：' + (error.message || String(error)));
-        debug({ phase: 'preset-scan-error', message: error.message || String(error) });
+        renderPresetSearchInfo(Object.assign({}, searchInfo, error.discoveryInfo || {}));
+        const message = useSystemPreset && /unknown|unsupported|invalid action/i.test(error.message)
+          ? '当前服务不支持系统预设，请重新运行 BAT / SH 后重试'
+          : (error.message || String(error));
+        setHint(message, true);
+        status(false, '搜索预设失败：' + message);
+        debug({ phase: 'preset-scan-error', systemPreset: useSystemPreset, searchPath, ...searchInfo, message });
       } finally {
         restoreSearchPaths(paths, 'preset-scan-finished');
         setBusy(false, '');
@@ -4121,7 +4147,7 @@
     }
 
     pickRootButton.addEventListener('click', () => { void chooseRoot(); });
-    pickPresetRootButton.addEventListener('click', () => { void choosePresetRoot(); });
+    systemPresetsButton.addEventListener('click', () => { void scanPresets(true); });
     scanPresetsButton.addEventListener('click', () => { void scanPresets(); });
     pickPresetButton.addEventListener('click', () => { void choosePreset(); });
     presetFileInput.addEventListener('change', () => {
