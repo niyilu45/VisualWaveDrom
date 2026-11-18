@@ -769,6 +769,10 @@ func TestSameRunningServiceRequiresCurrentAPIVersion(t *testing.T) {
 		t.Fatal("service with an older API version must not be reused")
 	}
 	info["serviceAPIVersion"] = serviceAPIVersion
+	if instance.sameRunningService(info) {
+		t.Fatal("service without system preset support must not be reused")
+	}
+	info["systemPresetConfig"] = true
 	if !instance.sameRunningService(info) {
 		t.Fatal("service with the current API version should be reused")
 	}
@@ -799,6 +803,11 @@ func TestWaveDocumentHTTPRoundTrip(t *testing.T) {
 	defer instance.cleanupTemporaryFiles()
 	server := httptest.NewServer(instance.routes())
 	defer server.Close()
+
+	info := requestJSON(t, http.MethodGet, server.URL+"/api/server-info", nil)
+	if info["systemPresetConfig"] != true || intValue(info["serviceAPIVersion"], 0) != serviceAPIVersion {
+		t.Fatalf("service must advertise current preset support: %#v", info)
+	}
 
 	summary := requestJSON(t, http.MethodGet,
 		server.URL+"/api/wave-library?summary=1&file=test-library", nil)

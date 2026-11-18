@@ -1131,6 +1131,9 @@
         const error = new Error(result && result.error
           ? String(result.error).replace(/^fileProc:\s*/i, '')
           : ('服务返回错误 ' + response.status));
+        error.action = action;
+        error.unsupportedAction = response.status === 400
+          && /^unknown collection import action$/i.test(String(result?.error || '').trim());
         if (Array.isArray(result?.fileErrors)) error.fileErrors = result.fileErrors;
         if (result?.configPath || result?.searchPath) error.discoveryInfo = result;
         throw error;
@@ -1203,33 +1206,54 @@
         presetDiscoveryHost.appendChild(empty);
         return;
       }
+      const tree = { folders: new Map(), files: [] };
       discoveredPresets.forEach((entry) => {
+        const parts = String(entry.relativePath || '').split('/').filter(Boolean);
+        if (!parts.length) return;
+        let branch = tree;
+        parts.slice(0, -1).forEach((name) => {
+          if (!branch.folders.has(name)) branch.folders.set(name, { folders: new Map(), files: [] });
+          branch = branch.folders.get(name);
+        });
+        branch.files.push(entry);
+      });
+      function appendFile(parent, entry) {
         const relativePath = String(entry.relativePath || '');
-        if (!relativePath) return;
         const option = document.createElement('button');
         option.type = 'button';
         option.className = 'wave-collection-preset-option';
         option.dataset.presetRelativePath = relativePath;
         option.setAttribute('aria-pressed', 'false');
         option.setAttribute('aria-label', '载入预设 ' + relativePath);
-        const label = document.createElement('span');
-        label.className = 'wave-collection-preset-option-label';
         const path = document.createElement('code');
         const separator = relativePath.lastIndexOf('/');
         path.textContent = relativePath.slice(separator + 1);
-        const directory = document.createElement('small');
-        directory.className = 'wave-collection-preset-option-directory';
-        directory.textContent = '相对目录：' + (separator >= 0 ? relativePath.slice(0, separator) : '.');
-        label.append(path, directory);
+        option.title = relativePath;
         const meta = document.createElement('small');
         meta.textContent = formatPresetSize(entry.size);
-        option.append(label, meta);
+        option.append(path, meta);
         option.addEventListener('click', () => {
           debug({ phase: 'preset-discovered-option-click', relativePath, busy });
           void loadDiscoveredPreset(entry);
         });
-        presetDiscoveryHost.appendChild(option);
-      });
+        parent.appendChild(option);
+      }
+      function appendBranch(parent, branch) {
+        branch.folders.forEach((child, name) => {
+          const folder = document.createElement('details');
+          folder.className = 'wave-collection-preset-folder';
+          const summary = document.createElement('summary');
+          summary.textContent = name;
+          summary.title = name;
+          const children = document.createElement('div');
+          children.className = 'wave-collection-preset-folder-children';
+          appendBranch(children, child);
+          folder.append(summary, children);
+          parent.appendChild(folder);
+        });
+        branch.files.forEach((entry) => appendFile(parent, entry));
+      }
+      appendBranch(presetDiscoveryHost, tree);
       updateDiscoveredPresetSelection();
     }
 
@@ -3550,9 +3574,18 @@
       } catch (error) {
         clearPresetDiscovery();
         renderPresetSearchInfo(Object.assign({}, searchInfo, error.discoveryInfo || {}));
-        const message = useSystemPreset && /unknown|unsupported|invalid action/i.test(error.message)
-          ? '当前服务不支持系统预设，请重新运行 BAT / SH 后重试'
-          : (error.message || String(error));
+        let message = error.message || String(error);
+        if (useSystemPreset && error.action === 'system-preset-config' && error.unsupportedAction) {
+          let serverInfo = null;
+          try {
+            const response = await fetch('/api/server-info');
+            if (response.ok) serverInfo = await response.json();
+          } catch (_error) { /* Keep the original service error when diagnostics are unavailable. */ }
+          message = '当前网页连接的旧服务不支持系统预设。请同步更新 bin 中的服务程序，重新运行 BAT / SH，'
+            + '并打开此次启动打印的地址，不要继续使用旧网页。当前地址：' + window.location.origin
+            + (serverInfo?.rootDir ? '；工具目录：' + serverInfo.rootDir : '');
+          debug({ phase: 'system-preset-unsupported', page: window.location.href, serverInfo, originalError: error.message });
+        }
         setHint(message, true);
         status(false, '搜索预设失败：' + message);
         debug({ phase: 'preset-scan-error', systemPreset: useSystemPreset, searchPath, ...searchInfo, message });

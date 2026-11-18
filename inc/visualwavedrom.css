@@ -2753,11 +2753,26 @@
       border-bottom: 0;
     }
 
+    .wave-collection-preset-folder > summary {
+      padding: 8px 10px;
+      color: var(--text);
+      font-size: 0.74rem;
+      overflow-wrap: anywhere;
+      cursor: pointer;
+    }
+
+    .wave-collection-preset-folder-children {
+      margin-left: 16px;
+      border-left: 1px solid var(--border);
+    }
+
+    .wave-collection-preset-folder > summary:hover,
     .wave-collection-preset-option:hover,
     .wave-collection-preset-option.is-selected {
       background: var(--accent-soft);
     }
 
+    .wave-collection-preset-folder > summary:focus-visible,
     .wave-collection-preset-option:focus-visible {
       position: relative;
       z-index: 1;
@@ -2769,18 +2784,9 @@
       min-width: 0;
       color: inherit;
       font: 0.74rem/1.4 Consolas, "Courier New", monospace;
-      overflow-wrap: anywhere;
-    }
-
-    .wave-collection-preset-option-label {
-      min-width: 0;
-      display: grid;
-      gap: 2px;
-    }
-
-    .wave-collection-preset-option .wave-collection-preset-option-directory {
-      white-space: normal;
-      overflow-wrap: anywhere;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .wave-collection-preset-option small {
