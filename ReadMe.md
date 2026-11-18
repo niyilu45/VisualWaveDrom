@@ -1332,9 +1332,11 @@ Time(1fs)   valid   data[13:0]
 
 相对路径以 `VisualWaveDrom.sh`（Windows 下为 BAT）所在的工具目录为基准，**不是执行脚本时的当前目录**。例如从 `/tmp` 运行 `/opt/VisualWaveDrom/VisualWaveDrom.sh`，上述配置会搜索 `/opt/VisualWaveDrom/inc/import/SchemeCollection`。也可填写绝对路径；Windows JSON 路径建议使用 `/`，或将 `\` 写成 `\\`。
 
-搜索结果上方显示实际搜索目录，以及要修改的 `bin/config.json` 完整路径和配置项；**系统预设** 和 **搜索预设** 都按目录树展示搜索结果，文件夹默认全部收起。展开文件夹后点击预设文件即可载入，不再额外显示右侧相对目录；悬停文件可查看相对路径。修改配置后再次点击 **系统预设** 即可，无需重启服务。此按钮需要新版服务，更新后请先重新运行 BAT / SH。
+搜索结果上方显示实际搜索目录，以及要修改的 `bin/config.json` 完整路径和配置项；**系统预设** 和 **搜索预设** 都按目录树展示搜索结果，文件夹默认全部收起。展开文件夹后点击预设文件即可载入，不再额外显示右侧相对目录；悬停文件可查看相对路径。修改配置后再次点击 **系统预设** 即可，无需重启服务。更新工具后建议重新运行 BAT / SH，以启用新版服务。
 
-使用 Python `subprocess.Popen(["bash", "/完整路径/VisualWaveDrom.sh"])` 启动也相同。新版服务不会复用缺少系统预设功能的旧服务；旧端口被占用时会打印新的地址，请打开本次启动打印的地址，而不是已有的旧网页。若仍提示旧服务不支持，请核对提示中的工具目录，并同步更新该目录下的 `bin/VisualWaveDrom-server-linux-amd64`（Windows 为 `bin/VisualWaveDrom-server.exe`），不能只更新 HTML 和 JS。
+使用 Python `subprocess.Popen(["bash", "/完整路径/VisualWaveDrom.sh"])` 启动也相同。替换 `bin` 中的文件不会更新已运行的 Linux 服务进程。新版服务不会复用缺少系统预设功能的旧服务；旧端口被占用时会打印新的地址，请打开本次启动打印的地址，而不是已有的旧网页。如果连递归搜索接口也不支持，请核对提示中的工具目录，并同步更新该目录下的 `bin/VisualWaveDrom-server-linux-amd64`（Windows 为 `bin/VisualWaveDrom-server.exe`）后重新启动服务。
+
+如果 Linux 上仍运行未包含系统预设配置接口的旧服务，网页会自动兼容读取同一服务目录下的 `bin/config.json`，再使用已有的递归搜索接口，无需因缺少配置查询接口而阻止搜索。相对路径仍基于服务实际使用的工具目录；Debug Mode 的 `system-preset-compatibility` 日志包含服务信息、配置位置和搜索路径。配置语法、路径或权限有误时会报告具体原因，不会误判为旧服务不支持。
 
 仍可手动填写预设搜索目录，点击 **搜索预设** 递归查找，不修改系统配置。`bin/config.json` 是本机配置，版本同步不覆盖；缺少此文件时暂用上述默认目录，界面会提示创建位置。
 

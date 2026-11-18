@@ -3524,6 +3524,59 @@
       }
     }
 
+    async function loadSystemPresetSettings() {
+      try {
+        return await post('system-preset-config');
+      } catch (error) {
+        if (!error.unsupportedAction) throw error;
+      }
+      // Older Linux servers can serve this config and scan presets without the new action.
+      const response = await fetch('/api/server-info', { cache: 'no-store' });
+      if (!response.ok) throw new Error('无法读取服务目录，请重新启动 SH / BAT 并打开本次启动的地址');
+      const serverInfo = await response.json();
+      const basePath = typeof serverInfo.rootDir === 'string' ? serverInfo.rootDir : '';
+      if (!basePath) throw new Error('服务未提供工具目录，无法确定 bin/config.json 的位置');
+      const windows = serverInfo.platform === 'windows' || /^[a-z]:[\\/]/i.test(basePath);
+      const separator = windows ? '\\' : '/';
+      const root = basePath.replace(windows ? /[\\/]+$/ : /\/+$/, '');
+      const settings = {
+        basePath,
+        configPath: root + separator + 'bin' + separator + 'config.json',
+        configuredPath: DEFAULT_PRESET_SEARCH_PATH,
+        usingDefault: false,
+        compatibilityMode: true
+      };
+      try {
+        const configResponse = await fetch('/bin/config.json', { cache: 'no-store' });
+        if (configResponse.status === 404) {
+          settings.usingDefault = true;
+        } else {
+          if (!configResponse.ok) throw new Error('配置文件读取失败（HTTP ' + configResponse.status + '）');
+          if (Number(configResponse.headers.get('Content-Length') || 0) > 1024 * 1024) {
+            throw new Error('配置文件超过 1 MiB');
+          }
+          const text = await configResponse.text();
+          if (new TextEncoder().encode(text).length > 1024 * 1024) throw new Error('配置文件超过 1 MiB');
+          const config = JSON.parse(text.replace(/^\uFEFF/, ''));
+          if (!config || Array.isArray(config) || typeof config.sysWaveJsonPath !== 'string'
+              || !config.sysWaveJsonPath.trim()) {
+            throw new Error('sysWaveJsonPath 必须是非空路径字符串');
+          }
+          settings.configuredPath = config.sysWaveJsonPath.trim();
+        }
+        const path = settings.configuredPath;
+        const absolute = windows ? /^(?:[a-z]:[\\/]|[\\/]{2})/i.test(path) : path.startsWith('/');
+        settings.searchPath = absolute || /^(?:file:|~(?:[\\/]|$))/i.test(path)
+          ? path : root + separator + path;
+        debug({ phase: 'system-preset-compatibility', page: window.location.href, serverInfo, ...settings });
+        return settings;
+      } catch (error) {
+        error.message += '；请检查 ' + settings.configPath + ' 中的 sysWaveJsonPath';
+        error.discoveryInfo = settings;
+        throw error;
+      }
+    }
+
     async function scanPresets(useSystemPreset = false) {
       if (busy) return;
       const paths = capturePaths();
@@ -3546,7 +3599,7 @@
       presetDiscoveryHost.appendChild(loading);
       try {
         if (useSystemPreset) {
-          searchInfo = await post('system-preset-config');
+          searchInfo = await loadSystemPresetSettings();
           searchPath = searchInfo.searchPath;
           paths.presetSearchPath = searchPath;
           presetSearchPathInput.value = searchPath;
@@ -3575,16 +3628,10 @@
         clearPresetDiscovery();
         renderPresetSearchInfo(Object.assign({}, searchInfo, error.discoveryInfo || {}));
         let message = error.message || String(error);
-        if (useSystemPreset && error.action === 'system-preset-config' && error.unsupportedAction) {
-          let serverInfo = null;
-          try {
-            const response = await fetch('/api/server-info');
-            if (response.ok) serverInfo = await response.json();
-          } catch (_error) { /* Keep the original service error when diagnostics are unavailable. */ }
-          message = '当前网页连接的旧服务不支持系统预设。请同步更新 bin 中的服务程序，重新运行 BAT / SH，'
-            + '并打开此次启动打印的地址，不要继续使用旧网页。当前地址：' + window.location.origin
-            + (serverInfo?.rootDir ? '；工具目录：' + serverInfo.rootDir : '');
-          debug({ phase: 'system-preset-unsupported', page: window.location.href, serverInfo, originalError: error.message });
+        if (useSystemPreset && error.action === 'scan-presets' && error.unsupportedAction) {
+          message = '当前服务连递归搜索接口也不支持，请更新 bin 中的服务程序后重新启动 SH / BAT。'
+            + '当前地址：' + window.location.origin
+            + (searchInfo.basePath ? '；工具目录：' + searchInfo.basePath : '');
         }
         setHint(message, true);
         status(false, '搜索预设失败：' + message);
