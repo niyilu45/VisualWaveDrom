@@ -43,7 +43,7 @@ func TestServiceResponsesDoNotUseBrowserCache(t *testing.T) {
 }
 
 func TestLinuxBrowserCommandsIncludeDesktopFallbacks(t *testing.T) {
-	commands := browserCommands("linux", "http://127.0.0.1:4173/VisualWaveDrom.html")
+	commands := browserCommands("linux", "http://127.0.0.1:4173/VisualWaveDrom.html", "")
 	expected := []string{"xdg-open", "gio", "sensible-browser", "kde-open5", "kde-open", "gnome-open"}
 	if len(commands) != len(expected) {
 		t.Fatalf("expected %d browser commands, got %d", len(expected), len(commands))

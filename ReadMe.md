@@ -309,6 +309,32 @@ WAVE_LIBRARY_RELATIVE_PATH="Wave/VisualWaveDrom-library/library.sqlite"
 
 自动打开浏览器会尝试系统已有的桌面打开工具。显示 Running 但未弹出浏览器时，服务可能已正常启动，不必重复启动。远程 SSH 中的 `127.0.0.1` 指远程机器，不能直接当成本机地址使用。
 
+通过 `--browser` 指定本次打开的浏览器；不传时仍使用系统默认浏览器：
+
+```bash
+bash VisualWaveDrom.sh --browser firefox
+bash VisualWaveDrom.sh --browser chrome
+bash VisualWaveDrom.sh --browser chromium
+bash VisualWaveDrom.sh --browser edge
+bash VisualWaveDrom.sh --browser "/opt/Browser App/firefox"
+bash VisualWaveDrom.sh --browser default
+```
+
+也支持 `--browser=firefox`。名称通过系统 `PATH` 查找，自定义程序建议填写完整路径；路径含空格时需要引号。指定浏览器未安装或启动失败时会打印明确原因，不会自动换成其他浏览器；服务仍可通过打印的地址访问。`--no-open` 优先于 `--browser`，不会打开浏览器。即使复用已运行的服务，本次启动也会用本次指定的浏览器打开页面；不会改动系统默认浏览器或关闭已有浏览器。`bash VisualWaveDrom.sh --help` 可查看参数。
+
+Python 调用方式：
+
+```python
+import subprocess
+
+process = subprocess.Popen([
+    "bash", "/opt/VisualWaveDrom/VisualWaveDrom.sh",
+    "--browser", "firefox"
+])
+```
+
+该参数需要同步更新 SH 和 `bin/VisualWaveDrom-server-linux-amd64`。
+
 <a id="start-html"></a>
 ### 2.3 直接打开 HTML
 

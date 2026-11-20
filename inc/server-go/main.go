@@ -115,6 +115,7 @@ type config struct {
 	statePath           string
 	protocolHandlerPath string
 	openURL             string
+	browser             string
 	noOpen              bool
 	port                int
 	checkRuntime        bool
@@ -194,7 +195,7 @@ func defaultRootDir() string {
 }
 
 func parseConfig() (config, error) {
-	var root, html, library, protocolHandler, openURL string
+	var root, html, library, protocolHandler, openURL, browser string
 	var noOpen, checkRuntime bool
 	var checkToolUpdates bool
 	var releaseVersion string
@@ -204,6 +205,7 @@ func parseConfig() (config, error) {
 	flag.StringVar(&library, "library", "Wave/VisualWaveDrom-library/library.sqlite", "wave library path")
 	flag.StringVar(&protocolHandler, "protocol-handler", "", "BAT or SH protocol launcher")
 	flag.StringVar(&openURL, "open-url", "", "VisualWaveDrom URL to open")
+	flag.StringVar(&browser, "browser", "", "browser name or executable path (default: system browser)")
 	flag.BoolVar(&noOpen, "no-open", false, "do not open a browser")
 	flag.BoolVar(&checkRuntime, "check-runtime", false, "print runtime information and exit")
 	flag.BoolVar(&checkToolUpdates, "check-tool-updates", false, "check local tool versions before launching")
@@ -259,7 +261,8 @@ func parseConfig() (config, error) {
 		waveDir: waveDir, tempDir: filepath.Join(root, ".tmp"),
 		statePath:           filepath.Join(root, ".tmp", ".visualwavedrom-state.json"),
 		protocolHandlerPath: protocolHandler, openURL: openURL, noOpen: noOpen,
-		port: port, checkRuntime: checkRuntime,
+		browser: browser,
+		port:    port, checkRuntime: checkRuntime,
 	}, nil
 }
 
@@ -805,7 +808,30 @@ func (s *service) pageAddress(port int) string {
 	return fmt.Sprintf("http://127.0.0.1:%d%s", port, pagePath)
 }
 
-func browserCommands(goos, address string) [][]string {
+func browserCommands(goos, address, browser string) [][]string {
+	selected := strings.TrimSpace(browser)
+	switch strings.ToLower(selected) {
+	case "default", "system":
+		selected = ""
+	}
+	if selected != "" {
+		names := []string{selected}
+		switch strings.ToLower(selected) {
+		case "chrome":
+			names = []string{"google-chrome", "google-chrome-stable"}
+		case "chromium":
+			names = []string{"chromium", "chromium-browser"}
+		case "edge":
+			names = []string{"microsoft-edge", "microsoft-edge-stable"}
+		case "firefox":
+			names = []string{"firefox"}
+		}
+		commands := make([][]string, 0, len(names))
+		for _, name := range names {
+			commands = append(commands, []string{name, address})
+		}
+		return commands
+	}
 	switch goos {
 	case "windows":
 		return [][]string{{"rundll32.exe", "url.dll,FileProtocolHandler", address}}
@@ -864,10 +890,11 @@ func launchBrowserCommand(candidate []string, probeDelay time.Duration) error {
 	}
 }
 
-func openBrowser(address string, noOpen bool) {
+func openBrowser(address string, noOpen bool, browser string) {
 	if noOpen {
 		return
 	}
+	browser = strings.TrimSpace(browser)
 	parsed, err := url.Parse(address)
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") ||
 		parsed.Hostname() != "127.0.0.1" {
@@ -875,14 +902,22 @@ func openBrowser(address string, noOpen bool) {
 		return
 	}
 	failures := make([]string, 0)
-	for _, candidate := range browserCommands(runtime.GOOS, address) {
+	for _, candidate := range browserCommands(runtime.GOOS, address, browser) {
 		if err = launchBrowserCommand(candidate, browserLaunchProbeDelay); err == nil {
+			if browser != "" && !strings.EqualFold(browser, "default") && !strings.EqualFold(browser, "system") {
+				log.Printf("Opened browser: %s", candidate[0])
+			}
 			return
 		}
 		failures = append(failures, candidate[0]+": "+err.Error())
 	}
 	if runtime.GOOS == "linux" && os.Getenv("DISPLAY") == "" && os.Getenv("WAYLAND_DISPLAY") == "" {
 		log.Print("Linux desktop variables were not detected, but available browser launchers were tried.")
+	}
+	if browser != "" && !strings.EqualFold(browser, "default") && !strings.EqualFold(browser, "system") {
+		log.Printf("Could not open selected browser %q (%s); open the printed URL manually or use --browser default.",
+			browser, strings.Join(failures, "; "))
+		return
 	}
 	log.Printf("Could not open the browser automatically (%s); open the printed URL manually.",
 		strings.Join(failures, "; "))
@@ -1734,7 +1769,7 @@ func (s *service) run() error {
 			(s.config.resumeSession == "" || stringValue(info["sessionId"]) == s.config.resumeSession) {
 			address := s.pageAddress(s.config.port)
 			fmt.Printf("VisualWaveDrom is already running at %s\n", address)
-			openBrowser(address, s.config.noOpen)
+			openBrowser(address, s.config.noOpen, s.config.browser)
 			return nil
 		}
 		if s.config.resumeSession != "" {
@@ -1767,7 +1802,7 @@ func (s *service) run() error {
 		s.scheduleClientShutdownLocked(clientStartupGracePeriod)
 		s.clientMu.Unlock()
 	}
-	openBrowser(address, s.config.noOpen)
+	openBrowser(address, s.config.noOpen, s.config.browser)
 	err = s.httpServer.Serve(listener)
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil

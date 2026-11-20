@@ -3,13 +3,13 @@
   "version": "2026.11.4.1",
   "html": "VisualWaveDrom.html",
   "files": {
-    "ReadMe.md": "59f9013644776447346ca80e49ebbdd47347ae288de162c3d35881760f698128",
+    "ReadMe.md": "ec950ba9fa8211a5516d4e6ea15c81bdc1b6a29683c71d36d8348ab9154ba6e2",
     "VisualWaveDrom.bat": "c32ad747ef39a4a1dda1da8ee0d3b1a4d98746c8999a9cb38b843b01df4f6a6a",
     "VisualWaveDrom.html": "90feb5583f48e08141d130015084f550d28cdd9d5e8ee22b7ab537614e96be5e",
-    "VisualWaveDrom.sh": "b254c8fdd2306d1140b66dae6d6b807132427227e740d461d86abfb3387e4f5c",
-    "bin/SHA256SUMS.txt": "687ee2086b0dcfb8df723a5242abc4646e3e302c98d308c494d8608747d95186",
-    "bin/VisualWaveDrom-server-linux-amd64": "af7c694fd77ead3cdadbdde4bbb6f085a79cdc1550a90634152339bb979836b5",
-    "bin/VisualWaveDrom-server.exe": "194191f87ddf8d2159a99d7438ec07561b18c5a5b6f59b4aeb050d2bf12527c9",
+    "VisualWaveDrom.sh": "7a08552bdde87c92b236fbc55529446c7d769594b136a42421469acc3b05f1bb",
+    "bin/SHA256SUMS.txt": "2873196c12b5ad1584ed3a78d2a2b9693cf65803aba0ffc35a85d3d6898df95e",
+    "bin/VisualWaveDrom-server-linux-amd64": "b3eb3fe0f7a6c1d1c58b3062c74ee4aa7b0898a35434d9d1d6b243e0c633a86d",
+    "bin/VisualWaveDrom-server.exe": "93cbc2e920dfeb1fddb3fc2b8b8d7c94cced259bd08b33b650d64a9f2367f14b",
     "inc/codemirror-LICENSE.txt": "168a4becc968f5001e2ee2e0291b6e4daabafc1894a11ade1e11d56e96096e07",
     "inc/codemirror-javascript.js": "1311c73c66308ba6f78512b4c2e770a6900c80c3629683763329668ee6111163",
     "inc/codemirror-vim.js": "0fafec216ec4a1cf01842a50629a76a7050a85cf8c53a7d603e6d2f1e86a8c9b",
@@ -77,6 +77,6 @@
   },
   "launchers": {
     "VisualWaveDrom.bat": "5290a6d06ce01f133c118494fc534df7d38726d2ea866b7aad55498c6737906d",
-    "VisualWaveDrom.sh": "d72b0d896c87b2e946f5f71e5ae999fcfc75980625dd9c45225a02f356524a1e"
+    "VisualWaveDrom.sh": "98961924664ed628fc95e53ab77fe7e4ecbd160a16d5e17d62ac4c0ea7ad9b4b"
   }
 }

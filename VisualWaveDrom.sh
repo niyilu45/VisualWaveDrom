@@ -6,6 +6,17 @@ HTML_FILE_NAME="VisualWaveDrom.html"
 WAVE_LIBRARY_RELATIVE_PATH="Wave/VisualWaveDrom-library/library.sqlite"
 # ======================================================
 
+if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
+  printf 'Usage: bash %s [options]\n' "${BASH_SOURCE[0]##*/}"
+  printf '%s\n' \
+    '  --browser NAME_OR_PATH  firefox, chrome, chromium, edge, default, or an executable path' \
+    '  --no-open               Start without opening a browser (overrides --browser)' \
+    '  --check-runtime         Check the runtime and exit' \
+    '  --help                  Show this help' \
+    'Other options are passed to the local server. The default browser is unchanged when --browser is omitted.'
+  exit 0
+fi
+
 SOURCE_PATH="${BASH_SOURCE[0]}"
 while [[ -h "$SOURCE_PATH" ]] && command -v readlink >/dev/null 2>&1; do
   SOURCE_PARENT="${SOURCE_PATH%/*}"
