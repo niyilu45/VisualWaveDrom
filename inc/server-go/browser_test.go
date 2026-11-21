@@ -3,12 +3,16 @@ package main
 import (
 	"bytes"
 	"flag"
+	"fmt"
 	"log"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
-	"sync"
 	"testing"
+	"time"
 )
 
 func TestBrowserSelectionCommands(t *testing.T) {
@@ -22,6 +26,7 @@ func TestBrowserSelectionCommands(t *testing.T) {
 		{"chromium", []string{"chromium", "chromium-browser"}},
 		{"edge", []string{"microsoft-edge", "microsoft-edge-stable"}},
 		{"/opt/Browser App/firefox", []string{"/opt/Browser App/firefox"}},
+		{"/opt/浏览器/chrome", []string{"/opt/浏览器/chrome"}},
 		{"firefox; echo unexpected", []string{"firefox; echo unexpected"}},
 	} {
 		commands := browserCommands("linux", address, test.selection)
@@ -42,31 +47,58 @@ func TestBrowserSelectionCommands(t *testing.T) {
 	}
 }
 
-func TestBrowserOutputTailIsBounded(t *testing.T) {
-	var tail browserOutputTail
-	if count, err := tail.Write([]byte(strings.Repeat("a", browserOutputLimit*3))); count != browserOutputLimit*3 || err != nil {
-		t.Fatalf("write: %d %v", count, err)
+func TestBrowserLaunchOutlivesLauncher(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Linux browser lifetime regression")
 	}
-	_, _ = tail.Write([]byte("renderer failed"))
-	value := tail.String()
-	if len(value) != browserOutputLimit || !strings.HasSuffix(value, "renderer failed") {
-		t.Fatalf("unexpected output tail: %d", len(value))
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
 	}
-	var writers sync.WaitGroup
-	for index := 0; index < 8; index++ {
-		writers.Add(1)
-		go func() {
-			defer writers.Done()
-			for count := 0; count < 100; count++ {
-				_, _ = tail.Write([]byte("message"))
-				_ = tail.String()
+	directory := t.TempDir()
+	marker := filepath.Join(directory, "browser-ready")
+	output, err := os.Create(filepath.Join(directory, "browser.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer output.Close()
+	command := exec.Command(executable, "-test.run=TestBrowserLifecycleHelper", "--", "launcher")
+	command.Env = append(os.Environ(), "VWD_BROWSER_LIFECYCLE_TEST=1", "VWD_BROWSER_READY="+marker)
+	command.Stderr = output
+	if err = command.Run(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err = os.Stat(marker); err == nil {
+			data, _ := os.ReadFile(output.Name())
+			if !strings.Contains(string(data), "late browser startup log") {
+				t.Fatal("browser output did not survive the launcher")
 			}
-		}()
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	writers.Wait()
-	if len(tail.String()) != browserOutputLimit {
-		t.Fatal("concurrent browser output exceeded the retention limit")
+	t.Fatal("browser died after launcher exit, before completing cold startup")
+}
+
+func TestBrowserLifecycleHelper(t *testing.T) {
+	if os.Getenv("VWD_BROWSER_LIFECYCLE_TEST") != "1" {
+		return
 	}
+	if os.Args[len(os.Args)-1] == "browser" {
+		time.Sleep(300 * time.Millisecond)
+		fmt.Fprintln(os.Stderr, "late browser startup log")
+		if err := os.WriteFile(os.Getenv("VWD_BROWSER_READY"), []byte("ready"), 0o600); err != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	executable, _ := os.Executable()
+	if err := launchBrowserCommand([]string{executable, "-test.run=TestBrowserLifecycleHelper", "--", "browser"}, 10*time.Millisecond); err != nil {
+		os.Exit(1)
+	}
+	os.Exit(0)
 }
 
 func TestBrowserFlagAndNoOpenPriority(t *testing.T) {

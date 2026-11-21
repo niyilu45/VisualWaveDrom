@@ -143,6 +143,8 @@ type service struct {
 	clientMu               sync.Mutex
 	clients                map[string]clientLease
 	shutdownTimer          *time.Timer
+	pendingPageLoads       int
+	pageLoadDeadline       time.Time
 	stateMu                sync.Mutex
 	libraryMu              sync.Mutex
 	draftMu                sync.Mutex
@@ -861,10 +863,10 @@ func launchBrowserCommand(candidate []string, probeDelay time.Duration) error {
 	if len(candidate) == 0 {
 		return errors.New("empty browser launcher command")
 	}
-	var stderr browserOutputTail
 	command := systemCommand(candidate[0], candidate[1:]...)
-	command.Stdout = io.Discard
-	command.Stderr = io.MultiWriter(os.Stderr, &stderr)
+	// Browsers can outlive a service-reuse launcher; do not give them Go-owned output pipes.
+	command.Stderr = os.Stderr
+	detachBrowserProcess(command)
 	if err := command.Start(); err != nil {
 		return err
 	}
@@ -873,7 +875,7 @@ func launchBrowserCommand(candidate []string, probeDelay time.Duration) error {
 	go func() {
 		err := command.Wait()
 		if err != nil {
-			log.Printf("Browser process exited: %s: %v; %s", command.Path, err, strings.TrimSpace(stderr.String()))
+			log.Printf("Browser process exited: %s: %v", command.Path, err)
 		}
 		finished <- err
 	}()
@@ -883,10 +885,6 @@ func launchBrowserCommand(candidate []string, probeDelay time.Duration) error {
 	case err := <-finished:
 		if err == nil {
 			return nil
-		}
-		detail := strings.TrimSpace(stderr.String())
-		if detail != "" {
-			return fmt.Errorf("%w: %s", err, detail)
 		}
 		return err
 	case <-timer.C:
@@ -1030,10 +1028,29 @@ func (s *service) scheduleClientShutdownLocked(delay time.Duration) {
 	s.shutdownTimer = time.AfterFunc(delay, s.shutdownIfNoClients)
 }
 
+func (s *service) beginPageLoad() {
+	now := time.Now()
+	s.clientMu.Lock()
+	defer s.clientMu.Unlock()
+	if !now.Before(s.pageLoadDeadline) {
+		s.pendingPageLoads = 0
+	}
+	s.pendingPageLoads++
+	s.pageLoadDeadline = now.Add(clientStartupGracePeriod)
+	s.scheduleClientLeaseCheckLocked(now)
+}
+
+func (s *service) clientShutdownWaitLocked(now time.Time) time.Duration {
+	if s.pendingPageLoads > 0 && s.pageLoadDeadline.Sub(now) > clientShutdownDelay {
+		return s.pageLoadDeadline.Sub(now)
+	}
+	return clientShutdownDelay
+}
+
 func (s *service) scheduleClientLeaseCheckLocked(now time.Time) {
 	s.stopClientTimerLocked()
 	if len(s.clients) == 0 {
-		s.scheduleClientShutdownLocked(clientShutdownDelay)
+		s.scheduleClientShutdownLocked(s.clientShutdownWaitLocked(now))
 		return
 	}
 	delay := clientLeaseTimeout
@@ -1055,7 +1072,7 @@ func (s *service) reapExpiredClients() {
 	now := time.Now()
 	s.pruneExpiredClientsLocked(now)
 	if len(s.clients) == 0 {
-		s.scheduleClientShutdownLocked(clientShutdownDelay)
+		s.scheduleClientShutdownLocked(s.clientShutdownWaitLocked(now))
 	} else {
 		s.scheduleClientLeaseCheckLocked(now)
 	}
@@ -1072,11 +1089,17 @@ func (s *service) shutdownIfNoClients() {
 		s.clientMu.Unlock()
 		return
 	}
+	if s.pendingPageLoads > 0 && now.Before(s.pageLoadDeadline) {
+		s.scheduleClientShutdownLocked(s.pageLoadDeadline.Sub(now))
+		s.clientMu.Unlock()
+		return
+	}
 	server := s.httpServer
 	s.clientMu.Unlock()
 	if server == nil {
 		return
 	}
+	log.Print("No browser clients remain; stopping the local service.")
 	context, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	_ = server.Shutdown(context)
@@ -1087,6 +1110,16 @@ func (s *service) touchClient(id, token string) int {
 	s.clientMu.Lock()
 	s.pruneExpiredClientsLocked(now)
 	lease, found := s.clients[id]
+	if !found && s.pendingPageLoads > 0 {
+		if now.Before(s.pageLoadDeadline) {
+			s.pendingPageLoads--
+		} else {
+			s.pendingPageLoads = 0
+		}
+		if s.pendingPageLoads == 0 {
+			s.pageLoadDeadline = time.Time{}
+		}
+	}
 	if !found || token != "heartbeat" {
 		lease.token = token
 	}
@@ -1114,7 +1147,7 @@ func (s *service) removeClient(id, token string, force bool) int {
 		}
 	}
 	if len(s.clients) == 0 {
-		s.scheduleClientShutdownLocked(clientShutdownDelay)
+		s.scheduleClientShutdownLocked(s.clientShutdownWaitLocked(now))
 	} else {
 		s.scheduleClientLeaseCheckLocked(now)
 	}
@@ -1664,6 +1697,9 @@ func (s *service) serveStatic(writer http.ResponseWriter, request *http.Request)
 		return
 	}
 	defer file.Close()
+	if request.Method == http.MethodGet && samePath(realTarget, canonicalExistingPath(s.config.htmlPath)) {
+		s.beginPageLoad()
+	}
 	writer.Header().Set("Content-Type", contentType(realTarget))
 	writer.Header().Set("X-Content-Type-Options", "nosniff")
 	http.ServeContent(writer, request, info.Name(), info.ModTime(), file)

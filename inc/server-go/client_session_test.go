@@ -69,3 +69,45 @@ func TestInterruptedStreamLeaseStillExpires(t *testing.T) {
 		t.Fatal("orphaned interrupted stream never expired")
 	}
 }
+
+func TestPageReloadKeepsServiceAliveUntilClientReconnects(t *testing.T) {
+	instance := newClientTestService(t)
+	instance.touchClient("old-page", "heartbeat")
+	instance.beginPageLoad()
+	instance.removeClient("old-page", "", true)
+	if instance.clientShutdownWaitLocked(time.Now()) <= clientShutdownDelay {
+		t.Fatal("loading page lost its startup grace period")
+	}
+	instance.touchClient("new-page", "heartbeat")
+	if instance.pendingPageLoads != 0 {
+		t.Fatal("connected page did not acknowledge its pending load")
+	}
+	instance.removeClient("new-page", "", true)
+	if instance.clientShutdownWaitLocked(time.Now()) != clientShutdownDelay {
+		t.Fatal("normally closing a loaded page should still use the short shutdown delay")
+	}
+}
+
+func TestConcurrentPageLoadsKeepIndependentPendingCount(t *testing.T) {
+	instance := newClientTestService(t)
+	instance.beginPageLoad()
+	instance.beginPageLoad()
+	instance.touchClient("first", "heartbeat")
+	instance.touchClient("first", "stream")
+	if instance.pendingPageLoads != 1 {
+		t.Fatal("one page's heartbeat and stream acknowledged two page loads")
+	}
+	instance.removeClient("first", "", true)
+	if instance.clientShutdownWaitLocked(time.Now()) <= clientShutdownDelay {
+		t.Fatal("closing the first page interrupted the second page's startup")
+	}
+	instance.touchClient("second", "heartbeat")
+	if instance.pendingPageLoads != 0 {
+		t.Fatal("second page did not complete its pending load")
+	}
+	instance.beginPageLoad()
+	instance.pageLoadDeadline = time.Now().Add(-time.Second)
+	if instance.clientShutdownWaitLocked(time.Now()) != clientShutdownDelay {
+		t.Fatal("abandoned page load retained the service forever")
+	}
+}
