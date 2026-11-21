@@ -324,6 +324,8 @@ bash VisualWaveDrom.sh --browser default
 
 `--browser chrome` 依次尝试 `chrome`、`google-chrome`、`google-chrome-stable`，优先使用直接叫 `chrome` 的程序。如果终端中的 `chrome` 只是 shell 别名或函数，服务不会执行该别名或加载交互式 shell 配置，请改传实际浏览器程序的完整路径。
 
+服务会先启动 HTTP 处理并通过就绪检查，再打开浏览器，避免浏览器先请求页面而服务尚未响应。浏览器错误会保留在启动终端中，同时打印实际启动程序和进程号；内存仅保留最近 16 KiB 错误，避免长期累积日志。不自动添加 `--no-sandbox` 等关闭安全限制的参数。若浏览器提示该参数，请检查本机 Chrome 启动脚本或已有实例的配置；单独的 `favicon.ico` 404 仅表示缺少网站图标，不能据此判断白屏原因。
+
 Python 调用方式：
 
 ```python

@@ -6,6 +6,8 @@ import (
 	"log"
 	"os"
 	"reflect"
+	"strings"
+	"sync"
 	"testing"
 )
 
@@ -37,6 +39,33 @@ func TestBrowserSelectionCommands(t *testing.T) {
 				t.Errorf("%s %q should use the existing system default", platform, selection)
 			}
 		}
+	}
+}
+
+func TestBrowserOutputTailIsBounded(t *testing.T) {
+	var tail browserOutputTail
+	if count, err := tail.Write([]byte(strings.Repeat("a", browserOutputLimit*3))); count != browserOutputLimit*3 || err != nil {
+		t.Fatalf("write: %d %v", count, err)
+	}
+	_, _ = tail.Write([]byte("renderer failed"))
+	value := tail.String()
+	if len(value) != browserOutputLimit || !strings.HasSuffix(value, "renderer failed") {
+		t.Fatalf("unexpected output tail: %d", len(value))
+	}
+	var writers sync.WaitGroup
+	for index := 0; index < 8; index++ {
+		writers.Add(1)
+		go func() {
+			defer writers.Done()
+			for count := 0; count < 100; count++ {
+				_, _ = tail.Write([]byte("message"))
+				_ = tail.String()
+			}
+		}()
+	}
+	writers.Wait()
+	if len(tail.String()) != browserOutputLimit {
+		t.Fatal("concurrent browser output exceeded the retention limit")
 	}
 }
 

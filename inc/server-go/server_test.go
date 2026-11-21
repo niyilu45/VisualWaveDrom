@@ -32,6 +32,7 @@ func TestServiceResponsesDoNotUseBrowserCache(t *testing.T) {
 		{"/scope.js?v=1", http.MethodGet, http.StatusOK},
 		{"/wave.sqlite", http.MethodGet, http.StatusOK},
 		{"/api/import-wave-analyze", http.MethodPost, http.StatusBadRequest},
+		{"/api/health", http.MethodGet, http.StatusOK},
 	} {
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, httptest.NewRequest(test.method, test.path, strings.NewReader("{")))

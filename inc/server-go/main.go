@@ -861,16 +861,21 @@ func launchBrowserCommand(candidate []string, probeDelay time.Duration) error {
 	if len(candidate) == 0 {
 		return errors.New("empty browser launcher command")
 	}
-	var stderr strings.Builder
+	var stderr browserOutputTail
 	command := systemCommand(candidate[0], candidate[1:]...)
 	command.Stdout = io.Discard
-	command.Stderr = &stderr
+	command.Stderr = io.MultiWriter(os.Stderr, &stderr)
 	if err := command.Start(); err != nil {
 		return err
 	}
+	log.Printf("Browser process started: %s (PID %d)", command.Path, command.Process.Pid)
 	finished := make(chan error, 1)
 	go func() {
-		finished <- command.Wait()
+		err := command.Wait()
+		if err != nil {
+			log.Printf("Browser process exited: %s: %v; %s", command.Path, err, strings.TrimSpace(stderr.String()))
+		}
+		finished <- err
 	}()
 	timer := time.NewTimer(probeDelay)
 	defer timer.Stop()
@@ -905,7 +910,7 @@ func openBrowser(address string, noOpen bool, browser string) {
 	for _, candidate := range browserCommands(runtime.GOOS, address, browser) {
 		if err = launchBrowserCommand(candidate, browserLaunchProbeDelay); err == nil {
 			if browser != "" && !strings.EqualFold(browser, "default") && !strings.EqualFold(browser, "system") {
-				log.Printf("Opened browser: %s", candidate[0])
+				log.Printf("Browser launch requested: %s", candidate[0])
 			}
 			return
 		}
@@ -1676,6 +1681,9 @@ func (s *service) routes() http.Handler {
 			http.StatusFound)
 	})
 	mux.HandleFunc("/api/server-info", method(http.MethodGet, s.handleServerInfo))
+	mux.HandleFunc("/api/health", method(http.MethodGet, func(writer http.ResponseWriter, _ *http.Request) {
+		sendJSON(writer, http.StatusOK, map[string]any{"app": appID, "ready": true})
+	}))
 	mux.HandleFunc("/api/tool-version", s.handleToolVersion)
 	mux.HandleFunc("/api/wave-parameters", s.handleWaveParameters)
 	mux.HandleFunc("/api/parameter-export-toml", method(http.MethodPost, s.handleParameterTomlExport))
@@ -1794,6 +1802,24 @@ func (s *service) run() error {
 		IdleTimeout:       90 * time.Second,
 		MaxHeaderBytes:    1 * 1024 * 1024,
 	}
+	serveResult := make(chan error, 1)
+	go func() { serveResult <- s.httpServer.Serve(listener) }()
+	client := &http.Client{
+		Timeout:   5 * time.Second,
+		Transport: &http.Transport{DisableKeepAlives: true},
+	}
+	ready, readyErr := client.Get(fmt.Sprintf("http://127.0.0.1:%d/api/health", activePort))
+	if readyErr == nil {
+		ready.Body.Close()
+		if ready.StatusCode != http.StatusOK {
+			readyErr = fmt.Errorf("health check returned HTTP %d", ready.StatusCode)
+		}
+	}
+	if readyErr != nil {
+		_ = s.httpServer.Close()
+		<-serveResult
+		return fmt.Errorf("local server startup check failed: %w", readyErr)
+	}
 	fmt.Printf("Runtime: %s/%s / Go %s / SQLite %s\n",
 		runtime.GOOS, runtime.GOARCH, runtime.Version(), s.sqliteVersion)
 	fmt.Printf("VisualWaveDrom is running at %s\n", address)
@@ -1803,7 +1829,7 @@ func (s *service) run() error {
 		s.clientMu.Unlock()
 	}
 	openBrowser(address, s.config.noOpen, s.config.browser)
-	err = s.httpServer.Serve(listener)
+	err = <-serveResult
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
