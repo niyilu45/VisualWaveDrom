@@ -322,6 +322,8 @@ bash VisualWaveDrom.sh --browser default
 
 也支持 `--browser=firefox`。名称通过系统 `PATH` 查找，自定义程序建议填写完整路径；路径含空格时需要引号。指定浏览器未安装或启动失败时会打印明确原因，不会自动换成其他浏览器；服务仍可通过打印的地址访问。`--no-open` 优先于 `--browser`，不会打开浏览器。即使复用已运行的服务，本次启动也会用本次指定的浏览器打开页面；不会改动系统默认浏览器或关闭已有浏览器。`bash VisualWaveDrom.sh --help` 可查看参数。
 
+`--browser chrome` 依次尝试 `chrome`、`google-chrome`、`google-chrome-stable`，优先使用直接叫 `chrome` 的程序。如果终端中的 `chrome` 只是 shell 别名或函数，服务不会执行该别名或加载交互式 shell 配置，请改传实际浏览器程序的完整路径。
+
 Python 调用方式：
 
 ```python

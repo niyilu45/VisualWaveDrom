@@ -16,7 +16,7 @@ func TestBrowserSelectionCommands(t *testing.T) {
 		names     []string
 	}{
 		{"firefox", []string{"firefox"}},
-		{"chrome", []string{"google-chrome", "google-chrome-stable"}},
+		{"chrome", []string{"chrome", "google-chrome", "google-chrome-stable"}},
 		{"chromium", []string{"chromium", "chromium-browser"}},
 		{"edge", []string{"microsoft-edge", "microsoft-edge-stable"}},
 		{"/opt/Browser App/firefox", []string{"/opt/Browser App/firefox"}},

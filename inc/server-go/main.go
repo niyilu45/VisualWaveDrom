@@ -818,7 +818,7 @@ func browserCommands(goos, address, browser string) [][]string {
 		names := []string{selected}
 		switch strings.ToLower(selected) {
 		case "chrome":
-			names = []string{"google-chrome", "google-chrome-stable"}
+			names = []string{"chrome", "google-chrome", "google-chrome-stable"}
 		case "chromium":
 			names = []string{"chromium", "chromium-browser"}
 		case "edge":
